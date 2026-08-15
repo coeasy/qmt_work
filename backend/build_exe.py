@@ -71,6 +71,20 @@ runtimes_dir = ROOT / "runtimes"
 if runtimes_dir.is_dir():
     DATAS.append(f"{runtimes_dir};runtimes")
 
+# P0：xtquant_client 包以真实 .py 文件复制进 _internal/xtquant_client/
+# （PyInstaller 默认把纯 Python 模块打进 PYZ 归档，普通 embed 子进程无法从归档
+#   import；复制文件后，bridge 子进程（runtimes/cpXXX/python.exe）可正常
+#   `python -m xtquant_client.bridge_server`。主进程仍优先走 PYZ，无冲突。）
+# 注意：datas 目标须保留相对子路径（如 adapters/__init__.py -> xtquant_client/adapters），
+# 否则子包 __init__ 会覆盖顶层同名文件。
+_xq = ROOT / "xtquant_client"
+if _xq.is_dir():
+    for _py in _xq.rglob("*.py"):
+        _rel = _py.relative_to(_xq)
+        _dest = ("xtquant_client" if _rel.parent == Path(".")
+                 else os.path.join("xtquant_client", str(_rel.parent)).replace("/", os.sep))
+        DATAS.append(f"{_py};{_dest}")
+
 
 def main():
     cmd = [

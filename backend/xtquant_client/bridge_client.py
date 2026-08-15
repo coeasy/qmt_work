@@ -137,12 +137,14 @@ class BridgeAdapter(BrokerAdapter):
         self._stderr_thread = threading.Thread(target=self._stderr_loop, daemon=True)
         self._stderr_thread.start()
 
-        # 握手：_ping 确认子进程 IPC 就绪；超时则清理并抛错
+        # 握手：_ping 确认子进程 IPC 就绪；超时则清理并抛错（附 stderr 便于定位）
         try:
             self._rpc("_ping", [], timeout=30.0)
         except Exception as exc:  # noqa: BLE001
+            err = self._stderr_tail()
             self.close()
-            raise BrokerNotConnectedError(f"桥接子进程握手失败：{exc}") from exc
+            tail = f"（子进程 stderr: {err}）" if err else ""
+            raise BrokerNotConnectedError(f"桥接子进程握手失败：{exc}{tail}") from exc
         if self._init_error:
             err = self._init_error
             self.close()
@@ -160,6 +162,13 @@ class BridgeAdapter(BrokerAdapter):
                     self._stderr_buf.pop(0)
         except Exception:  # noqa: BLE001
             pass
+
+    def _stderr_tail(self, n: int = 8) -> str:
+        """返回子进程 stderr 最近 n 行（便于失败时透出真实原因）。"""
+        try:
+            return " | ".join(self._stderr_buf[-n:])[:500]
+        except Exception:  # noqa: BLE001
+            return ""
 
     def _read_loop(self):
         try:
