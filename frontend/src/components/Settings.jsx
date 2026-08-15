@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api } from "../api.js";
+import { api, getApiKey, setApiKey } from "../api.js";
 import { useBroker } from "../BrokerContext.jsx";
 
 export default function Settings() {
@@ -9,6 +9,7 @@ export default function Settings() {
   const [keys, setKeys] = useState([]);
   const [newKey, setNewKey] = useState("");
   const [msg, setMsg] = useState(null);
+  const [apiKeyLocal, setApiKeyLocal] = useState(getApiKey());
   const isElectron = typeof window !== "undefined" && !!window.electronAPI;
   const [autoLaunch, setAutoLaunch] = useState(null);
   const [riskCfg, setRiskCfg] = useState(null);
@@ -32,6 +33,10 @@ export default function Settings() {
       setMsg({ ok: true, t: "运行参数已保存并立即生效（无需重启）" });
       api.getRuntimeConfig().then(setRuntimeCfg).catch(() => {});
     } catch (e) { setMsg({ ok: false, t: e.message }); }
+  }
+  function saveApiKeyLocal() {
+    setApiKey(apiKeyLocal);
+    setMsg({ ok: true, t: apiKeyLocal.trim() ? "API Key 已保存，后续请求自动附带" : "已清除 API Key（本机回环访问无需密钥）" });
   }
   const setRuntime = (k) => (e) => setRuntimeCfg({
     ...runtimeCfg, [k]: { ...runtimeCfg[k], value: parseFloat(e.target.value) },
@@ -119,6 +124,25 @@ export default function Settings() {
           <button className="ghost" onClick={() => window.dispatchEvent(new CustomEvent("nav", { detail: "brokers" }))}>
             前往「券商连接」管理
           </button>
+        </div>
+      </div>
+
+      <div className="card" style={{ marginBottom: 16 }}>
+        <h3>远程访问 API Key（可选）</h3>
+        <p className="muted" style={{ marginTop: 4 }}>
+          本机浏览器访问无需填写（回环免鉴权）。通过局域网 / 远程服务器访问本平台 UI 或调用 API 时，
+          填写服务端配置的主密钥（<code>api_key</code>）或已签发的子密钥，保存后自动附带于所有请求头。
+          Key 仅保存在当前浏览器 localStorage，不会上传。
+        </p>
+        <div className="row" style={{ marginTop: 8 }}>
+          <input
+            type="password"
+            style={{ minWidth: 320 }}
+            placeholder="粘贴 API Key（qmt-xxx 或主密钥）"
+            defaultValue={apiKeyLocal}
+            onChange={(e) => setApiKeyLocal(e.target.value)}
+          />
+          <button onClick={saveApiKeyLocal}>保存并应用到所有请求</button>
         </div>
       </div>
 

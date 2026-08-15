@@ -10,7 +10,7 @@
 from fastapi import Request
 from fastapi.responses import JSONResponse
 
-from .apikey import scope_for_path, scope_match
+from .apikey import scope_for_path, scope_match, _is_public_path
 
 _LOOPBACK = {"127.0.0.1", "::1", "localhost"}
 
@@ -42,8 +42,13 @@ def make_auth_middleware(master_key: str, store_getter, limiter_getter):
             resp = await call_next(request)
             m.record_request("public", resp.status_code, "loopback")
             return resp
-        token = _extract_token(request)
         path = request.url.path
+        # 公共只读路径（健康检查/API 文档/前端静态页）免鉴权
+        if _is_public_path(path):
+            resp = await call_next(request)
+            m.record_request("public", resp.status_code, "public")
+            return resp
+        token = _extract_token(request)
         required_scope = scope_for_path(path)
         # 1) 主密钥（向后兼容，全权限）
         if token and master_key and token == master_key:

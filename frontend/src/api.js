@@ -1,12 +1,30 @@
 // 统一 REST 客户端：返回 {code,message,data} 中的 data，非 0 抛错。
 const BASE = "/api/v1";
 
+// 远程访问 API Key（localStorage 持久化；空 = 本机回环免鉴权，局域网/远程部署时填写）
+const KEY_STORAGE = "qmt_api_key";
+export function getApiKey() {
+  try { return localStorage.getItem(KEY_STORAGE) || ""; } catch { return ""; }
+}
+export function setApiKey(k) {
+  try {
+    if (k && k.trim()) localStorage.setItem(KEY_STORAGE, k.trim());
+    else localStorage.removeItem(KEY_STORAGE);
+  } catch { /* ignore */ }
+}
+
+function _authHeaders(extra = {}) {
+  const key = getApiKey();
+  if (key) return { ...extra, Authorization: `Bearer ${key}` };
+  return extra;
+}
+
 async function _req(method, path, { params, body } = {}) {
   const url = new URL(BASE + path, window.location.origin);
   if (params) Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v));
   const r = await fetch(url.toString(), {
     method,
-    headers: body ? { "Content-Type": "application/json" } : undefined,
+    headers: _authHeaders(body ? { "Content-Type": "application/json" } : {}),
     body: body ? JSON.stringify(body) : undefined,
   });
   const j = await r.json().catch(() => ({}));
@@ -191,7 +209,7 @@ api.notificationLogs = () => api.get("/notifications/logs");
 export async function agentChat(message, onEvent, signal) {
   const r = await fetch(`${BASE}/agent/chat`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: _authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify({ message }),
     signal,
   });

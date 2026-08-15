@@ -19,30 +19,60 @@ PATH_SCOPES = [
     ("/api/v1/market", "market"),
     ("/api/v1/quote", "market"),
     ("/api/v1/reference", "market"),
+    ("/api/v1/factors", "market"),
+    ("/api/v1/sync", "market"),
     ("/api/v1/trade", "trade"),
     ("/api/v1/algo", "trade"),
     ("/api/v1/limitup", "trade"),
     ("/api/v1/rebalance", "trade"),
+    ("/api/v1/signal", "trade"),
+    ("/api/v1/target-portfolio", "trade"),
+    ("/api/v1/paper", "trade"),
     ("/api/v1/account", "account"),
     ("/api/v1/backtest", "backtest"),
     ("/api/v1/strategies", "backtest"),
+    ("/api/v1/strategy-market", "backtest"),
     ("/api/v1/config", "admin"),
     ("/api/v1/api-keys", "admin"),
     ("/api/v1/notifiers", "admin"),
     ("/api/v1/audit", "admin"),
+    ("/api/v1/brokers", "admin"),
+    ("/api/v1/registry", "admin"),
+    ("/api/v1/scheduler", "admin"),
+    ("/api/v1/webhooks", "admin"),
+    ("/api/v1/alerts", "admin"),
+    ("/api/v1/notifications", "admin"),
+    ("/api/v1/reconcile", "admin"),
+    ("/api/v1/wal", "admin"),
+    ("/api/v1/observability", "admin"),
+    ("/api/v1/metrics", "admin"),
+    ("/api/v1/quote-bus", "admin"),
+    ("/api/v1/agent", "admin"),
 ]
-PUBLIC_PREFIXES = ("/api/v1/health", "/api/v1/ready", "/docs", "/openapi.json", "/redoc")
+# 公共路径（免鉴权，仅只读信息）：健康检查 / 就绪 / API 文档 / 前端静态页
+PUBLIC_PREFIXES = (
+    "/api/v1/health", "/api/v1/ready",
+    "/api/docs", "/api/redoc", "/api/openapi.json",
+)
+
+
+def _is_public_path(path: str) -> bool:
+    """静态页面与文档免鉴权（浏览器直开 UI / 查看 API 文档）；API 与 MCP 保持鉴权。"""
+    if path in ("/", "/index.html"):
+        return True
+    if path.startswith("/assets/") or path.startswith("/favicon"):
+        return True
+    return any(path.startswith(p) for p in PUBLIC_PREFIXES)
 
 
 def scope_for_path(path: str) -> str | None:
-    """根据请求路径返回所需 scope；public 端点返回 None（仍需鉴权但无 scope 限制）。"""
-    for prefix in PUBLIC_PREFIXES:
-        if path.startswith(prefix):
-            return None
+    """根据请求路径返回所需 scope；public 端点返回 None（免鉴权）。"""
+    if _is_public_path(path):
+        return None
     for prefix, scope in PATH_SCOPES:
         if path.startswith(prefix):
             return scope
-    return None  # 未匹配的端点（如 / 静态、/mcp）不强制 scope
+    return None  # 未匹配的端点（如 /mcp）不强制 scope，但仍需鉴权
 
 
 def scope_match(required: str | None, scopes: str) -> bool:
