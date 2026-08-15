@@ -58,11 +58,8 @@ class BrokerManager:
                 account_type=r["account_type"], session_id=int(r["session_id"] or 0),
                 min_version=r["min_version"] or "", active=bool(r["active"]))
             self._build(cfg, connect=False)
-        # 自动重连已标记为 active 的连接
-        for cid, conn in self._conns.items():
-            if conn.cfg.active:
-                self._safe_start(cid)
-                break  # 仅自动激活第一个 active，避免一次拉起过多
+        # 注意：这里不自动 start —— 由应用 lifespan 在事件循环上统一启动 active 连接，
+        # 避免「load_persisted 一次性 loop 启动 + lifespan 再启动」造成子进程重复拉起。
 
     # ---------------- 增删改连 ----------------
     def _build(self, cfg: ConnectionConfig, connect: bool) -> Connection:
@@ -80,19 +77,28 @@ class BrokerManager:
         return conn
 
     def _safe_start(self, conn_id: str) -> None:
+        """同步启动适配器（spawn 子进程 + 握手）。
+
+        不做异步泵（那需要一个可靠运行的事件循环）——行情泵由应用主事件循环的
+        `ensure_pump` 统一托管，避免在一次性/线程池 loop 上创建导致事件无法投递。
+        """
         conn = self._conns.get(conn_id)
         if not conn:
             return
         try:
-            import asyncio
-            loop = asyncio.new_event_loop()
-            loop.run_until_complete(conn.bridge.start())
-            loop.close()
+            conn.adapter.start()  # 幂等：子进程已在运行则复用
             conn.connected = conn.adapter.is_connected()
             if conn.connected and self._active_id is None:
                 self._active_id = conn_id
         except Exception:  # noqa: BLE001
             conn.connected = False
+
+    async def ensure_pump(self, conn_id: str) -> None:
+        """在（应用主）事件循环上确保连接的行情泵已启动（幂等）。"""
+        conn = self._conns.get(conn_id)
+        if conn is None:
+            return
+        await conn.bridge.start()  # 幂等：gateway 已运行则复用，泵已存在则跳过
 
     def add_connection(self, cfg: ConnectionConfig, autoconnect: bool = True) -> Connection:
         with self._lock:

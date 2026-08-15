@@ -97,7 +97,22 @@ class BrokerAdapter(ABC):
                     "account_id": self.account_id, "account_type": self.account_type,
                     "assets": cash.get("assets"), "detail": "ok"}
         except Exception as exc:  # noqa: BLE001
-            return {"connected": False, "detail": f"连接异常：{exc}"}
+            # 桥接场景：附上子进程 stderr / 退出码，便于在 qmt_work.log 定位
+            tail = ""
+            try:
+                from .bridge_client import BridgeAdapter
+                if isinstance(self, BridgeAdapter):
+                    tail = f" | 子进程 stderr: {self._stderr_tail()}" \
+                           f" | rc={self._proc.poll() if self._proc else 'N/A'}"
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                import logging
+                logging.getLogger("qmt_work").error(
+                    "test_connection 失败: %s%s", exc, tail)
+            except Exception:  # noqa: BLE001
+                pass
+            return {"connected": False, "detail": f"连接异常：{exc}{tail}"}
 
     # ---------------- 行情 ----------------
     @abstractmethod

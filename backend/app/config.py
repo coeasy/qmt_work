@@ -55,6 +55,13 @@ def _default_config_payload() -> dict[str, Any]:
         # ---- 存储与日志 ----
         "db_path": "data/app.db",
         "log_dir": "logs",
+        # ---- 日志聚合与告警（工业级可观测性）----
+        # log_json=true 时输出结构化 JSON（逐行），便于接入 Loki/ELK 等日志聚合系统
+        "log_json": False,
+        # 日志告警：ERROR 及以上级别日志推送到该 webhook（HMAC-SHA256 可选），
+        # 空=关闭。格式：{url}|{secret} 或纯 url；用于对接钉钉/企业微信/自定义监控
+        "log_alert_webhook": "",
+        "log_alert_level": "ERROR",
         # ---- 数据库自动备份（防单点损坏）----
         "db_backup_enabled": True,
         "db_backup_interval": 3600.0,
@@ -196,6 +203,11 @@ class Settings(BaseSettings):
     # 存储与日志（默认跟随运行根目录：打包=exe 同目录 data/、logs/）
     db_path: Path = Field(default_factory=_default_db_path)
     log_dir: Path = Field(default_factory=_default_log_dir)
+
+    # 日志聚合与告警（工业级可观测性）
+    log_json: bool = False                 # true=结构化 JSON 输出（接入 Loki/ELK 等）
+    log_alert_webhook: str = ""            # ERROR+ 日志推送 webhook（{url}|{secret} 或纯 url）
+    log_alert_level: str = "ERROR"         # 日志告警最低级别
 
     # 数据库自动备份：启动时 + 周期性（秒）+ 关闭前各一次，保留最近 keep 份
     db_backup_enabled: bool = True

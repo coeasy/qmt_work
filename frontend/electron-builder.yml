@@ -1,6 +1,19 @@
 # Electron 打包配置。
 # 渲染进程通过 URL 加载 FastAPI 托管的前端，无需把前端打包进 asar；
 # Python 后端由 PyInstaller 打成 qmt_work.exe，作为 extraResources 随包分发。
+#
+# 产物：
+#   - NSIS 安装包（默认，覆盖普通用户）
+#   - zip 便携版（--win zip）
+#
+# 代码签名（可选但强烈建议）：
+#   设置环境变量后 electron-builder 自动签名（同时生成 latest.yml 供自动更新）：
+#     Windows:  CSC_LINK=<pfx路径> CSC_KEY_PASSWORD=<密码>
+#     macOS:    CSC_LINK=<p12路径> CSC_KEY_PASSWORD=<密码> (需在 macOS 上构建)
+#   未配置时跳过签名（SmartScreen 可能告警）。
+#
+# 自动更新：electron-updater 从 publish.url 拉取 latest.yml + 安装包。
+#   默认 GitHub Releases（GitHub Token: GH_TOKEN）。自建服务器改 serverUrl。
 appId: com.qmt.work
 productName: qmt_work
 copyright: Copyright © 2026
@@ -14,7 +27,7 @@ extraResources:
   - from: ../backend/dist
     to: backend
 win:
-  signAndEditExecutable: false
+  signAndEditExecutable: true
   target:
     - nsis
     - zip
@@ -24,4 +37,8 @@ nsis:
   perMachine: false
   allowToChangeInstallationDirectory: true
   createDesktopShortcut: true
+  shortcutName: qmt_work
   artifactName: ${productName}-Setup-${version}.${ext}
+publish:
+  - provider: generic
+    url: ${env.QMT_UPDATE_URL}

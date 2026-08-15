@@ -1,15 +1,21 @@
 #!/usr/bin/env bash
 # qmt_work 一键构建脚本
-# 依次执行：前端构建 → 后端 EXE → Electron 桌面壳打包
+# 依次执行：前端构建 -> 后端 EXE -> Electron 桌面壳打包（默认 NSIS 安装包）
 # 用法:
 #   chmod +x build_all.sh && ./build_all.sh
 #   或: bash build_all.sh
 #
 # 可选参数:
-#   --desktop-only   跳过后端 EXE，仅打包 Electron
+#   --desktop-only   跳过后端 EXE，仅打包 Electron（需 backend/dist 已存在）
 #   --backend-only   仅打包后端 EXE（前端需已构建）
 #   --skip-frontend  跳过前端构建（需 backend/static 已存在）
-#   --dist           Electron 打包使用 NSIS 安装包（默认解压版）
+#   --portable       只打 zip 便携版（默认打 NSIS 安装包 + zip）
+#   --force          跳过运行中实例检测（不推荐）
+#
+# 环境变量（可选）:
+#   QMT_UPDATE_URL   自动更新服务器地址（默认 GitHub Releases）
+#   CSC_LINK         Windows 代码签名证书路径（*.pfx / *.p12）
+#   CSC_KEY_PASSWORD 证书密码（设置后自动签名）
 
 set -euo pipefail
 
@@ -30,7 +36,7 @@ fail() { echo -e "${RED}[error]${NC} $*" >&2; exit 1; }
 SKIP_FRONTEND=false
 BACKEND_ONLY=false
 DESKTOP_ONLY=false
-USE_NSIS=false
+USE_NSIS=true
 FORCE=false
 
 for arg in "$@"; do
@@ -38,7 +44,7 @@ for arg in "$@"; do
         --skip-frontend) SKIP_FRONTEND=true ;;
         --backend-only)  BACKEND_ONLY=true ;;
         --desktop-only)  DESKTOP_ONLY=true ;;
-        --dist)          USE_NSIS=true ;;
+        --portable)      USE_NSIS=false ;;
         --force)         FORCE=true ;;
         *)               echo "未知参数: $arg"; exit 1 ;;
     esac
@@ -67,11 +73,24 @@ if [[ "$DESKTOP_ONLY" == false ]]; then
 fi
 detect_running "electron.exe" "桌面壳实例"
 
+# ---- 自动更新地址：未配置时用 GitHub Releases 占位 ----
+if [[ -z "${QMT_UPDATE_URL:-}" ]]; then
+    export QMT_UPDATE_URL="https://github.com/qmt-work/qmt_work/releases/download"
+    warn "QMT_UPDATE_URL 未设置，使用默认: $QMT_UPDATE_URL"
+    warn "请按实际仓库地址设置环境变量 QMT_UPDATE_URL 后重新构建。"
+fi
+
 echo "========================================="
 echo " qmt_work 一键构建"
 echo " 工作目录: $ROOT"
 echo "========================================="
 echo ""
+
+# ---- 前端依赖：node_modules 缺失时自动安装 ----
+if [[ ! -d "$FRONTEND/node_modules" ]]; then
+    log "frontend/node_modules 不存在，执行 npm install ..."
+    (cd "$FRONTEND" && npm install)
+fi
 
 # ---- Step 1: 前端构建 ----
 if [[ "$DESKTOP_ONLY" == false ]]; then
@@ -126,10 +145,11 @@ else
 fi
 
 if [[ "$USE_NSIS" == true ]]; then
-    log "使用 NSIS 安装包模式"
+    log "打包 NSIS 安装包 + zip 便携版"
     npm run dist
 else
-    npm run pack
+    log "仅打包 zip 便携版"
+    npm run dist:portable
 fi
 
 cd "$ROOT"
@@ -139,4 +159,5 @@ echo "========================================="
 echo " 构建完成"
 echo " 后端 EXE: $BACKEND_EXE"
 echo " 桌面壳:   $FRONTEND/dist-electron/"
+echo " 更新源:   $QMT_UPDATE_URL"
 echo "========================================="

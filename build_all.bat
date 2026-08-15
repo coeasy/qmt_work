@@ -1,15 +1,22 @@
 @echo off
 REM qmt_work 一键构建脚本 (Windows)
-REM 依次执行：前端构建 → 后端 EXE → Electron 桌面壳打包
+REM 依次执行：前端构建 -> 后端 EXE -> Electron 桌面壳打包（默认 NSIS 安装包）
+REM
 REM 用法:
 REM   build_all.bat
+REM   build_all.bat --portable     仅产出 zip 便携版（不做 NSIS 安装包）
 REM
 REM 可选参数:
-REM   --desktop-only   跳过后端 EXE，仅打包 Electron
+REM   --desktop-only   跳过后端 EXE，仅打包 Electron（需 backend/dist 已存在）
 REM   --backend-only   仅打包后端 EXE
 REM   --skip-frontend  跳过前端构建
-REM   --dist           Electron 打包使用 NSIS 安装包
+REM   --portable       只打 zip 便携版（默认打 NSIS 安装包 + zip）
 REM   --force          跳过运行中实例检测（不推荐）
+REM
+REM 环境变量（可选）:
+REM   QMT_UPDATE_URL   自动更新服务器地址（默认 GitHub Releases）
+REM   CSC_LINK         Windows 代码签名证书路径（*.pfx）
+REM   CSC_KEY_PASSWORD 证书密码（设置后自动签名）
 
 setlocal enabledelayedexpansion
 set ROOT=%~dp0
@@ -26,7 +33,7 @@ REM 解析参数
 set SKIP_FRONTEND=false
 set BACKEND_ONLY=false
 set DESKTOP_ONLY=false
-set USE_NSIS=false
+set USE_NSIS=true
 set FORCE=false
 
 :parse_args
@@ -34,7 +41,7 @@ if "%~1"=="" goto done_parse
 if "%~1"=="--skip-frontend" set SKIP_FRONTEND=true
 if "%~1"=="--backend-only" set BACKEND_ONLY=true
 if "%~1"=="--desktop-only" set DESKTOP_ONLY=true
-if "%~1"=="--dist" set USE_NSIS=true
+if "%~1"=="--portable" set USE_NSIS=false
 if "%~1"=="--force" set FORCE=true
 shift /1
 goto parse_args
@@ -64,6 +71,26 @@ if !errorlevel! equ 0 (
         echo [error] 桌面壳（electron.exe）正在运行，请先退出后再构建。
         exit /b 1
     )
+)
+
+REM ---- 自动更新地址：未配置时用 GitHub Releases 占位 ----
+if "%QMT_UPDATE_URL%"=="" (
+    set "QMT_UPDATE_URL=https://github.com/qmt-work/qmt_work/releases/download"
+    echo [warn] QMT_UPDATE_URL 未设置，使用默认: !QMT_UPDATE_URL!
+    echo         请按实际仓库地址设置环境变量 QMT_UPDATE_URL 后重新构建。
+)
+set "QMT_UPDATE_URL=!QMT_UPDATE_URL!"
+
+REM ---- 前端依赖：node_modules 缺失时自动安装 ----
+if not exist "%FRONTEND%\node_modules" (
+    echo [build] frontend/node_modules 不存在，执行 npm install ...
+    cd /d "%FRONTEND%"
+    call npm install
+    if !errorlevel! neq 0 (
+        echo [error] npm install 失败
+        exit /b 1
+    )
+    cd /d "%ROOT%"
 )
 
 REM ---- Step 1: 前端构建 ----
@@ -124,10 +151,11 @@ if exist "%BACKEND%\dist\qmt_work\qmt_work.exe" (
 )
 
 if "%USE_NSIS%"=="true" (
-    echo [build] 使用 NSIS 安装包模式
+    echo [build] 打包 NSIS 安装包 + zip 便携版
     call npm run dist
 ) else (
-    call npm run pack
+    echo [build] 仅打包 zip 便携版
+    call npm run dist:portable
 )
 
 if !errorlevel! neq 0 (
@@ -142,5 +170,6 @@ echo =========================================
 echo  构建完成
 echo  后端 EXE: %BACKEND%\dist\qmt_work\qmt_work.exe
 echo  桌面壳:   %FRONTEND%\dist-electron\
+echo  更新源:   %QMT_UPDATE_URL%
 echo =========================================
 exit /b 0

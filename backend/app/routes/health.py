@@ -46,11 +46,31 @@ async def health_check():
         trading = {"mode": _ts.stats()["mode"], "active": _ts.is_active()}
     except Exception:  # noqa: BLE001
         trading = {"mode": "unknown", "active": None}
+    # 标准化的 checks 汇总（pass/warn/fail），便于外部监控按组件告警
+    checks = [
+        {"name": "db", "status": "pass" if db_ok else "fail"},
+        {"name": "ws", "status": "pass" if engines["ws"] else "warn"},
+        {"name": "backtest", "status": "pass" if engines["backtest_queue"] else "warn"},
+        {"name": "brokers", "status": "pass" if any(b["connected"] for b in brokers) else "warn"},
+    ]
+    status = "pass" if db_ok else "fail"
     return ok({
-        "status": "ok" if db_ok else "degraded",
-        "version": __version__, "uptime_seconds": uptime,
+        "status": status,
+        "service": "qmt_work", "version": __version__, "uptime_seconds": uptime,
         "db": db_ok, "brokers": brokers, "engines": engines,
-        "trading_session": trading,
+        "trading_session": trading, "checks": checks,
+    })
+
+
+@router.get("/live")
+async def live_check():
+    """存活探针（外部监控/编排接入）：进程活着即返回 200，不检查依赖。"""
+    import time as _t
+    return ok({
+        "status": "ok",
+        "service": "qmt_work", "version": __version__,
+        "uptime_seconds": int(_t.time() - state.started_at) if state.started_at else 0,
+        "checks": [{"name": "process", "status": "pass"}],
     })
 
 

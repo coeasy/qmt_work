@@ -280,6 +280,25 @@ def create_app() -> FastAPI:
         state.health_monitor = BrokerHealthMonitor(
             state.broker_manager, state.ws_manager.broadcast, check_interval=5.0)
         await state.health_monitor.start()
+        # 3.5.1 行情泵托管：确保所有已连接连接的行情泵跑在应用主事件循环上（幂等自愈）。
+        # 覆盖运行期新增/手动 connect/健康重连等路径——泵一旦因异常退出会自动补建。
+        _pump_task = None
+
+        async def _pump_guard():
+            while True:
+                await asyncio.sleep(2.0)
+                loop = asyncio.get_running_loop()
+                for conn in state.broker_manager.all_connections():
+                    b = conn.bridge
+                    if b is None or not (conn.cfg.active or conn.connected):
+                        continue
+                    if not b.pump_running():
+                        try:
+                            b.start_pump_on(loop)
+                        except Exception as exc:  # noqa: BLE001
+                            log.warning("pump guard %s: %s", conn.cfg.conn_id, exc)
+
+        _pump_task = asyncio.create_task(_pump_guard())
         # 4. 涨停监控 + 算法单引擎（事件推送到 WS）
         from tools.limitup import LimitUpMonitor
         from tools.algo import AlgoEngine
@@ -420,6 +439,12 @@ def create_app() -> FastAPI:
                     pass
             if state.health_monitor:
                 await state.health_monitor.stop()
+            if _pump_task is not None:
+                _pump_task.cancel()
+                try:
+                    await _pump_task
+                except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                    pass
             if state.limitup_monitor:
                 await state.limitup_monitor.stop()
             if state.condition_engine:

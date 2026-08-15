@@ -12,10 +12,12 @@
     "preview": "vite preview",
     "electron:dev": "electron .",
     "pack": "npm run build && electron-builder --dir",
-    "dist": "npm run build && electron-builder"
+    "dist": "npm run build && electron-builder",
+    "dist:portable": "npm run build && electron-builder --win zip"
   },
   "dependencies": {
     "echarts": "^5.5.1",
+    "electron-updater": "^6.3.9",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },

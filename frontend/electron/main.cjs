@@ -16,6 +16,9 @@ let quitting = false;
 let shuttingDown = false; // 异步停机中标志（防止 before-quit 重入）
 let activePort = DEFAULT_PORT;
 
+// 自动更新（electron-updater）：打包后启用，开发态自动跳过
+const updater = require("./updater.cjs");
+
 // 单实例锁
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) { app.quit(); }
@@ -172,6 +175,8 @@ function createTray() {
     { label: "显示", click: () => win.show() },
     { label: "打开浏览器", click: () => shell.openExternal(`http://127.0.0.1:${activePort}/`) },
     { type: "separator" },
+    { label: "检查更新", click: () => updater.check() },
+    { type: "separator" },
     { label: "退出", click: () => { quitting = true; app.quit(); } },
   ]);
   tray.setToolTip("qmt_work 量化平台");
@@ -188,6 +193,9 @@ app.whenReady().then(async () => {
   }
   createWindow();
   createTray();
+  // 自动更新：启动后静默检查一次（打包环境生效）
+  updater.init(win);
+  setTimeout(() => updater.checkSilent(), 5000);
 });
 
 app.on("second-instance", () => win && win.show());

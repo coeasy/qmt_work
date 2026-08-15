@@ -38,6 +38,7 @@ HIDDEN = [
     "gateway.alert_engine", "gateway.wal", "gateway.reconcile",
     "gateway.quote_bus", "gateway.health", "gateway.signal_router",
     "gateway.masking", "gateway.kline_cache", "gateway.webhook_out",
+    "gateway.log_alert",
     "gateway.runtime_config",
     "xtquant_client", "xtquant_client.base", "xtquant_client.gateway",
     "xtquant_client.xtp", "xtquant_client.manager", "xtquant_client.registry",

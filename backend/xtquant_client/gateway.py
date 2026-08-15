@@ -50,27 +50,85 @@ class XTQuantGateway(ABC):
 
 
 class XTQuantBridge:
-    """线程模型桥：线程池执行同步调用 + 回调队列泵 + 下单锁。"""
+    """线程模型桥：线程池执行同步调用 + 回调队列泵 + 下单锁。
+
+    生命周期幂等：start() 可安全重复调用（先停旧泵再重建，避免重连时泵/子进程堆积），
+    stop() 后 start() 可重新拉起（线程池按需重建）。
+    """
 
     def __init__(self, gateway: XTQuantGateway, max_workers: int = 4):
         self.gateway = gateway
-        self._pool = ThreadPoolExecutor(max_workers=max_workers)
+        self._max_workers = max_workers
+        self._pool: ThreadPoolExecutor | None = ThreadPoolExecutor(max_workers=max_workers)
+        # 泵专用线程池（1 线程）：与业务同步调用池解耦。
+        # 业务调用（get_quote/get_kline 等）可能长时间挂起（QMT 客户端卡顿），
+        # 若与泵共用线程池，池被占满时泵的阻塞取队列也会排队，行情投递随之停更；
+        # 独立线程池保证泵永远能及时排空回调队列。
+        self._pump_pool: ThreadPoolExecutor | None = ThreadPoolExecutor(max_workers=1)
         self._lock = threading.Lock()
         self._q: queue.Queue[dict] = queue.Queue()
         self._pump: asyncio.Task | None = None
         self._handlers: dict[str, list] = {}
+        self._started = False
 
-    # ---- 生命周期 ----
+    # ---- 生命周期（幂等）----
     async def start(self) -> None:
+        if self._pool is None:
+            self._pool = ThreadPoolExecutor(max_workers=self._max_workers)
+        if self._pump_pool is None:
+            self._pump_pool = ThreadPoolExecutor(max_workers=1)
         loop = asyncio.get_running_loop()
-        await loop.run_in_executor(self._pool, self.gateway.start)
-        self._pump = asyncio.create_task(self._pump_loop())
+        # 幂等：网关已启动且仍连接（子进程存活）时不再重复拉起；
+        # 一旦断开/子进程退出，is_connected()=False 会在此触发重新 start 自愈。
+        if not self._started or not self._gateway_connected():
+            await loop.run_in_executor(self._pool, self.gateway.start)
+            self._started = True
+        self.start_pump_on(loop)
 
     async def stop(self) -> None:
-        if self._pump:
+        if self._pump is not None and not self._pump.done():
             self._pump.cancel()
-        await asyncio.get_running_loop().run_in_executor(self._pool, self.gateway.close)
-        self._pool.shutdown(wait=False, cancel_futures=True)
+            try:
+                # 泵内队列带 0.5s 超时，取消能在有界时间内生效
+                await self._pump
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+        self._pump = None
+        if self._pump_pool is not None:
+            self._pump_pool.shutdown(wait=False, cancel_futures=True)
+            self._pump_pool = None
+        loop = asyncio.get_running_loop()
+        if self._pool is not None:
+            try:
+                await loop.run_in_executor(self._pool, self.gateway.close)
+            except Exception:  # noqa: BLE001
+                pass
+            self._pool.shutdown(wait=False, cancel_futures=True)
+            self._pool = None
+        self._started = False
+
+    def _gateway_connected(self) -> bool:
+        try:
+            return bool(self.gateway.is_connected())
+        except Exception:  # noqa: BLE001
+            return False
+
+    def pump_running(self) -> bool:
+        return self._pump is not None and not self._pump.done()
+
+    def start_pump_on(self, loop: asyncio.AbstractEventLoop) -> None:
+        """在指定（主）事件循环上确保泵已启动（幂等）。
+
+        泵（重新）启动时换新回调队列：上一轮被取消的泵，其 `q.get` 线程可能仍在
+        旧队列上阻塞（≤0.5s 超时）；若沿用同一队列，僵尸 waiter 会抢走新泵的首个
+        事件（重启丢事件）。换新队列后新泵只在新队列上等待，僵尸线程在旧队列超时退出。
+        """
+        if self.pump_running():
+            return
+        if self._pump_pool is None:
+            self._pump_pool = ThreadPoolExecutor(max_workers=1)
+        self._q = queue.Queue()
+        self._pump = loop.create_task(self._pump_loop())
 
     # ---- 同步调用隔离（§4.14 关键）----
     async def call(self, fn, *args, **kwargs):
@@ -96,10 +154,25 @@ class XTQuantBridge:
 
     async def _pump_loop(self) -> None:
         loop = asyncio.get_running_loop()
+        # 泵专用线程池快照：泵的阻塞取队列只走该池（与业务池解耦）。
+        # stop() 会先取消泵再关池，重启时 start_pump_on 重建新池并新建泵任务，
+        # 故此处快照始终对应当前泵的池，不跨生命周期错用。
+        pool = self._pump_pool
         while True:
-            event = await loop.run_in_executor(self._pool, self._q.get)
+            try:
+                # 带超时取队列：线程池关闭 / 泵被取消时能在有界时间内返回。
+                # 关键：在泵专用池上取队列——即使业务调用（get_quote/get_kline 等）
+                # 长时间挂起占满业务池，泵也能及时排空回调队列，行情不丢更。
+                event = await loop.run_in_executor(pool, self._q.get, True, 0.5)
+            except queue.Empty:
+                continue
+            except Exception:  # noqa: BLE001  池已关闭等
+                break
             for handler in self._handlers.get(event.get("type", ""), []):
                 try:
-                    await handler(event)
+                    # 兼容 async 与同步 handler
+                    res = handler(event)
+                    if asyncio.iscoroutine(res):
+                        await res
                 except Exception as exc:  # 泵内异常不得中断
                     print(f"[sync] handler error: {exc}")

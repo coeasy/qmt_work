@@ -5,6 +5,11 @@
 避免旧实例残留导致启动失败；实际监听端口通过 QMT_PORT_FILE 写出（桌面壳据此发现，
 前端始终同源加载，无需感知端口）。
 
+端口锁定（多实例防冲突）：当发生自动 +1 改口时，实际端口会持久化到
+<db_dir>/.qmt_work.port。下次启动优先复用该端口（端口锁定），避免每次重启漂移；
+若该端口又空闲则稳定复用，被占用则重新扫描并更新锁文件。
+不同实例使用不同数据库目录即天然获得不同端口，多实例部署互不冲突。
+
 可用环境变量：
 - QMT_PORT：覆盖起始端口（如 QMT_PORT=8013；优先级高于配置文件）
 - QMT_PORT_FILE：把实际监听端口写入该文件（桌面壳据此发现实际端口，规避端口冲突）
@@ -106,8 +111,44 @@ def _port_in_use(port: int) -> bool:
         s.close()
 
 
+def _port_lock_file() -> str:
+    """端口锁文件路径：<db_dir>/.qmt_work.port（与单实例锁同目录）。"""
+    db_dir = os.path.dirname(str(settings.db_path)) or "."
+    return os.path.join(db_dir, ".qmt_work.port")
+
+
+def _read_locked_port() -> int | None:
+    """读取上次持久化的实际端口（端口锁定）；无记录/损坏返回 None。"""
+    try:
+        with open(_port_lock_file(), "r", encoding="utf-8") as f:
+            v = int(f.read().strip())
+        return v if 1 <= v <= 65535 else None
+    except (OSError, ValueError):
+        return None
+
+
+def _write_locked_port(port: int) -> None:
+    """持久化实际监听端口（端口锁定），供下次启动复用。"""
+    try:
+        os.makedirs(os.path.dirname(_port_lock_file()) or ".", exist_ok=True)
+        with open(_port_lock_file(), "w", encoding="utf-8") as f:
+            f.write(str(port))
+    except OSError as exc:  # noqa: BLE001
+        log.warning("写端口锁文件失败: %s", exc)
+
+
 def _pick_port(start: int) -> int:
-    """从 start 开始找第一个可用端口（平滑改口）；全部占用则返回 start（交由 uvicorn 报错）。"""
+    """端口选择（多实例防冲突）：
+
+    1. 若存在历史锁定端口（上次自动改口得到的实际端口）且当前空闲 → 优先复用（端口锁定，
+       避免每次重启在默认端口与改口端口之间漂移）；
+    2. 否则从 start 开始找第一个可用端口（平滑改口）；
+    3. 全部占用则返回 start（交由 uvicorn 报错）。
+    """
+    locked = _read_locked_port()
+    if locked is not None and locked != start and not _port_in_use(locked):
+        log.info("端口锁定：复用上次实际端口 %s（锁文件 %s）", locked, _port_lock_file())
+        return locked
     for port in range(start, start + _MAX_PORT_RETRY):
         if not _port_in_use(port):
             return port
@@ -171,9 +212,23 @@ if __name__ == "__main__":
                                ".qmt_work.lock"))
         sys.exit(1)
     _self_check()
+    # 启动诊断：ABI 运行时探测结果（frozen EXE 黑盒下排查桥接问题的关键日志）
+    try:
+        from xtquant_client.runtime import (discover_bundled_runtimes,
+                                            discover_system_runtimes)
+        _b = discover_bundled_runtimes()
+        _s = discover_system_runtimes()
+        log.info("runtime 探测: bundled=%s", _b)
+        log.info("runtime 探测: system=%s", _s)
+        log.info("runtime 探测: host_abi=%s（%s）",
+                 sys.version_info[0] * 100 + sys.version_info[1], sys.version.split()[0])
+    except Exception as _exc:  # noqa: BLE001
+        log.warning("runtime 探测失败: %s", _exc)
     target = _pick_port(settings.port)
     if target != settings.port:
         log.warning("端口 %s 已被占用，自动平滑改口为 %s（可改配置文件 port 或设置 QMT_PORT 指定起始端口）",
                     settings.port, target)
+    # 端口锁定：把实际监听端口持久化，下次启动优先复用（多实例部署互不冲突）
+    _write_locked_port(target)
     _write_port_file(target)
     uvicorn.run("app.main:app", host=settings.host, port=target, reload=False)

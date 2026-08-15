@@ -395,6 +395,9 @@ class XTPQuantAdapter(BrokerAdapter):
 
     # ---------------- 生命周期 ----------------
     def start(self) -> None:
+        # 幂等：已连接则复用，避免重复 start 泄漏第二个交易会话（同账号多会话冲突）
+        if self._connected:
+            return
         # 自动发现并加载客户端自带的 xtquant（无需用户手动 pip install）
         xtq_sp = _resolve_xtquant_path(self.client_path)
         if xtq_sp:

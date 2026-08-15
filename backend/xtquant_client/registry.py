@@ -145,7 +145,7 @@ def create_adapter(broker_id: str, client_path: str, account_id: str,
                 client_path=client_path or profile.default_client_path,
                 account_id=account_id, account_type=account_type,
                 session_id=session_id, min_version=min_version or profile.min_version,
-                adapter="xtp", runtime=plan)
+                adapter="xtp", broker_id=broker_id, runtime=plan)
         # 兜底（理论上不可达）
         return XTPQuantAdapter(
             client_path=client_path or profile.default_client_path,

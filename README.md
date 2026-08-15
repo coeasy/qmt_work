@@ -102,18 +102,67 @@ python build_exe.py
 
 ```bash
 cd frontend
-npm run pack          # 解压版 → dist-electron/win-unpacked/qmt_work.exe
-npm run dist          # NSIS 安装包（需 electron-builder 工具链）
+npm run pack           # 解压版 → dist-electron/win-unpacked/qmt_work.exe
+npm run dist           # NSIS 安装包 + zip（默认，覆盖普通用户）
+npm run dist:portable  # 仅 zip 便携版
 ```
 
 ### 一键构建
 
 ```bash
-./build_all.sh        # Linux / Git Bash
-build_all.bat         # Windows CMD
+./build_all.sh         # Linux / Git Bash
+build_all.bat          # Windows CMD
 ```
 
-一键构建依次执行：前端 build → 后端 EXE → Electron 打包。
+一键构建依次执行：前端 build → 后端 EXE → Electron 打包，默认产出 **NSIS 安装包**（可安装到任意目录 + 桌面快捷方式）与 zip 便携版。
+
+常用参数：
+
+| 参数 | 说明 |
+|------|------|
+| `--portable` | 仅产出 zip 便携版（不做 NSIS 安装包） |
+| `--desktop-only` | 跳过后端 EXE，仅打包 Electron |
+| `--backend-only` | 仅打包后端 EXE |
+| `--skip-frontend` | 跳过前端构建 |
+| `--force` | 跳过运行中实例检测（不推荐） |
+
+环境变量：
+
+| 变量 | 说明 |
+|------|------|
+| `QMT_UPDATE_URL` | 自动更新服务器地址（默认 GitHub Releases 占位，按实际仓库设置） |
+| `CSC_LINK` / `CSC_KEY_PASSWORD` | Windows 代码签名证书路径/密码（设置后自动签名，消除 SmartScreen 告警） |
+
+> 代码签名：未配置证书时跳过签名（安装/运行时 Windows 可能提示未知发布者）；配置后 electron-builder 自动签名并生成 `latest.yml` 供自动更新使用。
+
+---
+
+## 运维与监控
+
+### 健康检查（标准化探针，供外部监控 / 编排接入）
+
+| 端点 | 用途 | 返回 |
+|------|------|------|
+| `GET /api/v1/live` | 存活探针（进程活着即 200，不检查依赖） | 200 + 基础信息 |
+| `GET /api/v1/health` | 综合健康：DB / 引擎 / 券商连接 / 交易时段 / 标准 `checks` 汇总 | 200 |
+| `GET /api/v1/ready` | 就绪探针（DB 可读 + 启动完成 + 核心引擎在跑） | 200 / 503 |
+| `GET /api/v1/metrics` | Prometheus 文本格式指标（订单/行情/回测/WS/错误计数） | 200 |
+
+所有探针带统一 `code/message/data` 包裹与 `service/version` 字段，可被 Prometheus Blackbox、Uptime Kuma、容器编排健康检查直接消费。
+
+### 端口锁定（多实例防冲突）
+
+后端将实际监听端口持久化到 `data/.qmt_work.port`，下次启动优先复用该端口（仍被占用才 +1），避免多实例部署时端口漂移与冲突。桌面壳通过 `QMT_PORT_FILE` 读取实际端口连接。
+
+### 日志聚合与告警
+
+- 本地：`logs/qmt_work.log` 按天滚动，保留 14 天，含请求链路号与敏感信息脱敏
+- 结构化：`QMT_LOG_JSON=true` 时额外输出 `logs/qmt_work.jsonl`（逐行 JSON），供 Loki / ELK / 自建采集器抓取
+- 告警：`QMT_LOG_ALERT_WEBHOOK` 配置后，ERROR 及以上日志异步推送 webhook（支持 `{url}|{secret}` HMAC-SHA256 签名，指数退避重试，队列洪峰保护），可对接钉钉/企业微信/自定义监控
+
+### 自动更新
+
+桌面壳集成 electron-updater：启动后静默检查更新，托盘菜单「检查更新」可手动触发；发现新版本提示下载，下载完成退出时自动安装。更新源由构建时 `QMT_UPDATE_URL` 指定。
 
 ---
 
@@ -177,7 +226,7 @@ qmt_work/
 │  ├─ paper/            # 模拟盘引擎
 │  ├─ scheduler/        # 定时任务 + 分布式调度
 │  ├─ tools/            # 因子/策略/算法/涨停/条件单/参考数据
-│  ├─ gateway/          # 鉴权/限流/风控/审计/脱敏/K线缓存/metrics
+│  ├─ gateway/          # 鉴权/限流/风控/审计/脱敏/K线缓存/metrics/日志告警
 │  ├─ data/             # SQLite 数据库
 │  ├─ static/           # 前端构建产物（同源托管）
 │  ├─ dist/             # PyInstaller 产物
@@ -212,10 +261,10 @@ qmt_work/
 │  │  │  ├─ Signal.jsx           # 外部信号
 │  │  │  ├─ Reconcile.jsx        # 对账核销
 │  │  │  └─ TargetPortfolio.jsx  # 目标持仓
-│  │  ├─ electron/         # 桌面壳（端口发现 + 托盘 + 开机自启）
+│  │  ├─ electron/         # 桌面壳（端口发现 + 托盘 + 开机自启 + 自动更新）
 │  │  └─ electron-builder.yml
-├─ build_all.sh          # 一键构建（sh）
-├─ build_all.bat         # 一键构建（Windows）
+├─ build_all.sh          # 一键构建（sh，默认 NSIS 安装包）
+├─ build_all.bat         # 一键构建（Windows，默认 NSIS 安装包）
 ├─ docs/                 # 方案设计 / 多语言接入
 └─ README.md
 ```

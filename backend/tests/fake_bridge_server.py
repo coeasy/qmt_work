@@ -7,6 +7,7 @@
 """
 import sys
 
+from xtquant_client.base import BrokerNotConnectedError
 from xtquant_client.bridge_server import serve_adapter
 
 
@@ -22,6 +23,15 @@ class MockAdapter:
 
     def is_connected(self):
         return self._connected
+
+    def _simulate_disconnect(self):
+        """测试辅助：模拟 SDK 断开（仅翻转标志；状态泵会轮询到并推送 conn_state:false）。"""
+        self._connected = False
+
+    def _simulate_disconnect_error(self):
+        """测试辅助：模拟查询时发现 SDK 已断开（翻转标志 + 抛 BrokerNotConnectedError）。"""
+        self._connected = False
+        raise BrokerNotConnectedError("SDK 已断开（模拟）")
 
     def get_quote(self, code):
         return {"code": code, "last": 10.0, "open": 9.0}
