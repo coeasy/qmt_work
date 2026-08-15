@@ -9,6 +9,7 @@ REM   --desktop-only   跳过后端 EXE，仅打包 Electron
 REM   --backend-only   仅打包后端 EXE
 REM   --skip-frontend  跳过前端构建
 REM   --dist           Electron 打包使用 NSIS 安装包
+REM   --force          跳过运行中实例检测（不推荐）
 
 setlocal enabledelayedexpansion
 set ROOT=%~dp0
@@ -26,6 +27,7 @@ set SKIP_FRONTEND=false
 set BACKEND_ONLY=false
 set DESKTOP_ONLY=false
 set USE_NSIS=false
+set FORCE=false
 
 :parse_args
 if "%~1"=="" goto done_parse
@@ -33,10 +35,36 @@ if "%~1"=="--skip-frontend" set SKIP_FRONTEND=true
 if "%~1"=="--backend-only" set BACKEND_ONLY=true
 if "%~1"=="--desktop-only" set DESKTOP_ONLY=true
 if "%~1"=="--dist" set USE_NSIS=true
+if "%~1"=="--force" set FORCE=true
 shift /1
 goto parse_args
 
 :done_parse
+
+REM ---- 运行中实例检测：构建会覆盖运行中的 EXE/静态资源，
+REM      导致运行中进程句柄异常（前端 500），必须先退出 ----
+if "%DESKTOP_ONLY%"=="false" (
+    tasklist /FI "IMAGENAME eq qmt_work.exe" 2>nul | findstr /i "qmt_work.exe" >nul
+    if !errorlevel! equ 0 (
+        if "%FORCE%"=="true" (
+            echo [warn] 后端 EXE 正在运行，使用 --force 继续（不推荐）
+        ) else (
+            echo [error] 后端 EXE 正在运行（qmt_work.exe）。
+            echo         请先完全退出（托盘右键-退出，或任务管理器结束所有 qmt_work.exe），
+            echo         或加 --force 跳过本检查。
+            exit /b 1
+        )
+    )
+)
+tasklist /FI "IMAGENAME eq electron.exe" 2>nul | findstr /i "electron.exe" >nul
+if !errorlevel! equ 0 (
+    if "%FORCE%"=="true" (
+        echo [warn] 桌面壳实例正在运行，使用 --force 继续（不推荐）
+    ) else (
+        echo [error] 桌面壳（electron.exe）正在运行，请先退出后再构建。
+        exit /b 1
+    )
+)
 
 REM ---- Step 1: 前端构建 ----
 if "%DESKTOP_ONLY%"=="false" (

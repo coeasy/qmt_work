@@ -1,8 +1,8 @@
 // Electron 主进程（桌面壳）：启动 Python 后端子进程 -> 等待就绪 -> 加载同源前端 URL。
 // 端口发现：后端通过 QMT_PORT_FILE 写出实际端口（run.py 支持端口被占用自动 +1），
 // 桌面壳读取该文件后按实际端口连接，彻底规避端口冲突。
-const { app, BrowserWindow, Tray, Menu, ipcMain, shell, nativeImage } = require("electron");
-const { spawn } = require("child_process");
+const { app, BrowserWindow, Tray, Menu, ipcMain, shell, nativeImage, dialog } = require("electron");
+const { spawn, execFile } = require("child_process");
 const path = require("path");
 const fs = require("fs");
 const http = require("http");
@@ -13,6 +13,7 @@ let backend = null;
 let win = null;
 let tray = null;
 let quitting = false;
+let shuttingDown = false; // 异步停机中标志（防止 before-quit 重入）
 let activePort = DEFAULT_PORT;
 
 // 单实例锁
@@ -35,6 +36,8 @@ function backendEntry() {
 
 function startBackend() {
   const { cmd, args } = backendEntry();
+  // 启动前清理陈旧端口文件（上次异常退出可能残留过期端口，导致健康检查等错端口）
+  try { fs.unlinkSync(portFile()); } catch { /* 不存在则忽略 */ }
   // 运行时数据（SQLite）写入用户可写目录，避免 Program Files 只读问题
   const env = {
     ...process.env,
@@ -44,7 +47,57 @@ function startBackend() {
   backend = spawn(cmd, args, { stdio: ["ignore", "pipe", "pipe"], windowsHide: true, env });
   backend.stdout.on("data", (d) => console.log("[backend]", d.toString().trim()));
   backend.stderr.on("data", (d) => console.error("[backend-err]", d.toString().trim()));
-  backend.on("exit", (code) => { if (!quitting) console.error("backend exited", code); });
+  backend.on("exit", (code) => {
+    if (quitting) return;
+    console.error("backend exited", code);
+    dialog.showErrorBox("qmt_work 后端异常退出",
+      `后端进程已退出（code=${code}）。\n请检查是否端口被占用或数据文件损坏，然后重新启动桌面客户端。`);
+  });
+}
+
+// ---- 退出清理：桌面壳关闭后，后端及其所有子进程（含 bridge 桥接进程）必须全部退出 ----
+
+function killBackendTree() {
+  if (!backend) return;
+  try {
+    if (backend.exitCode !== null || backend.signalCode !== null) return; // 已退出
+    const pid = backend.pid;
+    if (process.platform === "win32") {
+      // taskkill /T 递归终止进程树（含 bridge 等孙进程），/F 强杀
+      execFile("taskkill", ["/PID", String(pid), "/T", "/F"], { windowsHide: true }, () => {});
+    } else {
+      try { process.kill(-pid, "SIGKILL"); } catch { backend.kill("SIGKILL"); }
+    }
+  } catch { /* 进程可能已消失 */ }
+}
+
+// 优雅停机优先：先通知后端执行 lifespan 关闭（会清理 bridge 子进程与各引擎），
+// 短暂等待后再强杀进程树兜底，确保「关闭后零残留」。
+function shutdownBackend() {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = () => { if (!done) { done = true; resolve(); } };
+    try {
+      const req = http.request({
+        host: "127.0.0.1", port: activePort,
+        path: "/api/v1/scheduler/shutdown", method: "POST",
+        timeout: 1500, headers: { "Content-Type": "application/json" },
+      }, (res) => { res.resume(); res.on("end", finish); });
+      req.on("error", finish);
+      req.on("timeout", () => { req.destroy(); finish(); });
+      req.end("{}");
+      setTimeout(finish, 2000); // 最多等 2s
+    } catch { finish(); }
+  });
+}
+
+async function fullShutdown() {
+  quitting = true;
+  try { await shutdownBackend(); } catch { /* 忽略 */ }
+  // 再给后端短暂时间完成优雅停机
+  await new Promise((r) => setTimeout(r, 1200));
+  killBackendTree(); // 兜底：确保整棵进程树退出
+  setTimeout(() => { app.exit(0); }, 300);
 }
 
 function readPortFile() {
@@ -128,14 +181,25 @@ function createTray() {
 
 app.whenReady().then(async () => {
   startBackend();
-  try { await waitReady(); } catch (e) { console.error(e.message); }
+  try { await waitReady(); } catch (e) {
+    console.error(e.message);
+    dialog.showErrorBox("qmt_work 启动失败",
+      `${e.message}\n\n请确认后端进程未被占用端口，或查看日志后重试。`);
+  }
   createWindow();
   createTray();
 });
 
 app.on("second-instance", () => win && win.show());
-app.on("before-quit", () => { quitting = true; });
-app.on("quit", () => { if (backend) backend.kill(); });
+// 退出：先优雅停机后端再强杀兜底，保证桌面壳关闭后零残留进程
+app.on("before-quit", (e) => {
+  if (shuttingDown) return; // 正在停机中，放行本次退出
+  e.preventDefault();       // 拦截，先异步清理后端
+  shuttingDown = true;
+  fullShutdown();
+});
+app.on("quit", () => { quitting = true; killBackendTree(); });
+process.on("exit", () => killBackendTree()); // 极端兜底（如系统关机）
 
 ipcMain.handle("app-version", () => app.getVersion());
 

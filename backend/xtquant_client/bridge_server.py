@@ -17,11 +17,67 @@
 """
 import argparse
 import json
+import os
 import sys
+import threading
 import traceback
 from typing import TextIO
 
 from xtquant_client.base import BrokerError
+
+
+def _parent_alive(pid: int | None) -> bool:
+    """检查父进程是否仍存活（纯标准库，兼容任意嵌入式 Python）。
+
+    Windows 用 GetExitCodeProcess（STILL_ACTIVE=259 表示存活，进程句柄不要求权限）；
+    POSIX 用 os.kill(pid, 0) 探测。
+    """
+    if not pid or pid <= 0:
+        return True  # 未指定父进程则不约束
+    if os.name == "nt":
+        import ctypes
+        try:
+            _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            _STILL_ACTIVE = 259
+            h = ctypes.windll.kernel32.OpenProcess(
+                _PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+            if not h:
+                return False  # 打不开句柄 = 进程已退出
+            try:
+                code = ctypes.c_ulong()
+                ctypes.windll.kernel32.GetExitCodeProcess(h, ctypes.byref(code))
+                return code.value == _STILL_ACTIVE
+            finally:
+                ctypes.windll.kernel32.CloseHandle(h)
+        except Exception:  # noqa: BLE001
+            return True  # 探测失败不误杀
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+    except Exception:  # noqa: BLE001
+        return True
+
+
+def _watch_parent(pid: int | None, interval: float = 3.0) -> None:
+    """看护线程：父进程退出后，本桥接子进程自动退出，杜绝孤儿残留。"""
+    if not pid or pid <= 0:
+        return
+
+    def _loop():
+        while True:
+            if not _parent_alive(pid):
+                # 父进程已死：优雅关闭适配器后自杀
+                try:
+                    sys.stderr.write(f"[bridge] parent {pid} gone, exit\n")
+                    sys.stderr.flush()
+                except Exception:  # noqa: BLE001
+                    pass
+                os._exit(0)
+            threading.Event().wait(interval)
+
+    threading.Thread(target=_loop, daemon=True).start()
 
 
 def _err_type(e: Exception) -> str:
@@ -130,7 +186,10 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="qmt_work xtquant bridge server")
     parser.add_argument("--adapter", default="xtp", help="适配器 id（registry 中的键）")
     parser.add_argument("--config", default="{}", help="适配器构造参数 JSON")
+    parser.add_argument("--parent-pid", type=int, default=0,
+                        help="父进程 PID：父进程退出后本进程自动退出（防孤儿残留）")
     args = parser.parse_args()
+    _watch_parent(args.parent_pid)
     cfg = json.loads(args.config)
     from xtquant_client.registry import create_adapter
     adapter = create_adapter(

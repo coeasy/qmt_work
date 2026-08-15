@@ -118,7 +118,7 @@ class BridgeAdapter(BrokerAdapter):
                "account_type": self._account_type, "session_id": self.session_id,
                "min_version": self.min_version}
         cmd = [exe, "-m", self._server_module, "--adapter", self._adapter_id,
-               "--config", json.dumps(cfg)]
+               "--config", json.dumps(cfg), "--parent-pid", str(os.getppid())]
         env = dict(os.environ)
         # 让嵌入式子进程能 import xtquant_client 包（纯 Python，无需额外依赖）
         existing = env.get("PYTHONPATH", "")

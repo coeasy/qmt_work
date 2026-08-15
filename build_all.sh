@@ -31,6 +31,7 @@ SKIP_FRONTEND=false
 BACKEND_ONLY=false
 DESKTOP_ONLY=false
 USE_NSIS=false
+FORCE=false
 
 for arg in "$@"; do
     case "$arg" in
@@ -38,9 +39,33 @@ for arg in "$@"; do
         --backend-only)  BACKEND_ONLY=true ;;
         --desktop-only)  DESKTOP_ONLY=true ;;
         --dist)          USE_NSIS=true ;;
+        --force)         FORCE=true ;;
         *)               echo "未知参数: $arg"; exit 1 ;;
     esac
 done
+
+# ---- 运行中实例检测：构建会覆盖运行中的 EXE/静态资源，
+#      导致运行中进程句柄异常（前端 500、StaticFiles 崩），必须先退出 ----
+detect_running() {
+    local exe_name="$1" msg="$2"
+    local match="${exe_name%.exe}"  # 去扩展名，兼容 tasklist 输出格式
+    if command -v tasklist >/dev/null 2>&1; then
+        local hit
+        hit=$(tasklist 2>/dev/null | grep -i "${match}" || true)
+        if [[ -n "$hit" ]]; then
+            if [[ "$FORCE" == true ]]; then
+                warn "$msg 正在运行（$exe_name）—— 使用 --force 继续（不推荐，可能再次引发 500）"
+            else
+                fail "$msg 正在运行（$exe_name）。请先完全退出（托盘右键→退出，或任务管理器结束所有 $exe_name），再用 --force 跳过本检查"
+            fi
+        fi
+    fi
+}
+
+if [[ "$DESKTOP_ONLY" == false ]]; then
+    detect_running "qmt_work.exe" "后端 EXE 实例"
+fi
+detect_running "electron.exe" "桌面壳实例"
 
 echo "========================================="
 echo " qmt_work 一键构建"
