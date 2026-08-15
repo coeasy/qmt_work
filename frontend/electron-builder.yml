@@ -1,0 +1,27 @@
+# Electron 打包配置。
+# 渲染进程通过 URL 加载 FastAPI 托管的前端，无需把前端打包进 asar；
+# Python 后端由 PyInstaller 打成 qmt_work.exe，作为 extraResources 随包分发。
+appId: com.qmt.work
+productName: qmt_work
+copyright: Copyright © 2026
+directories:
+  output: dist-electron
+  buildResources: build
+files:
+  - "electron/**/*"
+  - "package.json"
+extraResources:
+  - from: ../backend/dist
+    to: backend
+win:
+  signAndEditExecutable: false
+  target:
+    - nsis
+    - zip
+  artifactName: ${productName}-${version}.${ext}
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  artifactName: ${productName}-Setup-${version}.${ext}

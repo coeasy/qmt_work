@@ -1,0 +1,38 @@
+# ---------- Python ----------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# ---------- 后端构建产物 ----------
+backend/build/
+backend/dist/
+backend/logs/
+# ---------- 运行期数据 ----------
+# SQLite + 加密主密钥不入库
+backend/data/
+# 前端构建产物（npm run build 生成）
+backend/static/
+# exe 同目录自动生成的运行期配置
+smart_qmt_config.json
+
+# ---------- 前端 ----------
+frontend/node_modules/
+frontend/dist/
+frontend/dist-electron/
+
+# ---------- 运行期 ----------
+*.log
+server_*.log
+electron_launch.log
+
+# ---------- 编辑器/系统 ----------
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# ---------- 本地 AI 协作记忆（含内部开发历史，不随公开仓库分发）----------
+.workbuddy/
+
