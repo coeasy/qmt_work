@@ -16,6 +16,7 @@ backend/data/
 backend/static/
 # exe 同目录自动生成的运行期配置
 smart_qmt_config.json
+qmt_work_config.json
 
 # ---------- 前端 ----------
 frontend/node_modules/
@@ -36,3 +37,6 @@ Thumbs.db
 # ---------- 本地 AI 协作记忆（含内部开发历史，不随公开仓库分发）----------
 .workbuddy/
 
+# ---------- 内部开发文档（不随公开仓库分发） ----------
+ROADMAP_VERSION_COMPAT.md
+docs/QMT量化Agent平台方案.md
