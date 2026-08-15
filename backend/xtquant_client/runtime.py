@@ -135,13 +135,37 @@ def _sys_py_version(exe: str) -> int | None:
         return None
 
 
+def _scan_dir_for_python(dirpath: str | None, out: dict[int, str]) -> None:
+    """扫描某目录下的 python.exe / python3*.exe，探测 ABI 版本后收录（首次胜出）。
+
+    覆盖绿色版/嵌入式 Python（不写注册表、不在 PATH），如 WorkBuddy managed
+    运行时、conda 根目录、便携 Python 目录等。
+    """
+    if not dirpath or not os.path.isdir(dirpath):
+        return
+    try:
+        names = os.listdir(dirpath)
+    except OSError:
+        return
+    for fn in names:
+        low = fn.lower()
+        if low == "python.exe" or (low.startswith("python3") and low.endswith(".exe")):
+            exe = os.path.join(dirpath, fn)
+            v = _sys_py_version(exe)
+            if v is not None:
+                out.setdefault(v, exe)
+
+
 def discover_system_runtimes() -> dict[int, str]:
     """枚举系统中已安装的 CPython，作为 bridge 子进程的候选（无 bundled 运行时时）。
 
     搜索范围（结果缓存到进程内，仅首次较慢）：
     - 常见安装目录 C:\\Python3xx\\python.exe、AppData/Local/Programs/Python/Python3xx 等；
     - Windows 注册表 Software\\Python\\PythonCore\\3.xx\\InstallPath；
-    - `py -3.xx` 启动器；PATH 中的 `python3.xx`。
+    - `py -3.xx` 启动器；PATH 中的 `python3.xx`；
+    - WorkBuddy managed 运行时 ~/.workbuddy/binaries/python/versions/*/python.exe；
+    - conda 常见根目录（anaconda3 / miniconda3）；
+    - 环境变量显式指定：QMT_PYTHON_DIRS（分号分隔目录）、QMT_PYTHON_<MINOR>（如 QMT_PYTHON_311=D:\\py\\python.exe）。
 
     仅返回 [3.8, 3.13] 区间版本（迅投官方未发布 cp313，3.13 仅作兜底）。
     """
@@ -151,9 +175,9 @@ def discover_system_runtimes() -> dict[int, str]:
     out: dict[int, str] = {}
     candidates: list[str] = []
 
-    # 1) 常见安装目录
+    # 1) 常见安装目录（注意目录名：Python3.8->Python38，3.10->Python310，无前导零）
     for minor in range(308, 314):
-        m = f"{minor // 100}{minor % 100:02d}"
+        m = f"{minor // 100}{minor % 100}"  # 308->"38", 311->"311"
         candidates.append(f"C:\\Python{m}\\python.exe")
         candidates.append(os.path.expandvars(
             f"%LOCALAPPDATA%\\Programs\\Python\\Python{m}\\python.exe"))
@@ -191,11 +215,12 @@ def discover_system_runtimes() -> dict[int, str]:
     except Exception:  # noqa: BLE001
         pass
 
-    # 3) py 启动器 / PATH
+    # 3) py 启动器 / PATH 中的 python3.xx
     for minor in range(308, 314):
-        m = f"{minor // 100}{minor % 100:02d}"
+        m = f"{minor // 100}{minor % 100}"
+        ver = f"{minor // 100}.{minor % 100}"  # py -3.8 / python3.8
         try:
-            r = subprocess.run(["py", f"-{m}", "-c", "import sys;print(sys.executable)"],
+            r = subprocess.run(["py", f"-{ver}", "-c", "import sys;print(sys.executable)"],
                                capture_output=True, text=True, timeout=8)
             if r.returncode == 0:
                 exe = r.stdout.strip()
@@ -203,9 +228,46 @@ def discover_system_runtimes() -> dict[int, str]:
                     candidates.append(exe)
         except Exception:  # noqa: BLE001
             pass
-        p = shutil.which(f"python{m}")
-        if p:
-            candidates.append(p)
+        for probe in (f"python{m}", f"python{ver}"):
+            p = shutil.which(probe)
+            if p:
+                candidates.append(p)
+
+    # 4) PATH 目录全扫描（绿色版 / 便携 Python / 虚拟环境，覆盖 3.13.12 managed 等）
+    for d in os.environ.get("PATH", "").split(os.pathsep):
+        _scan_dir_for_python(d, out)
+
+    # 5) WorkBuddy managed 运行时（本机常见：~/.workbuddy/binaries/python/versions/3.11.x/）
+    for base in (
+        os.path.expanduser("~/.workbuddy/binaries/python/versions"),
+        os.path.expandvars("%USERPROFILE%\\.workbuddy\\binaries\\python\\versions"),
+    ):
+        _scan_dir_for_python(base, out)
+
+    # 6) conda 常见根目录
+    for base in (
+        os.path.expanduser("~/anaconda3"), os.path.expanduser("~/miniconda3"),
+        os.path.expanduser("~/AppData/Local/Continuum/anaconda3"),
+        r"C:\ProgramData\Anaconda3", r"C:\ProgramData\miniconda3",
+    ):
+        _scan_dir_for_python(base, out)
+
+    # 7) 环境变量显式指定
+    #    QMT_PYTHON_DIRS=D:\py;E:\tools\python  （分号分隔目录）
+    for d in os.environ.get("QMT_PYTHON_DIRS", "").split(os.pathsep):
+        _scan_dir_for_python(d.strip() or None, out)
+    #    QMT_PYTHON_311=D:\py311\python.exe （按 ABI 小版本指定解释器）
+    for key, val in os.environ.items():
+        if not key.startswith("QMT_PYTHON_") or key == "QMT_PYTHON_DIRS":
+            continue
+        try:
+            minor = _normalize_abi(int(key[len("QMT_PYTHON_"):]))
+        except (TypeError, ValueError):
+            continue
+        if val and os.path.isfile(val):
+            v = _sys_py_version(val)
+            if v is not None:
+                out.setdefault(v, val)
 
     for exe in dict.fromkeys(candidates):  # 去重保序
         if exe and os.path.isfile(exe):

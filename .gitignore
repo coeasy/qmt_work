@@ -9,6 +9,8 @@ venv/
 backend/build/
 backend/dist/
 backend/logs/
+# 多运行时桥接的嵌入式 Python（由 tools/fetch_runtimes.py 下载，不入库）
+backend/runtimes/
 # ---------- 运行期数据 ----------
 # SQLite + 加密主密钥不入库
 backend/data/

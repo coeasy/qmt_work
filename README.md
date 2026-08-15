@@ -42,6 +42,25 @@
 - Windows（迅投系券商依赖 xtquant，须与 QMT 客户端同机运行）
 - Python 3.12+（后端），Node.js 20+（前端）
 
+### 多运行时桥接（xtquant ABI 兼容，开箱即用）
+
+迅投 xtquant 的 C 扩展按 CPython 小版本编译（cp36 ~ cp312，官方暂未发布 cp313）。
+当主后端（如 Python 3.13）与券商 SDK ABI 不匹配时，平台自动经「桥接子进程」加载：
+
+1. **自动探测**：扫描本机已安装的兼容 Python（常见安装目录 / 注册表 / `py` 启动器 /
+   PATH / WorkBuddy managed 运行时 / conda / `QMT_PYTHON_DIRS` 与 `QMT_PYTHON_<MINOR>` 环境变量）。
+2. **捆绑运行时（推荐，随包分发）**：下载极简嵌入式 Python 到 `backend/runtimes/cp311/`：
+
+   ```bash
+   cd backend
+   python tools/fetch_runtimes.py --only cp311   # 或全部 cp38~cp312
+   ```
+
+   打包（`build_exe.py`）时 `runtimes/` 自动打进 EXE 的 `_internal/`，换机器也可用。
+
+- 无匹配解释器时，探测接口（`/brokers/test`）会给出明确可操作的三种修复路径；
+  已发现兼容运行时则自动标记 `runtime_mode: bridge` 并给出运行时来源。
+
 ### 开发模式
 
 ```bash
