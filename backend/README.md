@@ -1,51 +1,56 @@
-# qmt_work 后端（Phase 1 骨架）
+# qmt_work 后端
 
-FastAPI 单进程统一后端：REST 网关 + MCP（Streamable HTTP）+ 工具层 + XTQuant 线程模型（Mock 网关）。
+FastAPI 单进程统一后端，同源托管 REST API + MCP + WebSocket + 前端 SPA。**真实券商模式，无 mock**。
 
 ## 快速启动
 
 ```bash
 # 1. 创建隔离环境（首次）
-python -m venv <venv路径>
-<venv>/Scripts/pip install -r requirements.txt
-
-# 2. 启动（默认 QMT_MODE=mock，无需真实 QMT）
 cd backend
-<venv>/Scripts/python run.py
+python -m venv .venv && .venv\Scripts\activate
+pip install -r requirements.txt
+
+# 2. 启动
+python run.py    # http://127.0.0.1:21117
 ```
 
-## 验证
+## 冒烟测试
 
 ```bash
-# REST
-curl http://127.0.0.1:21117/api/v1/health
-curl http://127.0.0.1:21117/api/v1/quote/600519.SH
-curl -X POST http://127.0.0.1:21117/api/v1/orders -H "Content-Type: application/json" \
-  -d '{"code":"600519.SH","direction":"buy","volume":100,"price":280.0}'
-
-# MCP（Streamable HTTP，Claude Desktop/Cursor 可配置 http://127.0.0.1:21117/mcp）
-<venv>/Scripts/python tests/smoke.py   # 全链路冒烟：REST 7 项 + MCP 4 项
+python tests/smoke2.py    # 22 项 → PASS
+python -m pytest          # 单测 → 121 passed
 ```
 
-## 端点
+## 打包为 EXE
 
-| 端点 | 说明 |
+```bash
+python build_exe.py
+# 产出：dist/qmt_work/qmt_work.exe
+```
+
+## 环境变量
+
+复制 `.env.example` 为 `.env` 按需修改。关键变量：
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `QMT_PORT` | `21117` | 监听端口（被占用自动 +1） |
+| `QMT_API_KEY` | `qmt-dev-key` | 鉴权密钥（生产必须修改） |
+| `QMT_RISK_MAX_AMOUNT` | `100000` | 单笔最大金额 |
+
+完整配置见 `.env.example`。
+
+## 核心目录
+
+| 目录 | 内容 |
 |------|------|
-| `GET /api/v1/health` | 综合健康（QMT 连接/订阅数） |
-| `GET /api/v1/quote/{code}` `GET /api/v1/kline/{code}` | 行情 |
-| `POST /api/v1/orders` `GET /api/v1/positions` `GET /api/v1/cash` | 交易（过风控） |
-| `POST /api/v1/backtest` | 回测（落库） |
-| `/mcp` | MCP Streamable HTTP 端点（12 个工具） |
-| `/api/docs` | Swagger 文档 |
-
-## 配置（.env，前缀 QMT_）
-
-- `QMT_MODE=mock|real`：mock 为无 QMT 环境的开发模式；real 需在 `xtquant_client/real_gateway.py` 实现真实网关
-- `QMT_API_KEY`：远程调用鉴权 Key（本机 loopback 免 Key）
-- `QMT_RISK_MAX_AMOUNT` / `QMT_RISK_MIN_QTY`：风控默认值
-
-## 关键技术点
-
-- **线程模型（§4.14）**：XTQuant 同步调用经 `run_in_executor` 线程池隔离；回调经线程安全队列投递到事件循环；下单加锁串行化——见 `xtquant_client/gateway.py`
-- **fastmcp 2.x + FastAPI 集成**：`http_app(path="/", transport="streamable-http")` + `mount("/mcp")`，且必须把 `mcp_app.router.lifespan_context(mcp_app)` 组合进父应用 lifespan（否则 SessionManager 未初始化）
-- **包名冲突**：本地包不得命名为 `mcp`（会遮蔽官方 mcp 库）
+| `app/` | config / db / routes / main / state |
+| `xtquant_client/` | BrokerAdapter / Manager / Registry V2 / 桥接 / 各券商适配器 |
+| `mcp_server/` | MCP 工具注册 |
+| `agent/` | LLM Provider 抽象 + Agent 核心 |
+| `gateway/` | 鉴权 / 限流 / 风控 / 审计 / 脱敏 / K 线缓存 / metrics / webhook |
+| `backtest/` | 回测作业队列（含向量化 + 参数扫描） |
+| `paper/` | 模拟盘引擎 |
+| `scheduler/` | 定时任务 + 分布式调度 |
+| `tools/` | 因子 / 策略 / 算法 / 涨停 / 条件单 / 参考数据 |
+| `tests/` | 单测 + 冒烟测试 |

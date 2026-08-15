@@ -7,6 +7,7 @@ const KINDS = {
   backtest: { label: "单标的回测", placeholder: "600519.SH" },
   compare: { label: "多标的对比（测量效果）", placeholder: "600519.SH,000001.SZ,300750.SZ" },
   sensitivity: { label: "参数敏感性分析", placeholder: "600519.SH" },
+  sweep: { label: "参数扫描（Grid Search）", placeholder: "600519.SH" },
 };
 
 export default function Backtest() {
@@ -20,6 +21,9 @@ export default function Backtest() {
   const [busy, setBusy] = useState(false);
   const [cost, setCost] = useState({ commission_rate: 0.0003, stamp_tax: 0.001, slippage_bps: 5 });
 
+  /* 参数扫描（sweep）专用 */
+  const [sweepParams, setSweepParams] = useState("ma_window:5,10,20|ma_fast:5,10|ma_slow:15,20,30");
+
   async function refreshJobs() {
     try { setJobs(await api.get("/backtest/jobs")); } catch {}
   }
@@ -29,6 +33,18 @@ export default function Backtest() {
     setErr(""); setResult(null); setBusy(true);
     const arr = symbols.split(/[,，\s]+/).map((s) => s.trim()).filter(Boolean);
     const costParams = { commission_rate: cost.commission_rate, stamp_tax: cost.stamp_tax, slippage_bps: cost.slippage_bps };
+
+    if (kind === "sweep") {
+      const parsed = parseSweepParams(sweepParams);
+      if (!parsed) { setErr("参数扫描格式错误"); setBusy(false); return; }
+      const sweepBody = { symbol: arr[0], params: parsed, ...costParams, broker_id: activeId };
+      try {
+        const j = await api.backtestSweep(sweepBody);
+        setJob(j); poll(j.id);
+      } catch (e) { setErr(e.message); setBusy(false); }
+      return;
+    }
+
     let params = { broker_id: activeId, ...costParams };
     if (kind === "compare") params = { ...params, configs: arr.map((s) => ({ symbol: s })) };
     else if (kind === "sensitivity") params = { ...params, symbol: arr[0], param: "ma_window", values: [5, 10, 20] };
@@ -38,6 +54,16 @@ export default function Backtest() {
       setJob(j);
       poll(j.id);
     } catch (e) { setErr(e.message); setBusy(false); }
+  }
+
+  function parseSweepParams(raw) {
+    const groups = {};
+    raw.split("|").forEach((part) => {
+      const [key, vals] = part.split(":").map((s) => s.trim());
+      if (!key || !vals) return;
+      groups[key] = vals.split(",").map((v) => Number(v)).filter((v) => !isNaN(v));
+    });
+    return Object.keys(groups).length ? groups : null;
   }
 
   async function poll(id) {
@@ -100,6 +126,18 @@ export default function Backtest() {
                  onChange={(e) => setCost({ ...cost, slippage_bps: +e.target.value })} style={{ width: 110 }} />
           <span className="muted">交易成本模型（佣金/印花税/滑点）</span>
         </div>
+        {kind === "sweep" && (
+          <div style={{ marginTop: 10 }}>
+            <label>参数扫描定义</label>
+            <input value={sweepParams} onChange={(e) => setSweepParams(e.target.value)}
+              placeholder="ma_window:5,10,20|ma_fast:5,10|ma_slow:15,20,30"
+              style={{ width: "100%", fontFamily: "monospace" }} />
+            <p className="muted" style={{ fontSize: 11, margin: "4px 0 0" }}>
+              格式：<code>参数名:值1,值2,值3|参数名:值1,值2,值3</code>
+              使用竖线 | 分隔多组参数
+            </p>
+          </div>
+        )}
         <div className="btn-row">
           <button onClick={submit} disabled={busy}>{busy ? "运行中…" : "提交回测"}</button>
           {job && <span className="muted">任务 {job.id.slice(0, 8)} · {job.status} · {Math.round((job.progress || 0) * 100)}%</span>}
@@ -122,7 +160,41 @@ export default function Backtest() {
         </div>
       )}
 
-      {result && kind !== "compare" && (
+      {result && kind === "sweep" && (
+        <div className="card" style={{ marginTop: 16 }}>
+          <h3>参数扫描结果（按夏普排序）</h3>
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%" }}>
+              <thead><tr>
+                <th>排名</th>
+                {Object.keys(result.params || result.groups || {}).length
+                  ? Object.keys(result.params || result.groups || {}).map((k) => <th key={k}>{k}</th>)
+                  : <th>参数组合</th>}
+                <th>夏普</th><th>总收益%</th><th>最大回撤%</th><th>交易次数</th>
+              </tr></thead>
+              <tbody>
+                {(result.results || []).slice(0, 20).map((r, i) => (
+                  <tr key={i}>
+                    <td><strong>#{i + 1}</strong></td>
+                    {Object.keys(r.params || {}).map((k) => <td key={k}>{r.params[k]}</td>)}
+                    <td style={{ color: "#2bd4a4", fontWeight: "bold" }}>{r.sharpe != null ? r.sharpe.toFixed(3) : "—"}</td>
+                    <td className={r.total_return >= 0 ? "up" : "down"}>{r.total_return?.toFixed(2) || "—"}</td>
+                    <td className="down">{r.max_drawdown?.toFixed(2) || "—"}</td>
+                    <td>{r.trade_count ?? "—"}</td>
+                  </tr>
+                ))}
+                {(result.results || []).length === 0 && <tr><td colSpan={99} className="muted">暂无结果</td></tr>}
+              </tbody>
+            </table>
+          </div>
+          <p className="muted" style={{ marginTop: 8 }}>
+            扫描参数：{Object.entries(result.groups || {}).map(([k, v]) => `${k}=[${v.join(",")}]`).join(" · ")}
+            共 {(result.results || []).length} 组
+          </p>
+        </div>
+      )}
+
+      {result && kind === "backtest" && (
         <div className="card" style={{ marginTop: 16 }}>
           <h3>回测指标</h3>
           <div className="grid grid-3">
@@ -130,6 +202,25 @@ export default function Backtest() {
               <div key={k}><div className="stat-value" style={{ fontSize: 20 }}>{v}</div><div className="stat-label">{k}</div></div>
             ))}
           </div>
+        </div>
+      )}
+
+      {result && kind === "sensitivity" && (
+        <div className="card" style={{ marginTop: 16 }}>
+          <h3>敏感性分析结果</h3>
+          <table>
+            <thead><tr><th>参数值</th><th>夏普</th><th>总收益%</th><th>最大回撤%</th></tr></thead>
+            <tbody>
+              {(result.results || []).map((r, i) => (
+                <tr key={i}>
+                  <td><strong>{r.param_value}</strong></td>
+                  <td>{r.sharpe?.toFixed(3)}</td>
+                  <td className={r.total_return >= 0 ? "up" : "down"}>{r.total_return?.toFixed(2)}</td>
+                  <td className="down">{r.max_drawdown?.toFixed(2)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
       )}
 
