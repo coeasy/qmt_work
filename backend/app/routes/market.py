@@ -20,6 +20,14 @@ from typing import Any, Dict, List, Optional
 
 router = APIRouter()
 
+@router.get("/market/quote")
+async def market_quote(code: str, conn_id: str = ""):
+    """实时行情快照（最新价 / 涨跌幅 / 成交量 / 买卖五档）。"""
+    b = _need(conn_id or None)
+    if b is None:
+        return err(503, "未连接任何券商客户端：请到「券商连接」页添加并连接券商。")
+    return await _call(b, b.gateway.get_quote, code)
+
 @router.get("/market/kline")
 async def market_kline(code: str, period: str = "1d", count: int = 250,
                        conn_id: str = "", force: bool = False):

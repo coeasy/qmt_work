@@ -52,7 +52,10 @@ async def signal_submit(body: dict):
         remark=body.get("remark", ""),
         broker_id=body.get("broker_id", ""),
         payload=body.get("payload", {}))
-    return await state.signal_router.route(sig)
+    res = await state.signal_router.route(sig)
+    if isinstance(res, dict) and res.get("ok"):
+        return ok(res)
+    return err(503, res.get("reason", "信号路由失败") if isinstance(res, dict) else "信号路由失败")
 
 @router.post("/signal/confirm")
 async def signal_confirm(body: dict):

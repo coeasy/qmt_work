@@ -24,12 +24,15 @@ router = APIRouter()
 async def target_portfolio_sync(body: dict):
     from tools.target_portfolio import TargetPortfolioEngine
     engine = TargetPortfolioEngine(state.broker_manager, state.signal_router, state.db)
-    return await engine.sync(
+    res = await engine.sync(
         body.get("targets", {}),
         float(body.get("total_capital", 0) or 0),
         body.get("mode", "volume"),
         body.get("broker_id", ""),
         bool(body.get("dry_run", False)))
+    if isinstance(res, dict) and res.get("ok"):
+        return ok(res)
+    return err(503, res.get("reason", "同步失败") if isinstance(res, dict) else "同步失败")
 
 @router.get("/target-portfolio/plans")
 async def target_portfolio_list():

@@ -25,7 +25,7 @@ async def strategies_generate(body: dict):
     from tools.strategy_gen import generate_strategy
     try:
         return ok(generate_strategy(
-            body.get("strategy_type", ""), body.get("code", "600519.SH"),
+            body.get("strategy_type") or body.get("strategy", ""), body.get("code", "600519.SH"),
             body.get("client_path", ""), body.get("account_id", ""),
             body.get("params") or {}))
     except ValueError as exc:
