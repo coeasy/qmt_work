@@ -1,12 +1,12 @@
 # qmt_work · 版本兼容与开源生态对标分析
 
 > 生成时间：2026-08-15
-> 当前发布：**v0.1.1（2026-08-15）— ABI 探测修复版**
+> 当前发布：**v0.1.0（2026-08-15）— 第一版（多券商 · 真实接口 · MCP/Agent）**
 > 结论先行：用户本机 Python 版本与打包**完全无关**；真正的约束是「打包时内嵌的 Python 运行时 ABI」必须落在「券商 xtquant 自带的 .pyd ABI 集合」内。最优解不是按版本打多个包，而是**主程序单包 + xtquant 桥接层多运行时（cp38~cp312）自动择机**。
 
 ---
 
-## v0.1.1 变更（2026-08-15）— ABI 探测修复
+## v0.1.0 变更（2026-08-15）— 第一版发布
 
 - **根因**：`probe_environment` 在主后端 Python 3.13 上直接 `import xtquant.xtdata` 触发 `No module named 'xtquant.IPythonApiClient'` 误报；`backend/runtimes/` 为空时桥接无候选；`detect_xtquant_abis` 的 ABI 值（raw=38）与 `host_python_minor()`（313）编码不一致，导致 `313 in [38,311]` 误判不兼容。
 - **修复**：`runtime.py` 新增 `discover_system_runtimes()`（扫描注册表 / `py` 启动器 / PATH），自动发现系统 Python 3.8~3.13 作为桥接候选；ABI 值统一归一化为 `MAJOR*100+MINOR`（cp38 → 308）；`probe_environment` 先判定 broker ABI 再决定是否尝试进程内导入；`create_adapter` 在 ABI 不兼容时不再默默退回进程内，改由 `require_runtime_or_raise` 抛清晰可操作错误（含三选一方案）。

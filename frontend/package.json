@@ -1,7 +1,7 @@
 {
   "name": "qmt-work-frontend",
   "private": true,
-  "version": "0.1.1",
+  "version": "0.1.0",
   "type": "module",
   "description": "qmt_work 量化平台 · 桌面壳",
   "author": "qmt_work",

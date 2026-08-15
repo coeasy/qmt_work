@@ -4,4 +4,4 @@
 避免多处分发的硬编码版本不一致。前端版本独立维护于 frontend/package.json。
 """
 
-__version__ = "0.3.1"
+__version__ = "0.1.0"
