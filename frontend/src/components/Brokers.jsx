@@ -5,6 +5,25 @@ import { useBroker } from "../BrokerContext.jsx";
 
 const ACCOUNT_TYPES = ["STOCK", "CREDIT", "OPTION", "FUTURES"];
 
+// 把后端/SDK 的底层报错翻译成用户可操作的指引（解决「连接异常：无法连接行情服务！」
+// 「桥接子进程握手失败：None」这类信息失明问题）。
+function friendlyErr(detail) {
+  if (!detail) return "连接失败，请检查券商客户端状态后重试。";
+  const d = String(detail);
+  // 后端已给出分步排查指引（行情/交易连接失败均如此）时直接透出，
+  // 不再叠加前端提示——否则同一条建议出现两遍，反而降低可读性。
+  if (d.includes("请按顺序排查") || d.includes("请按以下顺序排查")) return d;
+  if (d.includes("未登录") || d.includes("行情服务") || d.includes("无法连接行情") || d.includes("未启动"))
+    return d + "\n\n→ 请先登录 QMT 客户端（极速/普通模式均可），保持客户端运行，再重试连接。";
+  if (d.includes("握手失败"))
+    return d + "\n\n→ 桥接子进程未在 90s 内就绪，最常见原因是 QMT 客户端未登录导致 SDK 阻塞。请登录客户端后重试；仍失败则重启客户端与桌面端。";
+  if (d.includes("未配置") || d.includes("account_id"))
+    return d + "\n\n→ 请在「资金账号」填写券商资金账号后再连接（行情模式可不填，但交易/持仓/下单需账号）。";
+  if (d.includes("xtquant") || d.includes("SDK"))
+    return d + "\n\n→ 未找到/无法加载 xtquant。请确认客户端路径指向 userdata_mini 目录且对应券商客户端已安装。";
+  return d;
+}
+
 // 将后端结构化探测诊断格式化为可读文本（sdk 定位/导入/目录线索）
 function probeText(p) {
   const lines = [];
@@ -153,7 +172,33 @@ export default function Brokers() {
         支持多券商（国金 / 华鑫 / 银河 / 中信建投 / 兴业 / 广发 / 同花顺 / 恒生PTrade / 掘金）× 多客户端版本。
         所有下单 / 行情均经真实券商 SDK，未连接时页面给出明确提示，不返回任何假数据。
       </p>
-      {msg && <div className={`toast ${msg.ok ? "ok" : "err"}`}>{msg.t}</div>}
+      {/* 提示渲染规则：.toast 默认是右下角 fixed + max-width 360px，装不下
+          多行排查指引（会被截断，且与常驻诊断横幅重叠在同一位置）。
+          因此多行文案改为页面内静态展示并保留换行；单行仍用轻量角标提示。 */}
+      {msg && (
+        <div
+          className={`toast ${msg.ok ? "ok" : "err"}`}
+          style={
+            String(msg.t || "").includes("\n")
+              ? { position: "static", maxWidth: "none", marginBottom: 12, whiteSpace: "pre-wrap", lineHeight: 1.7 }
+              : { whiteSpace: "pre-wrap" }
+          }
+        >
+          {msg.t}
+        </div>
+      )}
+      {cands && cands.some((c) => c.running) && (
+        <div
+          className="toast"
+          style={{
+            position: "static", maxWidth: "none", marginBottom: 12,
+            borderColor: "#2a3a55", background: "#101826", lineHeight: 1.7,
+          }}
+        >
+          本机已发现<b>运行中的 QMT 客户端</b>：{cands.filter((c) => c.running).map((c) => c.root).join("、")}。
+          连接前请先在该客户端<b>登录（行情 + 交易服务）</b>；未登录时连接会失败并提示「无法连接行情服务 / 交易连接失败」。
+        </div>
+      )}
 
       <div className="grid grid-2">
         {/* 新增连接 */}
@@ -265,7 +310,7 @@ export default function Brokers() {
           )}
           {testRes && (
             <div className={`toast ${testRes.connected ? "ok" : "err"}`} style={{ position: "static", marginTop: 12, whiteSpace: "pre-wrap" }}>
-              {testRes.connected ? "探测成功：客户端可连接" : `探测失败：${testRes.detail || "未知原因"}`}
+              {testRes.connected ? "探测成功：客户端可连接" : `探测失败：${friendlyErr(testRes.detail || "未知原因")}`}
               {testRes.probe && probeText(testRes.probe)}
             </div>
           )}
@@ -323,7 +368,16 @@ export default function Brokers() {
                         {b.connected ? (
                           <button className="ghost" onClick={() => disconnect(b.conn_id)}>断开</button>
                         ) : (
-                          <button onClick={() => connect(b.conn_id)}>连接</button>
+                          <button onClick={async () => {
+                            setMsg(null);
+                            try {
+                              const r = await connect(b.conn_id);
+                              const okc = !!(r && r.connected);
+                              setMsg({ ok: okc, t: okc ? "连接成功" : friendlyErr(r && r.detail) });
+                            } catch (e) {
+                              setMsg({ ok: false, t: friendlyErr(e.message) });
+                            }
+                          }}>连接</button>
                         )}
                         {!b.active && (
                           <button className="ghost" onClick={() => setActive(b.conn_id)}>设为活跃</button>

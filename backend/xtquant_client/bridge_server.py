@@ -110,6 +110,27 @@ def _err_type(e: Exception) -> str:
     return type(e).__name__
 
 
+def _safe_err(exc: BaseException) -> str:
+    """异常文案规范化（防「None」失明）。
+
+    xtquant SDK 在部分失败路径上抛出 args=(None,) 或无参异常，`str(exc)` 得到
+    "None" / ""。这个字符串原样透传到父端后会变成「桥接子进程握手失败：None」，
+    用户与日志同时失明（真实根因被吞掉）。此处退化为「异常类型 + args」，
+    至少保证可定位；父端再据 error_type 补可操作指引。
+    """
+    try:
+        msg = str(exc)
+    except Exception:  # noqa: BLE001
+        msg = ""
+    if msg.strip().lower() in ("", "none", "null", "nonetype"):
+        try:
+            args = exc.args if exc.args else ()
+        except Exception:  # noqa: BLE001
+            args = ()
+        return f"{type(exc).__name__}{args if args else '（SDK 未提供错误详情）'}"
+    return msg
+
+
 def _write(out: TextIO, obj: dict) -> None:
     # 见 _WRITE_LOCK 注释：跨线程写 stdout 必须加锁防写穿
     with _WRITE_LOCK:
@@ -156,10 +177,22 @@ def serve_adapter(adapter, stdin=None, stdout=None,
         adapter.start()
         state["connected"] = bool(adapter.is_connected())
     except Exception as exc:  # noqa: BLE001
-        _write(stdout, {"event": "init_error", "error": str(exc),
-                        "error_type": _err_type(exc)})
+        # 启动失败是最需要可观测性的路径：除规范化文案外，必须把 traceback
+        # 同时（a）放入事件供父端记日志、（b）写 stderr 供父端 _stderr_tail 读取。
+        # 此前两者都缺失，父端只能看到「None」，真实根因彻底丢失。
+        tb = traceback.format_exc()
+        _write(stdout, {"event": "init_error", "error": _safe_err(exc),
+                        "error_type": _err_type(exc), "traceback": tb[-2000:]})
+        try:
+            stderr = sys.stderr
+            if stderr is not None:
+                stderr.write(f"[bridge_server] adapter.start() 失败: "
+                             f"{_err_type(exc)}: {_safe_err(exc)}\n{tb}")
+                stderr.flush()
+        except Exception:  # noqa: BLE001
+            pass
         # 仍进入读取循环，使父端 _ping 能收到响应（再带上 init_error 已记录）
-        log_init = str(exc)
+        log_init = _safe_err(exc)
     else:
         log_init = None
 
@@ -199,7 +232,7 @@ def serve_adapter(adapter, stdin=None, stdout=None,
                 adapter.subscribe_quote(list(codes), _on_quote)
                 _write(stdout, {"id": rid, "ok": True, "result": {"subscribed": len(codes)}})
             except Exception as exc:  # noqa: BLE001
-                _write(stdout, {"id": rid, "ok": False, "error": str(exc),
+                _write(stdout, {"id": rid, "ok": False, "error": _safe_err(exc),
                                 "error_type": _err_type(exc)})
             return
         fn = getattr(adapter, method, None)
@@ -214,10 +247,10 @@ def serve_adapter(adapter, stdin=None, stdout=None,
             # 即使 adapter.is_connected() 返回的是陈旧缓存标志（如 XTP 启动后不再
             # 刷新），客户端也能据此把 is_connected() 翻为 False，触发健康重连。
             _mark_connected(False)
-            _write(stdout, {"id": rid, "ok": False, "error": str(exc),
+            _write(stdout, {"id": rid, "ok": False, "error": _safe_err(exc),
                             "error_type": _err_type(exc)})
         except Exception as exc:  # noqa: BLE001
-            _write(stdout, {"id": rid, "ok": False, "error": str(exc),
+            _write(stdout, {"id": rid, "ok": False, "error": _safe_err(exc),
                             "error_type": _err_type(exc)})
 
     if log_init:

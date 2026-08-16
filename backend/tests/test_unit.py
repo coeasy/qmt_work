@@ -882,6 +882,83 @@ def test_discovery_candidate():
         assert _candidate(os.path.join(d, "no_such")) is None
 
 
+# ---------------- 桥接事件协议（防「握手失败：None」失真回归）----------------
+def _bridge_adapter():
+    from xtquant_client.bridge_client import BridgeAdapter
+    return BridgeAdapter("C:/__no_such_client__", "", "STOCK")
+
+
+def test_bridge_init_error_top_level_field_not_lost():
+    """回归：init_error 的 error 在消息**顶层**，_read_loop 必须整条传递。
+
+    历史 bug：_read_loop 只传 msg["data"]（init_error 时为 None），
+    _on_event 用 str(None) == "None" 当作错误文案，用户看到
+    「桥接子进程握手失败：None」，真实原因（客户端未登录）被完全吞掉。
+    """
+    a = _bridge_adapter()
+    a._on_event("init_error", {
+        "event": "init_error",
+        "error": "xtdata 行情服务连接失败：QMT 客户端可能未登录",
+        "error_type": "BrokerNotConnectedError",
+        "traceback": "Traceback ...",
+    })
+    assert a._init_error == "xtdata 行情服务连接失败：QMT 客户端可能未登录"
+
+
+def test_bridge_init_error_nested_field_compat():
+    """兼容形态：字段放在 data 内时同样不能丢。"""
+    a = _bridge_adapter()
+    a._on_event("init_error", {"event": "init_error",
+                               "data": {"error": "交易连接异常：会话被占用"}})
+    assert a._init_error == "交易连接异常：会话被占用"
+
+
+def test_bridge_init_error_void_humanized():
+    """空洞错误（None / 字符串 "None" / 空串）必须兜底成可操作指引。
+
+    注意字符串 "None" 是 truthy，朴素的 `if not err` 兜底会漏——
+    这正是修复前用户在 EXE 里看到 "None" 的直接原因。
+    """
+    for raw in (None, "None", "none", "", "null", "NoneType"):
+        a = _bridge_adapter()
+        a._on_event("init_error", {"event": "init_error", "error": raw})
+        assert a._init_error, f"raw={raw!r} 未产生任何文案"
+        assert "None" not in a._init_error, f"raw={raw!r} 透出了 None"
+        assert "登录" in a._init_error, f"raw={raw!r} 缺少可操作指引"
+
+
+def test_bridge_conn_state_and_quote_payload_still_in_data():
+    """整条消息传递后，conn_state / quote 仍须从 data 取载荷（不得回归）。"""
+    a = _bridge_adapter()
+    a._on_event("conn_state", {"event": "conn_state", "data": {"connected": True}})
+    assert a._connected is True
+    a._on_event("conn_state", {"event": "conn_state", "data": {"connected": False}})
+    assert a._connected is False
+
+    got = []
+    a._quote_handlers.append(got.append)
+    a._on_event("quote", {"event": "quote", "data": {"code": "600519.SH"}})
+    assert got == [{"code": "600519.SH"}]
+
+
+def test_humanize_init_error_passthrough():
+    """有效文案必须原样透出，不能被兜底覆盖。"""
+    from xtquant_client.bridge_client import _humanize_init_error
+    assert _humanize_init_error("会话 session 被占用") == "会话 session 被占用"
+    assert "登录" in _humanize_init_error(None, "RuntimeError")
+    assert "RuntimeError" in _humanize_init_error(None, "RuntimeError")
+
+
+def test_bridge_server_safe_err_normalizes_void_exception():
+    """服务端侧：args=(None,) 的空异常不得序列化成 "None"。"""
+    from xtquant_client.bridge_server import _safe_err
+    assert _safe_err(ValueError("真实原因")) == "真实原因"
+    out = _safe_err(ValueError(None))
+    assert out != "None" and "ValueError" in out
+    out2 = _safe_err(RuntimeError())
+    assert out2 != "" and "RuntimeError" in out2
+
+
 if __name__ == "__main__":
     import pytest
     sys.exit(pytest.main([__file__, "-q"]))

@@ -37,8 +37,9 @@ export function BrokerProvider({ children }) {
   }, [refresh]);
 
   const connect = useCallback(async (id) => {
-    await api.connectBroker(id);
+    const r = await api.connectBroker(id);
     await refresh();
+    return r;
   }, [refresh]);
 
   const disconnect = useCallback(async (id) => {

@@ -39,6 +39,31 @@ _ERR_MAP = {
 # 后端目录（含 xtquant_client 包），用于让嵌入式子进程找到本模块
 _BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+# 「空洞错误」集合：SDK 抛空异常时 str() 的各种退化形态。
+# 注意必须包含字符串 "none"——JSON 里 None 与字符串 "None" 都会出现，
+# 后者是 truthy，只做 falsy 判断会漏。
+_VOID_ERRS = {"", "none", "null", "nonetype", "()", "nonetype()"}
+
+
+def _humanize_init_error(raw, error_type: str = "") -> str:
+    """把子进程 init_error 规范化为「用户可直接照做」的文案。
+
+    设计取舍：xtquant 是黑盒，穷举它每个抛空异常的分支不可行，因此在**边界处**
+    统一做防御——只要拿不到有效文案，就给出按概率排序的可操作原因清单，
+    而不是把 "None" 抛给用户。
+    """
+    msg = ("" if raw is None else str(raw)).strip()
+    if msg.lower() in _VOID_ERRS:
+        base = "券商 SDK 启动失败，但未返回错误详情"
+        if error_type:
+            base += f"（异常类型：{error_type}）"
+        return (base + "。请按以下顺序排查：\n"
+                "1) 打开并登录 QMT 客户端（极速/普通模式均可），保持客户端运行；\n"
+                "2) 确认客户端行情/交易服务已启动（能正常看行情、下单）；\n"
+                "3) 关闭重复打开的客户端或其他占用同一账号/session 的程序；\n"
+                "4) 确认「客户端路径」指向 userdata_mini 目录。")
+    return msg
+
 
 class BridgeAdapter(BrokerAdapter):
     """在子进程解释器（ABI 匹配）中托管券商适配器，本端做 JSON-RPC 代理。"""
@@ -176,18 +201,31 @@ class BridgeAdapter(BrokerAdapter):
 
         # 握手：_ping 确认子进程 IPC 就绪；超时则清理并抛错（附 stderr 便于定位）
         try:
-            self._rpc("_ping", [], timeout=30.0)
+            self._rpc("_ping", [], timeout=90.0)
         except Exception as exc:  # noqa: BLE001
             err = self._stderr_tail()
+            # 握手超时几乎是「QMT 客户端未登录导致 SDK 阻塞」的专属信号：
+            # XtQuantTrader.start() 在未登录时会一直阻塞等登录，子进程无法在
+            # 窗口内响应 _ping。给出明确指引，避免用户误以为是平台 bug。
+            hint = ""
+            if isinstance(exc, TimeoutError) or "Timeout" in type(exc).__name__:
+                hint = ("（握手超时：子进程 90s 内无响应——最常见原因是 QMT 客户端"
+                        "未登录，导致 xtquant 交易连接 SDK 阻塞。请先登录客户端后重试）")
             # 失败必落日志（打包 EXE 黑盒下，qmt_work.log 是唯一诊断通道）
             try:
-                log.error("bridge 握手失败: %s | 子进程 stderr: %s | proc rc=%s",
-                          exc, err, self._proc.poll() if self._proc else "N/A")
+                log.error("bridge 握手失败: %s%s | 子进程 stderr: %s | proc rc=%s",
+                          exc, hint, err, self._proc.poll() if self._proc else "N/A")
             except Exception:  # noqa: BLE001
                 pass
+            init_err = self._init_error  # close() 前先取，避免被清理
             self.close()
+            # 若握手失败源自子进程 init_error，其文案已是「用户可照做」的指引：
+            # 直接透出，不要再套「桥接子进程握手失败」这类内部术语前缀——
+            # 用户读到术语只会误判成平台 bug，而不是去登录客户端。
+            if init_err:
+                raise BrokerNotConnectedError(init_err) from exc
             tail = f"（子进程 stderr: {err}）" if err else ""
-            raise BrokerNotConnectedError(f"桥接子进程握手失败：{exc}{tail}") from exc
+            raise BrokerNotConnectedError(f"桥接子进程握手失败：{exc}{hint}{tail}") from exc
         if self._init_error:
             err = self._init_error
             self.close()
@@ -224,7 +262,11 @@ class BridgeAdapter(BrokerAdapter):
                 except Exception:  # noqa: BLE001
                     continue
                 if "event" in msg:
-                    self._on_event(msg.get("event"), msg.get("data"))
+                    # 传整条消息：事件字段的位置在协议里并不统一——
+                    # init_error 的 error/error_type/traceback 在**顶层**，
+                    # quote/conn_state 的载荷在 data 里。此前只传 msg["data"]
+                    # 会让 init_error 的 error 永远丢失（详见 _on_event 注释）。
+                    self._on_event(msg.get("event"), msg)
                     continue
                 rid = msg.get("id")
                 fut = self._pending.get(rid)
@@ -243,9 +285,34 @@ class BridgeAdapter(BrokerAdapter):
                     if not f.done():
                         f.set_exception(BrokerNotConnectedError(msg))
 
-    def _on_event(self, event, data):
+    def _on_event(self, event, msg):
+        """处理子进程事件。`msg` 是**整条**事件消息（不是 msg["data"]）。
+
+        协议不一致史（曾导致「桥接子进程握手失败：None」这一失真报错）：
+        bridge_server 的 init_error 把 error/error_type/traceback 放在消息顶层，
+        而 quote/conn_state 的载荷放在 data 里。此前 _read_loop 统一只传
+        msg["data"]，init_error 时 data 为 None，`str(None)` 得到字符串 "None"
+        并被当作真实错误透出——真实原因（如「QMT 客户端未登录」）被完全吞掉。
+        现在传整条消息，各分支按协议自取，并同时兼容「字段在 data 内」的形态。
+        """
+        m = msg if isinstance(msg, dict) else {}
+        data = m.get("data")
         if event == "init_error":
-            self._init_error = data.get("error") if isinstance(data, dict) else str(data)
+            d = data if isinstance(data, dict) else {}
+            raw = m.get("error") if m.get("error") is not None else d.get("error")
+            etype = str(m.get("error_type") or d.get("error_type") or "")
+            tb = str(m.get("traceback") or d.get("traceback") or "")
+            # 防失真空洞：SDK 在部分失败路径抛 args=(None,) 的空异常，序列化后
+            # error 可能是 None，也可能是**字符串 "None"**（truthy，会绕过朴素的
+            # falsy 兜底）。原样透出即「桥接子进程握手失败：None」，用户彻底失明。
+            self._init_error = _humanize_init_error(raw, etype)
+            # traceback 只入日志、不进用户提示：打包 EXE 黑盒下 qmt_work.log 是
+            # 唯一诊断通道，缺了它任何 SDK 内部错误都无法追查。
+            if tb:
+                try:
+                    log.error("bridge 子进程启动失败 [%s] raw=%r\n%s", etype, raw, tb)
+                except Exception:  # noqa: BLE001
+                    pass
             # 唤醒所有挂起调用（握手会因此拿到 init_error）
             for f in list(self._pending.values()):
                 if not f.done():
@@ -283,7 +350,10 @@ class BridgeAdapter(BrokerAdapter):
             self._pending.pop(rid, None)
         if not res.get("ok"):
             etype = res.get("error_type")
-            emsg = res.get("error", "桥接调用失败")
+            # 陷阱：dict.get(k, default) 在「键存在但值为 None」时返回 None 而非
+            # default，会构造出 BrokerError(None) —— str() 得 "None"，用户失明。
+            # 统一走 _humanize_init_error 兜底成可操作文案。
+            emsg = _humanize_init_error(res.get("error"), str(etype or ""))
             raise _ERR_MAP.get(etype, BrokerError)(emsg)
         return res.get("result")
 

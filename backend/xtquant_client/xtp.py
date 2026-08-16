@@ -354,6 +354,41 @@ def _load_trader_api() -> tuple:
     return XtQuantTrader, accounts
 
 
+def _probe_xtdata(xtdata) -> tuple[bool, str]:
+    """探测行情服务是否可用，返回 (ok, detail)。兼容多版本 xtquant API。
+
+    版本差异（踩坑记录）：
+    - 部分新版本提供 `xtdata.connect()`；
+    - 本机广发 QMT 自带的 2023 版**没有** connect()，只有 `get_client()`——
+      成功返回已连接的 RPCClient，失败抛 Exception("无法连接行情服务！")。
+      曾误用 `bool(xtdata.connect())` 预检，AttributeError 被吞成「不可用」，
+      导致行情模式在该版本下 100% 连不上（即使客户端已登录）。
+
+    设计原则：预检只用于**确定失败**的场景。两个 API 都不存在时返回 True 放行，
+    把判断交给后续真实调用，绝不因 SDK 版本差异把可用的连接误判为故障。
+    """
+    for name in ("connect", "get_client"):
+        fn = getattr(xtdata, name, None)
+        if not callable(fn):
+            continue
+        try:
+            res = fn()
+        except Exception as exc:  # noqa: BLE001
+            # SDK 原话（如「无法连接行情服务！」）是有效诊断信息，保留并上抛
+            return False, (str(exc).strip() or type(exc).__name__)
+        if res is None or res is False:
+            return False, f"xtdata.{name}() 未返回可用连接"
+        chk = getattr(res, "is_connected", None)
+        if callable(chk):
+            try:
+                if not chk():
+                    return False, "行情客户端未处于连接状态"
+            except Exception:  # noqa: BLE001
+                pass  # is_connected 自身异常不作为失败依据
+        return True, ""
+    return True, ""  # 无可用预检 API：放行，由后续真实调用暴露问题
+
+
 class XTPQuantAdapter(BrokerAdapter):
     """迅投 XTQuant 真实适配器。"""
 
@@ -441,38 +476,61 @@ class XTPQuantAdapter(BrokerAdapter):
                 "或手动 pip install xtquant") from exc
 
         self._xtdata = xtdata
-        try:
-            xtdata.connect()
-        except Exception:  # noqa: BLE001
-            pass  # xtdata 在未启动客户端时会失败；后续行情查询会明确报错
+        xtdata_ok, xtdata_detail = _probe_xtdata(xtdata)
 
         if not self._account_id:
-            # 仅行情模式（无交易账号）：行情可用，交易不可用
+            # 仅行情模式（无交易账号）：行情可用，交易不可用。
+            # 在 start() 阶段就给出明确指引，而不是等到 get_quote 才抛 SDK 原话
+            #「无法连接行情服务！」——那种报错会让用户误以为是平台 bug。
+            if not xtdata_ok:
+                raise BrokerNotConnectedError(
+                    f"行情服务连接失败（{xtdata_detail}）。请按顺序排查：\n"
+                    f"1) 打开并登录 QMT 客户端（极速/普通模式均可），保持客户端运行；\n"
+                    f"2) 确认客户端能正常显示行情；\n"
+                    f"3) 确认「客户端路径」指向 userdata_mini 目录。")
             self._connected = True
             return
 
         try:
-            # session 占用规避：start()!=0 时递增 session_id 重试（0..5），
-            # 规避用户已手动打开 QMT 客户端占用默认 session 的场景
+            # session 占用规避：连接失败时递增 session_id 重试（0..5），
+            # 规避用户已手动打开 QMT 客户端占用默认 session 的场景。
+            #
+            # 关键兼容性（历史 bug）：xtquant 的 XtQuantTrader.start() 在多数版本里
+            # **没有返回值**（源码 `self.async_client.start(); return`），因此 rc 为
+            # None。旧实现用 `if rc == 0` 判断启动成功，None == 0 恒为 False，导致
+            # 交易模式在这些 SDK 版本下 100% 连不上（无论客户端是否已登录），且报错
+            # 指向「session 被占用」误导排查方向。
+            # 正确语义：start() 返回 None 视为已启动；真正的连接结果由 connect()
+            # 决定（返回 0 成功，非 0 失败——session 冲突在这里暴露）。
             trader = None
             last_err = ""
             for attempt in range(6):
                 sid = self.session_id + attempt
                 t = XtQuantTrader(self.client_path, sid)
                 rc = t.start()
-                if rc == 0:
+                if rc is not None and rc != 0:
+                    last_err = f"start rc={rc}"
+                    continue
+                crc = t.connect()
+                if crc == 0:
                     trader = t
                     self.session_id = sid
                     break
-                last_err = f"start rc={rc}"
+                last_err = f"connect rc={crc}"
+                # 释放本次失败的会话，避免连续重试泄漏多个 session
+                try:
+                    t.stop()
+                except Exception:  # noqa: BLE001
+                    pass
             if trader is None:
                 raise BrokerNotConnectedError(
-                    f"XtQuantTrader 启动失败（session_id {self.session_id}~"
-                    f"{self.session_id + 5} 均失败，最后 {last_err}）："
-                    f"请确认 client_path 是 userdata_mini 目录、未被其他进程占用"
-                    f"（如已开 QMT 客户端），或手动指定其他 session_id")
-            if trader.connect() != 0:
-                raise BrokerNotConnectedError("XtQuantTrader 连接失败（QMT 客户端未登录或未运行）")
+                    f"交易连接失败（已尝试 session_id {self.session_id}~"
+                    f"{self.session_id + 5}，最后 {last_err}）。请按顺序排查：\n"
+                    f"1) 打开并登录 QMT 客户端，保持运行；\n"
+                    f"2) 确认「客户端路径」指向 userdata_mini 目录；\n"
+                    f"3) 关闭占用同一账号/session 的其他程序，或手动指定其他 "
+                    f"session_id；\n"
+                    f"4) 确认该资金账号已在客户端登录且账户类型匹配。")
             if self._account_type not in _acc_classes:
                 raise BrokerNotConnectedError(
                     f"该客户端不支持账户类型 {self._account_type}（支持：{sorted(_acc_classes)}）")
