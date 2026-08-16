@@ -10,13 +10,22 @@
 - 状态（现金 / 持仓 / 成交）落 SQLite，进程重启后自动恢复；
 - 自建表（paper_positions / paper_cash / paper_trades），不改动 app/db.py 迁移。
 """
+import json
 import logging
 import threading
 from datetime import datetime
 
+from tools.ashare import is_valid_lot, round_lot
+
 log = logging.getLogger("qmt_work.paper")
 
 DEFAULT_INITIAL = 1_000_000.0
+MIN_LOT = 100  # A 股 1 手 = 100 股
+
+
+def _today_date() -> str:
+    return datetime.now().strftime("%Y-%m-%d")
+
 
 _DDL = (
     """CREATE TABLE IF NOT EXISTS paper_positions (
@@ -65,6 +74,8 @@ class PaperEngine:
         self.stamp_tax_rate = float(stamp_tax_rate)
         self.positions: dict[str, dict] = {}
         self.last_prices: dict[str, float] = {}
+        # T+1 批次账本：code -> [[acquired_date, volume], ...]（当日买入次日才可卖）
+        self._lots: dict[str, list] = {}
         self._lock = threading.RLock()
         self._seq = 0
 
@@ -74,6 +85,11 @@ class PaperEngine:
         self.db = db
         for sql in _DDL:
             db.execute(sql)
+        # T+1 批次账本持久化（兼容旧库：缺列则补）
+        try:
+            db.execute("ALTER TABLE paper_positions ADD COLUMN lots TEXT")
+        except Exception:  # noqa: BLE001  # 列已存在时忽略
+            pass
         self.load()
         return self
 
@@ -90,7 +106,8 @@ class PaperEngine:
                 self.cash = float(row["cash"] or 0.0)
                 self.initial = float(row["initial"] or DEFAULT_INITIAL)
             self.positions = {}
-            for p in self.db.query("SELECT code, name, volume, avg_cost, side "
+            self._lots = {}
+            for p in self.db.query("SELECT code, name, volume, avg_cost, side, lots "
                                    "FROM paper_positions"):
                 self.positions[p["code"]] = {
                     "code": p["code"], "name": p["name"] or p["code"],
@@ -98,6 +115,12 @@ class PaperEngine:
                     "avg_cost": float(p["avg_cost"] or 0.0),
                     "side": p["side"] or "long",
                 }
+                raw = p.get("lots")
+                if raw:
+                    try:
+                        self._lots[p["code"]] = json.loads(raw)
+                    except Exception:  # noqa: BLE001
+                        self._lots[p["code"]] = []
             # 无行情时用最近成交价兜底（仍是真实成交/行情价，不是编造价）
             for t in self.db.query(
                     "SELECT code, price FROM paper_trades ORDER BY id"):
@@ -121,6 +144,7 @@ class PaperEngine:
             "volume": round(pos["volume"], 4),
             "avg_cost": round(pos["avg_cost"], 6),
             "side": pos.get("side") or "long",
+            "lots": json.dumps(self._lots.get(code, [])),
         })
 
     def reset(self, initial_capital: float = DEFAULT_INITIAL) -> dict:
@@ -133,6 +157,7 @@ class PaperEngine:
             self.cash = initial
             self.positions = {}
             self.last_prices = {}
+            self._lots = {}
             self._seq = 0
             if self.db is not None:
                 self.db.execute("DELETE FROM paper_positions")
@@ -171,11 +196,16 @@ class PaperEngine:
             raise ValueError("volume 必须大于 0")
         if price <= 0:
             raise ValueError("price 必须大于 0")
+        # A 股规则：整手（100 股整数倍）
+        if not is_valid_lot(int(round(volume)), MIN_LOT):
+            raise ValueError(f"volume 须为 {MIN_LOT} 股的整数倍（A 股 1 手）")
+        vol_int = int(round(volume))
 
         with self._lock:
-            amount = price * volume
+            amount = price * vol_int
             commission = self._commission(amount)
             pnl = 0.0
+            today = _today_date()
             if side == "buy":
                 cost = amount + commission
                 if cost > self.cash + 1e-9:
@@ -184,41 +214,62 @@ class PaperEngine:
                 pos = self.positions.get(code)
                 if pos is None:
                     self.positions[code] = {"code": code, "name": name or code,
-                                            "volume": volume, "avg_cost": price,
+                                            "volume": vol_int, "avg_cost": price,
                                             "side": "long"}
                 else:
-                    total_vol = pos["volume"] + volume
+                    total_vol = pos["volume"] + vol_int
                     pos["avg_cost"] = (pos["avg_cost"] * pos["volume"]
-                                       + price * volume) / total_vol
+                                       + price * vol_int) / total_vol
                     pos["volume"] = total_vol
                     if name:
                         pos["name"] = name
+                # T+1：记录买入批次（次日才可卖）
+                self._lots.setdefault(code, []).append([today, vol_int])
             else:
                 pos = self.positions.get(code)
                 held = pos["volume"] if pos else 0.0
-                if volume > held + 1e-9:
-                    raise ValueError(f"模拟盘可卖数量不足：持有 {held:g}，卖出 {volume:g}")
+                # T+1：仅允许卖出「非当日」买入的批次
+                lots = self._lots.get(code, [])
+                sellable = sum(v for (d, v) in lots if d < today)
+                if vol_int > sellable + 1e-9:
+                    raise ValueError(
+                        f"T+1 限制：当日买入不可卖出，当前可卖 {int(sellable)} 股，"
+                        f"申请卖出 {vol_int} 股")
+                if vol_int > held + 1e-9:
+                    raise ValueError(f"模拟盘可卖数量不足：持有 {held:g}，卖出 {vol_int:g}")
                 stamp = self._stamp_tax(amount)
                 self.cash += amount - commission - stamp
-                pnl = (price - pos["avg_cost"]) * volume - commission - stamp
-                pos["volume"] = held - volume
+                pnl = (price - pos["avg_cost"]) * vol_int - commission - stamp
+                pos["volume"] = held - vol_int
+                # 从最旧批次核销可卖量
+                remaining = vol_int
+                for lot in lots:
+                    if lot[0] >= today:
+                        continue
+                    take = min(remaining, lot[1])
+                    lot[1] -= take
+                    remaining -= take
+                    if remaining <= 0:
+                        break
+                self._lots[code] = [[d, v] for (d, v) in lots if v > 0]
                 if pos["volume"] <= 1e-9:
                     self.positions.pop(code, None)
+                    self._lots.pop(code, None)
 
             self.last_prices[code] = price
             self._save_cash()
             self._save_position(code)
             trade = {"code": code, "side": side, "price": round(price, 4),
-                     "volume": volume, "ts": _now(), "pnl": round(pnl, 4)}
+                     "volume": vol_int, "ts": _now(), "pnl": round(pnl, 4)}
             if self.db is not None:
                 tid = self.db.insert("paper_trades", trade)
             else:
                 self._seq += 1
                 tid = self._seq
-            log.info("模拟盘成交 %s %s %g@%.4f 现金 %.2f", side, code, volume,
+            log.info("模拟盘成交 %s %s %g@%.4f 现金 %.2f", side, code, vol_int,
                      price, self.cash)
             return {"order_id": f"PAPER-{tid}", "trade_id": tid, "code": code,
-                    "side": side, "price": round(price, 4), "volume": volume,
+                    "side": side, "price": round(price, 4), "volume": vol_int,
                     "price_type": price_type or "limit", "remark": remark or "",
                     "commission": commission, "pnl": round(pnl, 4),
                     "cash_after": round(self.cash, 2), "status": "filled"}
@@ -300,6 +351,8 @@ class PaperEngine:
             upnl = sum(p["unrealized_pnl"] for p in positions)
             rpnl = self.realized_pnl()
             total = self.cash + mv
+            # 盯市来源标注：有真实行情最新价 -> live；缺行情退化成本价 -> frozen（不编造涨跌）
+            marking_source = "live" if any(p["last_price"] > 0 for p in positions) else "frozen"
             return {
                 "cash": round(self.cash, 2),
                 "market_value": round(mv, 2),
@@ -309,6 +362,7 @@ class PaperEngine:
                 "realized_pnl": rpnl,
                 "total_return": round(total / self.initial - 1, 6) if self.initial else 0.0,
                 "position_count": len(positions),
+                "marking_source": marking_source,
                 "positions": positions,
             }
 
@@ -349,6 +403,7 @@ class PaperEngine:
         with self._lock:
             return {"cash": round(self.cash, 4), "initial": self.initial,
                     "positions": {c: dict(p) for c, p in self.positions.items()},
+                    "lots": {c: list(v) for c, v in self._lots.items()},
                     "last_prices": dict(self.last_prices)}
 
     def from_dict(self, data: dict) -> "PaperEngine":
@@ -357,12 +412,15 @@ class PaperEngine:
             self.cash = float(data.get("cash", self.cash) or 0.0)
             self.initial = float(data.get("initial", self.initial) or DEFAULT_INITIAL)
             self.positions = {}
+            self._lots = {}
             for code, p in (data.get("positions") or {}).items():
                 self.positions[code] = {
                     "code": code, "name": p.get("name") or code,
                     "volume": float(p.get("volume") or 0.0),
                     "avg_cost": float(p.get("avg_cost") or 0.0),
                     "side": p.get("side") or "long"}
+            for code, lots in (data.get("lots") or {}).items():
+                self._lots[code] = [[d, float(v)] for d, v in lots]
             self.last_prices = {k: float(v) for k, v in
                                 (data.get("last_prices") or {}).items()}
             if self.db is not None:

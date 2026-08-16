@@ -84,15 +84,17 @@ def test_at_limit_board_specific():
 # ---------------- P0#7：algo 拆单计划 ----------------
 def test_vwap_differs_from_twap_and_sums():
     total = 10000
-    vwap = AlgoEngine._plan_vwap(total, 10)
+    vwap, src = AlgoEngine._plan_vwap(total, 10)
     twap = AlgoEngine._plan_slices(total, 10)
+    # 无真实分时量分布 -> 降级 heuristic_utype，并显式标注来源
+    assert src == "heuristic_utype"
     assert sum(vwap) == total
     assert all(v % 100 == 0 for v in vwap)
-    # VWAP U 型：首/末片轻、中间重（与 TWAP 等分不同）；总量守恒
+    # VWAP U 型：开盘/收盘端更重、中间轻（与 TWAP 等分不同）；总量守恒
     assert vwap != twap
     mid = len(vwap) // 2
-    assert vwap[0] < vwap[mid]   # 开盘端 < 中间
-    assert vwap[-1] < vwap[mid]  # 收盘端 < 中间
+    assert vwap[0] > vwap[mid]   # 开盘端 > 中间
+    assert vwap[-1] > vwap[mid]  # 收盘端 > 中间
 
 
 def test_plan_slices_lot_safe():

@@ -131,8 +131,11 @@ class AlgoEngine:
             elif algo == "pov":
                 await self._run_pov(aid)
             elif algo == "vwap":
-                # VWAP：按日内成交量分布加权拆单（A股 U 型：开盘/收盘更重），与 TWAP 等分不同
-                await self._run_twap(aid, self._plan_vwap(job["volume"], job["slices"]))
+                # VWAP：按成交量分布加权拆单；有真实分时量分布用 profile，否则降级 U 型并标注来源
+                plan, vwap_source = self._plan_vwap(
+                    job["volume"], job["slices"], job.get("volume_profile"))
+                job["vwap_source"] = vwap_source
+                await self._run_twap(aid, plan)
             else:  # twap
                 await self._run_twap(aid)
             if job["status"] not in ("canceled", "done"):
@@ -174,27 +177,40 @@ class AlgoEngine:
         return min(lots * 100, max(100, int(total)))
 
     @staticmethod
-    def _plan_vwap(volume: int, slices: int) -> list[int]:
-        """VWAP 拆单计划：按 A 股典型日内成交量分布（U 型：开盘/收盘更重）加权分配每片量。
+    def _plan_vwap(volume: int, slices: int, volume_profile: list[float] | None = None):
+        """VWAP 拆单计划：按成交量分布加权分配每片量（每片 100 股整数倍，余量并入末片）。
 
-        与 TWAP 等分不同，VWAP 在成交量更大的时段下更大单，更贴近市场真实成交节奏。
-        每片均为 100 股整数倍，余量并入最后一片。
+        优先级：
+        - volume_profile 提供（来自券商分时量分布，长度≈slices）：按真实分布加权，
+          source="profile"（最贴近真实 VWAP）
+        - 否则降级为 A 股典型日内 U 型（开盘/收盘更重），source="heuristic_utype"
+          （明确标注非真实分布，避免对外自称精确 VWAP）
         """
         volume = int(volume)
         slices = max(1, int(slices))
         lots = volume // 100
         if lots <= 0:
-            return [volume] if volume > 0 else []
+            return ([volume] if volume > 0 else []), "none"
         slices = min(slices, lots)
-        # U 型权重：w_i ∝ 1 + sin(pi * i/(N-1))，中间低、两端高
-        raw = [1.0 + (math.sin(math.pi * i / max(1, slices - 1)) if slices > 1 else 1.0)
-               for i in range(slices)]
+        # 真实分时量分布优先
+        if volume_profile and len(volume_profile) >= slices:
+            prof = [max(0.0, float(x)) for x in volume_profile[:slices]]
+            s = sum(prof)
+            if s > 0:
+                plan = [max(100, int(round(lots * w / s)) * 100) for w in prof]
+                diff = lots * 100 - sum(plan)
+                plan[-1] = max(100, plan[-1] + diff)
+                return plan, "profile"
+        # 降级：U 型权重（两端高、中间低，贴近 A 股日内成交量分布）
+        if slices > 1:
+            raw = [1.0 + abs(math.cos(math.pi * i / (slices - 1))) for i in range(slices)]
+        else:
+            raw = [1.0]
         s = sum(raw) or 1.0
         plan = [max(100, int(round(lots * w / s)) * 100) for w in raw]
-        # 校正总量（因取整偏差把余量并入最后一片）
         diff = lots * 100 - sum(plan)
         plan[-1] = max(100, plan[-1] + diff)
-        return plan
+        return plan, "heuristic_utype"
 
     async def _run_twap(self, aid: str, plan: list[int] | None = None) -> None:
         """TWAP/VWAP：按时间等分切片顺序下单（plan 为空时用 TWAP 等分计划）。"""

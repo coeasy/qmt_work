@@ -59,9 +59,14 @@ def test_buy_twice_average_cost(engine):
 
 
 def test_sell_realizes_pnl_and_clears_position(engine):
+    import paper.paper_engine as pe
+    orig = pe._today_date
+    pe._today_date = lambda: "2024-01-01"          # 买入日 D1
     engine.submit_order("600519.SH", "buy", 100.0, 1000)
     cash_after_buy = engine.cash
+    pe._today_date = lambda: "2024-01-02"          # T+1 次日方可卖
     o = engine.submit_order("600519.SH", "sell", 110.0, 1000)
+    pe._today_date = orig
     amount = 110.0 * 1000
     comm = max(amount * 0.0003, 5.0)            # 33.0
     stamp = amount * 0.001                      # 110.0
@@ -76,8 +81,13 @@ def test_sell_realizes_pnl_and_clears_position(engine):
 
 
 def test_partial_sell_keeps_position(engine):
+    import paper.paper_engine as pe
+    orig = pe._today_date
+    pe._today_date = lambda: "2024-01-01"
     engine.submit_order("600519.SH", "buy", 100.0, 2000)
+    pe._today_date = lambda: "2024-01-02"
     engine.submit_order("600519.SH", "sell", 105.0, 500)
+    pe._today_date = orig
     pos = engine.get_positions()[0]
     assert pos["volume"] == 1500
     assert pos["avg_cost"] == pytest.approx(100.0)
@@ -109,11 +119,16 @@ def test_invalid_orders_raise(engine):
 
 
 def test_metrics(engine):
+    import paper.paper_engine as pe
+    orig = pe._today_date
+    pe._today_date = lambda: "2024-01-01"          # 买入日 D1
     engine.submit_order("600519.SH", "buy", 100.0, 1000)
-    engine.submit_order("600519.SH", "sell", 110.0, 1000)   # 盈利
     engine.submit_order("000001.SZ", "buy", 20.0, 1000)
-    engine.submit_order("000001.SZ", "sell", 18.0, 1000)    # 亏损
     engine.submit_order("600036.SH", "buy", 30.0, 1000)
+    pe._today_date = lambda: "2024-01-02"          # T+1 次日卖
+    engine.submit_order("600519.SH", "sell", 110.0, 1000)   # 盈利
+    engine.submit_order("000001.SZ", "sell", 18.0, 1000)    # 亏损
+    pe._today_date = orig
     engine.process_quote("600036.SH", 33.0)
     m = engine.metrics()
     assert m["trade_count"] == 5

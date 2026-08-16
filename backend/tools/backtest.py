@@ -6,9 +6,10 @@
 - 覆盖 EzQmt 的「测量效果」对比：compare 多方案并排，sensitivity 参数扫描防过拟合
 """
 import math
-import statistics
 
 from . import get_bridge
+from .matching import MatchingConfig, simulate as match_simulate
+from .metrics import compute_metrics
 from xtquant_client.base import BrokerNotConnectedError
 
 
@@ -97,93 +98,84 @@ def _signals(strategy: str, closes: list[float], params: dict) -> list[int]:
 
 
 # ---------------- 回测核心 ----------------
-def _metrics(equity: list[float], rets: list[float], trades: list[dict]) -> dict:
-    if not equity or len(equity) < 2:
-        return {}
-    total = equity[-1] / equity[0] - 1
-    n = len(rets)
-    annual = (1 + total) ** (252 / n) - 1 if n > 0 and total > -1 else 0.0
-    mean = statistics.mean(rets) if rets else 0.0
-    std = statistics.stdev(rets) if len(rets) > 1 else 0.0
-    sharpe = (mean / std * math.sqrt(252)) if std > 0 else 0.0
-    peak = equity[0]
-    max_dd = 0.0
-    for c in equity:
-        peak = max(peak, c)
-        max_dd = min(max_dd, c / peak - 1)
-    wins = [t for t in trades if t.get("pnl", 0) > 0]
-    win_rate = len(wins) / len(trades) if trades else 0.0
-    avg_pnl = statistics.mean([t.get("pnl", 0) for t in trades]) if trades else 0.0
-    var95 = -sorted(rets)[int(n * 0.05)] if n >= 20 else 0.0
-    ann_vol = std * math.sqrt(252) if std > 0 else 0.0
-    return {
-        "total_return": round(total, 4), "annual_return": round(annual, 4),
-        "max_drawdown": round(max_dd, 4), "annual_volatility": round(ann_vol, 4),
-        "sharpe": round(sharpe, 3), "win_rate": round(win_rate, 3),
-        "trade_count": len(trades), "avg_pnl": round(avg_pnl, 4),
-        "var95": round(var95, 4),
-        "rating": "A" if sharpe > 1.5 else ("B" if sharpe > 1 else "C"),
-    }
+def _build_cfg(symbol: str, commission_rate, stamp_tax, slippage_bps, **opt) -> MatchingConfig:
+    """由回测参数构造撮合内核配置。"""
+    return MatchingConfig(
+        execution_timing=opt.get("execution_timing", "close"),
+        slippage_bps=float(slippage_bps),
+        use_spread_slippage=bool(opt.get("use_spread_slippage", False)),
+        max_participation_pct=float(opt.get("max_participation_pct", 1.0)),
+        enforce_limit=bool(opt.get("enforce_limit", True)),
+        commission_rate=float(commission_rate),
+        stamp_tax=float(stamp_tax),
+        code=symbol,
+        is_st=bool(opt.get("is_st", False)),
+    )
+
+
+def _split_metrics(equity: list[float], trades: list[dict], train_ratio: float,
+                   period: str = "1d", rf: float = 0.0):
+    """样本内/外指标切分：按 train_ratio 切净值序列；无切分返回 (None, None)。"""
+    if train_ratio is None or train_ratio >= 1.0:
+        return None, None
+    k = max(2, int(len(equity) * train_ratio))
+    if k >= len(equity) - 1:
+        return None, None
+    tr_equity = equity[:k + 1]
+    te_equity = equity[k:]
+    # 成交按时间顺序近似归属样本内/外（前 k 笔视为样本内）
+    tr_trades = trades[:k] if trades else []
+    te_trades = trades[k:] if trades else []
+    train = compute_metrics(tr_equity, tr_trades, period=period, rf=rf)
+    test = compute_metrics(te_equity, te_trades, period=period, rf=rf)
+    return train, test
 
 
 def run_backtest_engine(symbol: str, kline: list[dict], strategy: str,
                         params: dict, initial_capital: float,
                         commission_rate: float = 0.0003,
                         stamp_tax: float = 0.001,
-                        slippage_bps: float = 5.0) -> dict:
-    """基于真实 K 线运行回测（多头、满仓切换），含交易成本模型。
+                        slippage_bps: float = 5.0,
+                        *, execution_timing: str = "close",
+                        enforce_limit: bool = True,
+                        max_participation_pct: float = 1.0,
+                        use_spread_slippage: bool = False,
+                        period: str = "1d", is_st: bool = False,
+                        train_ratio: float = 1.0, rf: float = 0.0) -> dict:
+    """基于真实 K 线运行回测（多头、满仓切换），含 A 股规则感知的撮合内核。
 
-    成本模型（工业级）：买入价上浮滑点、卖出价下浮滑点；
-    佣金双边按 commission_rate（默认万 3），印花税卖出按 stamp_tax（默认千 1）；
-    成本直接扣除现金，影响净值与盈亏。
+    成本模型：买入价上浮滑点、卖出价下浮滑点；佣金双边（默认万 3），
+    印花税卖出（默认千 1）；成本直接扣除现金。
+    撮合内核 (`tools/matching`) 支持：执行时点(close/next_open)、滑点模型、
+    涨跌停不可成交、成交量容量约束、整手。
+    train_ratio<1 时额外输出样本内/外指标对比（防过拟合基线）。
     """
-    slip = float(slippage_bps) / 10000.0
     closes = [b["close"] for b in kline if b.get("close") is not None]
     if len(closes) < 30:
         raise BrokerNotConnectedError(f"{symbol} K 线不足（需≥30 根），请确认券商已返回历史数据。")
     sig = _signals(strategy, closes, params)
-    cash = float(initial_capital)
-    shares = 0.0
-    equity = []
-    trades = []
-    for i, price in enumerate(closes):
-        pos = sig[i]
-        if pos == 1 and shares == 0:
-            buy_px = price * (1 + slip)
-            shares = cash / (buy_px * (1 + commission_rate))
-            cash = 0.0
-            trades.append({"time": kline[i].get("time"), "side": "buy",
-                           "price": round(buy_px, 4), "qty": round(shares, 2),
-                           "cost": round(shares * buy_px * (1 + commission_rate), 2)})
-        elif pos == 0 and shares > 0:
-            sell_px = price * (1 - slip)
-            proceeds = shares * sell_px * (1 - commission_rate - stamp_tax)
-            buy_cost = trades[-1].get("cost") or (trades[-1]["price"] * trades[-1]["qty"])
-            trades.append({"time": kline[i].get("time"), "side": "sell",
-                           "price": round(sell_px, 4), "qty": round(shares, 2),
-                           "pnl": round(proceeds - buy_cost, 2)})
-            cash = proceeds
-            shares = 0.0
-        equity.append(cash + shares * price)
-    if shares > 0:
-        equity[-1] = cash + shares * closes[-1]
-    rets = [equity[i] / equity[i - 1] - 1 for i in range(1, len(equity))]
-    # 末笔未平仓按收盘价平仓计入盈亏（含成本）
-    if shares > 0 and trades and trades[-1]["side"] == "buy":
-        last = closes[-1]
-        sell_px = last * (1 - slip)
-        proceeds = shares * sell_px * (1 - commission_rate - stamp_tax)
-        buy_cost = trades[-1].get("cost") or (trades[-1]["price"] * trades[-1]["qty"])
-        trades.append({"time": kline[-1].get("time"), "side": "sell", "price": round(sell_px, 4),
-                       "qty": round(shares, 2),
-                       "pnl": round(proceeds - buy_cost, 2)})
-    metrics = _metrics(equity, rets, trades)
-    return {"symbol": symbol, "strategy": strategy, "params": params,
-            "initial_capital": initial_capital, "metrics": metrics,
-            "trades": trades[-20:], "trade_count": len(trades),
-            "equity_curve": [round(e, 2) for e in equity[-200:]],
-            "cost_model": {"commission_rate": commission_rate,
-                           "stamp_tax": stamp_tax, "slippage_bps": slippage_bps}}
+    cfg = _build_cfg(symbol, commission_rate, stamp_tax, slippage_bps,
+                     execution_timing=execution_timing, enforce_limit=enforce_limit,
+                     max_participation_pct=max_participation_pct,
+                     use_spread_slippage=use_spread_slippage, is_st=is_st)
+    sim = match_simulate(closes, sig, kline, cfg, initial_capital)
+    equity, trades = sim["equity"], sim["trades"]
+    metrics = compute_metrics(equity, trades, period=period, rf=rf)
+    train_m, test_m = _split_metrics(equity, trades, train_ratio, period, rf=rf)
+    out = {"symbol": symbol, "strategy": strategy, "params": params,
+           "initial_capital": initial_capital, "metrics": metrics,
+           "trades": trades[-20:], "trade_count": len(trades),
+           "equity_curve": [round(e, 2) for e in equity[-200:]],
+           "cost_model": {"commission_rate": commission_rate,
+                          "stamp_tax": stamp_tax, "slippage_bps": slippage_bps,
+                          "execution_timing": execution_timing,
+                          "enforce_limit": enforce_limit,
+                          "max_participation_pct": max_participation_pct},
+           "engine": "legacy"}
+    if train_m:
+        out["train_test"] = {"train_ratio": train_ratio,
+                             "train": train_m, "test": test_m}
+    return out
 
 
 async def fetch_kline_async(broker_id: str, symbol: str, count: int = 250) -> list[dict]:
@@ -204,17 +196,30 @@ def register_backtest_tools(mcp):
         commission_rate: float = 0.0003,
         stamp_tax: float = 0.001,
         slippage_bps: float = 5.0,
+        execution_timing: str = "close",
+        enforce_limit: bool = True,
+        max_participation_pct: float = 1.0,
+        period: str = "1d",
+        train_ratio: float = 1.0,
+        rf: float = 0.0,
         broker_id: str = "",
     ) -> dict:
-        """运行一次回测（真实 K 线 + 策略信号 + 交易成本模型），返回指标 + 成交明细 + 评级。
+        """运行一次回测（真实 K 线 + 策略信号 + A 股规则撮合内核），返回指标 + 成交明细 + 评级。
 
         cost 参数：commission_rate 佣金（默认万3）、stamp_tax 印花税（默认千1，卖出）、
         slippage_bps 单边滑点（默认 5bp）。
+        撮合参数：execution_timing(close/next_open)、enforce_limit(涨停买不进/跌停卖不出)、
+        max_participation_pct(单根成交量参与率上限)、period(bar 频率，决定年化乘子)、
+        train_ratio(<1 时输出样本内/外对比防过拟合)、rf(无风险年化收益率)。
         """
         params = params or {"fast": 5, "slow": 20}
         kline = await fetch_kline_async(broker_id, symbol, count)
         return run_backtest_engine(symbol, kline, strategy, params, initial_capital,
-                                   commission_rate, stamp_tax, slippage_bps)
+                                   commission_rate, stamp_tax, slippage_bps,
+                                   execution_timing=execution_timing,
+                                   enforce_limit=enforce_limit,
+                                   max_participation_pct=max_participation_pct,
+                                   period=period, train_ratio=train_ratio, rf=rf)
 
     @mcp.tool()
     async def compare_backtests(configs: list[dict], broker_id: str = "") -> dict:
@@ -333,63 +338,60 @@ def _rsi_vectorized(s: "pd.Series", n: int) -> "pd.Series":
 
 def _simulate(closes: list[float], sig: list[int], kline: list[dict],
               initial_capital: float, commission_rate: float,
-              stamp_tax: float, slippage_bps: float) -> dict:
-    """与 run_backtest_engine 同构的交易模拟（向量化信号下的统一回测内核）。"""
-    slip = float(slippage_bps) / 10000.0
-    cash = float(initial_capital)
-    shares = 0.0
-    equity = []
-    trades = []
-    for i, price in enumerate(closes):
-        pos = sig[i]
-        if pos == 1 and shares == 0:
-            buy_px = price * (1 + slip)
-            shares = cash / (buy_px * (1 + commission_rate))
-            cash = 0.0
-            trades.append({"time": kline[i].get("time"), "side": "buy",
-                           "price": round(buy_px, 4), "qty": round(shares, 2),
-                           "cost": round(shares * buy_px * (1 + commission_rate), 2)})
-        elif pos == 0 and shares > 0:
-            sell_px = price * (1 - slip)
-            proceeds = shares * sell_px * (1 - commission_rate - stamp_tax)
-            buy_cost = trades[-1].get("cost") or (trades[-1]["price"] * trades[-1]["qty"])
-            trades.append({"time": kline[i].get("time"), "side": "sell",
-                           "price": round(sell_px, 4), "qty": round(shares, 2),
-                           "pnl": round(proceeds - buy_cost, 2)})
-            cash = proceeds
-            shares = 0.0
-        equity.append(cash + shares * price)
-    if shares > 0:
-        equity[-1] = cash + shares * closes[-1]
-    rets = [equity[i] / equity[i - 1] - 1 for i in range(1, len(equity))]
-    if shares > 0 and trades and trades[-1]["side"] == "buy":
-        last = closes[-1]
-        sell_px = last * (1 - slip)
-        proceeds = shares * sell_px * (1 - commission_rate - stamp_tax)
-        buy_cost = trades[-1].get("cost") or (trades[-1]["price"] * trades[-1]["qty"])
-        trades.append({"time": kline[-1].get("time"), "side": "sell", "price": round(sell_px, 4),
-                       "qty": round(shares, 2), "pnl": round(proceeds - buy_cost, 2)})
-    metrics = _metrics(equity, rets, trades)
-    return {"metrics": metrics, "trades": trades, "equity": equity}
+              stamp_tax: float, slippage_bps: float,
+              cfg: MatchingConfig | None = None, symbol: str = "",
+              period: str = "1d", train_ratio: float = 1.0,
+              rf: float = 0.0) -> dict:
+    """统一撮合内核封装（向量化信号下的回测）。"""
+    if cfg is None:
+        cfg = MatchingConfig(commission_rate=float(commission_rate),
+                             stamp_tax=float(stamp_tax),
+                             slippage_bps=float(slippage_bps), code=symbol)
+    sim = match_simulate(closes, sig, kline, cfg, initial_capital)
+    equity, trades = sim["equity"], sim["trades"]
+    metrics = compute_metrics(equity, trades, period=period, rf=rf)
+    train_m, test_m = _split_metrics(equity, trades, train_ratio, period, rf=rf)
+    return {"equity": equity, "trades": trades, "metrics": metrics,
+            "train": train_m, "test": test_m}
 
 
 def run_backtest_vectorized(symbol: str, kline: list[dict], strategy: str,
                             params: dict, initial_capital: float,
                             commission_rate: float = 0.0003,
                             stamp_tax: float = 0.001,
-                            slippage_bps: float = 5.0) -> dict:
+                            slippage_bps: float = 5.0,
+                            *, execution_timing: str = "close",
+                            enforce_limit: bool = True,
+                            max_participation_pct: float = 1.0,
+                            use_spread_slippage: bool = False,
+                            period: str = "1d", is_st: bool = False,
+                            train_ratio: float = 1.0, rf: float = 0.0) -> dict:
     """向量化回测（pandas/numpy 指标 + 统一交易内核），输出形状与 run_backtest_engine 一致。"""
     closes = [b["close"] for b in kline if b.get("close") is not None]
     if len(closes) < 30:
         raise BrokerNotConnectedError(f"{symbol} K 线不足（需≥30 根），请确认券商已返回历史数据。")
     sig = _signals_vectorized(strategy, closes, params)
-    sim = _simulate(closes, sig, kline, initial_capital, commission_rate, stamp_tax, slippage_bps)
-    return {"symbol": symbol, "strategy": strategy, "params": params,
-            "initial_capital": initial_capital, "metrics": sim["metrics"],
-            "trades": sim["trades"][-20:], "trade_count": len(sim["trades"]),
-            "equity_curve": [round(e, 2) for e in sim["equity"][-200:]],
-            "cost_model": {"commission_rate": commission_rate,
-                           "stamp_tax": stamp_tax, "slippage_bps": slippage_bps}}
+    cfg = _build_cfg(symbol, commission_rate, stamp_tax, slippage_bps,
+                     execution_timing=execution_timing, enforce_limit=enforce_limit,
+                     max_participation_pct=max_participation_pct,
+                     use_spread_slippage=use_spread_slippage, is_st=is_st)
+    sim = _simulate(closes, sig, kline, initial_capital, commission_rate, stamp_tax,
+                    slippage_bps, cfg=cfg, symbol=symbol, period=period,
+                    train_ratio=train_ratio, rf=rf)
+    out = {"symbol": symbol, "strategy": strategy, "params": params,
+           "initial_capital": initial_capital, "metrics": sim["metrics"],
+           "trades": sim["trades"][-20:], "trade_count": len(sim["trades"]),
+           "equity_curve": [round(e, 2) for e in sim["equity"][-200:]],
+           "cost_model": {"commission_rate": commission_rate,
+                          "stamp_tax": stamp_tax, "slippage_bps": slippage_bps,
+                          "execution_timing": execution_timing,
+                          "enforce_limit": enforce_limit,
+                          "max_participation_pct": max_participation_pct},
+           "engine": "vectorized"}
+    if sim["train"]:
+        out["train_test"] = {"train_ratio": train_ratio,
+                             "train": sim["train"], "test": sim["test"]}
+    return out
 
 
 def run_param_sweep(symbol: str, kline: list[dict], strategy: str,
