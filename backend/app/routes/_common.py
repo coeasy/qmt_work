@@ -7,9 +7,7 @@ import json
 import time
 import uuid
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import StreamingResponse
 
-from agent import AgentCore, LLMConfig, build_provider
 from app import crypto
 from app.config import settings
 from app.state import state
@@ -61,22 +59,3 @@ def _ws_authorized(ws: WebSocket) -> bool:
         return False
     from gateway.apikey import scope_match
     return scope_match("market", row.get("scopes", "")) or scope_match("trade", row.get("scopes", ""))
-
-
-def _load_llm_config() -> LLMConfig:
-    row = state.db.query_one("SELECT * FROM llm_config WHERE scope='global' ORDER BY id LIMIT 1")
-    if not row:
-        return LLMConfig()
-    return LLMConfig(provider=row["provider"], base_url=row["base_url"],
-                     api_key=crypto.decrypt_plain(row["api_key_enc"]) if row["api_key_enc"] else "",
-                     model=row["model"], temperature=row["temperature"],
-                     timeout=row["timeout_ms"] / 1000 if row["timeout_ms"] else 60)
-
-
-async def _build_agent():
-    cfg = _load_llm_config()
-    provider = build_provider(cfg)
-    tools = await state.mcp.get_tools()
-    # FastMCP 2.x get_tools() 返回 dict {name: Tool}；统一转 list 供 AgentCore 使用
-    tool_list = list(tools.values()) if isinstance(tools, dict) else list(tools)
-    return provider, AgentCore(provider, tool_list) if provider else None

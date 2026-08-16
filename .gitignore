@@ -11,6 +11,8 @@ backend/dist/
 backend/logs/
 # 多运行时桥接的嵌入式 Python（由 tools/fetch_runtimes.py 下载，不入库）
 backend/runtimes/
+# 策略生成器输出目录（tools/strategy_gen.py 生成，不入库）
+backend/qmt_strategies/
 # ---------- 运行期数据 ----------
 # SQLite + 加密主密钥不入库
 backend/data/
@@ -42,3 +44,5 @@ Thumbs.db
 # ---------- 内部开发文档（不随公开仓库分发） ----------
 ROADMAP_VERSION_COMPAT.md
 docs/QMT量化Agent平台方案.md
+docs/基于deepseek-harness的客户端重构方案.md
+docs/竞品对比与优化改进方案.md

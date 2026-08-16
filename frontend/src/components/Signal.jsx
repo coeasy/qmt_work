@@ -105,7 +105,6 @@ export default function Signal() {
             <label>来源</label>
             <select value={source} onChange={(e) => setSource(e.target.value)}>
               <option value="manual">手动</option>
-              <option value="agent">Agent</option>
               <option value="webhook">Webhook</option>
             </select>
           </div>

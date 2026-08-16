@@ -18,9 +18,6 @@ const Factors = lazy(() => import("./components/Factors.jsx"));
 const Paper = lazy(() => import("./components/Paper.jsx"));
 const StrategyMarket = lazy(() => import("./components/StrategyMarket.jsx"));
 const Notifications = lazy(() => import("./components/Notifications.jsx"));
-const Scheduler = lazy(() => import("./components/Scheduler.jsx"));
-const Observability = lazy(() => import("./components/Observability.jsx"));
-const Registry = lazy(() => import("./components/Registry.jsx"));
 const Alerts = lazy(() => import("./components/Alerts.jsx"));
 const Webhooks = lazy(() => import("./components/Webhooks.jsx"));
 const Signal = lazy(() => import("./components/Signal.jsx"));
@@ -30,7 +27,6 @@ const Rebalance = lazy(() => import("./components/Rebalance.jsx"));
 const Strategies = lazy(() => import("./components/Strategies.jsx"));
 const Reference = lazy(() => import("./components/Reference.jsx"));
 const Audit = lazy(() => import("./components/Audit.jsx"));
-const Agent = lazy(() => import("./components/Agent.jsx"));
 const Brokers = lazy(() => import("./components/Brokers.jsx"));
 const AccountsGrid = lazy(() => import("./components/AccountsGrid.jsx"));
 const Settings = lazy(() => import("./components/Settings.jsx"));
@@ -94,16 +90,12 @@ const NAV = [
 
   { key: "ops", label: "运维中心", group: "运维", comp: () => (
     <Hub tabs={[
-      { key: "scheduler", label: "定时任务", comp: Scheduler },
-      { key: "observability", label: "可观测性", comp: Observability },
       { key: "sysstatus", label: "系统状态", comp: SystemStatus },
-      { key: "registry", label: "注册表 V2", comp: Registry },
       { key: "audit", label: "审计日志", comp: Audit },
     ]} />
   ) },
 
   { key: "reconcile", label: "对账核销", group: "运维", comp: Reconcile },
-  { key: "agent", label: "Agent 对话", group: "智能", comp: Agent },
   { key: "settings", label: "设置", group: "系统", comp: Settings },
 ];
 

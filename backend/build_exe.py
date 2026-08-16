@@ -32,7 +32,7 @@ HIDDEN = [
     # app.main 经 uvicorn 字符串在运行时加载，PyInstaller 不会自动收集，需显式声明
     "app", "app.config", "app.db", "app.state", "app.routes", "app.main",
     "app.logging_setup",
-    "sync", "agent", "backtest", "mcp_server", "gateway",
+    "sync", "backtest", "mcp_server", "gateway",
     "gateway.auth", "gateway.rate_limit", "gateway.risk",
     "gateway.apikey", "gateway.totp", "gateway.metrics", "gateway.notifier",
     "gateway.alert_engine", "gateway.wal", "gateway.reconcile",
@@ -52,13 +52,19 @@ HIDDEN = [
     "tools.strategy_market", "tools.strategy_runtime",
     "app.routes.strategy_run",
     "paper", "paper.paper_engine",
-    "scheduler", "scheduler.scheduler", "scheduler.distributed",
     "app.routes.factors", "app.routes.paper", "app.routes.strategy_market",
-    "app.routes.observability", "app.routes.scheduler", "app.routes.registry",
 ]
 
 # 收集可能含动态导入/数据的包
 COLLECT_ALL = ["mcp", "fastmcp", "starlette", "uvicorn", "docket", "burner_redis", "fakeredis"]
+
+# 明确排除的重型/无关包：应用代码未使用（sqlite3 直连、pandas/numpy 处理行情），
+# 但环境中已安装且会进入依赖图——既拖慢打包又可能触发 hook 崩溃（如 sqlalchemy 2.0.23
+# 在 Python 3.13 下 import 即抛 TypingOnly AssertionError）。打包产物应保持精简。
+EXCLUDES = [
+    "torch", "torchvision", "torchaudio",   # 巨型深度学习框架，未使用
+    "sqlalchemy", "alembic", "apscheduler",  # 调度/迁移/ORM，未使用
+]
 
 # 额外数据：前端静态资源（FastAPI 同源托管）
 DATAS = []
@@ -102,6 +108,8 @@ def main():
     ]
     for h in HIDDEN:
         cmd.append(f"--hidden-import={h}")
+    for e in EXCLUDES:
+        cmd.append(f"--exclude-module={e}")
     for c in COLLECT_ALL:
         cmd.append(f"--collect-all={c}")
     for d in DATAS:

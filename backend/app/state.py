@@ -34,8 +34,6 @@ class AppState:
     runtime_config = None    # 运行时配置中心（热更新）
     paper_engine = None      # 模拟盘引擎（P1）
     strategy_runtime = None  # 策略运行容器：在平台内把策略当作实盘/模拟机器人运行（P0）
-    scheduler = None         # 定时任务调度器（P2）
-    distributed_scheduler = None  # 可选分布式调度（P2）
     started_at: float = 0.0  # 进程启动时间戳（健康检查用）
     latest_quotes: dict = {}
 

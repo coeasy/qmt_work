@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 
 const listeners = new Set();
+const brokerHandlers = new Set();
 let ws = null;
 let retry = 0;
 let reconnectTimer = null;
@@ -12,8 +13,15 @@ let sysData = null;
 let connState = "connecting";
 
 function emit() {
-  const snap = { status: connState, sys: sysData, latency: lastLatency };
+  const snap = { status: connState, sys: sysData, latency: lastLatency, retries: retry };
   listeners.forEach((cb) => cb(snap));
+}
+
+// 订阅券商连接状态事件（broker.connected / broker.disconnected），返回退订函数。
+// 供 BrokerContext 近实时更新各连接状态，消除对 /brokers 轮询（15s）的延迟。
+export function subscribeBroker(cb) {
+  brokerHandlers.add(cb);
+  return () => brokerHandlers.delete(cb);
 }
 
 function scheduleReconnect() {
@@ -66,6 +74,15 @@ function connect() {
         lastLatency = Math.round(performance.now() - ws._pingAt);
         emit();
       }
+    } else if (typeof msg.type === "string" && msg.type.startsWith("broker.")) {
+      // 券商连接状态事件：broker.connected / broker.disconnected
+      const data = msg.data || {};
+      const event = msg.type.slice("broker.".length);
+      brokerHandlers.forEach((cb) => {
+        try {
+          cb({ conn_id: data.conn_id, connected: event === "connected", event, detail: data });
+        } catch { /* noop */ }
+      });
     }
   };
   ws.onclose = () => {

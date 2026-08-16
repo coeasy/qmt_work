@@ -37,17 +37,13 @@ PATH_SCOPES = [
     ("/api/v1/notifiers", "admin"),
     ("/api/v1/audit", "admin"),
     ("/api/v1/brokers", "admin"),
-    ("/api/v1/registry", "admin"),
-    ("/api/v1/scheduler", "admin"),
     ("/api/v1/webhooks", "admin"),
     ("/api/v1/alerts", "admin"),
     ("/api/v1/notifications", "admin"),
     ("/api/v1/reconcile", "admin"),
     ("/api/v1/wal", "admin"),
-    ("/api/v1/observability", "admin"),
     ("/api/v1/metrics", "admin"),
     ("/api/v1/quote-bus", "admin"),
-    ("/api/v1/agent", "admin"),
 ]
 # 公共路径（免鉴权，仅只读信息）：健康检查 / 就绪 / API 文档 / 前端静态页
 PUBLIC_PREFIXES = (

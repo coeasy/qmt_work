@@ -6,8 +6,6 @@
 """
 import asyncio
 import logging
-import os
-import signal
 import time
 from contextlib import asynccontextmanager
 
@@ -82,15 +80,11 @@ OPENAPI_TAGS = [
     {"name": "notifications", "description": "通知渠道：钉钉 / 企业微信 / 飞书 / 邮件，含测试与发送日志。"},
     {"name": "webhooks", "description": "出站 webhook：订阅委托/成交/告警/风控事件，HMAC-SHA256 签名 + 指数退避重试，供外部系统消费。"},
     {"name": "reconcile", "description": "委托对账核销与 WAL 轮转：崩溃恢复后与券商当日委托/成交比对。"},
-    {"name": "agent", "description": "Agent 对话：LLM 驱动的工具调用（MCP 工具集）。"},
-    {"name": "config", "description": "运行期配置：LLM、风控参数、信号模式。"},
+    {"name": "config", "description": "运行期配置：风控参数、信号模式。"},
     {"name": "ops", "description": "运维：健康检查、Prometheus 指标、审计日志、行情总线状态、WS 订阅。"},
     {"name": "factors", "description": "技术指标/因子库（pandas 向量化）：单/多因子计算、基于真实行情。"},
     {"name": "paper", "description": "模拟盘：基于实时行情的虚拟成交、持仓与盈亏（独立于真实券商）。"},
     {"name": "strategy-market", "description": "策略市场：模板目录、发布、导入导出（zip/json）、安装到 QMT 客户端。"},
-    {"name": "observability", "description": "可观测性：指标摘要、请求追踪（X-Request-ID）、运行时矩阵。"},
-    {"name": "scheduler", "description": "定时任务：cron/周期调度、批量执行、定时关机/重启。"},
-    {"name": "registry", "description": "券商注册表 V2：能力协商、档案列表、运行期热插拔。"},
 ]
 
 _TAG_PREFIX = [
@@ -113,14 +107,10 @@ _TAG_PREFIX = [
     ("/api/v1/webhooks", "webhooks"),
     ("/api/v1/reconcile", "reconcile"),
     ("/api/v1/wal", "reconcile"),
-    ("/api/v1/agent", "agent"),
     ("/api/v1/config", "config"),
     ("/api/v1/factors", "factors"),
     ("/api/v1/paper", "paper"),
     ("/api/v1/strategy-market", "strategy-market"),
-    ("/api/v1/observability", "observability"),
-    ("/api/v1/scheduler", "scheduler"),
-    ("/api/v1/brokers/registry", "registry"),
 ]
 
 
@@ -373,47 +363,6 @@ def create_app() -> FastAPI:
         restored = state.strategy_runtime.restore()
         log.info("strategy runtime ready: restored %d running instance(s)", restored)
 
-        # 7. P2 定时任务调度器（cron/周期；支持定时关机/重启）
-        from scheduler.scheduler import TaskScheduler
-        state.scheduler = TaskScheduler().init(state.db)
-        await state.scheduler.start(interval=settings.scheduler_interval)
-        log.info("scheduler ready: interval=%.0fs", settings.scheduler_interval)
-
-        # 8. P2 可选分布式调度（内存锁默认；redis 可达时可选升级）
-        from scheduler.distributed import DistributedScheduler
-        state.distributed_scheduler = DistributedScheduler(
-            backend=os.environ.get("QUANT_SCHEDULER_BACKEND", "memory"),
-            redis_url=os.environ.get("QUANT_SCHEDULER_REDIS_URL", ""))
-        log.info("distributed scheduler ready: backend=%s",
-                 getattr(state.distributed_scheduler, "backend_name", "memory"))
-
-        # 9. 生命周期看门狗：响应调度器的关机/重启请求（优雅停机）
-        async def _lifecycle_watchdog():
-            while True:
-                await asyncio.sleep(2.0)
-                s = state.scheduler
-                if s is None:
-                    continue
-                if getattr(s, "shutdown_requested", False):
-                    log.info("scheduler requested shutdown -> graceful stop")
-                    try:
-                        if state.ws_manager is not None:
-                            await state.ws_manager.broadcast(
-                                "system", {"event": "shutdown",
-                                           "message": "已通过定时任务触发关机"})
-                    except Exception:  # noqa: BLE001
-                        pass
-                    loop = asyncio.get_event_loop()
-                    loop.call_later(1.0, lambda: os.kill(os.getpid(), signal.SIGTERM))
-                    return
-                if getattr(s, "restart_requested", False):
-                    log.info("scheduler requested restart -> graceful restart")
-                    loop = asyncio.get_event_loop()
-                    loop.call_later(1.0, lambda: os.kill(os.getpid(), signal.SIGHUP))
-                    return
-
-        _lifecycle_task = asyncio.create_task(_lifecycle_watchdog())
-
         log.info("qmt_work started (real broker mode)")
         try:
             yield
@@ -436,14 +385,6 @@ def create_app() -> FastAPI:
                 await db_backup.stop()
             if state.reconciler:
                 await state.reconciler.stop()
-            if state.scheduler:
-                await state.scheduler.stop()
-            if "_lifecycle_task" in dir() and _lifecycle_task is not None:
-                _lifecycle_task.cancel()
-                try:
-                    await _lifecycle_task
-                except (asyncio.CancelledError, Exception):  # noqa: BLE001
-                    pass
             if state.health_monitor:
                 await state.health_monitor.stop()
             if _pump_task is not None:
@@ -483,7 +424,7 @@ def create_app() -> FastAPI:
         title="qmt_work 量化交易网关",
         version=__version__,
         description=(
-            "**qmt_work** —— 面向真实券商（迅投 MiniQMT 系）的量化交易与 Agent 平台统一网关。\n\n"
+            "**qmt_work** —— 面向真实券商（迅投 MiniQMT 系）的量化交易统一网关。\n\n"
             "### 鉴权\n"
             "所有 `/api/v1/**` 请求需携带密钥，二者任选其一：\n"
             "- `Authorization: Bearer <key>`\n"

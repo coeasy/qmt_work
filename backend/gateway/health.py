@@ -107,11 +107,20 @@ class BrokerHealthMonitor:
         conn.reconnect_task = None
 
     def _emit(self, conn_id: str, event: str, data: dict):
-        if self._on_event:
-            try:
-                self._on_event({"type": f"broker.{event}", "data": {"conn_id": conn_id, **data}})
-            except Exception:  # noqa: BLE001
-                pass
+        """推送连接状态事件到 WS 客户端。
+
+        兼容同步/异步回调：on_event 通常为 ws_manager.broadcast(event_type, payload)，
+        传入正确参数；若返回协程则调度到事件循环（原实现未 await 且把 dict 当 event_type 传，
+        导致 broker.connected/disconnected 事件从未真正推送到前端）。
+        """
+        if not self._on_event:
+            return
+        try:
+            result = self._on_event(f"broker.{event}", {"conn_id": conn_id, **data})
+            if asyncio.iscoroutine(result):
+                asyncio.create_task(result)
+        except Exception:  # noqa: BLE001
+            pass
 
     def status(self, conn_id: str) -> dict | None:
         conn = self._manager._conns.get(conn_id)

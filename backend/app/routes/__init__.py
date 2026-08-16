@@ -17,7 +17,6 @@ import app.routes.alerts as alerts
 import app.routes.reconcile as reconcile
 import app.routes.signal as signal
 import app.routes.target_portfolio as target_portfolio
-import app.routes.agent as agent
 import app.routes.limitup as limitup
 import app.routes.algo as algo
 import app.routes.reference as reference
@@ -29,9 +28,6 @@ import app.routes.ws as ws
 import app.routes.factors as factors
 import app.routes.paper as paper
 import app.routes.strategy_market as strategy_market
-import app.routes.observability as observability
-import app.routes.scheduler as scheduler
-import app.routes.registry as registry
 
 router = APIRouter(prefix="/api/v1")
 router.include_router(broker.router)
@@ -50,7 +46,6 @@ router.include_router(alerts.router)
 router.include_router(reconcile.router)
 router.include_router(signal.router)
 router.include_router(target_portfolio.router)
-router.include_router(agent.router)
 router.include_router(limitup.router)
 router.include_router(algo.router)
 router.include_router(reference.router)
@@ -62,6 +57,3 @@ router.include_router(ws.router)
 router.include_router(factors.router)
 router.include_router(paper.router)
 router.include_router(strategy_market.router)
-router.include_router(observability.router)
-router.include_router(scheduler.router)
-router.include_router(registry.router)

@@ -19,9 +19,11 @@ export default function Settings() {
 
   useEffect(() => {
     api.getRiskConfig().then(setRiskCfg).catch(() => {});
-    api.getRuntimeConfig().then(setRuntimeCfg).catch(() => {});
+    // 守护：API 返回非对象时强制转为 {}，避免下游 Object.entries().map 抛 "_.map is not a function"
+    api.getRuntimeConfig().then((r) => setRuntimeCfg(r && typeof r === "object" && !Array.isArray(r) ? r : {})).catch(() => {});
     api.riskDaily().then(setRiskDaily).catch(() => {});
-    api.runtimeHistory().then(setHist).catch(() => {});
+    // 守护：history 必须是数组；后端返回 {items:[...]} 等包装结构时解包
+    api.runtimeHistory().then((r) => setHist(Array.isArray(r) ? r : (Array.isArray(r?.items) ? r.items : []))).catch(() => {});
   }, []);
 
   async function saveRuntime() {
@@ -88,7 +90,11 @@ export default function Settings() {
       setCfg((p) => ({ ...p, provider: c.provider, base_url: c.base_url, model: c.model, temperature: c.temperature }));
       setMasked(c.configured ? c.api_key_masked : "（未配置）");
     } catch (e) { setMsg({ ok: false, t: e.message }); }
-    try { setKeys(await api.get("/api-keys")); } catch {}
+    try {
+      // 守护：/api-keys 可能是分页结构 {items:[...]} 或其他；统一为数组
+      const r = await api.get("/api-keys");
+      setKeys(Array.isArray(r) ? r : (Array.isArray(r?.items) ? r.items : (Array.isArray(r?.keys) ? r.keys : [])));
+    } catch {}
   }
   useEffect(() => { load(); }, []);
 

@@ -15,7 +15,7 @@ import re
 import subprocess
 import sys
 
-from .xtp import _resolve_xtquant_path, probe_environment
+from .xtp import _resolve_xtquant_path, probe_environment, _is_system_dir
 
 log = logging.getLogger("qmt_work.discovery")
 
@@ -168,50 +168,91 @@ def _looks_like_client_root(d: str) -> bool:
 
 
 def _scan_installed() -> list[str]:
-    """扫描常见安装位置 + 盘符下 ≤2 层疑似客户端根（去重、保留存在者）。
+    """扫描常见安装位置 + 全部盘符下 ≤3 层疑似客户端根（去重、保留存在者）。
 
-    相比旧版「仅盘符顶层 *QMT* 目录」，新版支持客户端装在盘符下子目录
-    （如 P:\\stock\\gd_qmt、D:\\tools\\广发QMT），通过标记（bin.x64 / userdata_mini /
-     主程序 exe）判定疑似根，避免遗漏；深度限制 2 层防止失控遍历。
+    相比旧版「仅盘符顶层 *QMT* 目录 / 深度 2 层」，新版扩展：
+    1) 盘符从硬编码 C/D/E/P/F 改为遍历 A~Z 全部存在盘符 —— 适配装在 G:/H:/非
+       默认盘的客户端（如某些券商客户端默认装到数据盘）；
+    2) 深度从 2 提升到 3 层 —— 适配装在 D:\Program Files\Broker\QMT 之类 3 层路径；
+    3) 增加 %ProgramFiles% / %ProgramFiles(x86)% / 用户目录下的券商常见子目录
+       作为优先探测点（部分券商客户端默认装到 Program Files 下）；
+    4) 客户端根判定标记：保留 bin.x64 / userdata_mini / 主程序 exe 等。
+
+    防护：跳过 _SYSTEM_DIR_NAMES（Windows/AppData/Temp 等），避免误命中无关 xtquant
+    （如 IDE 的 stub）；跳过 fake/*_test 调试目录。
     """
+    import string as _str
     roots: list[str] = []
     seen: set[str] = set()
 
     def _add_root(r: str):
         r = os.path.abspath(r)
         base = os.path.basename(r).lower()
-        # 降噪：跳过明显是调试/临时/测试残留的目录（如 fake_qmt、*_test），避免污染候选列表
         if "fake" in base or base.endswith("test") or base.endswith("_test"):
             return
         if _looks_like_client_root(r) and r not in seen:
             seen.add(r)
             roots.append(r)
 
-    # 1) 常见安装位置（一级）
+    # 1) 常见安装位置（一级探测）
     for r in _COMMON_ROOTS:
         _add_root(r)
-    # 2) 盘符下 ≤2 层递归查找疑似客户端根
-    for drive in ("C:", "D:", "E:", "P:", "F:"):
-        base = drive + "\\"
+    # 2) Program Files / 用户目录下券商常见子目录（深度 2 内）
+    pf = os.environ.get("ProgramFiles", r"C:\Program Files")
+    pfx = os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")
+    userprofile = os.environ.get("USERPROFILE", "")
+    for base_dir in [pf, pfx, userprofile]:
+        if base_dir and os.path.isdir(base_dir):
+            try:
+                for top in os.listdir(base_dir):
+                    d = os.path.join(base_dir, top)
+                    if not os.path.isdir(d):
+                        continue
+                    _add_root(d)
+                    try:
+                        for sub in os.listdir(d):
+                            d2 = os.path.join(d, sub)
+                            if os.path.isdir(d2):
+                                _add_root(d2)
+                    except OSError:
+                        continue
+            except OSError:
+                continue
+    # 3) 全部盘符下 ≤3 层扫描
+    for drive_letter in _str.ascii_uppercase:
+        base = f"{drive_letter}:\\"
         if not os.path.isdir(base):
             continue
         try:
-            top = os.listdir(base)
+            top_entries = os.listdir(base)
         except OSError:
             continue
-        for name in top:
+        for name in top_entries:
             d1 = os.path.join(base, name)
             if not os.path.isdir(d1):
                 continue
             _add_root(d1)  # 第 1 层
-            # 第 2 层（仅下探一层，减少无效 listdir）
             try:
-                for sub in os.listdir(d1):
-                    d2 = os.path.join(d1, sub)
-                    if os.path.isdir(d2):
-                        _add_root(d2)
+                level1 = os.listdir(d1)
             except OSError:
                 continue
+            for sub1 in level1:
+                d2 = os.path.join(d1, sub1)
+                if not os.path.isdir(d2):
+                    continue
+                _add_root(d2)  # 第 2 层
+                try:
+                    level2 = os.listdir(d2)
+                except OSError:
+                    continue
+                for sub2 in level2:
+                    d3 = os.path.join(d2, sub2)
+                    if not os.path.isdir(d3):
+                        continue
+                    # 第 3 层：跳过系统目录（防 IDE/AppData 误命中无关 xtquant stub）
+                    if _is_system_dir(d3):
+                        continue
+                    _add_root(d3)
     return roots
 
 

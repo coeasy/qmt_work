@@ -3,6 +3,7 @@
 // 实时行情 WS 跟随后端 active 连接，因此切换连接 = 设为活跃。
 import { createContext, useContext, useCallback, useEffect, useState } from "react";
 import { api } from "./api.js";
+import { subscribeBroker } from "./hooks/useSystemWS.js";
 
 const BrokerCtx = createContext(null);
 
@@ -28,7 +29,15 @@ export function BrokerProvider({ children }) {
   useEffect(() => {
     refresh();
     const t = setInterval(refresh, 15000); // 连接状态可能由后端自动重连变化
-    return () => clearInterval(t);
+    // WS 实时推送 broker.connected/disconnected：就地更新对应连接状态，减少轮询延迟
+    const unsub = subscribeBroker(({ conn_id, connected }) => {
+      if (!conn_id) return;
+      setBrokers((prev) => {
+        if (!prev.some((b) => b.conn_id === conn_id)) return prev; // 列表未含该连接时交由轮询兜底
+        return prev.map((b) => (b.conn_id === conn_id ? { ...b, connected } : b));
+      });
+    });
+    return () => { clearInterval(t); unsub(); };
   }, [refresh]);
 
   const setActive = useCallback(async (id) => {

@@ -114,31 +114,19 @@ api.aggregate = () => api.get("/account/aggregate");
 // ---------------- 运行时配置中心（引擎参数热更新） ----------------
 api.getRuntimeConfig = () => api.get("/config/runtime");
 api.putRuntimeConfig = (body) => api.put("/config/runtime", body);
-api.resetRuntimeConfig = (key) => api.post("/config/runtime/reset", { key });
 api.runtimeHistory = () => api.get("/config/runtime/history");
 api.runtimeRollback = (id) => api.post("/config/runtime/rollback", { id });
 api.riskDaily = () => api.get("/config/risk/daily");
 api.riskCircuit = (body) => api.post("/config/risk/circuit", body);
 
 // ---------------- API Key 管理（列表/创建/轮换/编辑/删除） ----------------
-api.apiKeys = () => api.get("/api-keys");
 api.createApiKey = (body) => api.post("/api-keys", body);
 api.patchApiKey = (kid, body) => api.patch(`/api-keys/${kid}`, body);
 api.rotateApiKey = (kid) => api.post(`/api-keys/${kid}/rotate`);
 api.deleteApiKey = (kid) => api.del(`/api-keys/${kid}`);
 
-// ---------------- 审计校验（D4 防篡改 hash 链） ----------------
-api.auditVerify = () => api.get("/audit/verify");
-
 // ---------------- 回测任务删除 ----------------
 api.backtestDeleteJob = (id) => api.del(`/backtest/jobs/${id}`);
-
-// ---------------- 出站 webhook（B2） ----------------
-api.webhooks = () => api.get("/webhooks");
-api.saveWebhook = (body) => api.post("/webhooks", body);
-api.deleteWebhook = (id) => api.del(`/webhooks/${id}`);
-api.testWebhook = (id) => api.post(`/webhooks/${id}/test`);
-api.webhookDeliveries = (sid) => api.get("/webhooks/deliveries", sid ? { sid } : {});
 
 // ---------------- 多账户网格 / 批量操作 ----------------
 api.accountGrid = () => api.get("/account/grid");
@@ -158,8 +146,6 @@ api.tradeConditionSubmit = (body) => api.post("/trade/conditions", body);
 api.tradeConditionCancel = (cid) => api.post(`/trade/conditions/${cid}/cancel`);
 
 // ---------------- 因子/指标库（P1，15 类指标） ----------------
-api.listFactors = () => api.get("/factors");
-api.computeFactor = (body) => api.post("/factors/compute", body);
 api.computeManyFactors = (body) => api.post("/factors/compute/many", body);
 api.factorFromKline = (body) => api.post("/factors/from-kline", body);
 
@@ -174,35 +160,12 @@ api.paperMetrics = () => api.get("/paper/metrics");
 // ---------------- 策略市场（P1，DB 目录 + zip/json 导入导出） ----------------
 api.strategyCatalog = () => api.get("/strategy-market/catalog");
 api.strategyMarketList = () => api.get("/strategy-market/market");
-api.strategyMarketGet = (id) => api.get(`/strategy-market/market/${id}`);
 api.strategyPublish = (body) => api.post("/strategy-market/publish", body);
 api.strategyInstall = (body) => api.post("/strategy-market/install", body);
 api.strategyExport = (body) => api.post("/strategy-market/export", body);
 api.strategyImport = (body) => api.post("/strategy-market/import", body);
 api.strategyExportJson = (body) => api.post("/strategy-market/export-json", body);
 api.strategyImportJson = (body) => api.post("/strategy-market/import-json", body);
-
-// ---------------- 定时任务 + 分布式调度（P2） ----------------
-api.schedulerTasks = () => api.get("/scheduler/tasks");
-api.schedulerCreateTask = (body) => api.post("/scheduler/tasks", body);
-api.schedulerDeleteTask = (id) => api.del(`/scheduler/tasks/${id}`);
-api.schedulerEnableTask = (id, body) => api.post(`/scheduler/tasks/${id}/enable`, body || {});
-api.schedulerRunDue = () => api.post("/scheduler/run-due");
-api.schedulerShutdown = () => api.post("/scheduler/shutdown");
-api.schedulerRestart = () => api.post("/scheduler/restart");
-api.schedulerStatus = () => api.get("/scheduler/status");
-
-// ---------------- 可观测性（P2，Prometheus 指标 + 链路追踪） ----------------
-api.metricsSummary = () => api.get("/observability/metrics-summary");
-api.traces = () => api.get("/observability/traces");
-api.runtimeInfo = () => api.get("/observability/runtime");
-
-// ---------------- 注册表 V2（P2，negotiate / hotplug） ----------------
-api.registryProfiles = () => api.get("/brokers/registry");
-api.registryGet = (id) => api.get(`/brokers/registry/${id}`);
-api.registryNegotiate = (body) => api.post("/brokers/registry/negotiate", body);
-api.registryHotplug = (body) => api.post("/brokers/registry/profiles", body);
-api.registryReload = () => api.post("/brokers/registry/reload");
 
 // ---------------- 回测参数扫描（P1） ----------------
 api.backtestSweep = (body) => api.post("/backtest/sweep", body);
@@ -226,7 +189,6 @@ api.signalMode = () => api.get("/signal/mode");
 api.signalSetMode = (body) => api.post("/signal/mode", body);
 api.signalSubmit = (body) => api.post("/signal/submit", body);
 api.signalConfirm = (body) => api.post("/signal/confirm", body);
-api.signalWebhook = (body) => api.post("/signal/webhook", body);
 
 // ---------------- 对账核销 / WAL ----------------
 api.reconcileRun = (body) => api.post("/reconcile", body);
@@ -257,38 +219,3 @@ api.metricsRaw = async () => {
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return await r.text();
 };
-
-// Agent 对话：SSE 流式。回调 onEvent(evt) 收到解析后的事件对象。
-export async function agentChat(message, onEvent, signal) {
-  const r = await fetch(`${BASE}/agent/chat`, {
-    method: "POST",
-    headers: _authHeaders({ "Content-Type": "application/json" }),
-    body: JSON.stringify({ message }),
-    signal,
-  });
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
-  const reader = r.body.getReader();
-  const dec = new TextDecoder();
-  let buf = "";
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buf += dec.decode(value, { stream: true });
-    const parts = buf.split("\n\n");
-    buf = parts.pop();
-    for (const part of parts) {
-      const lines = part.split("\n");
-      let evt = "message";
-      for (const ln of lines) {
-        if (ln.startsWith("event:")) evt = ln.slice(6).trim();
-        else if (ln.startsWith("data:")) {
-          try {
-            onEvent({ event: evt, data: JSON.parse(ln.slice(5).trim()) });
-          } catch {
-            /* ignore */
-          }
-        }
-      }
-    }
-  }
-}

@@ -109,7 +109,6 @@ def _default_config_payload() -> dict[str, Any]:
         "quote_bus_redis_url": "redis://127.0.0.1:6379/0",
         # ---- 引擎轮询/巡检间隔 ----
         "reconcile_interval": 300.0,
-        "scheduler_interval": 30.0,
         "kline_cache_ttl_daily": 21600.0,
         "kline_cache_ttl_intraday": 60.0,
         "webhook_out_retry_backoff": 2.0,
@@ -236,9 +235,6 @@ class Settings(BaseSettings):
     order_watchdog_enabled: bool = True
     order_watchdog_timeout: float = 60.0
     order_watchdog_interval: float = 5.0
-
-    # P2 定时任务调度器轮询间隔（秒）
-    scheduler_interval: float = 30.0
 
     # 通知去重静默期（秒；0=关闭）：同一通知渠道 + 事件 + 标题在窗口内只发送一次
     notify_dedup_seconds: float = 0.0

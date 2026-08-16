@@ -262,8 +262,23 @@ button.danger:hover { filter: brightness(1.05); }
 .nav-items { display: flex; flex-direction: column; }
 
 /* ===== Hub 合并页（一个领域一个入口，内部子 tab 切换） ===== */
-.hub-bar { margin-bottom: 14px; padding: 8px 10px; }
+.hub { display: flex; flex-direction: column; gap: 14px; }
+.hub-bar { margin-bottom: 0; padding: 8px 10px; }
 .hub-tabs { gap: 6px; }
-.hub-body { min-height: 200px; }
+.hub-body { min-height: 200px; display: flex; flex-direction: column; gap: 14px; }
 .hub-body .page-title,
 .hub-body .page-header { margin-top: 0; }
+
+/* ===== 页面根容器 .page（12 个高级页面使用） ===== */
+.page { display: flex; flex-direction: column; gap: 14px; padding: 4px 0 24px; }
+
+/* ===== 侧栏分组标题 ===== */
+.g-name { flex: 1; }
+
+/* ===== 通用高亮（弥补裸按钮无 .btn-group 包裹时无 active 样式） ===== */
+button.active:not(.chip):not(.nav-item) {
+  background: var(--accent); color: #fff; border-color: var(--accent);
+}
+
+/* ===== 选中行（TargetPortfolio 计划选中态） ===== */
+.selected { background: rgba(57, 134, 230, 0.12); }
