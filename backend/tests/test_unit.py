@@ -474,7 +474,6 @@ def _mk_db(tmp):
 
 def _tmp_db():
     """返回 (db, tmpdir)：Windows 下避免 TemporaryDirectory 严格清理的文件锁问题。"""
-    import shutil
     import tempfile as _t
     d = _t.mkdtemp()
     return _mk_db(d), d

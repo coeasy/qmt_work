@@ -8,7 +8,6 @@ import subprocess
 import sys
 import time
 
-import pytest
 
 BACKEND = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PY = sys.executable

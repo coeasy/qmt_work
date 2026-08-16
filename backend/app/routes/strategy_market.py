@@ -4,7 +4,7 @@ import tempfile
 
 from fastapi import APIRouter
 
-from app.routes._common import ok, err, state
+from app.routes._common import ok, err
 from tools import strategy_market as sm
 
 router = APIRouter()

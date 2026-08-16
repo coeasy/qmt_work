@@ -23,8 +23,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from email.mime.text import MIMEText
-from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any
 
 import httpx
 

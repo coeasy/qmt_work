@@ -5,7 +5,6 @@ LLM API Key 等敏感配置落库前加密，读取时内存解密。
 """
 import base64
 import os
-from pathlib import Path
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 

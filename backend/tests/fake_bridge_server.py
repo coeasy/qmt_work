@@ -5,7 +5,6 @@
 
 由 BridgeAdapter 测试以 `python -m tests.fake_bridge_server` 拉起。
 """
-import sys
 
 from xtquant_client.base import BrokerNotConnectedError
 from xtquant_client.bridge_server import serve_adapter

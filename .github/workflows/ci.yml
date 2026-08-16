@@ -1,0 +1,93 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# 取消同一分支上正在运行的旧流水线，节省资源
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend-tests:
+    name: Backend tests (pytest)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install backend dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # 逐文件运行：避免 Windows 上“全量同进程”跑测试偶发硬崩溃（进程互相干扰）；
+      # 同时任一文件失败即阻断 PR。所有用例不依赖券商 SDK（xtquant 运行时按需从
+      # 用户客户端加载），未连券商的端点返回 503 引导，零 mock。
+      - name: Run backend tests (per-file)
+        run: |
+          fail=0
+          for f in test_factors test_stage1_financial test_stage3_research \
+                   test_backtest_vectorized test_paper test_optimizer_fixes \
+                   test_strategy_market test_unit test_gateway_pump test_runtime \
+                   test_bridge test_bridge_watchdog; do
+            echo "::group::$f"
+            python -m pytest "tests/$f.py" -q -p no:cacheprovider || fail=1
+            echo "::endgroup::"
+          done
+          exit $fail
+
+      # 数字核对：后端测试数 / 前端组件数 必须与方案文档一致，防止“改代码不更文档”
+      - name: Reconcile numbers (tests / components vs docs)
+        run: python ../scripts/ci_reconcile.py
+
+  lint:
+    name: Lint (ruff — real-bug gate)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install ruff
+        run: pip install ruff==0.16.3
+
+      # 仅检查真实 bug（F + E9），F401 未用导入因 re-export 转发模式故意排除
+      - name: Ruff check
+        run: ruff check .
+
+  frontend-build:
+    name: Frontend build (vite)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build frontend
+        run: npm run build

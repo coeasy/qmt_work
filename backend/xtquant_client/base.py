@@ -59,6 +59,14 @@ class BrokerAdapter(ABC):
         """账户类型：STOCK / CREDIT / OPTION / FUTURES。"""
         return "STOCK"
 
+    def capabilities(self) -> list[str]:
+        """运行时能力探测钩子（阶段 2.4）：子类可覆盖返回真实支持的能力清单。
+
+        默认返回空列表，由 `Registry.probe` 回退到基于档案的静态推导。
+        真实券商 SDK 未就绪时不应伪造能力。
+        """
+        return []
+
     @property
     def supported_periods(self) -> list[str]:
         """支持的 K 线周期：1m/5m/15m/30m/60m/1d/1w/1mon 等。"""

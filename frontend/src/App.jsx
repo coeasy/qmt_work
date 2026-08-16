@@ -15,6 +15,7 @@ const LimitUp = lazy(() => import("./components/LimitUp.jsx"));
 const Algo = lazy(() => import("./components/Algo.jsx"));
 const Backtest = lazy(() => import("./components/Backtest.jsx"));
 const Factors = lazy(() => import("./components/Factors.jsx"));
+const Research = lazy(() => import("./components/Research.jsx"));
 const Paper = lazy(() => import("./components/Paper.jsx"));
 const StrategyMarket = lazy(() => import("./components/StrategyMarket.jsx"));
 const Notifications = lazy(() => import("./components/Notifications.jsx"));
@@ -22,6 +23,7 @@ const Alerts = lazy(() => import("./components/Alerts.jsx"));
 const Webhooks = lazy(() => import("./components/Webhooks.jsx"));
 const Signal = lazy(() => import("./components/Signal.jsx"));
 const Reconcile = lazy(() => import("./components/Reconcile.jsx"));
+const Agent = lazy(() => import("./components/Agent.jsx"));
 const TargetPortfolio = lazy(() => import("./components/TargetPortfolio.jsx"));
 const Rebalance = lazy(() => import("./components/Rebalance.jsx"));
 const Strategies = lazy(() => import("./components/Strategies.jsx"));
@@ -68,6 +70,7 @@ const NAV = [
     <Hub tabs={[
       { key: "backtest", label: "回测对比", comp: Backtest },
       { key: "factors", label: "因子/指标", comp: Factors },
+      { key: "research", label: "研究深度", comp: Research },
       { key: "reference", label: "参考数据", comp: Reference },
     ]} />
   ) },
@@ -96,6 +99,11 @@ const NAV = [
   ) },
 
   { key: "reconcile", label: "对账核销", group: "运维", comp: Reconcile },
+  { key: "agent", label: "智能助手", group: "智能", comp: () => (
+    <Hub tabs={[
+      { key: "agent", label: "助手对话", comp: Agent },
+    ]} />
+  ) },
   { key: "settings", label: "设置", group: "系统", comp: Settings },
 ];
 

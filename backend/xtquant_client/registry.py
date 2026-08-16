@@ -11,8 +11,9 @@ from __future__ import annotations 使类型注解惰性求值，
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Callable
+import json
+from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
 
 from .adapters.juejin import JuejinAdapter
 from .adapters.ptrade import PTradeAdapter
@@ -114,7 +115,7 @@ def create_adapter(broker_id: str, client_path: str, account_id: str,
         plan = None
         abi_compat = False  # 仅在 ABI 兼容（或 xtquant 未定位）时退回进程内直连
         try:
-            from .runtime import (xtp_runtime_plan, detect_xtquant_abis,
+            from .runtime import (detect_xtquant_abis,
                                   host_python_minor, require_runtime_or_raise)
             from .xtp import _resolve_xtquant_path
             site = _resolve_xtquant_path(client_path or profile.default_client_path)
@@ -168,19 +169,59 @@ class Registry:
     追加用户自定义券商（无需改代码、无需重启），实现热插拔。
     """
 
-    def __init__(self):
+    def __init__(self, db=None):
+        self._db = db
         self._profiles: dict[str, BrokerProfile] = {}
         self.reload()
 
+    def attach_db(self, db) -> None:
+        """生命周期初始化后注入 DB，使热插拔档案落库并加载已持久化档案。"""
+        self._db = db
+        self.reload()
+
     def reload(self) -> int:
-        """重置为内置档案集合（热插拔场景下重新加载基线）。"""
+        """重置为内置档案集合，并叠加 DB 中已持久化的自定义档案。"""
         self._profiles = {p.id: p for p in BROKER_PROFILES}
+        if self._db is not None:
+            try:
+                for row in self._db.query(
+                        "SELECT id, profile_json FROM broker_profiles WHERE is_custom=1"):
+                    try:
+                        data = json.loads(row["profile_json"] or "{}")
+                        p = BrokerProfile(**data)
+                        self._profiles[p.id] = p
+                    except Exception:  # noqa: BLE001 损坏记录跳过
+                        continue
+            except Exception:  # noqa: BLE001 DB 不可用时降级为仅内置
+                pass
         return len(self._profiles)
 
     def register_profile(self, profile: BrokerProfile) -> str:
-        """热插拔：追加/覆盖一条券商档案（运行时生效）。"""
+        """热插拔：追加/覆盖一条券商档案（运行时生效并落库）。"""
         self._profiles[profile.id] = profile
+        self._persist(profile)
         return profile.id
+
+    def unregister_profile(self, broker_id: str) -> None:
+        """删除自定义档案（内置档案不可删）。"""
+        if broker_id in {p.id for p in BROKER_PROFILES}:
+            raise ValueError(f"内置券商不可删除：{broker_id}")
+        self._profiles.pop(broker_id, None)
+        if self._db is not None:
+            self._db.execute("DELETE FROM broker_profiles WHERE id=?", (broker_id,))
+
+    def _persist(self, profile: BrokerProfile) -> None:
+        if self._db is None:
+            return
+        data = asdict(profile)
+        now = datetime.now(timezone.utc).isoformat()
+        self._db.execute(
+            "INSERT INTO broker_profiles (id,name,adapter,profile_json,is_custom,created_at,updated_at) "
+            "VALUES (?,?,?,?,1,?,?) "
+            "ON CONFLICT(id) DO UPDATE SET name=excluded.name, adapter=excluded.adapter, "
+            "profile_json=excluded.profile_json, updated_at=excluded.updated_at",
+            (profile.id, profile.name, profile.adapter,
+             json.dumps(data, ensure_ascii=False), now, now))
 
     def list(self) -> list[BrokerProfile]:
         return list(self._profiles.values())
@@ -213,12 +254,31 @@ class Registry:
                 "unsupported": [c for c in req if c not in caps],
                 "all_capabilities": caps}
 
+    def probe(self, broker_id: str, adapter=None) -> list[str]:
+        """动态能力探测：优先用运行时适配器实例的真实 `capabilities()`，
+        否则回退到基于档案的静态推导（`effective_capabilities`）。
+
+        真实券商 SDK 未就绪时适配器无法实例化，调用方应以 503 引导，绝不造假能力。
+        """
+        profile = self.get(broker_id)
+        if profile is None:
+            return []
+        if adapter is not None and hasattr(adapter, "capabilities"):
+            try:
+                caps = adapter.capabilities()
+                if caps:
+                    return list(caps)
+            except Exception:  # noqa: BLE001
+                pass
+        return self.effective_capabilities(profile)
+
 
 # 全局注册表单例（模块级，路由/生命周期共享）
 registry = Registry()
 
 
 def list_profiles_v2() -> list[dict]:
+    builtin = {p.id for p in BROKER_PROFILES}
     return [{
         "id": p.id, "name": p.name, "adapter": p.adapter,
         "supported_account_types": p.supported_account_types,
@@ -227,6 +287,7 @@ def list_profiles_v2() -> list[dict]:
         "multi_version": p.multi_version,
         "capabilities": registry.effective_capabilities(p),
         "features": p.features, "note": p.note,
+        "is_custom": p.id not in builtin,
     } for p in registry.list()]
 
 

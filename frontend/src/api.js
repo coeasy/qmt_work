@@ -150,6 +150,14 @@ api.tradeConditionCancel = (cid) => api.post(`/trade/conditions/${cid}/cancel`);
 api.computeManyFactors = (body) => api.post("/factors/compute/many", body);
 api.factorFromKline = (body) => api.post("/factors/from-kline", body);
 
+// ---------------- 研究深度层（阶段 3：因子IC/分位/组合回测/walk-forward/归因） ----------------
+api.researchFactorIc = (body) => api.post("/research/factor-ic", body);
+api.researchQuantile = (body) => api.post("/research/quantile", body);
+api.researchCorrelation = (body) => api.post("/research/correlation", body);
+api.researchPortfolioBacktest = (body) => api.post("/research/portfolio-backtest", body);
+api.researchWalkForward = (body) => api.post("/research/walk-forward", body);
+api.researchAttribution = (body) => api.post("/research/attribution", body);
+
 // ---------------- 模拟盘（P1，实时真实行情 mark-to-market） ----------------
 api.paperReset = () => api.post("/paper/reset");
 api.paperOrder = (body) => api.post("/paper/order", body);
@@ -209,6 +217,14 @@ api.createNotification = (body) => api.post("/notifications", body);
 api.deleteNotification = (nid) => api.del(`/notifications/${nid}`);
 api.testNotification = () => api.post("/notifications/test");
 api.notificationLogs = () => api.get("/notifications/logs");
+
+// ---------------- 阶段 5 Agent（LLM 助手） ----------------
+api.agentStatus = () => api.get("/agent/status");
+api.agentSessions = () => api.get("/agent/sessions");
+api.agentCreateSession = (body) => api.post("/agent/sessions", body);
+api.agentGetSession = (id) => api.get(`/agent/sessions/${id}`);
+api.agentDeleteSession = (id) => api.del(`/agent/sessions/${id}`);
+api.agentChat = (body) => api.post("/agent/chat", body);
 
 // ---------------- 系统状态探针（live/ready/metrics/quote-bus） ----------------
 api.live = () => api.get("/live");

@@ -26,8 +26,10 @@ import app.routes.trade as trade
 import app.routes.sync as sync
 import app.routes.ws as ws
 import app.routes.factors as factors
+import app.routes.research as research
 import app.routes.paper as paper
 import app.routes.strategy_market as strategy_market
+import app.routes.agent as agent
 
 router = APIRouter(prefix="/api/v1")
 router.include_router(broker.router)
@@ -55,5 +57,7 @@ router.include_router(trade.router)
 router.include_router(sync.router)
 router.include_router(ws.router)
 router.include_router(factors.router)
+router.include_router(research.router)
 router.include_router(paper.router)
 router.include_router(strategy_market.router)
+router.include_router(agent.router)

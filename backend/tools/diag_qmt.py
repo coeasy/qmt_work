@@ -16,7 +16,6 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from xtquant_client.xtp import (  # noqa: E402
-    _candidate_roots,
     _is_likely_root,
     probe_environment,
 )

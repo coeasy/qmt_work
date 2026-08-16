@@ -60,7 +60,6 @@ class BrokerHealthMonitor:
             await asyncio.sleep(default_session.sleep_seconds(interval, 60.0))
 
     async def _check(self, conn):
-        was_connected = conn.connected
         try:
             ok = conn.adapter.is_connected()
         except Exception as exc:  # noqa: BLE001

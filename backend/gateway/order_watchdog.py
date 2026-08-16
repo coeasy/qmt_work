@@ -91,11 +91,12 @@ class OrderWatchdog:
                 if oid:
                     self._first_seen.pop(oid, None)
                 self._handled += 1
-                await self._handle_stale(conn.cfg.conn_id, o)
+                await self._handle_stale(conn, o)
 
-    async def _handle_stale(self, conn_id: str, order: dict):
+    async def _handle_stale(self, conn, order: dict):
         oid = str(order.get("order_id") or "")
         code = order.get("code", "")
+        conn_id = conn.cfg.conn_id
         reason = (f"订单超时守护：{code} 委托 {oid}（{conn_id}）"
                   f"超过 {self.timeout:.0f}s 未成交，自动撤单")
         result = "cancelled"

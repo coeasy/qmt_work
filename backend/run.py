@@ -72,7 +72,7 @@ def _acquire_singleton_lock(data_dir) -> int | None:
 
 def _self_check() -> None:
     """启动自检：数据库目录可写、时钟基准、API Key 存在性。"""
-    from datetime import datetime, timezone
+    from datetime import datetime
     db_dir = os.path.dirname(str(settings.db_path)) or "."
     try:
         os.makedirs(db_dir, exist_ok=True)

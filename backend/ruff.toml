@@ -1,0 +1,19 @@
+# QMT Work — ruff 配置
+#
+# 质量门禁只做“真实 bug”检查：
+#   - F  : pyflakes（未定义名 F821 / 重定义 F811 / 未使用赋值 F841 / 等等）
+#   - E9 : 语法错误
+# 其余风格类规则（E501 行长、I 导入排序、B 盲异常、S/DTZ/PLW 等）不纳入 CI 阻断，
+# 避免对存量 565 个文件做大规模重构引发的回归风险。
+#
+# 注意：F401（未使用导入）故意排除。原因有二：
+#   1) 代码大量使用 `from app.routes._common import X` 的“转发 re-export”模式，
+#      ruff 会误判被转发符号为未使用；
+#   2) 未用导入属风格问题，不应阻断 PR。
+# 后续若清理存量未用导入，可再开启 F401。
+line-length = 120
+target-version = "py311"
+
+[lint]
+select = ["F", "E9"]
+ignore = ["F401"]

@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 import math
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 try:
     import numpy as np

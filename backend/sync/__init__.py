@@ -198,6 +198,11 @@ class SyncEngine:
                         # B4：净值上报给风控（日亏损熔断），仅活跃连接锚定日初净值
                         if self.risk is not None and conn.cfg.active:
                             try:
+                                # 用真实持仓市值 + 总资产喂入风控（接管演示级默认值，来源切 live）
+                                self.risk.feed_account_snapshot(
+                                    {p.get("code", ""): float(p.get("market_value", 0.0) or 0.0)
+                                     for p in (pos or [])},
+                                    float((cash.get("assets", 0.0) or 0.0) or snap["net_value"]))
                                 reason = self.risk.update_net_value(snap["net_value"])
                                 if reason:
                                     log.warning("risk circuit broken: %s", reason)

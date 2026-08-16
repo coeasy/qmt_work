@@ -3,19 +3,7 @@ from app.routes._common import ok, err, state, BrokerError, ConnectionConfig, ge
 from fastapi import APIRouter
 # --- stdlib imports injected by fix_route_imports ---
 import asyncio
-import base64
-import datetime
-import hashlib
 import sys
-import io
-import json
-import math
-import os
-import re
-import time
-import uuid
-from pathlib import Path
-from typing import Any, Dict, List, Optional
 
 
 
@@ -41,8 +29,7 @@ async def broker_runtimes():
 
     供排障确认「哪些券商 xtquant ABI 可被进程内直连 / 桥接子进程覆盖」。
     """
-    from xtquant_client.runtime import (host_python_minor, discover_bundled_runtimes,
-                                        detect_xtquant_abis)
+    from xtquant_client.runtime import (host_python_minor, discover_bundled_runtimes)
     bundled = discover_bundled_runtimes()
     return ok({
         "host_python": sys.version.split()[0],

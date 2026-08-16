@@ -281,4 +281,24 @@ button.active:not(.chip):not(.nav-item) {
 }
 
 /* ===== 选中行（TargetPortfolio 计划选中态） ===== */
+
+/* ===== 阶段 5 智能助手（Agent）会话列表 + 聊天气泡 ===== */
+.session-list { display: flex; flex-direction: column; gap: 6px; }
+.session-item {
+  display: flex; align-items: center; gap: 6px; justify-content: space-between;
+  padding: 8px 10px; border-radius: 8px; cursor: pointer;
+  background: var(--panel); border: 1px solid var(--border);
+}
+.session-item:hover { filter: brightness(1.12); }
+.session-item.active { border-color: var(--accent); background: var(--panel-2); }
+.session-title { font-size: 13px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-item .danger { padding: 2px 8px; font-size: 11px; }
+
+.bubble { max-width: 86%; padding: 10px 13px; border-radius: 10px; line-height: 1.55; }
+.bubble.user { margin-left: auto; background: var(--accent); color: #fff; border-bottom-right-radius: 2px; }
+.bubble.assistant { margin-right: auto; background: var(--panel-2); border-bottom-left-radius: 2px; }
+.bubble.tool { margin-right: auto; background: var(--bg-2); border: 1px dashed var(--border); color: var(--text-dim); font-size: 12px; }
+.bubble-meta { font-size: 11px; color: var(--text-dim); margin-bottom: 4px; }
+.bubble-body { white-space: pre-wrap; word-break: break-word; }
+
 .selected { background: rgba(57, 134, 230, 0.12); }

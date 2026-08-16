@@ -2,19 +2,6 @@ from app.routes._common import ok, err, state
 
 from fastapi import APIRouter
 # --- stdlib imports injected by fix_route_imports ---
-import asyncio
-import base64
-import datetime
-import hashlib
-import io
-import json
-import math
-import os
-import re
-import time
-import uuid
-from pathlib import Path
-from typing import Any, Dict, List, Optional
 
 
 
@@ -46,7 +33,7 @@ async def test_notification(body: dict):
         return err(503, "通知中心未初始化")
     cfg = body.get("config", {})
     # 临时构造 Notifier 子任务，复用同一个 http client
-    from gateway.notifier import _render, _event_match
+    from gateway.notifier import _render
     event = body.get("event", "system.test")
     title = body.get("title", "测试通知")
     text = body.get("body", "来自 qmt_work 的通知测试。")

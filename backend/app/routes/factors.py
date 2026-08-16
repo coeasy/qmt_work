@@ -7,9 +7,9 @@
 
 标签前缀统一为 /factors；由集成方挂载到 /api/v1。
 """
-from app.routes._common import ok, err, state
+from app.routes._common import ok, err
 from fastapi import APIRouter
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict
 
 from tools import fetch_kline_cached
 from tools.factors import compute_factor, compute_many, list_factors, from_kline

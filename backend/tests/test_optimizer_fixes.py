@@ -9,9 +9,7 @@
 运行：cd backend && python -m pytest tests/test_optimizer_fixes.py -q
 """
 import asyncio
-import sys
 
-import tools.algo as algo_mod
 from tools.algo import AlgoEngine
 from tools.limitup import _limit_factor, LimitUpMonitor
 from tools.rebalance import _at_limit

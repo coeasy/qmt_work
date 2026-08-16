@@ -2,19 +2,7 @@ from app.routes._common import ok, err, state
 
 from fastapi import APIRouter
 # --- stdlib imports injected by fix_route_imports ---
-import asyncio
-import base64
-import datetime
-import hashlib
-import io
-import json
-import math
-import os
-import re
-import time
-import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional
 
 
 
@@ -42,7 +30,6 @@ async def reconcile_last():
 async def wal_stats():
     if state.wal is None:
         return err(503, "WAL 未初始化")
-    from pathlib import Path
     p = Path(state.wal.path)
     snap = p.with_suffix(".snapshot.jsonl")
     recs = state.wal.all_records()

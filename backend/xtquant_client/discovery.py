@@ -15,7 +15,7 @@ import re
 import subprocess
 import sys
 
-from .xtp import _resolve_xtquant_path, probe_environment, _is_system_dir
+from .xtp import probe_environment, _is_system_dir
 
 log = logging.getLogger("qmt_work.discovery")
 

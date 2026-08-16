@@ -13,7 +13,6 @@ import asyncio
 import json
 import os
 import sqlite3
-import time
 import websockets
 
 BASE = os.environ.get("QMT_TEST_BASE", "http://127.0.0.1:21117/api/v1")

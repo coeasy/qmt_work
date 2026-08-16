@@ -16,10 +16,10 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from .ashare import (
-    board_limit_pct, is_limit_down, is_limit_up, round_lot,
+    is_limit_down, is_limit_up, round_lot,
 )
 
 
@@ -183,7 +183,6 @@ def simulate(closes: list[float], sig: list[int], kline: list[dict],
         shares = 0
         equity[-1] = cash
 
-    rets = [equity[i] / equity[i - 1] - 1 for i in range(1, len(equity))]
     # 指标统一交给 tools.metrics.compute_metrics（年化按 bar 频率 / 可含基准），
     # 此处只返回净值与成交，避免两套指标逻辑漂移。
     return {"equity": equity, "trades": trades}

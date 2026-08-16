@@ -242,6 +242,13 @@ class Settings(BaseSettings):
     # CORS：允许的跨域来源（逗号分隔；空=不启用跨域，仅同源访问）
     cors_origins: str = ""
 
+    # 阶段 5 Agent：LLM Provider 配置（缺 key 即 503 降级，绝不造假）
+    agent_enabled: bool = False
+    agent_provider: str = "openai"           # openai | anthropic
+    agent_api_key: str = ""
+    agent_model: str = ""                    # 空=使用 provider 默认模型
+    agent_base_url: str = ""                 # 空=使用 provider 默认端点（支持自建/代理）
+
     @classmethod
     def settings_customise_sources(cls, settings_cls, init_settings, env_settings,
                                    dotenv_settings, file_secret_settings):

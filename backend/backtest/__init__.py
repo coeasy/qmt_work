@@ -12,7 +12,7 @@ import uuid
 
 from app.db import get_db
 from tools.backtest import (fetch_kline_async, run_backtest_engine,
-                            run_backtest_vectorized, run_param_sweep)
+                            run_param_sweep)
 
 log = logging.getLogger("qmt_work.backtest")
 

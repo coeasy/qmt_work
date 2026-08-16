@@ -13,7 +13,6 @@ import logging
 import os
 import sys
 import threading
-import time
 from datetime import datetime
 
 from .base import BrokerAdapter, BrokerNotConnectedError, BrokerSDKError

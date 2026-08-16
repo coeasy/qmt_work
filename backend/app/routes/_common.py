@@ -3,17 +3,14 @@
 拆分 routes.py（原 1400+ 行单体）后，各业务域子模块（broker/account/trade/...）
 统一从此处导入 ok/err/_need/_call 与共享符号，避免循环依赖、保持单一真相来源。
 """
-import json
-import time
-import uuid
-from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
+from fastapi import Request, WebSocket, WebSocketDisconnect
 
-from app import crypto
 from app.config import settings
 from app.state import state
-from xtquant_client.base import BrokerError, BrokerNotConnectedError
-from xtquant_client.manager import ConnectionConfig
-from xtquant_client.registry import get_profile, list_profiles
+from app import crypto  # noqa: F401  (re-export for routes: config.py/signal.py)
+from xtquant_client.base import BrokerError
+from xtquant_client.manager import ConnectionConfig  # noqa: F401  (re-export for routes: broker.py)
+from xtquant_client.registry import get_profile, list_profiles  # noqa: F401  (re-export for routes: broker.py)
 
 
 def ok(data) -> dict:

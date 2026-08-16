@@ -11,7 +11,7 @@ import uuid
 from dataclasses import dataclass, field
 
 from app.db import get_db
-from .base import BrokerAdapter, BrokerError
+from .base import BrokerAdapter
 from .gateway import XTQuantBridge
 from .registry import create_adapter, get_profile
 

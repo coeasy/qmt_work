@@ -29,6 +29,9 @@ CREATE TABLE IF NOT EXISTS api_keys (
     status TEXT DEFAULT 'active',
     created_at TEXT NOT NULL
 );
+-- ⚠️ 孤儿表（阶段 5 Agent 预留）：sessions / messages / llm_config
+-- 当前无任何后端代码读写（agent/ 后端已删），仅为阶段 5 重建 AgentCore 会话持久化预留。
+-- 切勿删除，否则阶段 5 需重新建表；亦切勿在其它模块误用。
 CREATE TABLE IF NOT EXISTS sessions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER,
@@ -353,6 +356,19 @@ CREATE TABLE IF NOT EXISTS strategy_logs (
     message TEXT DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_strategy_logs_run ON strategy_logs(run_id, id);
+"""),
+    (11, """
+-- 阶段 2.4：券商档案落库（热插拔 profile 持久化，重启不丢；内置档案仍来自代码）
+CREATE TABLE IF NOT EXISTS broker_profiles (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL DEFAULT '',
+    adapter TEXT NOT NULL DEFAULT 'xtp',
+    profile_json TEXT NOT NULL DEFAULT '{}',
+    is_custom INTEGER DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_broker_profiles_custom ON broker_profiles(is_custom);
 """),
 ]
 

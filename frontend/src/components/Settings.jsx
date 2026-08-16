@@ -200,6 +200,12 @@ export default function Settings() {
       {riskCfg && (
         <div className="card" style={{ marginBottom: 16 }}>
           <h3>风控参数（下单实时生效）</h3>
+          {riskCfg.data_source !== "live" && (
+            <div className="msg error" style={{ marginBottom: 10 }}>
+              当前风控持仓/总资产为<strong>演示值（默认 ¥100 万）</strong>：未接入真实账户快照。
+              连接券商并积累账户快照后自动切换为真实持仓。
+            </div>
+          )}
           <div className="grid grid-3">
             <div><label>单笔金额上限 ¥</label>
               <input type="number" value={riskCfg.max_amount} onChange={setRisk("max_amount")} /></div>

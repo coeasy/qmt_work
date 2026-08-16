@@ -10,7 +10,6 @@ import asyncio
 import logging
 import math
 import time
-import uuid
 from collections import deque
 
 from xtquant_client.base import BrokerError

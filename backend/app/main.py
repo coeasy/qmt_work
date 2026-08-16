@@ -85,6 +85,7 @@ OPENAPI_TAGS = [
     {"name": "factors", "description": "技术指标/因子库（pandas 向量化）：单/多因子计算、基于真实行情。"},
     {"name": "paper", "description": "模拟盘：基于实时行情的虚拟成交、持仓与盈亏（独立于真实券商）。"},
     {"name": "strategy-market", "description": "策略市场：模板目录、发布、导入导出（zip/json）、安装到 QMT 客户端。"},
+    {"name": "agent", "description": "智能助手（LLM Agent）：基于真实券商/运行期数据的对话与工具调用；缺 LLM 配置即 503 降级。"},
 ]
 
 _TAG_PREFIX = [
@@ -111,6 +112,7 @@ _TAG_PREFIX = [
     ("/api/v1/factors", "factors"),
     ("/api/v1/paper", "paper"),
     ("/api/v1/strategy-market", "strategy-market"),
+    ("/api/v1/agent", "agent"),
 ]
 
 
@@ -175,6 +177,9 @@ def create_app() -> FastAPI:
         db_backup = None
         _system_task = None
         state.db = init_db(settings.db_path)
+        # 阶段 2.4：券商档案注册表挂接 DB（热插拔档案落库 + 加载已持久化档案）
+        from xtquant_client.registry import registry as broker_registry
+        broker_registry.attach_db(state.db)
         state.mcp = mcp
         # 多密钥存储绑定 DB 并加载
         if state.apikey_store is not None:

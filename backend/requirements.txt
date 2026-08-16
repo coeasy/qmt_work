@@ -16,3 +16,6 @@ pandas>=2.0
 pyinstaller>=6.0
 # 测试
 pytest
+# 测试：行情总线 Redis 真路径（fakeredis 替代真实 Redis，无需起服务）
+redis>=5.0
+fakeredis>=2.0

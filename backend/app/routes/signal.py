@@ -2,19 +2,8 @@ from app.routes._common import ok, err, state, settings, Request
 
 from fastapi import APIRouter
 # --- stdlib imports injected by fix_route_imports ---
-import asyncio
-import base64
-import datetime
 import hashlib
-import io
 import json
-import math
-import os
-import re
-import time
-import uuid
-from pathlib import Path
-from typing import Any, Dict, List, Optional
 
 
 
@@ -75,9 +64,7 @@ async def signal_webhook(request: Request):
     """外部策略系统信号入站：HMAC-SHA256 签名校验（QMT_WEBHOOK_SECRET 非空时），经统一信号路由。"""
     if state.signal_router is None:
         return err(503, "信号路由未初始化")
-    import hashlib
     import hmac
-    import json
     secret = settings.webhook_secret
     raw = await request.body()
     if secret:

@@ -7,7 +7,6 @@
 """
 import math
 
-from . import get_bridge
 from .matching import MatchingConfig, simulate as match_simulate
 from .metrics import compute_metrics
 from xtquant_client.base import BrokerNotConnectedError

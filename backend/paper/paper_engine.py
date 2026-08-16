@@ -15,7 +15,7 @@ import logging
 import threading
 from datetime import datetime
 
-from tools.ashare import is_valid_lot, round_lot
+from tools.ashare import is_valid_lot
 
 log = logging.getLogger("qmt_work.paper")
 

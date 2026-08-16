@@ -24,7 +24,7 @@ import time
 import traceback
 from typing import TextIO
 
-from xtquant_client.base import BrokerError, BrokerNotConnectedError
+from xtquant_client.base import BrokerNotConnectedError
 
 # stdout 写锁：QMT 回调线程（_on_quote）、状态泵线程与请求处理主线程都会写 stdout，
 # 多线程同时 write 同一管道可能写穿（半个 JSON 行），导致对端 json 解析失败。

@@ -4,7 +4,6 @@
 以及挂载 strategy_market 路由的端点测试。
 运行：cd backend && python -m pytest tests/test_strategy_market.py -q
 """
-import json
 import os
 import shutil
 import sys

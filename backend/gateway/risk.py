@@ -58,6 +58,9 @@ class RiskManager:
     # 简单内存态：code -> 持仓市值（真实场景由账户网关提供）
     positions_value: dict[str, float] = field(default_factory=dict)
     total_assets: float = 1_000_000.0
+    # 数据来源标注：未接入真实持仓时为 "demo"（演示级 100 万默认值），
+    # 由 SyncEngine 账户快照喂入后切换为 "live"。前端据此显式提示「演示值」。
+    data_source: str = "demo"
     _order_times: deque = field(default_factory=lambda: deque(maxlen=500))
     _price_provider: object = None      # 最新价回调：fn(code) -> float|None（价格偏离校验用）
     # 日级计数（跨日自动清零）
@@ -73,7 +76,19 @@ class RiskManager:
 
     # ---------------- 配置持久化 ----------------
     def to_dict(self) -> dict:
-        return {k: getattr(self, k) for k in _TUNABLES}
+        d = {k: getattr(self, k) for k in _TUNABLES}
+        d["data_source"] = self.data_source
+        return d
+
+    def feed_account_snapshot(self, positions_value: dict[str, float], total_assets: float) -> None:
+        """由 SyncEngine 账户快照喂入真实持仓市值与总资产，切换数据来源为 live。
+
+        未调用前 total_assets 停留在默认 100 万（演示级），data_source="demo"。
+        """
+        self.positions_value = dict(positions_value or {})
+        if total_assets and total_assets > 0:
+            self.total_assets = float(total_assets)
+        self.data_source = "live"
 
     def update_from(self, data: dict) -> list[str]:
         """按传入字典更新参数；返回实际变更的字段名列表。"""

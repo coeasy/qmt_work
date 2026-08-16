@@ -15,7 +15,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time
 
 log = logging.getLogger("qmt_work")
 
