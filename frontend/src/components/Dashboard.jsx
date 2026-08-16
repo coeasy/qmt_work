@@ -67,8 +67,8 @@ export default function Dashboard() {
       {err && <div className="toast err">{err}</div>}
       {health && (
         <div className="row" style={{ marginBottom: 12 }}>
-          <span className={`tag ${health.status === "ok" ? "ok" : "warn"}`}>
-            系统：{health.status === "ok" ? "健康" : "降级"} · v{health.version} · 运行 {Math.floor(health.uptime_seconds / 60)} 分钟
+          <span className={`tag ${health.status === "ok" || health.status === "pass" ? "ok" : "warn"}`}>
+            系统：{health.status === "ok" || health.status === "pass" ? "健康" : "降级"} · v{health.version} · 运行 {Math.floor(health.uptime_seconds / 60)} 分钟
           </span>
           <span className={`tag ${health.db ? "ok" : "fail"}`}>DB {health.db ? "正常" : "异常"}</span>
           {health.engines?.limitup && <span className="tag run">涨停监控运行中</span>}

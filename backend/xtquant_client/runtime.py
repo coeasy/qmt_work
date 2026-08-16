@@ -20,6 +20,10 @@ import sys
 
 log = logging.getLogger("qmt_work.runtime")
 
+# Windows：spawn 外部控制台程序（python/pythonw/py 启动器）做 ABI 探测时隐藏其控制台
+# 窗口，避免桌面运行时首次连接券商时弹出黑窗。其他平台该值为 0（无副作用）。
+CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
+
 # 支持的 ABI 小版本（cp36 ~ cp312；cp313 暂未发布 xtquant 变体）
 _RUNTIME_DIR_RE = re.compile(r"^cp(\d+)$", re.IGNORECASE)
 _PYD_RE = re.compile(r"\.cp(\d+)-win_amd64\.pyd$", re.IGNORECASE)
@@ -126,7 +130,8 @@ def _sys_py_version(exe: str) -> int | None:
     try:
         out = subprocess.run(
             [exe, "-c", "import sys;print(sys.version_info[0]*100+sys.version_info[1])"],
-            capture_output=True, text=True, timeout=8)
+            capture_output=True, text=True, timeout=8,
+            creationflags=CREATE_NO_WINDOW)
         if out.returncode != 0:
             return None
         v = int(out.stdout.strip())
@@ -221,7 +226,8 @@ def discover_system_runtimes() -> dict[int, str]:
         ver = f"{minor // 100}.{minor % 100}"  # py -3.8 / python3.8
         try:
             r = subprocess.run(["py", f"-{ver}", "-c", "import sys;print(sys.executable)"],
-                               capture_output=True, text=True, timeout=8)
+                               capture_output=True, text=True, timeout=8,
+                               creationflags=CREATE_NO_WINDOW)
             if r.returncode == 0:
                 exe = r.stdout.strip()
                 if exe and os.path.isfile(exe):

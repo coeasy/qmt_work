@@ -22,6 +22,7 @@ import app.routes.limitup as limitup
 import app.routes.algo as algo
 import app.routes.reference as reference
 import app.routes.strategies as strategies
+import app.routes.strategy_run as strategy_run
 import app.routes.trade as trade
 import app.routes.sync as sync
 import app.routes.ws as ws
@@ -54,6 +55,7 @@ router.include_router(limitup.router)
 router.include_router(algo.router)
 router.include_router(reference.router)
 router.include_router(strategies.router)
+router.include_router(strategy_run.router)
 router.include_router(trade.router)
 router.include_router(sync.router)
 router.include_router(ws.router)

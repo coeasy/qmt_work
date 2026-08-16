@@ -80,6 +80,15 @@ export default function Backtest() {
     }, 800);
   }
 
+  async function deleteJob(id) {
+    if (!window.confirm(`确认删除回测任务 ${id.slice(0, 8)}？删除后不可恢复。`)) return;
+    try {
+      await api.backtestDeleteJob(id);
+      setErr("");
+      await refreshJobs();
+    } catch (e) { setErr(e.message); }
+  }
+
   function equityOption() {
     const eq = result?.equity_curve || [];
     return {
@@ -273,14 +282,15 @@ export default function Backtest() {
       <div className="card" style={{ marginTop: 16 }}>
         <h3>历史任务</h3>
         <table>
-          <thead><tr><th>ID</th><th>类型</th><th>状态</th><th>进度</th><th>创建时间</th></tr></thead>
+          <thead><tr><th>ID</th><th>类型</th><th>状态</th><th>进度</th><th>创建时间</th><th>操作</th></tr></thead>
           <tbody>
             {jobs.map((j) => (
               <tr key={j.id}><td>{j.id.slice(0, 8)}</td><td>{j.kind}</td>
                 <td><span className={`tag ${j.status === "done" ? "ok" : j.status === "failed" ? "fail" : "run"}`}>{j.status}</span></td>
-                <td>{Math.round((j.progress || 0) * 100)}%</td><td>{j.created_at}</td></tr>
+                <td>{Math.round((j.progress || 0) * 100)}%</td><td>{j.created_at}</td>
+                <td><button className="danger" onClick={() => deleteJob(j.id)}>删除</button></td></tr>
             ))}
-            {jobs.length === 0 && <tr><td colSpan={5} className="muted">暂无任务</td></tr>}
+            {jobs.length === 0 && <tr><td colSpan={6} className="muted">暂无任务</td></tr>}
           </tbody>
         </table>
       </div>

@@ -42,6 +42,21 @@ async def market_kline(code: str, period: str = "1d", count: int = 250,
                "source": res.get("source"), "cached_at": res.get("cached_at"),
                "note": res.get("note"), "bars": res.get("bars") or []})
 
+@router.get("/market/limitup")
+async def market_limitup(sector: str = "沪深A股", min_pct: float = 9.5,
+                         only_limit: bool = True, limit: int = 200,
+                         sort: str = "change"):
+    """涨停板：扫描板块内最新行情，列出涨停（或接近涨停）个股及最新数据，便于快速选股交易。"""
+    b = _need()
+    if b is None:
+        return err(503, "未连接任何券商客户端：请到「券商连接」页添加并连接券商。")
+    try:
+        from tools.limitup import scan_limit_up
+        rows = await scan_limit_up(b, sector, min_pct, only_limit, limit, sort)
+    except BrokerError as exc:
+        return err(503, str(exc))
+    return ok({"sector": sector, "count": len(rows), "rows": rows})
+
 @router.get("/market/kline/cache")
 async def kline_cache_stats():
     """K 线缓存统计（行数、序列数、命中率）。"""

@@ -538,6 +538,23 @@ class XTPQuantAdapter(BrokerAdapter):
             "ts": datetime.now().isoformat(timespec="seconds"),
         }
 
+    def get_instrument_detail(self, code: str) -> dict:
+        """合约详情：名称 / 涨停价 / 跌停价 / 昨收（用于涨停板精确涨停价与名称）。"""
+        if self._xtdata is None:
+            raise BrokerSDKError("xtquant", "pip install xtquant")
+        try:
+            d = self._xtdata.get_instrument_detail(code) or {}
+        except Exception as exc:  # noqa: BLE001
+            raise BrokerNotConnectedError(f"合约详情获取失败：{exc}") from exc
+        return {
+            "code": code,
+            "name": d.get("instrument_name") or code,
+            "up_limit_price": d.get("up_limit_price"),
+            "down_limit_price": d.get("down_limit_price"),
+            "pre_close": d.get("pre_close_price"),
+            "exchange": d.get("exchange_id"),
+        }
+
     def get_kline(self, code: str, period: str, count: int,
                   start: str = "", end: str = "") -> list[dict]:
         if self._xtdata is None:

@@ -106,6 +106,7 @@ _TAG_PREFIX = [
     ("/api/v1/market", "market"),
     ("/api/v1/reference", "reference"),
     ("/api/v1/strategies", "strategies"),
+    ("/api/v1/strategies/run", "strategies"),
     ("/api/v1/api-keys", "api-keys"),
     ("/api/v1/alerts", "alerts"),
     ("/api/v1/notifications", "notifications"),
@@ -365,6 +366,12 @@ def create_app() -> FastAPI:
         from paper.paper_engine import PaperEngine
         state.paper_engine = PaperEngine().init(state.db)
         log.info("paper trading engine ready")
+
+        # 6.5 P0 策略运行容器：把生成的策略当作实盘/模拟机器人运行（进程内异步循环）
+        from tools.strategy_runtime import StrategyRuntime
+        state.strategy_runtime = StrategyRuntime(state)
+        restored = state.strategy_runtime.restore()
+        log.info("strategy runtime ready: restored %d running instance(s)", restored)
 
         # 7. P2 定时任务调度器（cron/周期；支持定时关机/重启）
         from scheduler.scheduler import TaskScheduler

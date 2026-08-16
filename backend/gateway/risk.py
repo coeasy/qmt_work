@@ -216,18 +216,14 @@ class RiskManager:
         }
 
     # ---------------- 校验 ----------------
-    def check_order(self, code: str, price: float, volume: int,
-                    direction: str) -> tuple[bool, str]:
+    def _validate_order(self, code: str, price: float, volume: int,
+                        direction: str) -> tuple[bool, str]:
+        """纯校验（不修改任何计数/状态）：返回 (是否放行, 原因)。
+
+        供 `precheck_order` 复用 —— 预检只判断「这笔委托会不会被风控拦截」，
+        但不计入频率窗口与日级用量，避免预检本身污染真实风控计数。
+        """
         self._roll_day()
-        now = time.time()
-        self._order_times.append(now)
-        # 频率限制：滑动窗口 60s 内下单数
-        while self._order_times and now - self._order_times[0] > 60:
-            self._order_times.popleft()
-        if len(self._order_times) > self.max_orders_per_min:
-            return False, (
-                f"下单频率超限：近 60s 已 {len(self._order_times)} 笔 "
-                f"> 上限 {self.max_orders_per_min}")
         if volume <= 0:
             return False, "volume must be positive"
         if volume < self.min_qty:
@@ -285,7 +281,34 @@ class RiskManager:
                 return False, (
                     f"position ratio would be {new_ratio:.2f} > "
                     f"max ratio {self.max_position_ratio:.2f}")
+        return True, "ok"
+
+    def precheck_order(self, code: str, price: float, volume: int,
+                       direction: str) -> tuple[bool, str]:
+        """非变更型预检：判断委托是否会被风控放行，但不计入频率/日级用量。
+
+        前端「风控预检」按钮调用，避免预检本身污染真实风控计数（与 `check_order` 的区别）。
+        """
+        return self._validate_order(code, price, volume, direction)
+
+    def check_order(self, code: str, price: float, volume: int,
+                    direction: str) -> tuple[bool, str]:
+        """下单前校验 + 计入频率窗口与日级用量（放行的委托才计数）。"""
+        self._roll_day()
+        now = time.time()
+        self._order_times.append(now)
+        # 频率限制：滑动窗口 60s 内下单数
+        while self._order_times and now - self._order_times[0] > 60:
+            self._order_times.popleft()
+        if len(self._order_times) > self.max_orders_per_min:
+            return False, (
+                f"下单频率超限：近 60s 已 {len(self._order_times)} 笔 "
+                f"> 上限 {self.max_orders_per_min}")
+        ok, reason = self._validate_order(code, price, volume, direction)
+        if not ok:
+            return False, reason
         # 全部通过 -> 计入日级用量（只统计放行的委托）
+        amount = price * volume
         self._day_amount += amount
         self._day_orders += 1
         self._day_code_orders[code] = self._day_code_orders.get(code, 0) + 1

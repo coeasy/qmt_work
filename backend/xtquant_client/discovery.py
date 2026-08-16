@@ -13,10 +13,15 @@ import logging
 import os
 import re
 import subprocess
+import sys
 
 from .xtp import _resolve_xtquant_path, probe_environment
 
 log = logging.getLogger("qmt_work.discovery")
+
+# Windows：spawn 外部控制台程序（powershell/python）时隐藏其控制台窗口，
+# 避免桌面运行时弹出 PowerShell 蓝窗 / 黑窗。其他平台该值为 0（无副作用）。
+CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 
 # 运行中的迅投系 QMT 相关进程名（小写）。覆盖各券商主程序 / 行情 / 交易进程：
 # - 广发 / 迅投通用 ItClient：XtItClient.exe；部分券商为 XtClient.exe / XtMini.exe
@@ -118,7 +123,8 @@ def _ps_enum() -> list[dict]:
             "Get-CimInstance Win32_Process | "
             "ForEach-Object { '{0}|{1}|{2}' -f $_.Name, $_.ProcessId, $_.ExecutablePath }")
         r = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
-                           capture_output=True, text=True, encoding="utf-8", timeout=20)
+                           capture_output=True, text=True, encoding="utf-8", timeout=20,
+                           creationflags=CREATE_NO_WINDOW)
         out = []
         for line in (r.stdout or "").splitlines():
             parts = line.split("|", 2)

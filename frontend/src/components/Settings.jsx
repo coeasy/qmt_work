@@ -14,12 +14,14 @@ export default function Settings() {
   const [autoLaunch, setAutoLaunch] = useState(null);
   const [riskCfg, setRiskCfg] = useState(null);
   const [runtimeCfg, setRuntimeCfg] = useState(null);
+  const [hist, setHist] = useState([]);
   const [riskDaily, setRiskDaily] = useState(null);
 
   useEffect(() => {
     api.getRiskConfig().then(setRiskCfg).catch(() => {});
     api.getRuntimeConfig().then(setRuntimeCfg).catch(() => {});
     api.riskDaily().then(setRiskDaily).catch(() => {});
+    api.runtimeHistory().then(setHist).catch(() => {});
   }, []);
 
   async function saveRuntime() {
@@ -103,9 +105,39 @@ export default function Settings() {
 
   async function createKey() {
     try {
-      const r = await api.post("/api-keys", { name: newKey || "default" });
-      setMsg({ ok: true, t: `已生成 API Key：${r.api_key}（仅显示一次）` });
+      const r = await api.createApiKey({ name: newKey || "default" });
+      setMsg({ ok: true, t: `已生成 API Key：${r.api_key}（仅显示一次，请妥善保存）` });
       setNewKey(""); load();
+    } catch (e) { setMsg({ ok: false, t: e.message }); }
+  }
+  async function rotateKey(kid) {
+    try {
+      const r = await api.rotateApiKey(kid);
+      setMsg({ ok: true, t: `已轮换 #${kid}：新密钥 ${r.api_key}（仅显示一次，旧密钥已失效）` });
+      load();
+    } catch (e) { setMsg({ ok: false, t: e.message }); }
+  }
+  async function deleteKey(kid) {
+    if (!window.confirm(`确认删除 API Key #${kid}？删除后该密钥立即失效，且无法恢复。`)) return;
+    try { await api.deleteApiKey(kid); setMsg({ ok: true, t: `已删除 #${kid}` }); load(); }
+    catch (e) { setMsg({ ok: false, t: e.message }); }
+  }
+  async function toggleStatus(k) {
+    const next = k.status === "active" ? "disabled" : "active";
+    try {
+      await api.patchApiKey(k.id, { status: next });
+      setMsg({ ok: true, t: `#${k.id} 已${next === "active" ? "启用" : "停用"}` }); load();
+    } catch (e) { setMsg({ ok: false, t: e.message }); }
+  }
+
+  async function loadHist() {
+    try { setHist(await api.runtimeHistory()); } catch {}
+  }
+  async function rollback(id) {
+    try {
+      await api.runtimeRollback(id);
+      setMsg({ ok: true, t: `已回滚到配置历史 #${id}` });
+      api.getRuntimeConfig().then(setRuntimeCfg).catch(() => {}); loadHist();
     } catch (e) { setMsg({ ok: false, t: e.message }); }
   }
 
@@ -230,6 +262,26 @@ export default function Settings() {
             ))}
           </div>
           <div className="btn-row" style={{ marginTop: 10 }}><button onClick={saveRuntime}>保存并热生效</button></div>
+          <details style={{ marginTop: 12 }}>
+            <summary style={{ cursor: "pointer" }} className="muted">变更历史与回滚（共 {hist.length} 条）</summary>
+            <table style={{ marginTop: 8 }}>
+              <thead><tr><th>ID</th><th>配置项</th><th>动作</th><th>旧值</th><th>新值</th><th>时间</th><th>操作</th></tr></thead>
+              <tbody>
+                {hist.map((h) => (
+                  <tr key={h.id}>
+                    <td className="code">{h.id}</td>
+                    <td>{h.key}</td>
+                    <td><span className="tag run">{h.action}</span></td>
+                    <td className="muted" style={{ fontSize: 11, maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis" }}>{h.old_value || "—"}</td>
+                    <td className="muted" style={{ fontSize: 11, maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis" }}>{h.new_value || "—"}</td>
+                    <td className="code" style={{ fontSize: 11 }}>{h.created_at}</td>
+                    <td><button className="ghost" onClick={() => rollback(h.id)}>回滚</button></td>
+                  </tr>
+                ))}
+                {hist.length === 0 && <tr><td colSpan={7} className="muted">暂无变更历史</td></tr>}
+              </tbody>
+            </table>
+          </details>
         </div>
       )}
 
@@ -253,19 +305,32 @@ export default function Settings() {
         </div>
 
         <div className="card">
-          <h3>第三方 API Key</h3>
+          <h3>第三方 API Key（列表 / 创建 / 轮换 / 停用 / 删除）</h3>
           <div className="row">
             <input style={{ flex: 1 }} value={newKey} placeholder="名称" onChange={(e) => setNewKey(e.target.value)} />
             <button onClick={createKey}>生成</button>
+            <span className="muted">创建 / 轮换后仅显示一次完整密钥，请妥善保存</span>
           </div>
           <table style={{ marginTop: 12 }}>
-            <thead><tr><th>前缀</th><th>名称</th><th>状态</th></tr></thead>
+            <thead><tr><th>前缀</th><th>名称</th><th>范围</th><th>状态</th><th>过期</th><th>操作</th></tr></thead>
             <tbody>
               {keys.map((k) => (
-                <tr key={k.id}><td>{k.key_prefix}</td><td>{k.name}</td>
-                  <td><span className={`tag ${k.status === "active" ? "ok" : "fail"}`}>{k.status}</span></td></tr>
+                <tr key={k.id}>
+                  <td className="code">{k.key_prefix}</td>
+                  <td>{k.name}</td>
+                  <td className="muted" style={{ fontSize: 11 }}>{k.scopes || "—"}</td>
+                  <td><span className={`tag ${k.status === "active" ? "ok" : "fail"}`}>{k.status}</span></td>
+                  <td className="muted" style={{ fontSize: 11 }}>{k.expires_at || "—"}</td>
+                  <td className="row" style={{ gap: 6 }}>
+                    <button className="ghost" onClick={() => rotateKey(k.id)}>轮换</button>
+                    <button className="ghost" onClick={() => toggleStatus(k)}>
+                      {k.status === "active" ? "停用" : "启用"}
+                    </button>
+                    <button className="danger" onClick={() => deleteKey(k.id)}>删除</button>
+                  </td>
+                </tr>
               ))}
-              {keys.length === 0 && <tr><td colSpan={3} className="muted">暂无 Key</td></tr>}
+              {keys.length === 0 && <tr><td colSpan={6} className="muted">暂无 Key</td></tr>}
             </tbody>
           </table>
         </div>

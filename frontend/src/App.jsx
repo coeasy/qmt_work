@@ -8,6 +8,8 @@ import Hub from "./components/Hub.jsx";
 import Dashboard from "./components/Dashboard.jsx";
 
 const Quote = lazy(() => import("./components/Quote.jsx"));
+const Kline = lazy(() => import("./components/Kline.jsx"));
+const MarketTools = lazy(() => import("./components/MarketTools.jsx"));
 const Trade = lazy(() => import("./components/Trade.jsx"));
 const LimitUp = lazy(() => import("./components/LimitUp.jsx"));
 const Algo = lazy(() => import("./components/Algo.jsx"));
@@ -15,6 +17,7 @@ const Backtest = lazy(() => import("./components/Backtest.jsx"));
 const Factors = lazy(() => import("./components/Factors.jsx"));
 const Paper = lazy(() => import("./components/Paper.jsx"));
 const StrategyMarket = lazy(() => import("./components/StrategyMarket.jsx"));
+const Notifications = lazy(() => import("./components/Notifications.jsx"));
 const Scheduler = lazy(() => import("./components/Scheduler.jsx"));
 const Observability = lazy(() => import("./components/Observability.jsx"));
 const Registry = lazy(() => import("./components/Registry.jsx"));
@@ -31,6 +34,7 @@ const Agent = lazy(() => import("./components/Agent.jsx"));
 const Brokers = lazy(() => import("./components/Brokers.jsx"));
 const AccountsGrid = lazy(() => import("./components/AccountsGrid.jsx"));
 const Settings = lazy(() => import("./components/Settings.jsx"));
+const SystemStatus = lazy(() => import("./components/SystemStatus.jsx"));
 
 /* 合并导航：把原来扁平 25 个 tab 收敛为「分组 + Hub 子页签」。
    分组只是侧边栏视觉归类；真正减少顶层入口的是 Hub（一个领域一个入口，内部子 tab 切换）。
@@ -39,6 +43,8 @@ const Settings = lazy(() => import("./components/Settings.jsx"));
 const NAV = [
   { key: "dashboard", label: "仪表盘", group: "总览", comp: Dashboard },
   { key: "quote", label: "实时行情", group: "行情", comp: Quote },
+  { key: "kline", label: "K 线", group: "行情", comp: Kline },
+  { key: "markettools", label: "行情工具", group: "行情", comp: MarketTools },
 
   { key: "trade", label: "交易", group: "交易", comp: () => (
     <Hub tabs={[
@@ -74,6 +80,7 @@ const NAV = [
     <Hub tabs={[
       { key: "signal", label: "信号路由", comp: <Signal /> },
       { key: "alerts", label: "告警规则", comp: <Alerts /> },
+      { key: "notifications", label: "通知渠道", comp: <Notifications /> },
       { key: "webhooks", label: "出站 Webhook", comp: <Webhooks /> },
     ]} />
   ) },
@@ -89,6 +96,7 @@ const NAV = [
     <Hub tabs={[
       { key: "scheduler", label: "定时任务", comp: <Scheduler /> },
       { key: "observability", label: "可观测性", comp: <Observability /> },
+      { key: "sysstatus", label: "系统状态", comp: <SystemStatus /> },
       { key: "registry", label: "注册表 V2", comp: <Registry /> },
       { key: "audit", label: "审计日志", comp: <Audit /> },
     ]} />

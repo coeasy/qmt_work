@@ -33,6 +33,11 @@ class XTQuantGateway(ABC):
     @abstractmethod
     def get_kline(self, code: str, period: str, count: int) -> list[dict]: ...
 
+    def get_instrument_detail(self, code: str) -> dict:
+        """合约详情（名称 / 涨停价 / 跌停价 / 昨收）。真实网关需覆盖；默认抛错。"""
+        from xtquant_client.base import BrokerError
+        raise BrokerError("get_instrument_detail 未实现")
+
     @abstractmethod
     def place_order(self, code: str, direction: str, price_type: str, price: float, volume: int) -> dict: ...
 

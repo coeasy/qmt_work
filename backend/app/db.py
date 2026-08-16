@@ -316,6 +316,44 @@ CREATE INDEX IF NOT EXISTS idx_paper_orders_code ON paper_orders(code);
 CREATE INDEX IF NOT EXISTS idx_target_portfolios_status ON target_portfolios(status);
 CREATE INDEX IF NOT EXISTS idx_market_cache_code ON market_cache(code, dtype);
 """),
+    (10, """
+-- P0 策略运行容器：在平台内把生成的策略当作实盘/模拟机器人运行
+CREATE TABLE IF NOT EXISTS strategy_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL DEFAULT '',
+    strategy_type TEXT NOT NULL,
+    codes_json TEXT DEFAULT '[]',
+    params_json TEXT DEFAULT '{}',
+    mode TEXT NOT NULL DEFAULT 'paper',
+    conn_id TEXT DEFAULT '',
+    account_id TEXT DEFAULT '',
+    period TEXT DEFAULT '1d',
+    interval_seconds REAL DEFAULT 60,
+    volume INTEGER DEFAULT 100,
+    max_positions INTEGER DEFAULT 1,
+    enabled INTEGER DEFAULT 1,
+    status TEXT DEFAULT 'stopped',
+    last_signal TEXT DEFAULT '',
+    last_action TEXT DEFAULT '',
+    last_eval_at TEXT DEFAULT '',
+    held_volume REAL DEFAULT 0,
+    pnl REAL DEFAULT 0,
+    error TEXT DEFAULT '',
+    created_at TEXT NOT NULL,
+    started_at TEXT DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_strategy_runs_status ON strategy_runs(status);
+CREATE TABLE IF NOT EXISTS strategy_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id INTEGER NOT NULL,
+    ts TEXT NOT NULL,
+    level TEXT DEFAULT 'info',
+    signal TEXT DEFAULT '',
+    action TEXT DEFAULT '',
+    message TEXT DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_strategy_logs_run ON strategy_logs(run_id, id);
+"""),
 ]
 
 # 表 -> 向后兼容扩展字段（幂等补列，TEXT DEFAULT ''）

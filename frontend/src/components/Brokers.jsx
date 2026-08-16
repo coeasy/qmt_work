@@ -31,6 +31,21 @@ export default function Brokers() {
   const [busy, setBusy] = useState(false);
   const [cands, setCands] = useState(null);   // 自动发现候选（null=未探测）
   const [detecting, setDetecting] = useState(false);
+  const [runtimes, setRuntimes] = useState(null); // ABI 运行时矩阵
+  const [health, setHealth] = useState({});       // conn_id -> 健康检查结果
+  const [healthBusy, setHealthBusy] = useState("");
+
+  async function loadRuntimes() {
+    try { setRuntimes(await api.brokerRuntimes()); } catch (e) { setRuntimes({ error: e.message }); }
+  }
+  async function checkHealth(connId) {
+    setHealthBusy(connId);
+    try {
+      const r = await api.brokerHealth(connId);
+      setHealth((h) => ({ ...h, [connId]: { ok: true, data: r } }));
+    } catch (e) { setHealth((h) => ({ ...h, [connId]: { ok: false, err: e.message } })); }
+    finally { setHealthBusy(""); }
+  }
 
   // 进入页面自动探测一次：发现本机 QMT 客户端则展示横幅（无需手动触发）
   useEffect(() => {
@@ -254,6 +269,31 @@ export default function Brokers() {
           )}
         </div>
 
+        {/* ABI 运行时矩阵（排障：哪些券商 xtquant ABI 可被进程内直连/桥接覆盖） */}
+        <div className="card">
+          <div className="row" style={{ alignItems: "center" }}>
+            <h3 style={{ margin: 0 }}>运行时矩阵</h3>
+            <button className="btn-sm" onClick={loadRuntimes} style={{ marginLeft: "auto" }}>加载</button>
+          </div>
+          {runtimes == null && <p className="muted" style={{ marginTop: 8 }}>点击「加载」查看 ABI 运行时矩阵（主进程 Python / 桥接运行时 / 支持范围）。</p>}
+          {runtimes?.error && <p className="muted" style={{ color: "#e6a23c" }}>加载失败：{runtimes.error}</p>}
+          {runtimes && !runtimes.error && (
+            <div style={{ marginTop: 8, fontSize: 13, lineHeight: 1.9 }}>
+              <div>主进程 Python：<code>{runtimes.host_python}</code> · ABI <code>{runtimes.host_abi}</code></div>
+              <div className="muted" style={{ fontSize: 11, margin: "4px 0" }}>{runtimes.supported_abi_note}</div>
+              <div style={{ fontWeight: 600, marginTop: 6 }}>随包附带的桥接运行时</div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 4 }}>
+                {Object.entries(runtimes.bundled_runtimes || {}).map(([k, v]) => (
+                  <span key={k} className="tag">{v} · cp{k}</span>
+                ))}
+                {Object.keys(runtimes.bundled_runtimes || {}).length === 0 && (
+                  <span className="muted">无（全部进程内直连）</span>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+
         {/* 已配置连接列表 */}
         <div className="card">
           <h3>已配置连接（{brokers.length}）</h3>
@@ -286,8 +326,18 @@ export default function Brokers() {
                         {!b.active && (
                           <button className="ghost" onClick={() => setActive(b.conn_id)}>设为活跃</button>
                         )}
+                        <button className="ghost" onClick={() => checkHealth(b.conn_id)} disabled={healthBusy === b.conn_id}>
+                          {healthBusy === b.conn_id ? "检查中…" : "健康检查"}
+                        </button>
                         <button className="ghost danger" onClick={() => remove(b.conn_id)}>删除</button>
                       </div>
+                      {health[b.conn_id] && (
+                        <div className={`toast ${health[b.conn_id].ok ? "ok" : "err"}`} style={{ position: "static", marginTop: 6, fontSize: 12, whiteSpace: "pre-wrap" }}>
+                          {health[b.conn_id].ok
+                            ? `健康：连接正常 · ${JSON.stringify(health[b.conn_id].data).slice(0, 160)}`
+                            : `不健康：${health[b.conn_id].err}`}
+                        </div>
+                      )}
                     </td>
                   </tr>
                 ))}

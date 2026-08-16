@@ -25,6 +25,10 @@ from .runtime import select_runtime, require_runtime_or_raise
 
 log = logging.getLogger("qmt_work")
 
+# Windows：spawn 桥接子进程（python.exe，控制台子系统）时隐藏其控制台窗口，
+# 避免桌面运行时券商连接/重连时弹出黑窗。其他平台该值为 0（无副作用）。
+CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
+
 # 子进程异常类型名 -> 客户端重建的异常类
 _ERR_MAP = {
     "BrokerNotConnectedError": BrokerNotConnectedError,
@@ -156,7 +160,8 @@ class BridgeAdapter(BrokerAdapter):
             self._proc = subprocess.Popen(
                 cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE, env=env, text=True, bufsize=1,
-                encoding="utf-8", errors="replace", creationflags=0)
+                encoding="utf-8", errors="replace",
+                creationflags=CREATE_NO_WINDOW)
         except Exception as exc:  # noqa: BLE001
             raise BrokerNotConnectedError(f"桥接子进程启动失败：{exc}") from exc
 

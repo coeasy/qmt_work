@@ -99,6 +99,22 @@ async def trade_target(body: dict):
 
 # ---------------- 条件单（Trade 页） ----------------
 
+@router.post("/trade/precheck")
+async def trade_precheck(body: dict):
+    """风控预检（非变更型）：判断一笔委托是否会被风控放行，但不计入日级计数/频率窗口。"""
+    if state.risk is None:
+        return err(503, "风控未初始化")
+    code = str(body.get("code", "")).strip().upper()
+    direction = (body.get("direction") or "buy").lower()
+    try:
+        volume = int(body.get("volume", 0))
+        price = float(body.get("price", 0) or 0)
+    except (TypeError, ValueError):
+        return err(400, "volume/price 必须为数字")
+    allowed, reason = state.risk.precheck_order(code, price, volume, direction)
+    return ok({"allowed": allowed, "reason": reason})
+
+
 @router.get("/trade/conditions")
 async def trade_conditions():
     e = state.condition_engine

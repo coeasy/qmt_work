@@ -59,7 +59,7 @@ export default function Scheduler() {
   async function toggleTask(id) {
     setLoading(true);
     try {
-      await api.schedulerEnableTask(id);
+      await api.schedulerEnableTask(id, { enabled: !t.enabled });
       setMsg({ ok: true, t: "已切换任务状态" });
       loadAll();
     } catch (e) { setMsg({ ok: false, t: e.message }); }
@@ -105,10 +105,10 @@ export default function Scheduler() {
         <div className="status-bar">
           {status ? (
             <>
-              <span>调度器状态：<strong>{status.running ? "运行中" : "已停止"}</strong></span>
-              <span>Leader：<strong>{status.is_leader ? "本机" : "其他节点"}</strong></span>
-              <span>锁：<strong>{status.lock_backend || "Memory"}</strong></span>
-              <span>上次执行：<strong>{status.last_run || "—"}</strong></span>
+              <span>调度器状态：<strong>运行中</strong></span>
+              <span>任务数：<strong>{status.task_count ?? 0}</strong></span>
+              <span>停机请求：<strong>{status.shutdown_requested ? "是" : "否"}</strong></span>
+              <span>重启请求：<strong>{status.restart_requested ? "是" : "否"}</strong></span>
             </>
           ) : (
             <span>调度器状态：未知</span>

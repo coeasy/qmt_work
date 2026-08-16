@@ -36,6 +36,7 @@ export default function Audit() {
             {ACTIONS.map((a) => <option key={a} value={a}>{a || "全部动作"}</option>)}
           </select>
           <button onClick={load}>刷新</button>
+          <button className="ghost" onClick={verifyChain}>校验完整性（防篡改）</button>
           <span className="muted">共 {rows.length} 条</span>
         </div>
         {rows.length === 0 ? <p className="muted" style={{ marginTop: 12 }}>暂无审计记录</p> : (
@@ -60,6 +61,13 @@ export default function Audit() {
           </table>
         )}
       </div>
+      {verify && (
+        <div className={`toast ${verify.ok ? "ok" : "err"}`} style={{ marginTop: 12 }}>
+          {verify.ok
+            ? `✅ 审计链完整：共校验 ${verify.checked} 条（历史 legacy ${verify.legacy} 条不参与），尾部 hash ${String(verify.tail_hash).slice(0, 12)}…`
+            : `⚠️ 检出 ${verify.broken_count} 处断链！首个异常记录 id=${verify.broken?.[0]?.id ?? "?"}（${verify.broken?.[0]?.reason ?? ""}）`}
+        </div>
+      )}
     </div>
   );
 }

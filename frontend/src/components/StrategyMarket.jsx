@@ -24,6 +24,7 @@ export default function StrategyMarket() {
   const [publishParams, setPublishParams] = useState("");
   const [publishFile, setPublishFile] = useState(null);
   const [importFile, setImportFile] = useState(null);
+  const [importZipPath, setImportZipPath] = useState("");
 
   useEffect(() => { loadCatalog(); }, []);
 
@@ -100,6 +101,17 @@ export default function StrategyMarket() {
       await api.strategyImportJson(data);
       setMsg({ ok: true, t: "JSON 策略导入成功" });
       setImportFile(null); loadCatalog();
+    } catch (e) { setMsg({ ok: false, t: e.message }); }
+    finally { setLoading(false); }
+  }
+
+  async function importZip() {
+    setLoading(true); setMsg(null);
+    try {
+      if (!importZipPath.trim()) throw new Error("请输入 .zip bundle 的服务器路径");
+      await api.strategyImport({ path: importZipPath.trim() });
+      setMsg({ ok: true, t: "ZIP 策略包导入成功" });
+      setImportZipPath(""); loadCatalog();
     } catch (e) { setMsg({ ok: false, t: e.message }); }
     finally { setLoading(false); }
   }
@@ -184,6 +196,16 @@ export default function StrategyMarket() {
             </div>
             <button className="btn-sm" onClick={importJson} disabled={loading}>
               {loading ? "导入中…" : "导入"}
+            </button>
+          </div>
+          <div className="form-row" style={{ marginTop: 10 }}>
+            <div className="form-field">
+              <label>导入 ZIP 策略包（服务器路径）</label>
+              <input value={importZipPath} onChange={(e) => setImportZipPath(e.target.value)}
+                     placeholder="如 C:\strategy_bundle_1234.zip" />
+            </div>
+            <button className="btn-sm" onClick={importZip} disabled={loading}>
+              {loading ? "导入中…" : "导入 ZIP"}
             </button>
           </div>
         </div>

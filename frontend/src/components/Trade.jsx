@@ -8,6 +8,7 @@ export default function Trade() {
   const [tab, setTab] = useState("order");
   const [err, setErr] = useState("");
   const [msg, setMsg] = useState(null);
+  const [precheck, setPrecheck] = useState(null);
 
   const [form, setForm] = useState({
     code: "600519.SH", direction: "buy", volume: 100, price: 0, price_type: "limit",
@@ -40,9 +41,36 @@ export default function Trade() {
   }
   useEffect(() => { load(); const t = setInterval(load, 5000); return () => clearInterval(t); }, [activeId]);
 
+  // 从涨停板 / 行情等页面「快速交易」带单过来：填充代码+涨停价并切到下单页
+  useEffect(() => {
+    const onPrefill = (e) => {
+      const d = e.detail || {};
+      if (!d.code) return;
+      setForm((f) => ({
+        ...f, code: d.code,
+        direction: "buy",
+        price: d.price ? Number(d.price) : f.price,
+        price_type: d.price ? "limit" : f.price_type,
+      }));
+      setTab("order");
+    };
+    window.addEventListener("trade:prefill", onPrefill);
+    return () => window.removeEventListener("trade:prefill", onPrefill);
+  }, []);
+
   async function submitOrder() {
     await wrap(() => api.tradeOrder(form), `已提交：${form.direction === "buy" ? "买入" : "卖出"} ${form.code} ${form.volume} 股`);
     setMsg(null);
+  }
+  async function runPrecheck() {
+    setPrecheck({ loading: true });
+    try {
+      const r = await api.tradePrecheck({
+        code: form.code, direction: form.direction, volume: form.volume,
+        price: form.price_type === "limit" ? form.price : 0,
+      });
+      setPrecheck({ ok: r.allowed, reason: r.reason });
+    } catch (e) { setPrecheck({ ok: false, reason: e.message }); }
   }
   async function cancelOrder(oid) {
     await wrap(() => api.tradeCancel(oid), `已撤单：${oid}`); setMsg(null);
@@ -106,8 +134,14 @@ export default function Trade() {
               <input name="price" type="number" step="0.01" value={form.price} onChange={setForm2} placeholder="限价" style={{ width: 110 }} />
             )}
             <button onClick={submitOrder}>提交订单</button>
+            <button onClick={runPrecheck} disabled={precheck?.loading}>风控预检</button>
+            {precheck && !precheck.loading && (
+              <span className={`tag ${precheck.ok ? "ok" : "fail"}`}>
+                {precheck.ok ? "预检通过" : "预检拦截"} · {precheck.reason}
+              </span>
+            )}
           </div>
-          <p className="muted">风控：单笔金额/最小数量/单票持仓上限/频率限制将在后端强制校验</p>
+          <p className="muted">风控：单笔金额/最小数量/单票持仓上限/频率限制将在后端强制校验。预检仅判断能否放行，不占用日级额度。</p>
         </div>
       )}
 

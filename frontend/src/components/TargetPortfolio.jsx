@@ -10,7 +10,7 @@ export default function TargetPortfolio() {
   const [loading, setLoading] = useState(false);
   const [plans, setPlans] = useState([]);
   const [selectedPlan, setSelectedPlan] = useState(null);
-  const [syncMode, setSyncMode] = useState("volume");
+  const [syncMode, setSyncMode] = useState("weight");
   const [dryRun, setDryRun] = useState(true);
   const [totalCapital, setTotalCapital] = useState("");
 
@@ -57,7 +57,7 @@ export default function TargetPortfolio() {
       const body = { targets: plan.weights || plan.plan_weights || {}, mode: syncMode, dry_run: dryRun };
       if (totalCapital) body.total_capital = +totalCapital;
       const r = await api.targetSync(body);
-      setMsg({ ok: true, t: `同步完成：差量 ${r.diff_count || r.orders || 0} 笔` });
+      setMsg({ ok: true, t: `同步完成：差量 ${r.plan?.length || 0} 笔` });
       loadPlans();
     } catch (e) { setMsg({ ok: false, t: e.message }); }
     finally { setLoading(false); }

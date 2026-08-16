@@ -7,6 +7,7 @@
 """
 import asyncio
 import logging
+import time
 from collections import deque
 from datetime import datetime
 
@@ -233,3 +234,102 @@ def register_limitup_tools(mcp):
     async def limitup_status() -> dict:
         """涨停监控状态（运行中/参数/股票池/已触发事件）。"""
         return _monitor().status()
+
+
+# ---------------- 涨停板（盘口扫描，真实行情） ----------------
+# 记录每只票首次触及涨停的时间（用于展示「涨停时长」）。
+_LIMIT_FIRST_SEEN: dict = {}
+
+
+def _limit_factor(code: str) -> float:
+    """按代码前缀估算涨停幅度：科创板/创业板 20%，北交所 30%，其余 10%。"""
+    c = (code or "").upper()
+    if c.startswith("68") or c.startswith("30"):
+        return 0.20
+    if c.startswith("8") or c.startswith("4") or c.startswith("92"):
+        return 0.30
+    return 0.10
+
+
+async def scan_limit_up(bridge, sector: str = "沪深A股", min_pct: float = 9.5,
+                        only_limit: bool = True, limit: int = 200,
+                        sort: str = "change") -> list[dict]:
+    """扫描板块内最新行情，列出涨停（或接近涨停）个股及最新数据。真实行情，无 mock。
+
+    - 通过 get_sector_stocks 取板块成分，分块 get_full_tick 拉全市场快照；
+    - 按昨收*(1+板块幅度) 估算涨停价，last>=涨停价-0.01 视为涨停；
+    - 仅对过滤后的小集合逐个查 get_instrument_detail 补名称与精确涨停价；
+    - 返回按涨跌幅/成交额排序的列表，含封单量、封单额、涨停时长，便于快速选股交易。
+    """
+    if bridge is None:
+        raise BrokerError("未连接任何券商客户端")
+    g = bridge.gateway
+    codes = await bridge.call(g.get_sector_stocks, sector) or []
+    if not codes:
+        return []
+    CHUNK = 300
+    ticks: dict = {}
+    for i in range(0, len(codes), CHUNK):
+        sub = await bridge.call(g.get_full_tick, codes[i:i + CHUNK]) or {}
+        if sub:
+            ticks.update(sub)
+
+    now = time.time()
+    rows: list = []
+    for code, q in ticks.items():
+        last = q.get("last")
+        lc = q.get("lastClose")
+        if not last or not lc:
+            continue
+        try:
+            last_f = float(last); lc_f = float(lc)
+        except (TypeError, ValueError):
+            continue
+        pct = (last_f - lc_f) / lc_f * 100.0
+        if pct < min_pct:
+            _LIMIT_FIRST_SEEN.pop((sector, code), None)
+            continue
+        factor = _limit_factor(code)
+        limit_price = round(lc_f * (1 + factor), 2)
+        is_limit = last_f >= limit_price - 0.01
+        if only_limit and not is_limit:
+            _LIMIT_FIRST_SEEN.pop((sector, code), None)
+            continue
+        key = (sector, code)
+        if is_limit:
+            if key not in _LIMIT_FIRST_SEEN:
+                _LIMIT_FIRST_SEEN[key] = now
+            limit_seconds = int(now - _LIMIT_FIRST_SEEN[key])
+        else:
+            _LIMIT_FIRST_SEEN.pop(key, None)
+            limit_seconds = 0
+        bid_vol = q.get("bid_vol") or 0
+        rows.append({
+            "code": code,
+            "name": code,
+            "last": round(last_f, 2),
+            "pre_close": round(lc_f, 2),
+            "change_pct": round(pct, 2),
+            "limit_price": limit_price,
+            "is_limit": is_limit,
+            "amount": q.get("amount"),
+            "bid_vol": bid_vol,
+            "bid_amount": round(bid_vol * limit_price, 0),
+            "limit_seconds": limit_seconds,
+            "ts": q.get("ts"),
+        })
+    # 仅对过滤后的小集合补全名称 + 精确涨停价
+    for r in rows:
+        try:
+            d = await bridge.call(g.get_instrument_detail, r["code"]) or {}
+            if d.get("name"):
+                r["name"] = d["name"]
+            if d.get("up_limit_price"):
+                r["limit_price"] = round(float(d["up_limit_price"]), 2)
+        except Exception:  # noqa: BLE001
+            pass
+    if sort == "amount":
+        rows.sort(key=lambda x: (x.get("amount") or 0), reverse=True)
+    else:
+        rows.sort(key=lambda x: x["change_pct"], reverse=True)
+    return rows[: int(limit)]

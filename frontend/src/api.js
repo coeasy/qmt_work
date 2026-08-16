@@ -50,6 +50,9 @@ api.connectBroker = (id) => api.post(`/brokers/${id}/connect`);
 api.disconnectBroker = (id) => api.post(`/brokers/${id}/disconnect`);
 api.setActiveBroker = (id) => api.post(`/brokers/${id}/active`);
 api.removeBroker = (id) => api.del(`/brokers/${id}`);
+// ABI 运行时矩阵 / 单连接健康检查（运维排障）
+api.brokerRuntimes = () => api.get("/brokers/runtimes");
+api.brokerHealth = (id) => api.get(`/brokers/${id}/health`);
 
 // ---------------- 涨停监控 / 打板助手 ----------------
 api.limitupStatus = () => api.get("/limitup/status");
@@ -58,6 +61,9 @@ api.limitupPoolRemove = (code) => api.del(`/limitup/pool?code=${encodeURICompone
 api.limitupStart = (body) => api.post("/limitup/start", body);
 api.limitupStop = () => api.post("/limitup/stop");
 api.limitupReset = () => api.post("/limitup/reset");
+
+// 涨停板（盘口扫描）：板块内涨停/接近涨停个股列表与最新数据
+api.marketLimitup = (params) => api.get("/market/limitup", params);
 
 // ---------------- 算法单（TWAP/VWAP）----------------
 api.algoSubmit = (body) => api.post("/algo/submit", body);
@@ -72,10 +78,30 @@ api.sectors = () => api.get("/reference/sectors");
 api.sectorStocks = (sector) => api.get("/reference/sector-stocks", { sector });
 api.financial = (code) => api.get("/reference/financial", { code });
 api.l2 = (code, count) => api.get("/market/l2", { code, count });
+api.marketKline = (params) => api.get("/market/kline", params);
+// 行情工具：单票实时报价 / 手动抓取落库 / K 线缓存查看与清理
+api.marketQuote = (params) => api.get("/market/quote", params);
+api.marketCrawl = (body) => api.post("/market/crawl", body);
+api.klineCacheStats = () => api.get("/market/kline/cache");
+api.klineCacheClear = (code, period) =>
+  api.del(`/market/kline/cache?code=${encodeURIComponent(code || "")}&period=${encodeURIComponent(period || "")}`);
 
 // ---------------- 策略模板库 ----------------
 api.strategyGenerate = (body) => api.post("/strategies/generate", body);
 api.strategySave = (body) => api.post("/strategies/save", body);
+
+// ---------------- 策略运行容器（P0：在平台内把策略当作实盘/模拟机器人运行） ----------------
+api.strategyRunList = () => api.get("/strategies/run");
+api.strategyRunCreate = (body) => api.post("/strategies/run", body);
+api.strategyRunGet = (id) => api.get(`/strategies/run/${id}`);
+api.strategyRunStart = (id) => api.post(`/strategies/run/${id}/start`);
+api.strategyRunStop = (id) => api.post(`/strategies/run/${id}/stop`);
+api.strategyRunDelete = (id) => api.del(`/strategies/run/${id}`);
+api.strategyRunLogs = (id, limit) => api.get(`/strategies/run/${id}/logs`, limit ? { limit } : {});
+api.strategyRunPrecheck = (body) => api.post("/strategies/run/precheck", body);
+
+// ---------------- 风控预检（P1：非变更型，不计入日级计数） ----------------
+api.tradePrecheck = (body) => api.post("/trade/precheck", body);
 
 // ---------------- 工业级增强：健康检查 / 风控配置 / 审计 ----------------
 api.health = () => api.get("/health");
@@ -88,8 +114,23 @@ api.aggregate = () => api.get("/account/aggregate");
 api.getRuntimeConfig = () => api.get("/config/runtime");
 api.putRuntimeConfig = (body) => api.put("/config/runtime", body);
 api.resetRuntimeConfig = (key) => api.post("/config/runtime/reset", { key });
+api.runtimeHistory = () => api.get("/config/runtime/history");
+api.runtimeRollback = (id) => api.post("/config/runtime/rollback", { id });
 api.riskDaily = () => api.get("/config/risk/daily");
 api.riskCircuit = (body) => api.post("/config/risk/circuit", body);
+
+// ---------------- API Key 管理（列表/创建/轮换/编辑/删除） ----------------
+api.apiKeys = () => api.get("/api-keys");
+api.createApiKey = (body) => api.post("/api-keys", body);
+api.patchApiKey = (kid, body) => api.patch(`/api-keys/${kid}`, body);
+api.rotateApiKey = (kid) => api.post(`/api-keys/${kid}/rotate`);
+api.deleteApiKey = (kid) => api.del(`/api-keys/${kid}`);
+
+// ---------------- 审计校验（D4 防篡改 hash 链） ----------------
+api.auditVerify = () => api.get("/audit/verify");
+
+// ---------------- 回测任务删除 ----------------
+api.backtestDeleteJob = (id) => api.del(`/backtest/jobs/${id}`);
 
 // ---------------- 出站 webhook（B2） ----------------
 api.webhooks = () => api.get("/webhooks");
@@ -144,7 +185,7 @@ api.strategyImportJson = (body) => api.post("/strategy-market/import-json", body
 api.schedulerTasks = () => api.get("/scheduler/tasks");
 api.schedulerCreateTask = (body) => api.post("/scheduler/tasks", body);
 api.schedulerDeleteTask = (id) => api.del(`/scheduler/tasks/${id}`);
-api.schedulerEnableTask = (id) => api.post(`/scheduler/tasks/${id}/enable`);
+api.schedulerEnableTask = (id, body) => api.post(`/scheduler/tasks/${id}/enable`, body || {});
 api.schedulerRunDue = () => api.post("/scheduler/run-due");
 api.schedulerShutdown = () => api.post("/scheduler/shutdown");
 api.schedulerRestart = () => api.post("/scheduler/restart");
@@ -204,6 +245,17 @@ api.createNotification = (body) => api.post("/notifications", body);
 api.deleteNotification = (nid) => api.del(`/notifications/${nid}`);
 api.testNotification = () => api.post("/notifications/test");
 api.notificationLogs = () => api.get("/notifications/logs");
+
+// ---------------- 系统状态探针（live/ready/metrics/quote-bus） ----------------
+api.live = () => api.get("/live");
+api.ready = () => api.get("/ready");
+api.quoteBusStats = () => api.get("/quote-bus/stats");
+// /metrics 返回 Prometheus text/plain（非 JSON），需原始文本读取
+api.metricsRaw = async () => {
+  const r = await fetch(`${BASE}/metrics`, { headers: _authHeaders() });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return await r.text();
+};
 
 // Agent 对话：SSE 流式。回调 onEvent(evt) 收到解析后的事件对象。
 export async function agentChat(message, onEvent, signal) {
