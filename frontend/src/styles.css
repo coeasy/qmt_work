@@ -247,3 +247,23 @@ button.danger:hover { filter: brightness(1.05); }
 /* 表格容器（P2 列表）*/
 .table { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
 .table th, .table td { padding: 10px 12px; }
+
+/* ===== 分组侧边栏（收敛 25 个扁平 tab） ===== */
+.nav-group { margin-top: 2px; }
+.nav-group-title {
+  display: flex; align-items: center; gap: 6px;
+  padding: 8px 14px 4px; cursor: pointer; user-select: none;
+  font-size: 11px; letter-spacing: 1px; text-transform: uppercase;
+  color: var(--text-dim);
+}
+.nav-group-title:hover { color: var(--text); }
+.nav-group-title .caret { font-size: 10px; width: 10px; display: inline-block; }
+.nav-group.collapsed .nav-items { display: none; }
+.nav-items { display: flex; flex-direction: column; }
+
+/* ===== Hub 合并页（一个领域一个入口，内部子 tab 切换） ===== */
+.hub-bar { margin-bottom: 14px; padding: 8px 10px; }
+.hub-tabs { gap: 6px; }
+.hub-body { min-height: 200px; }
+.hub-body .page-title,
+.hub-body .page-header { margin-top: 0; }
