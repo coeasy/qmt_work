@@ -36,6 +36,7 @@ export const api = {
   get: (path, params) => _req("GET", path, { params }),
   post: (path, body) => _req("POST", path, { body }),
   put: (path, body) => _req("PUT", path, { body }),
+  patch: (path, body) => _req("PATCH", path, { body }),
   del: (path) => _req("DELETE", path),
 };
 

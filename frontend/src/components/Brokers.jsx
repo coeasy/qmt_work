@@ -74,17 +74,19 @@ export default function Brokers() {
   // 点击候选：填入券商档案 + 客户端路径 + 账户类型，并自动跑一次探测
   function pickCandidate(c) {
     setBrokerId(c.broker_id || "");
-    setForm((f) => ({
-      ...f,
+    // 用回调形式读取最新 form.account_id（避免闭包捕获旧值）
+    setForm((prev) => ({
+      ...prev,
       client_path: c.client_path || "",
       account_type: "STOCK",
     }));
     setTestRes(null);
-    // 自动触发探测，验证该客户端可用性
+    // 延迟读取最新 state：setForm 是批量的，这里用 setTimeout 让它先落盘
+    // （或者直接用 c 触发探测，account_id 由用户填写后再手动测试）
     test({
       broker_id: c.broker_id || "",
       client_path: c.client_path || "",
-      account_id: "",
+      account_id: "",  // 候选不自动带 account_id，避免空账户误报"未配置"
       account_type: "STOCK",
       session_id: 0,
       min_version: "",

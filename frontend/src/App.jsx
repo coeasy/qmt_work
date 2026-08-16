@@ -48,57 +48,57 @@ const NAV = [
 
   { key: "trade", label: "交易", group: "交易", comp: () => (
     <Hub tabs={[
-      { key: "trade", label: "手动交易", comp: <Trade /> },
-      { key: "limitup", label: "涨停监控", comp: <LimitUp /> },
-      { key: "algo", label: "算法交易", comp: <Algo /> },
-      { key: "paper", label: "模拟盘", comp: <Paper /> },
+      { key: "trade", label: "手动交易", comp: Trade },
+      { key: "limitup", label: "涨停监控", comp: LimitUp },
+      { key: "algo", label: "算法交易", comp: Algo },
+      { key: "paper", label: "模拟盘", comp: Paper },
     ]} />
   ) },
 
   { key: "strategy", label: "策略", group: "策略与组合", comp: () => (
     <Hub tabs={[
-      { key: "strategies", label: "模板生成", comp: <Strategies /> },
-      { key: "market", label: "策略市场", comp: <StrategyMarket /> },
+      { key: "strategies", label: "模板生成", comp: Strategies },
+      { key: "market", label: "策略市场", comp: StrategyMarket },
     ]} />
   ) },
   { key: "portfolio", label: "调仓组合", group: "策略与组合", comp: () => (
     <Hub tabs={[
-      { key: "target", label: "目标持仓", comp: <TargetPortfolio /> },
-      { key: "rebalance", label: "即时再平衡", comp: <Rebalance /> },
+      { key: "target", label: "目标持仓", comp: TargetPortfolio },
+      { key: "rebalance", label: "即时再平衡", comp: Rebalance },
     ]} />
   ) },
 
   { key: "research", label: "研究回测", group: "研究", comp: () => (
     <Hub tabs={[
-      { key: "backtest", label: "回测对比", comp: <Backtest /> },
-      { key: "factors", label: "因子/指标", comp: <Factors /> },
-      { key: "reference", label: "参考数据", comp: <Reference /> },
+      { key: "backtest", label: "回测对比", comp: Backtest },
+      { key: "factors", label: "因子/指标", comp: Factors },
+      { key: "reference", label: "参考数据", comp: Reference },
     ]} />
   ) },
 
   { key: "signals", label: "信号与告警", group: "信号与告警", comp: () => (
     <Hub tabs={[
-      { key: "signal", label: "信号路由", comp: <Signal /> },
-      { key: "alerts", label: "告警规则", comp: <Alerts /> },
-      { key: "notifications", label: "通知渠道", comp: <Notifications /> },
-      { key: "webhooks", label: "出站 Webhook", comp: <Webhooks /> },
+      { key: "signal", label: "信号路由", comp: Signal },
+      { key: "alerts", label: "告警规则", comp: Alerts },
+      { key: "notifications", label: "通知渠道", comp: Notifications },
+      { key: "webhooks", label: "出站 Webhook", comp: Webhooks },
     ]} />
   ) },
 
   { key: "brokers", label: "账户与连接", group: "账户", comp: () => (
     <Hub initial="brokers" tabs={[
-      { key: "brokers", label: "连接管理", comp: <Brokers /> },
-      { key: "accounts", label: "多账户网格", comp: <AccountsGrid /> },
+      { key: "brokers", label: "连接管理", comp: Brokers },
+      { key: "accounts", label: "多账户网格", comp: AccountsGrid },
     ]} />
   ) },
 
   { key: "ops", label: "运维中心", group: "运维", comp: () => (
     <Hub tabs={[
-      { key: "scheduler", label: "定时任务", comp: <Scheduler /> },
-      { key: "observability", label: "可观测性", comp: <Observability /> },
-      { key: "sysstatus", label: "系统状态", comp: <SystemStatus /> },
-      { key: "registry", label: "注册表 V2", comp: <Registry /> },
-      { key: "audit", label: "审计日志", comp: <Audit /> },
+      { key: "scheduler", label: "定时任务", comp: Scheduler },
+      { key: "observability", label: "可观测性", comp: Observability },
+      { key: "sysstatus", label: "系统状态", comp: SystemStatus },
+      { key: "registry", label: "注册表 V2", comp: Registry },
+      { key: "audit", label: "审计日志", comp: Audit },
     ]} />
   ) },
 

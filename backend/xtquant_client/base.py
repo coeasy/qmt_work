@@ -88,14 +88,24 @@ class BrokerAdapter(ABC):
         """是否已连接。"""
 
     def test_connection(self) -> dict:
-        """探测连接健康度，返回结构化结果（默认用 is_connected + 一次轻量查询）。"""
+        """探测连接健康度，返回结构化结果（默认用 is_connected + 一次轻量查询）。
+
+        行情模式（未配置 account_id）下只用行情查询验证客户端可达，
+        避免把「尚未填写交易账户」误报成「未配置 account_id 或客户端未登录」故障。
+        """
         if not self.is_connected():
             return {"connected": False, "detail": "未连接"}
         try:
-            cash = self.get_cash()
+            if self.account_id:
+                cash = self.get_cash()
+                return {"connected": True, "broker": self.broker_name,
+                        "account_id": self.account_id, "account_type": self.account_type,
+                        "assets": cash.get("assets"), "detail": "ok"}
+            # 行情模式：用恒存在的标的验证行情客户端可达
+            self.get_quote("SH000001")
             return {"connected": True, "broker": self.broker_name,
-                    "account_id": self.account_id, "account_type": self.account_type,
-                    "assets": cash.get("assets"), "detail": "ok"}
+                    "account_id": None, "account_type": self.account_type,
+                    "detail": "行情已连通（未配置交易账户，交易/持仓/下单不可用）"}
         except Exception as exc:  # noqa: BLE001
             # 桥接场景：附上子进程 stderr / 退出码，便于在 qmt_work.log 定位
             tail = ""
