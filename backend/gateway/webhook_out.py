@@ -58,6 +58,12 @@ class WebhookOut:
                     r["headers"] = json.loads(r.pop("headers_json") or "{}")
                 except Exception:  # noqa: BLE001
                     r["headers"] = {}
+                # events 可能以 JSON 数组串（前端数组）或 "*"/逗号串（存量）存储，统一解析
+                try:
+                    _ev = r.get("events") or "*"
+                    r["events"] = json.loads(_ev) if isinstance(_ev, str) and _ev.strip().startswith("[") else _ev
+                except Exception:  # noqa: BLE001
+                    pass
                 try:
                     r["max_retries"] = int(r.get("max_retries") or self.max_retries)
                 except (TypeError, ValueError):
@@ -82,7 +88,8 @@ class WebhookOut:
         for cfg in self._configs():
             if not cfg.get("enabled"):
                 continue
-            patterns = (cfg.get("events") or "*").replace(",", " ").split()
+            ev = cfg.get("events") or "*"
+            patterns = ev if isinstance(ev, list) else (ev.replace(",", " ").split())
             if any(self._event_match(event, p) for p in patterns):
                 out.append(cfg)
         return out
@@ -156,6 +163,12 @@ class WebhookOut:
             "SELECT id, name, url, events, enabled, max_retries, timeout_ms, "
             "success_count, fail_count, last_status, last_error, last_sent_at, "
             "created_at, updated_at FROM webhook_subscriptions ORDER BY id")
+        for r in rows:
+            try:
+                _ev = r.get("events") or "*"
+                r["events"] = json.loads(_ev) if isinstance(_ev, str) and _ev.strip().startswith("[") else _ev
+            except Exception:  # noqa: BLE001
+                pass
         return rows
 
     def get_sub(self, sid: int) -> dict | None:
@@ -163,10 +176,17 @@ class WebhookOut:
             "SELECT * FROM webhook_subscriptions WHERE id=?", (sid,))
 
     def save_sub(self, data: dict) -> int:
+        events_raw = data.get("events", "*")
+        if isinstance(events_raw, (list, tuple)):
+            events_str = json.dumps(list(events_raw), ensure_ascii=False)
+        elif isinstance(events_raw, str):
+            events_str = events_raw.strip() or "*"
+        else:
+            events_str = "*"
         payload = {
             "name": data.get("name", ""),
             "url": data.get("url", ""),
-            "events": data.get("events", "*"),
+            "events": events_str,
             "secret": data.get("secret", ""),
             "enabled": 1 if data.get("enabled", True) else 0,
             "max_retries": int(data.get("max_retries", 3)),

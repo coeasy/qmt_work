@@ -80,6 +80,23 @@ export default function Backtest() {
     }, 800);
   }
 
+  function equityOption() {
+    const eq = result?.equity_curve || [];
+    return {
+      backgroundColor: "transparent",
+      legend: { textStyle: { color: "#e6ecf5" }, top: 0 },
+      grid: { left: 56, right: 16, top: 36, bottom: 28 },
+      tooltip: { trigger: "axis" },
+      xAxis: { type: "category", data: eq.map((_, i) => i + 1), axisLabel: { color: "#8a97ad" } },
+      yAxis: { type: "value", scale: true, splitLine: { lineStyle: { color: "#2c3850" } }, axisLabel: { color: "#8a97ad" } },
+      series: [{
+        name: "净值", type: "line", smooth: true, showSymbol: false,
+        data: eq, areaStyle: { opacity: 0.12 },
+        lineStyle: { color: "#4f8cff", width: 2 }, itemStyle: { color: "#4f8cff" },
+      }],
+    };
+  }
+
   function compareOption() {
     const rows = result?.rows || [];
     return {
@@ -202,6 +219,35 @@ export default function Backtest() {
               <div key={k}><div className="stat-value" style={{ fontSize: 20 }}>{v}</div><div className="stat-label">{k}</div></div>
             ))}
           </div>
+
+          {result.equity_curve?.length > 1 && (
+            <div style={{ marginTop: 16 }}>
+              <h3>资金曲线</h3>
+              <Chart option={equityOption()} height={300} />
+            </div>
+          )}
+
+          {result.trades?.length > 0 && (
+            <div style={{ marginTop: 16 }}>
+              <h3>成交明细（最近 {result.trades.length} 笔）</h3>
+              <div style={{ overflowX: "auto" }}>
+                <table>
+                  <thead><tr><th>时间</th><th>方向</th><th>价格</th><th>数量</th><th>盈亏</th></tr></thead>
+                  <tbody>
+                    {result.trades.map((t, i) => (
+                      <tr key={i}>
+                        <td>{t.time}</td>
+                        <td className={t.side === "buy" ? "up" : "down"}>{t.side === "buy" ? "买入" : "卖出"}</td>
+                        <td>{t.price}</td>
+                        <td>{t.qty}</td>
+                        <td className={(t.pnl ?? 0) >= 0 ? "up" : "down"}>{t.pnl != null ? t.pnl : "—"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
         </div>
       )}
 
