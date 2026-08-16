@@ -160,3 +160,90 @@ code { background: var(--bg-2); border: 1px solid var(--border); border-radius: 
 .page-loading {
   padding: 48px; text-align: center; color: var(--text-dim, #8899aa); font-size: 14px;
 }
+
+/* ============================================================
+   工业级 / 高级模块补充样式
+   以下类名被可观测性、定时任务、注册表、策略市场、告警、因子、
+   模拟盘、对账、信号、目标持仓、Webhook 等页面使用，此前在
+   styles.css 中缺失，导致这些页面按钮 / 表单 / 标题 / 布局完全
+   无样式（表现为「界面无法正常加载」）。统一在此补齐。
+   ============================================================ */
+
+/* 页面头（P2 模块通用）*/
+.page-header { margin-bottom: 16px; }
+.page-header h2 { margin: 0 0 4px; font-size: 18px; font-weight: 700; color: var(--text); }
+.page-header p { margin: 0; color: var(--text-dim); font-size: 12px; }
+
+/* 按钮组（标签页式）*/
+.btn-group { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.btn-group button { background: transparent; border: 1px solid var(--border); color: var(--text); padding: 8px 14px; }
+.btn-group button:hover { filter: brightness(1.15); }
+.btn-group .active { background: var(--accent); color: #fff; border-color: var(--accent); }
+
+/* 小型 / 主操作 / 危险按钮 */
+.btn-sm { padding: 6px 12px; font-size: 12px; border-radius: 6px; }
+.btn-primary { background: var(--accent); color: #fff; padding: 9px 18px; }
+.btn-danger { background: var(--danger); color: #fff; }
+.btn-danger-sm { background: var(--danger); color: #fff; padding: 6px 12px; font-size: 12px; border-radius: 6px; }
+button.danger { background: var(--danger); color: #fff; }
+button.danger:hover { filter: brightness(1.05); }
+
+/* 成功 / 错误横幅（覆盖聊天气泡 .msg 基础样式，勿与 .msg.user/.agent 冲突）*/
+.msg.success {
+  max-width: none; margin: 12px 0; padding: 10px 14px; border-radius: 8px;
+  background: rgba(43, 212, 164, .12); border: 1px solid var(--accent-2); color: var(--accent-2); line-height: 1.5;
+}
+.msg.error {
+  max-width: none; margin: 12px 0; padding: 10px 14px; border-radius: 8px;
+  background: rgba(255, 92, 108, .12); border: 1px solid var(--danger); color: var(--danger); line-height: 1.5;
+}
+
+/* 表单行 / 字段 */
+.form-row { display: flex; gap: 14px; flex-wrap: wrap; align-items: flex-end; margin-bottom: 6px; }
+.form-field { display: flex; flex-direction: column; gap: 4px; min-width: 160px; flex: 1; }
+.form-field label { margin: 0; }
+.form-field input, .form-field select, .form-field textarea { width: 100%; }
+
+/* 可观测性：指标卡 / KV 对 */
+.metric-card { background: var(--bg-2); border: 1px solid var(--border); border-radius: 8px; padding: 12px; }
+.metric-name { color: var(--text-dim); font-size: 12px; }
+.metric-value { font-size: 22px; font-weight: 700; margin: 4px 0 2px; }
+.metric-help { color: var(--text-dim); font-size: 11px; }
+.kv-pair { display: flex; justify-content: space-between; gap: 12px; padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
+.kv-label { color: var(--text-dim); }
+.kv-value { text-align: right; word-break: break-all; }
+
+/* 策略市场卡片网格 */
+.strategy-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 14px; }
+.strategy-card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px; }
+.strategy-card h4 { margin: 0 0 6px; font-size: 14px; }
+.strategy-card p { color: var(--text-dim); font-size: 12px; margin: 0 0 8px; }
+.strategy-card .meta { display: flex; gap: 10px; flex-wrap: wrap; font-size: 11px; color: var(--text-dim); margin-bottom: 8px; }
+
+/* 注册表 V2 卡片网格 */
+.registry-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 14px; }
+.registry-card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px; }
+.registry-card h4 { margin: 0 0 6px; font-size: 14px; }
+.registry-card p { color: var(--text-dim); font-size: 12px; margin: 4px 0; }
+
+/* 状态条（定时任务）*/
+.status-bar { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; font-size: 13px; }
+.status-bar > span { color: var(--text-dim); }
+.status-bar strong { color: var(--text); }
+
+/* 复选行内联标签 */
+.checkbox { display: inline-flex; align-items: center; gap: 6px; color: var(--text-dim); font-size: 12px; margin: 0; cursor: pointer; }
+.checkbox input { width: auto; }
+
+/* 因子选择 chip */
+.chip-grid { display: flex; gap: 8px; flex-wrap: wrap; }
+.chip {
+  display: inline-flex; align-items: center; padding: 4px 12px; border-radius: 999px;
+  border: 1px solid var(--border); background: var(--bg-2); color: var(--text-dim);
+  font-size: 12px; cursor: pointer; user-select: none;
+}
+.chip.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+
+/* 表格容器（P2 列表）*/
+.table { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.table th, .table td { padding: 10px 12px; }
