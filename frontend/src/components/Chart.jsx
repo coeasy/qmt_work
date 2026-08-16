@@ -15,7 +15,13 @@ export default function Chart({ option, height = 320, className = "" }) {
   useEffect(() => {
     const onResize = () => inst.current && inst.current.resize();
     window.addEventListener("resize", onResize);
-    return () => window.removeEventListener("resize", onResize);
+    return () => {
+      window.removeEventListener("resize", onResize);
+      if (inst.current) {
+        inst.current.dispose();
+        inst.current = null;
+      }
+    };
   }, []);
 
   return <div ref={ref} className={`chart-box ${className}`} style={{ height }} />;

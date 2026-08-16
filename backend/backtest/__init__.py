@@ -20,7 +20,10 @@ log = logging.getLogger("qmt_work.backtest")
 class BacktestQueue:
     def __init__(self, max_workers: int = 2):
         self._jobs: dict[str, dict] = {}
+        self._tasks: dict[str, asyncio.Task] = {}
         self._listeners: list = []
+        self._max_workers = max(1, int(max_workers))
+        self._sem = asyncio.Semaphore(self._max_workers)
 
     def on_event(self, handler) -> None:
         self._listeners.append(handler)
@@ -63,39 +66,45 @@ class BacktestQueue:
             return False
         job["status"] = "cancelled"
         self._persist(job)
+        # 真正停止仍在运行的协程（在 await 点可中断，如 K 线拉取）
+        task = self._tasks.pop(job_id, None)
+        if task is not None and not task.done():
+            task.cancel()
         return True
 
     async def submit(self, kind: str, params: dict):
         job = self.create(kind, params)
-        asyncio.create_task(self._dispatch(job))
+        self._tasks[job["id"]] = asyncio.create_task(self._dispatch(job))
         return job
 
     async def _dispatch(self, job: dict) -> None:
         job["status"] = "running"
         self._persist(job)
         await self._emit(job)
-        try:
-            if job["kind"] == "backtest":
-                job["result"] = await self._run_backtest(job["params"])
-                job["progress"] = 100
-                _record_backtest_metric("backtest")
-            elif job["kind"] == "compare":
-                job["result"] = await self._run_compare(job["params"])
-                job["progress"] = 100
-                _record_backtest_metric("compare")
-            elif job["kind"] == "sensitivity":
-                job["result"] = await self._run_sensitivity(job["params"])
-                job["progress"] = 100
-                _record_backtest_metric("sensitivity")
-            elif job["kind"] == "sweep":
-                job["result"] = await self._run_sweep(job["params"])
-                job["progress"] = 100
-            job["status"] = "done"
-        except asyncio.CancelledError:
-            job["status"] = "cancelled"
-        except Exception as exc:
-            job["status"] = "failed"
-            job["error"] = str(exc)
+        async with self._sem:
+            try:
+                if job["kind"] == "backtest":
+                    job["result"] = await self._run_backtest(job["params"])
+                    job["progress"] = 100
+                    _record_backtest_metric("backtest")
+                elif job["kind"] == "compare":
+                    job["result"] = await self._run_compare(job["params"])
+                    job["progress"] = 100
+                    _record_backtest_metric("compare")
+                elif job["kind"] == "sensitivity":
+                    job["result"] = await self._run_sensitivity(job["params"])
+                    job["progress"] = 100
+                    _record_backtest_metric("sensitivity")
+                elif job["kind"] == "sweep":
+                    job["result"] = await self._run_sweep(job["params"])
+                    job["progress"] = 100
+                job["status"] = "done"
+            except asyncio.CancelledError:
+                job["status"] = "cancelled"
+            except Exception as exc:
+                job["status"] = "failed"
+                job["error"] = str(exc)
+        self._tasks.pop(job.get("id", ""), None)
         self._persist(job)
         await self._emit(job)
 

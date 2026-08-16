@@ -8,6 +8,7 @@ from __future__ import annotations   # 类内有 list() 方法，注解须延迟
 
 import asyncio
 import logging
+import math
 import time
 import uuid
 from collections import deque
@@ -129,7 +130,10 @@ class AlgoEngine:
                 await self._run_iceberg(aid)
             elif algo == "pov":
                 await self._run_pov(aid)
-            else:  # twap / vwap
+            elif algo == "vwap":
+                # VWAP：按日内成交量分布加权拆单（A股 U 型：开盘/收盘更重），与 TWAP 等分不同
+                await self._run_twap(aid, self._plan_vwap(job["volume"], job["slices"]))
+            else:  # twap
                 await self._run_twap(aid)
             if job["status"] not in ("canceled", "done"):
                 job["status"] = "done"
@@ -169,10 +173,34 @@ class AlgoEngine:
         lots = max(1, int(round(int(total) * float(visible_pct) / 100.0 / 100.0)))
         return min(lots * 100, max(100, int(total)))
 
-    async def _run_twap(self, aid: str) -> None:
-        """TWAP/VWAP：按时间等分切片顺序下单。"""
+    @staticmethod
+    def _plan_vwap(volume: int, slices: int) -> list[int]:
+        """VWAP 拆单计划：按 A 股典型日内成交量分布（U 型：开盘/收盘更重）加权分配每片量。
+
+        与 TWAP 等分不同，VWAP 在成交量更大的时段下更大单，更贴近市场真实成交节奏。
+        每片均为 100 股整数倍，余量并入最后一片。
+        """
+        volume = int(volume)
+        slices = max(1, int(slices))
+        lots = volume // 100
+        if lots <= 0:
+            return [volume] if volume > 0 else []
+        slices = min(slices, lots)
+        # U 型权重：w_i ∝ 1 + sin(pi * i/(N-1))，中间低、两端高
+        raw = [1.0 + (math.sin(math.pi * i / max(1, slices - 1)) if slices > 1 else 1.0)
+               for i in range(slices)]
+        s = sum(raw) or 1.0
+        plan = [max(100, int(round(lots * w / s)) * 100) for w in raw]
+        # 校正总量（因取整偏差把余量并入最后一片）
+        diff = lots * 100 - sum(plan)
+        plan[-1] = max(100, plan[-1] + diff)
+        return plan
+
+    async def _run_twap(self, aid: str, plan: list[int] | None = None) -> None:
+        """TWAP/VWAP：按时间等分切片顺序下单（plan 为空时用 TWAP 等分计划）。"""
         job = self._jobs[aid]
-        plan = self._plan_slices(job["volume"], job["slices"])
+        if plan is None:
+            plan = self._plan_slices(job["volume"], job["slices"])
         gap = max(0.5, job["duration"] / max(1, len(plan)))
         for i, vol in enumerate(plan):
             if job["status"] == "canceled":
@@ -241,6 +269,28 @@ class AlgoEngine:
             job["slices_done"] = idx
             await asyncio.sleep(gap)
 
+    async def _confirm_fill(self, b, order_id: str, intended: int) -> int:
+        """确认真实成交数量：查当日委托，读 dealt/traded_volume。
+
+        查不到（适配器未实现/订单尚未可见）时保守按全额计，并写降级日志——
+        避免「切片发出即计 done 假设全额成交」的乐观错误，同时不阻塞下单流程。
+        """
+        if not order_id:
+            return intended
+        for _ in range(3):
+            try:
+                rows = await b.call(b.gateway.get_orders) or []
+            except Exception:  # noqa: BLE001
+                return intended
+            for o in rows:
+                if str(o.get("order_id")) == str(order_id):
+                    filled = int(o.get("dealt") or o.get("traded_volume")
+                                 or o.get("filled_volume") or 0)
+                    if filled > 0:
+                        return filled
+            await asyncio.sleep(0.3)
+        return intended
+
     async def _place_slice(self, aid: str, idx: int, vol: int) -> None:
         job = self._jobs[aid]
         b = self._manager.active_bridge()
@@ -257,9 +307,11 @@ class AlgoEngine:
         try:
             res = await b.call(b.gateway.place_order, job["code"], job["direction"],
                                price_type, price, vol, f"algo_{job['algo']}", job.get("remark", ""))
-            job["done"] += vol
+            # 真实成交而非假设全额：查委托确认 filled，冰山/POV 据此推进，避免超额下发
+            filled = await self._confirm_fill(b, res.get("order_id"), vol)
+            job["done"] += filled
             child = {"idx": idx, "order_id": res.get("order_id"), "volume": vol,
-                     "price_type": price_type, "price": price,
+                     "filled": filled, "price_type": price_type, "price": price,
                      "ts": time.strftime("%H:%M:%S")}
             job["children"].append(child)
             self._emit({"type": "algo_slice", "data": {"algo_id": aid, **child}})
@@ -267,7 +319,7 @@ class AlgoEngine:
             if state.db is not None:
                 try:
                     state.db.audit("algo", "algo.slice", f"{aid}:{job['code']}",
-                                   {"idx": idx, "volume": vol, "price": price,
+                                   {"idx": idx, "volume": vol, "filled": filled, "price": price,
                                     "order_id": res.get("order_id")}, "ok")
                 except Exception:  # noqa: BLE001
                     pass

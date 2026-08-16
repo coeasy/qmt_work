@@ -3,7 +3,7 @@ const { contextBridge, ipcRenderer } = require("electron");
 
 contextBridge.exposeInMainWorld("electronAPI", {
   appVersion: () => ipcRenderer.invoke("app-version"),
-  openExternal: (url) => ipcRenderer.send("open-external", url),
+  openExternal: (url) => ipcRenderer.invoke("open-external", url),
   setAutoLaunch: (enabled) => ipcRenderer.invoke("set-auto-launch", enabled),
   getAutoLaunch: () => ipcRenderer.invoke("get-auto-launch"),
 });

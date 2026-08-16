@@ -7,17 +7,24 @@ generate_rebalance(targets, ...) 按目标市值占比计算调仓单：
 - 落库 rebalance_orders 并可经券商真实下单
 """
 from . import get_bridge
+from .limitup import _limit_factor
 
 
 def _at_limit(quote: dict, direction: str) -> bool:
+    """真实涨跌停判定：以昨收*(1±板块幅度) 计算涨停/跌停价，而非用当日最高/最低价近似。
+
+    板块幅度按代码前缀：创业板/科创板 20%、北交所 30%、其余 10%（ST 标记由上层处理）。
+    """
     last = quote.get("last")
-    high = quote.get("high")
-    low = quote.get("low")
-    if last is None or high is None or low is None:
+    lc = quote.get("lastClose")
+    if last is None or not lc:
         return False
-    if direction == "buy" and last >= high:
+    pct = _limit_factor(quote.get("code", ""))
+    limit_up = round(lc * (1 + pct), 2)
+    limit_down = round(lc * (1 - pct), 2)
+    if direction == "buy" and last >= limit_up - 1e-9:
         return True
-    if direction == "sell" and last <= low:
+    if direction == "sell" and last <= limit_down + 1e-9:
         return True
     return False
 

@@ -7,8 +7,8 @@ def register_account_tools(mcp):
     async def monitor_account(broker_id: str = "") -> dict:
         """账户实时快照：资金 + 持仓 + 连接状态。"""
         b = get_bridge(broker_id or None)
-        cash = await b.call(b.gateway.query_cash)
-        pos = await b.call(b.gateway.query_position)
+        cash = await b.call(b.gateway.get_cash)
+        pos = await b.call(b.gateway.get_positions)
         return {"connected": b.gateway.is_connected(), "cash": cash, "positions": pos}
 
     @mcp.tool()

@@ -123,14 +123,17 @@ class LimitUpMonitor:
         lc = q.get("lastClose") or 0
         if not last or not lc:
             return
-        pct = float(self._cfg.get("limit_pct", 0.1))
+        # 涨停幅度：显式配置 > 按板块自动（主板10/创业科创20/北交30/ST5）
+        cfg_pct = float(self._cfg.get("limit_pct", 0.0) or 0.0)
+        pct = cfg_pct if cfg_pct > 0 else _limit_factor(code, self._pool.get(code, ""))
         limit = round(lc * (1 + pct), 2)
         if last < limit - 1e-9:
             return
         buf = self._ticks.setdefault(code, deque(maxlen=25))
         buf.append(last)
         min_rise = float(self._cfg.get("min_rise", 0.03))
-        rise_ok = len(buf) >= 25 and (buf[-1] / buf[0] - 1) >= min_rise
+        min_ticks = int(self._cfg.get("min_ticks", 10))
+        rise_ok = len(buf) >= min_ticks and (buf[-1] / buf[0] - 1) >= min_rise
         if not (in_window and rise_ok):
             return
         if code in self._triggered:
@@ -216,10 +219,11 @@ def register_limitup_tools(mcp):
         return "ok"
 
     @mcp.tool()
-    async def limitup_start(limit_pct: float = 0.1, cutoff: str = "10:00",
+    async def limitup_start(limit_pct: float = 0.0, cutoff: str = "10:00",
                             min_rise: float = 0.03, buy_volume: int = 0,
                             do_trade: bool = False, interval: float = 2.0) -> dict:
-        """启动涨停监控：last>=涨停价 且 时间<=cutoff 且 近25个tick涨幅>=min_rise 时触发；
+        """启动涨停监控：last>=涨停价 且 时间<=cutoff 且 近N个tick涨幅>=min_rise 时触发；
+        涨停幅度 limit_pct=0（默认）时按板块自动判定（主板10%/创业板科创20%/北交所30%/ST5%）；
         buy_volume>0 且 do_trade=True 时自动涨停价限价买入。"""
         return await _monitor().start({
             "limit_pct": limit_pct, "cutoff": cutoff, "min_rise": min_rise,
@@ -241,8 +245,13 @@ def register_limitup_tools(mcp):
 _LIMIT_FIRST_SEEN: dict = {}
 
 
-def _limit_factor(code: str) -> float:
-    """按代码前缀估算涨停幅度：科创板/创业板 20%，北交所 30%，其余 10%。"""
+def _limit_factor(code: str, name: str | None = None) -> float:
+    """按代码前缀估算涨停幅度：科创板/创业板 20%，北交所 30%，ST 5%，其余 10%。
+
+    name 用于识别 ST（名称含 ST / *ST），优先于代码前缀。
+    """
+    if name and "ST" in (name or "").upper():
+        return 0.05
     c = (code or "").upper()
     if c.startswith("68") or c.startswith("30"):
         return 0.20
