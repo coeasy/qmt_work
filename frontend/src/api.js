@@ -109,6 +109,7 @@ api.health = () => api.get("/health");
 api.getRiskConfig = () => api.get("/config/risk");
 api.putRiskConfig = (body) => api.put("/config/risk", body);
 api.audit = (params) => api.get("/audit", params);
+api.auditVerify = () => api.get("/audit/verify");
 api.aggregate = () => api.get("/account/aggregate");
 
 // ---------------- 运行时配置中心（引擎参数热更新） ----------------

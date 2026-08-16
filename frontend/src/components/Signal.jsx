@@ -28,7 +28,7 @@ export default function Signal() {
   const [remark, setRemark] = useState("");
   const [pending, setPending] = useState(null);
 
-  useEffect(() => { api.signalMode().then(setMode).catch(() => {}); }, []);
+  useEffect(() => { api.signalMode().then((d) => setMode(d?.mode ?? "live")).catch(() => {}); }, []);
 
   async function setSignalMode(m) {
     setLoading(true); setMsg(null);

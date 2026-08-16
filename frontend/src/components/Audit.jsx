@@ -11,6 +11,7 @@ export default function Audit() {
   const [rows, setRows] = useState([]);
   const [action, setAction] = useState("");
   const [err, setErr] = useState("");
+  const [verify, setVerify] = useState(null);
 
   async function load() {
     try {
@@ -22,6 +23,14 @@ export default function Audit() {
 
   function fmtParams(p) {
     try { return JSON.stringify(JSON.parse(p)); } catch { return p; }
+  }
+
+  async function verifyChain() {
+    setVerify(null);
+    try {
+      const r = await api.auditVerify();
+      setVerify(r);
+    } catch (e) { setVerify({ ok: false, broken_count: 0, broken: [], error: e.message }); }
   }
 
   return (
