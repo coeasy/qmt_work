@@ -176,10 +176,13 @@ def _load_xtquant_from(site_packages: str) -> None:
     _load_trader_api()  # 新旧 xt_trader/xttrader 兼容导入
 
 
-def probe_environment(client_path: str) -> dict:
+def probe_environment(client_path: str, light: bool = False) -> dict:
     """结构化探测客户端环境（不连接券商）：定位 xtquant / 导入可行性 / 目录线索。
 
-    供 /brokers/test 与 tools/diag_qmt.py 使用，把「为什么探测失败」拆成可读诊断。
+    供 /brokers/test、discovery（light=True）与 tools/diag_qmt.py 使用，把
+    「为什么探测失败」拆成可读诊断。
+    light=True 时仅做轻量定位 + ABI 兼容判定（不 import xtquant、不扫运行时），
+    用于 auto-detect 候列表，避免每条候选都触发昂贵的 import / 进程扫描。
     """
     result: dict = {
         "client_path": client_path or "",
@@ -224,6 +227,21 @@ def probe_environment(client_path: str) -> dict:
     result["broker_abis"] = broker_abis
     result["host_abi"] = host
     result["abi_compatible"] = abi_compatible
+    if light:
+        # 轻量模式（discover 阶段用）：只定位 xtquant 目录 + 判定 ABI 是否兼容，
+        # 不真正 import xtquant（避免加载 .pyd 的副作用/耗时），也不触发昂贵的
+        # discover_system_runtimes 扫描。完整诊断留给用户点击候选后的 /brokers/test。
+        if sp:
+            result["xtquant_importable"] = True if abi_compatible else "bridge"
+            result["hint"] = (
+                "已定位 xtquant 目录"
+                + ("（主后端可进程内加载）" if abi_compatible
+                   else "（主后端 ABI 不兼容，将经桥接子进程加载；点击候选后可探测）"))
+        else:
+            result["xtquant_importable"] = False
+            result["hint"] = ("未找到 xtquant 目录：请确认 client_path 指向 userdata_mini 目录"
+                              "（或其上层为客户端根，含 bin.x64）")
+        return result
     if sp:
         if abi_compatible:
             try:

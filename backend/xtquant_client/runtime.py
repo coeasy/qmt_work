@@ -233,8 +233,16 @@ def discover_system_runtimes() -> dict[int, str]:
             if p:
                 candidates.append(p)
 
-    # 4) PATH 目录全扫描（绿色版 / 便携 Python / 虚拟环境，覆盖 3.13.12 managed 等）
-    for d in os.environ.get("PATH", "").split(os.pathsep):
+    # 4) PATH 目录扫描（绿色版 / 便携 Python / 虚拟环境，覆盖 3.13.12 managed 等）
+    #    跳过 Windows 系统目录（含成千上万文件、几乎无 python.exe，listdir 极慢且无意义）；
+    #    并限制目录数上限，防止极端长 PATH 下首次扫描卡死（结果有进程内缓存，仅首次较慢）。
+    _SKIP_DIR_HINTS = ("windows", "system32", "syswow64", "servicing",
+                       "$recycle.bin", "programdata", "appdata")
+    _path_dirs = [d.strip() for d in os.environ.get("PATH", "").split(os.pathsep) if d.strip()]
+    for d in _path_dirs[:80]:
+        low = d.lower()
+        if any(h in low for h in _SKIP_DIR_HINTS):
+            continue
         _scan_dir_for_python(d, out)
 
     # 5) WorkBuddy managed 运行时（本机常见：~/.workbuddy/binaries/python/versions/3.11.x/）
