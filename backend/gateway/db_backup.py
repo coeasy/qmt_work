@@ -2,6 +2,8 @@
 
 - 备份目标：<db 同目录>/backups/app.YYYYMMDD_HHMMSS.db（连同 -wal/-shm 一并复制，
   保证 WAL 模式下备份点一致）。
+- 传入 `db`（app.db.DB 实例）时改用 **sqlite3 backup API**：在事务层面拷贝出
+  单一一致性文件（含 WAL 已提交数据），可直接单独还原，不再依赖 -wal/-shm。
 - 保留最近 `keep` 份（默认 10），超出自动清理最旧。
 - 由 app.main 生命周期驱动：启动备份一次、后台周期任务、关闭前再备份一次。
 """
@@ -18,11 +20,13 @@ log = logging.getLogger("qmt_work.db_backup")
 
 class DBBackup:
     def __init__(self, db_path: Path, keep: int = 10,
-                 backups_dir: Path | None = None, interval: float = 3600.0):
+                 backups_dir: Path | None = None, interval: float = 3600.0,
+                 db=None):
         self.db_path = Path(db_path)
         self.keep = max(1, int(keep))
         self.backups_dir = Path(backups_dir) if backups_dir else (self.db_path.parent / "backups")
         self.interval = max(60.0, float(interval))
+        self.db = db  # 阶段 3：可选 app.db.DB 实例，提供 backup API 一致性备份
         self._task: asyncio.Task | None = None
         self._stop = False
 
@@ -42,10 +46,16 @@ class DBBackup:
             self.backups_dir.mkdir(parents=True, exist_ok=True)
             ts = time.strftime("%Y%m%d_%H%M%S")
             dst = self.backups_dir / f"app.{ts}.db"
-            for suffix in ("", "-wal", "-shm"):
-                src = Path(str(self.db_path) + suffix)
-                if src.exists():
-                    shutil.copy2(src, str(dst) + suffix)
+            if self.db is not None and hasattr(self.db, "backup_to"):
+                # 阶段 3：backup API 生成单一一致性文件（无需 -wal/-shm）
+                if not self.db.backup_to(dst):
+                    raise RuntimeError("sqlite backup API 返回失败")
+            else:
+                # 回退：逐文件 copy 主库 + -wal/-shm
+                for suffix in ("", "-wal", "-shm"):
+                    src = Path(str(self.db_path) + suffix)
+                    if src.exists():
+                        shutil.copy2(src, str(dst) + suffix)
             self._prune()
             log.info("数据库备份完成（%s）：%s [%s]", reason, dst.name, self._size_str(dst))
             return str(dst)

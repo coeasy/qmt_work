@@ -92,6 +92,62 @@ class KlineCache:
         age = time.time() - self.last_fetch(code, period)
         return age <= self.ttl_for(period)
 
+    # ---------------- 阶段 3：异步变体（事件循环内回源/写缓存不阻塞） ----------------
+    async def aget(self, code: str, period: str, count: int) -> list[dict]:
+        if self.db is None:
+            return []
+        rows = await self.db.aquery(
+            "SELECT dt, open, high, low, close, volume, amount FROM kline_cache "
+            "WHERE code=? AND period=? ORDER BY dt DESC LIMIT ?",
+            (code, period, max(1, int(count))))
+        rows.reverse()
+        return [{"time": r["dt"], **{f: r[f] for f in _FIELDS}} for r in rows]
+
+    async def aput(self, code: str, period: str, bars: list[dict]) -> int:
+        if self.db is None or not bars:
+            return 0
+        now = time.time()
+        n = 0
+        for b in bars:
+            dt = str(b.get("time") or b.get("dt") or "").strip()
+            if not dt:
+                continue
+            row = {"code": code, "period": period, "dt": dt, "fetched_at": now}
+            for f in _FIELDS:
+                v = b.get(f)
+                try:
+                    row[f] = None if v is None else float(v)
+                except (TypeError, ValueError):
+                    row[f] = None
+            try:
+                await self.db.aupsert("kline_cache", row)
+                n += 1
+            except Exception as exc:  # noqa: BLE001
+                log.debug("kline cache aput failed %s %s: %s", code, dt, exc)
+        return n
+
+    async def alast_fetch(self, code: str, period: str) -> float:
+        if self.db is None:
+            return 0.0
+        row = await self.db.aquery_one(
+            "SELECT MAX(fetched_at) AS f, COUNT(1) AS c FROM kline_cache "
+            "WHERE code=? AND period=?", (code, period))
+        return float((row or {}).get("f") or 0.0)
+
+    async def acount(self, code: str, period: str) -> int:
+        if self.db is None:
+            return 0
+        row = await self.db.aquery_one(
+            "SELECT COUNT(1) AS c FROM kline_cache WHERE code=? AND period=?",
+            (code, period))
+        return int((row or {}).get("c") or 0)
+
+    async def ais_fresh(self, code: str, period: str, count: int) -> bool:
+        if await self.acount(code, period) < count:
+            return False
+        age = time.time() - await self.alast_fetch(code, period)
+        return age <= self.ttl_for(period)
+
     # ---------------- 组合入口 ----------------
     async def get_or_fetch(self, code: str, period: str, count: int, fetcher,
                            force: bool = False) -> dict:
@@ -101,32 +157,33 @@ class KlineCache:
         返回 {"bars": [...], "source": cache|broker|cache_stale, "cached_at": float|None}
         """
         count = max(1, int(count))
-        if not force and self.is_fresh(code, period, count):
+        # 阶段 3：事件循环内回源/读缓存走 a* 变体（线程池），不阻塞事件循环
+        if not force and await self.ais_fresh(code, period, count):
             self.hits += 1
-            return {"bars": self.get(code, period, count), "source": "cache",
-                    "cached_at": self.last_fetch(code, period)}
+            return {"bars": await self.aget(code, period, count), "source": "cache",
+                    "cached_at": await self.alast_fetch(code, period)}
         try:
             bars = await fetcher(code, period, count) or []
             if bars:
                 self.misses += 1
-                self.put(code, period, bars)
+                await self.aput(code, period, bars)
                 return {"bars": bars, "source": "broker", "cached_at": time.time()}
             # 券商返回空：若有缓存则降级供给
-            cached = self.get(code, period, count)
+            cached = await self.aget(code, period, count)
             if cached:
                 self.stale_serves += 1
                 return {"bars": cached, "source": "cache_stale",
-                        "cached_at": self.last_fetch(code, period),
+                        "cached_at": await self.alast_fetch(code, period),
                         "note": "券商返回空数据，回退到本地历史缓存"}
             self.misses += 1
             return {"bars": [], "source": "broker", "cached_at": None}
         except Exception as exc:  # noqa: BLE001
-            cached = self.get(code, period, count)
+            cached = await self.aget(code, period, count)
             if cached:
                 self.stale_serves += 1
                 log.warning("kline fetch failed, serve stale cache %s: %s", code, exc)
                 return {"bars": cached, "source": "cache_stale",
-                        "cached_at": self.last_fetch(code, period),
+                        "cached_at": await self.alast_fetch(code, period),
                         "note": f"券商取数失败（{exc}），回退到本地历史缓存"}
             raise
 

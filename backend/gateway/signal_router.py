@@ -14,6 +14,8 @@ import logging
 import time
 from dataclasses import dataclass, field
 
+from gateway.idempotency import single_flight
+
 log = logging.getLogger("qmt_work.signal")
 
 
@@ -53,8 +55,12 @@ class SignalRouter:
         log.info("signal mode: %s -> %s", old, mode)
         return mode
 
-    async def route(self, sig: Signal) -> dict:
-        """统一信号入口：根据 mode 决定真实下单 / 旁路 / 预演 / 二次确认。"""
+    async def route(self, sig: Signal, auto_confirm: bool = False) -> dict:
+        """统一信号入口：根据 mode 决定真实下单 / 旁路 / 预演 / 二次确认。
+
+        auto_confirm=True 时跳过「大额 TOTP 二次确认挂起」（用于已授权自动化引擎：
+        algo/limitup/rebalance/strategy_runtime/condition/position），但仍走完整风控。
+        """
         import uuid
         code = (sig.code or "").strip().upper()
         side = (sig.side or "").lower()
@@ -73,10 +79,11 @@ class SignalRouter:
             self._emit({"type": "signal_dry_run", "data": plan})
             return {"ok": True, **plan}
 
-        # 风控检查
+        # 阶段 0-B（F13）：市价/无价单用**最新价**估算金额（而非写死的 100.0），
+        # 否则大额市价单会绕过 TOTP 二次确认与金额类风控。
+        est_price = await self._est_price_async(sig)
         if self._risk is not None:
-            ok, reason = self._risk.check_order(code, sig.price if sig.price > 0 else 100.0,
-                                                sig.volume, side)
+            ok, reason = self._risk.check_order(code, est_price, sig.volume, side)
             if not ok:
                 self._audit("signal.rejected", code, sig.__dict__, reason)
                 if self._notifier:
@@ -86,9 +93,8 @@ class SignalRouter:
                 return {"ok": False, "reason": reason, "mode": self.mode}
 
         # 大额二次确认：金额超阈值时挂起，待 /signal/confirm 确认
-        est_price = sig.price if sig.price > 0 else 100.0
         amount = est_price * sig.volume
-        if amount >= self.threshold and self.mode in ("live", "paper"):
+        if amount >= self.threshold and self.mode in ("live", "paper") and not auto_confirm:
             token = uuid.uuid4().hex
             self._pending[token] = {"sig": sig.__dict__, "ts": time.time(), "mode": self.mode}
             self._emit({"type": "signal_pending", "data": {
@@ -99,6 +105,44 @@ class SignalRouter:
                     "mode": self.mode}
 
         return await self._execute(sig)
+
+    async def _est_price_async(self, sig: Signal) -> float:
+        """估算下单金额所用价格：有价用价，市价/无价则取最新行情价。"""
+        if sig.price and sig.price > 0:
+            return float(sig.price)
+        b = self._manager.bridge(sig.broker_id or None)
+        if b is not None:
+            try:
+                q = await b.call(b.gateway.get_quote, sig.code)
+                if isinstance(q, dict):
+                    p = q.get("last") or q.get("ask") or q.get("bid")
+                    if p:
+                        return float(p)
+            except Exception:  # noqa: BLE001
+                pass
+        return 100.0
+
+    async def submit(self, code: str, side: str, volume: int, price: float = 0.0,
+                     price_type: str = "limit", source: str = "manual",
+                     broker_id: str = "", remark: str = "", idempotency_key: str = "",
+                     auto_confirm: bool = False, payload: dict | None = None) -> dict:
+        """统一下单入口（引擎/策略/手动共用）：风控 + 幂等 + TOTP + WAL + 审计 + 真实下单。
+
+        阶段 0-B（F6/F7/F8/F9）：所有引擎（algo/limitup/rebalance/strategy_runtime/
+        condition/position）一律经此入口，禁止直接 ``gateway.place_order`` 绕过风控。
+
+        idempotency_key 非空时经单飞（single-flight）幂等：同 key 并发/窗口内重复
+        请求只执行一次真实逻辑，其余返回缓存结果并标记 duplicated（阶段 0-B / F1）。
+        """
+        sig = Signal(source=source, code=str(code), side=str(side),
+                     volume=int(volume), price=float(price or 0),
+                     price_type=price_type, remark=remark or "", broker_id=broker_id or "",
+                     payload=payload or {})
+        if idempotency_key:
+            async def _run():
+                return await self.route(sig, auto_confirm=auto_confirm)
+            return await single_flight(f"order:{idempotency_key}", _run)
+        return await self.route(sig, auto_confirm=auto_confirm)
 
     async def _execute(self, sig: Signal) -> dict:
         """确认后/未超阈值时的实际执行（paper 或 live）。"""
@@ -115,6 +159,14 @@ class SignalRouter:
         if self.totp_secret and not verify_totp(self.totp_secret, totp_code, self.totp_digits):
             return {"ok": False, "reason": "TOTP 校验失败，请重新发起信号"}
         sig = Signal(**entry["sig"])
+        # 阶段 0-B（F13）：确认前**重跑风控**——挂起期间风控参数/熔断可能已变化，
+        # 不得直接放行。
+        est_price = await self._est_price_async(sig)
+        if self._risk is not None:
+            ok, reason = self._risk.check_order(sig.code, est_price, sig.volume, sig.side)
+            if not ok:
+                self._audit("signal.rejected", sig.code, sig.__dict__, reason)
+                return {"ok": False, "reason": reason, "mode": self.mode}
         res = await self._execute(sig)
         res["confirmed"] = True
         return res
@@ -151,6 +203,17 @@ class SignalRouter:
             res = await b.call_locked(
                 b.gateway.place_order, sig.code, sig.side, sig.price_type,
                 sig.price, sig.volume, sig.source, sig.remark)
+            # 阶段 0-B（F13）：绝不把失败/未确认的下单粉饰成成功。
+            # 柜台未返回委托号（超时 unknown）或明确拒单 → ok=False。
+            oid = res.get("order_id") if isinstance(res, dict) else None
+            rstatus = res.get("status") if isinstance(res, dict) else None
+            if not oid or rstatus == "rejected":
+                res = res if isinstance(res, dict) else {}
+                res["ok"] = False
+                res["reason"] = res.get("reason") or "下单未确认（柜台未返回委托号，可能超时或拒单）"
+                res["mode"] = "live"
+                self._audit("signal.failed", sig.code, sig.__dict__, res["reason"])
+                return res
             res["ok"] = True
             res["mode"] = "live"
             from gateway.metrics import get_metrics

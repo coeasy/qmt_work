@@ -28,10 +28,15 @@ PATH_SCOPES = [
     ("/api/v1/signal", "trade"),
     ("/api/v1/target-portfolio", "trade"),
     ("/api/v1/paper", "trade"),
-    ("/api/v1/account", "account"),
-    ("/api/v1/backtest", "backtest"),
+    # 阶段 0-E：strategies/run 必须独立 scope——它启动策略代码（可真实下单），
+    # 若沿用 strategies 的 backtest scope，backtest 权限子密钥即可启动实盘策略。
+    # 必须置于 /api/v1/strategies 之前（前缀匹配顺序敏感）。
+    ("/api/v1/strategies/run", "trade"),
     ("/api/v1/strategies", "backtest"),
     ("/api/v1/strategy-market", "backtest"),
+    ("/api/v1/account", "account"),
+    ("/api/v1/backtest", "backtest"),
+    ("/api/v1/research", "backtest"),
     ("/api/v1/config", "admin"),
     ("/api/v1/api-keys", "admin"),
     ("/api/v1/notifiers", "admin"),
@@ -44,12 +49,17 @@ PATH_SCOPES = [
     ("/api/v1/wal", "admin"),
     ("/api/v1/metrics", "admin"),
     ("/api/v1/quote-bus", "admin"),
+    ("/api/v1/agent", "admin"),
 ]
 # 公共路径（免鉴权，仅只读信息）：健康检查 / 就绪 / API 文档 / 前端静态页
 PUBLIC_PREFIXES = (
     "/api/v1/health", "/api/v1/ready",
     "/api/docs", "/api/redoc", "/api/openapi.json",
 )
+
+# 未匹配（非公共）路径的兜底 scope：default-deny——任何未显式映射的端点
+# 至少需要 admin scope 才能访问，杜绝「新端点/前缀漏配 → 默认放行」的越权面。
+UNMATCHED_SCOPE = "admin"
 
 
 def _is_public_path(path: str) -> bool:
@@ -62,13 +72,18 @@ def _is_public_path(path: str) -> bool:
 
 
 def scope_for_path(path: str) -> str | None:
-    """根据请求路径返回所需 scope；public 端点返回 None（免鉴权）。"""
+    """根据请求路径返回所需 scope；public 端点返回 None（免鉴权）。
+
+    阶段 0-E：未匹配的端点返回 UNMATCHED_SCOPE（default-deny）。原实现返回 None，
+    而 scope_match(None) 恒 True → 任意有效密钥（如 market 子密钥）即可访问
+    未映射端点（/mcp、/agent 等），存在越权调用下单/管理接口的通道。
+    """
     if _is_public_path(path):
         return None
     for prefix, scope in PATH_SCOPES:
         if path.startswith(prefix):
             return scope
-    return None  # 未匹配的端点（如 /mcp）不强制 scope，但仍需鉴权
+    return UNMATCHED_SCOPE
 
 
 def scope_match(required: str | None, scopes: str) -> bool:
@@ -111,14 +126,18 @@ class ApiKeyStore:
 
     @staticmethod
     def _is_expired(row: dict) -> bool:
-        """过期判断：expires_at 之后失效；grace_until 提供轮换宽限期。"""
+        """过期判断：expires_at 之后失效；grace_until 提供轮换宽限期。
+
+        阶段 0-E：解析失败按「已过期」处理（返回 True）。原实现解析失败返回 False，
+        意味着格式损坏/非法日期的 expires_at 会让密钥永不过期。
+        """
         exp = (row.get("expires_at") or "").strip()
         if not exp:
             return False
         try:
             exp_ts = datetime.datetime.fromisoformat(exp).timestamp()
         except Exception:
-            return False
+            return True
         cutoff = exp_ts
         grace = (row.get("grace_until") or "").strip()
         if grace:

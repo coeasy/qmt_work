@@ -64,7 +64,11 @@ async def add_broker(body: dict):
         min_version=body.get("min_version", ""),
         active=bool(body.get("active", False)))
     try:
-        conn = state.broker_manager.add_connection(cfg, autoconnect=bool(body.get("autoconnect", True)))
+        # 阶段 0-D（C7）：add_connection(autoconnect=True) 会同步拉起子进程 + 握手
+        # （最坏 _ping 90s 超时），放线程池执行，避免冻结 FastAPI 事件循环。
+        conn = await asyncio.to_thread(
+            state.broker_manager.add_connection,
+            cfg, bool(body.get("autoconnect", True)))
     except BrokerError as exc:
         return err(503, str(exc))
     return ok({"conn_id": conn.cfg.conn_id, "name": conn.cfg.name,
@@ -78,12 +82,14 @@ async def test_broker(body: dict):
         account_type=body.get("account_type", "STOCK"),
         session_id=int(body.get("session_id", 0) or 0),
         min_version=body.get("min_version", ""))
-    return ok(state.broker_manager.test_connection(cfg))
+    # 阶段 0-D（C7）：test_connection 会临时拉起子进程（最坏 90s 超时），须放线程池。
+    return ok(await asyncio.to_thread(state.broker_manager.test_connection, cfg))
 
 @router.post("/brokers/{conn_id}/connect")
 async def connect_broker(conn_id: str):
     try:
-        res = state.broker_manager.connect(conn_id)
+        # 阶段 0-D（C7）：connect 同步 start() + test_connection()（最坏 90s），放线程池。
+        res = await asyncio.to_thread(state.broker_manager.connect, conn_id)
     except (KeyError, BrokerError) as exc:
         state.db.audit("broker", "broker.connect_failed", conn_id, {}, str(exc))
         return err(503, str(exc))

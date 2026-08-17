@@ -14,10 +14,11 @@
 import json
 import logging
 import os
+import queue as _queue
 import subprocess
 import sys
 import threading
-from concurrent.futures import Future
+from concurrent.futures import Future, TimeoutError as _FutTimeout
 
 from .base import (BrokerAdapter, BrokerError, BrokerNotConnectedError,
                    BrokerSDKError)
@@ -90,11 +91,22 @@ class BridgeAdapter(BrokerAdapter):
         self._backend_dir = backend_dir or _BACKEND_DIR
         self._proc = None
         self._lock = threading.Lock()
+        # 阶段 0-D（C6）：start() 临界区锁——健康重连 / 手动 connect / 批量重连三路
+        # 并发调用 start() 时，无双检锁会各自 Popen 双孤儿子进程、同账号双交易会话。
+        self._start_lock = threading.Lock()
         self._req_id = 0
         self._pending: dict[int, Future] = {}
         self._reader_thread = None
         self._stderr_thread = None
         self._quote_handlers: list = []
+        # 阶段 0-D（C5）：记录已订阅 codes，子进程重启后自动重新下发订阅（行情恢复）
+        self._subscribed_codes: set[str] = set()
+        # 阶段 1（C12）：quote handler 移出 reader 线程——独立有界事件队列 + 独立线程执行。
+        # reader 线程只做「解析 + RPC 响应分发」，高并发行情下 handler 阻塞不再拖垮
+        # 响应分发（此前 handler 在 reader 线程同步执行，会延迟 future 兑现/触发超时）。
+        self._quote_q: _queue.Queue = _queue.Queue(maxsize=2000)
+        self._quote_thread: threading.Thread | None = None
+        self._quote_dropped = 0  # 有界队列满丢弃计数（C12 背压指标）
         self._connected = False
         self._init_error: str | None = None
         self._stderr_buf: list[str] = []
@@ -144,6 +156,15 @@ class BridgeAdapter(BrokerAdapter):
         # 幂等复用：子进程存活 且 SDK 仍连接 → 直接复用（避免重复拉起同账户多连接/泄漏）
         if self._proc is not None and self._proc.poll() is None and self._connected:
             return
+        # 阶段 0-D（C6）：并发 start()（健康重连/手动 connect/批量重连三路）必须串行化，
+        # 否则各自 Popen 双孤儿子进程、同一资金账号双交易会话。
+        with self._start_lock:
+            # 双检：等待锁期间另一线程可能已完成重启（保持幂等复用语义）
+            if self._proc is not None and self._proc.poll() is None and self._connected:
+                return
+            self._start_inner()
+
+    def _start_inner(self) -> None:
         # 上次残留（已退出 / SDK 已断开 / 未清理）：先彻底终止旧子进程，再干净重启。
         # 关键：SDK 断开（服务端已推 conn_state:false，_connected=False）时强制重启子进程
         # ——让新子进程重新执行 adapter.start()，清掉 SDK 内部可能卡死的状态
@@ -198,6 +219,10 @@ class BridgeAdapter(BrokerAdapter):
         self._stderr_thread = threading.Thread(
             target=self._stderr_loop, args=(self._proc,), daemon=True)
         self._stderr_thread.start()
+        # 阶段 1（C12）：独立 quote 处理线程（队列泵），与 reader 线程解耦
+        self._quote_thread = threading.Thread(
+            target=self._quote_loop, daemon=True)
+        self._quote_thread.start()
 
         # 握手：_ping 确认子进程 IPC 就绪；超时则清理并抛错（附 stderr 便于定位）
         try:
@@ -234,6 +259,23 @@ class BridgeAdapter(BrokerAdapter):
             self._connected = bool(self._rpc("is_connected", [], timeout=10.0) or False)
         except Exception:  # noqa: BLE001
             self._connected = False
+        # 阶段 0-D（C5）订阅恢复：子进程（重新）启动后其订阅状态清零，
+        # 若不清洗 _subscribed_codes 的 SyncEngine 会以为「已订阅」而永不重订，
+        # 行情流静默死亡直到客户端退订再重订。这里在握手上成功后重新下发已订阅 codes，
+        # 让断线重连 / SDK 断开强重启 / 手动 connect 后行情立即恢复。
+        if self._connected and self._subscribed_codes:
+            try:
+                self._rpc("_subscribe_quote", [list(self._subscribed_codes)], timeout=15.0)
+                log.info("bridge resubscribed %d code(s) after (re)start",
+                         len(self._subscribed_codes))
+                # 阶段 3：订阅恢复可观测——指标 qmt_conn_events_total{event="subscription_recovered"}
+                try:
+                    from gateway.metrics import get_metrics
+                    get_metrics().record_conn_event("bridge", "subscription_recovered")
+                except Exception:  # noqa: BLE001
+                    pass
+            except Exception as exc:  # noqa: BLE001
+                log.warning("bridge resubscribe failed after start: %s", exc)
 
     def _stderr_loop(self, proc):
         try:
@@ -243,6 +285,27 @@ class BridgeAdapter(BrokerAdapter):
                     self._stderr_buf.pop(0)
         except Exception:  # noqa: BLE001
             pass
+
+    def _quote_loop(self) -> None:
+        """阶段 1（C12）：独立 quote 处理线程——从有界队列取事件并逐一派发 handler。
+
+        reader 线程（_read_loop）只负责解析 + RPC 响应分发；行情事件经队列在此线程
+        执行 handler，避免 handler 阻塞拖垮响应分发。线程退出条件：_cleanup_proc 把
+        self._quote_thread 置 None，循环在 0.5s 超时内自然退出。
+        """
+        t = threading.current_thread()
+        while self._quote_thread is t:
+            try:
+                evt = self._quote_q.get(timeout=0.5)
+            except _queue.Empty:
+                continue
+            if evt is None:
+                return
+            for h in list(self._quote_handlers):
+                try:
+                    h(evt)
+                except Exception:  # noqa: BLE001
+                    pass
 
     def _stderr_tail(self, n: int = 8) -> str:
         """返回子进程 stderr 最近 n 行（便于失败时透出真实原因）。"""
@@ -323,11 +386,18 @@ class BridgeAdapter(BrokerAdapter):
             d = data if isinstance(data, dict) else {}
             self._connected = bool(d.get("connected", self._connected))
         elif event == "quote":
-            for h in self._quote_handlers:
+            # 阶段 1（C12）：仅入队，由独立 quote 线程执行 handler——reader 线程只做
+            # 解析 + RPC 响应分发。有界队列满（handler 持续阻塞）时丢弃最旧并计数，
+            # 防止内存无界增长（背压：宁可丢行情也不拖垮 RPC 通道）。
+            try:
+                self._quote_q.put_nowait(data)
+            except _queue.Full:
                 try:
-                    h(data)
+                    self._quote_q.get_nowait()
+                    self._quote_q.put_nowait(data)
                 except Exception:  # noqa: BLE001
                     pass
+                self._quote_dropped += 1
 
     def _rpc(self, method: str, args, timeout: float = 30.0):
         if self._proc is None or self._proc.poll() is not None:
@@ -346,6 +416,13 @@ class BridgeAdapter(BrokerAdapter):
                 raise BrokerNotConnectedError(f"桥接写入失败：{exc}") from exc
         try:
             res = fut.result(timeout=timeout)
+        except _FutTimeout as exc:
+            # 阶段 1（C13）：方法级超时——超时≠未执行（尤其下单），
+            # 抛 BrokerError 供上层幂等层去重，避免 HTTP 500 让调用方
+            # 误以为「未下单」而重复提交造成双单。
+            raise BrokerError(
+                f"{method} 调用超时（{timeout}s）：请求可能仍在子进程执行，"
+                f"请勿盲目重试（幂等层会对同一请求去重）") from exc
         finally:
             self._pending.pop(rid, None)
         if not res.get("ok"):
@@ -380,7 +457,19 @@ class BridgeAdapter(BrokerAdapter):
     def subscribe_quote(self, codes: list[str], on_tick) -> None:
         if on_tick is not None and on_tick not in self._quote_handlers:
             self._quote_handlers.append(on_tick)
+        # 阶段 0-D（C5）：记录订阅 codes，子进程重启后据此自动恢复订阅
+        if codes:
+            self._subscribed_codes.update(codes)
         self._rpc("_subscribe_quote", [list(codes)], timeout=15.0)
+
+    def unsubscribe_quote(self, codes: list[str]) -> None:
+        """退订：从本端记录中移除并下发子进程（子进程侧 XTP 无对应接口时降级为仅本端）。"""
+        for c in codes:
+            self._subscribed_codes.discard(c)
+        try:
+            self._rpc("unsubscribe_quote", [list(codes)], timeout=15.0)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("unsubscribe_quote failed (child may not support): %s", exc)
 
     # ---------------- 账户 ----------------
     def get_account(self) -> dict:
@@ -439,18 +528,23 @@ class BridgeAdapter(BrokerAdapter):
         退出，超时则强杀——避免 SDK 断开后每次强制重启都堆积一个残留子进程。
         """
         self._connected = False
+        # 阶段 1（C12）：停止独立 quote 处理线程（0.5s 内自然退出，daemon 兜底）
+        self._quote_thread = None
         if self._proc is not None:
             proc = self._proc
             for f in list(self._pending.values()):
                 if not f.done():
                     f.set_exception(BrokerNotConnectedError("桥接已关闭"))
             if proc.poll() is None:
-                try:
-                    proc.stdin.write(json.dumps(
-                        {"id": -1, "method": "_shutdown", "args": []}) + "\n")
-                    proc.stdin.flush()
-                except Exception:  # noqa: BLE001
-                    pass
+                # 阶段 1（C14）：写 stdin 统一持锁，防止与并发 _rpc 请求交错成半行 JSON
+                #（子进程 json.loads 失败静默 continue → 父端 future 挂到超时）
+                with self._lock:
+                    try:
+                        proc.stdin.write(json.dumps(
+                            {"id": -1, "method": "_shutdown", "args": []}) + "\n")
+                        proc.stdin.flush()
+                    except Exception:  # noqa: BLE001
+                        pass
                 try:
                     proc.wait(timeout=3.0)
                 except Exception:  # noqa: BLE001

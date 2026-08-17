@@ -388,13 +388,9 @@ class StrategyRuntime:
         volume = int(volume)
         if volume <= 0 or not price or price <= 0:
             return
-        # 实盘模式过真实风控（计入日级计数）；模拟盘不污染真实风控计数
-        if mode == "live":
-            okc, reason = self.state.risk.check_order(code, price, volume, direction)
-            if not okc:
-                self._log(run_id, "reject", f"{direction} {code} 被风控拦截：{reason}", direction)
-                self._set(run_id, last_action=f"reject {code}")
-                return
+        # 阶段 0-B（F8）：mode 不区分大小写（原 "Live"/拼写错误落入 else 既绕过风控又实盘下单）。
+        # 全局 signal_mode 是交易主闸门：paper 下任何引擎都不真实下单（安全）。
+        mode = str(mode).lower()
         try:
             if mode == "paper":
                 pe = self.state.paper_engine
@@ -407,13 +403,19 @@ class StrategyRuntime:
                 self._log(run_id, "order",
                           f"[模拟] {direction} {code} {volume}@{price:.2f} -> {oid}", direction)
             else:
-                bridge = self.state.broker_manager.bridge(run.get("conn_id") or None)
-                if bridge is None:
-                    self._log(run_id, "error", "未连接券商，无法实盘下单", direction)
-                    return
-                res = await bridge.call(bridge.gateway.place_order, code, direction,
-                                        "limit", price, volume, f"bot:{run_id}", "")
+                # 实盘：经统一下单入口，携带完整风控（熔断/单笔/频率/黑白名单/日额度）。
+                # auto_confirm=True：已授权策略单跳过人工 TOTP 挂起，但仍过风控。
+                from app.state import state
+                res = await state.signal_router.submit(
+                    code, direction, volume, price, "limit",
+                    source=f"bot:{run_id}", broker_id=run.get("conn_id") or "",
+                    auto_confirm=True)
                 oid = (res or {}).get("order_id") if isinstance(res, dict) else None
+                if res and isinstance(res, dict) and not res.get("ok"):
+                    self._log(run_id, "reject",
+                              f"{direction} {code} 被风控拦截：{res.get('reason')}", direction)
+                    self._set(run_id, last_action=f"reject {code}")
+                    return
                 self._log(run_id, "order",
                           f"[实盘] {direction} {code} {volume}@{price:.2f} -> {oid}", direction)
             self._set(run_id, last_action=f"{direction} {code} {volume}@{price:.2f}")

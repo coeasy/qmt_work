@@ -40,8 +40,14 @@ class WebhookOut:
         self._lock = asyncio.Lock()
         self.sent = 0
         self.failed = 0
+        self._tasks: set[asyncio.Task] = set()  # 后台投递任务（防 GC + close 时清理）
 
     async def close(self):
+        for t in list(self._tasks):
+            t.cancel()
+        if self._tasks:
+            await asyncio.gather(*self._tasks, return_exceptions=True)
+        self._tasks.clear()
         await self._http.aclose()
 
     def invalidate(self):
@@ -102,18 +108,25 @@ class WebhookOut:
 
     # ---------------- 投递 ----------------
     async def dispatch(self, event: str, data) -> None:
-        """向所有匹配订阅投递一次事件（失败按各自 max_retries 重试，指数退避）。"""
+        """向所有匹配订阅投递一次事件（失败按各自 max_retries 重试，指数退避）。
+
+        P1 修复：fire-and-forget —— 投递与重试在后台执行，绝不阻塞调用方
+        （原实现内联重试阻塞账户循环 → 净值更新停摆 → 熔断失明）。
+        """
         subs = self._matches(event)
         if not subs:
             return
         ts = str(int(time.time()))
         body = json.dumps({"event": event, "ts": ts, "data": data},
                           ensure_ascii=False, default=str)
-        await asyncio.gather(*[self._deliver(s, event, ts, body) for s in subs],
-                             return_exceptions=True)
+        for s in subs:
+            task = asyncio.create_task(self._deliver(s, event, ts, body))
+            self._tasks.add(task)
+            task.add_done_callback(self._tasks.discard)
 
     async def _deliver(self, sub: dict, event: str, ts: str, body: str) -> None:
-        log_id = self.db.insert("webhook_deliveries", {
+        # 阶段 3：事件循环内投递日志/计数更新走 a* 变体（线程池），不阻塞事件循环
+        log_id = await self.db.ainsert("webhook_deliveries", {
             "subscription_id": sub["id"], "event": event, "payload_json": body,
             "status": "pending", "attempts": 0, "created_at":
                 time.strftime("%Y-%m-%dT%H:%M:%S")})
@@ -132,12 +145,12 @@ class WebhookOut:
                 r = await self._http.post(sub["url"], content=body, headers=headers, timeout=timeout)
                 http_status = r.status_code
                 if 200 <= r.status_code < 300:
-                    self.db.execute(
+                    await self.db.aexecute(
                         "UPDATE webhook_deliveries SET status=?, attempts=?, "
                         "http_status=?, error='', delivered_at=? WHERE id=?",
                         ("ok", attempt, http_status,
                          time.strftime("%Y-%m-%dT%H:%M:%S"), log_id))
-                    self.db.execute(
+                    await self.db.aexecute(
                         "UPDATE webhook_subscriptions SET success_count=success_count+1, "
                         "last_status=?, last_error='', last_sent_at=? WHERE id=?",
                         ("ok", time.strftime("%Y-%m-%dT%H:%M:%S"), sub["id"]))
@@ -148,10 +161,10 @@ class WebhookOut:
                 last_err = str(exc)[:300]
             if attempt < max_tries:
                 await asyncio.sleep(self.base_delay * (self.backoff ** (attempt - 1)))
-        self.db.execute(
+        await self.db.aexecute(
             "UPDATE webhook_deliveries SET status=?, attempts=?, http_status=?, error=? WHERE id=?",
             ("failed", max_tries, http_status, last_err, log_id))
-        self.db.execute(
+        await self.db.aexecute(
             "UPDATE webhook_subscriptions SET fail_count=fail_count+1, "
             "last_status=?, last_error=? WHERE id=?",
             ("failed", last_err[:300], sub["id"]))

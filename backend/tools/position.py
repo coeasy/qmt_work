@@ -63,11 +63,18 @@ def register_position_tools(mcp, risk):
                                                   "direction": direction,
                                                   "volume": volume}, "plan_only")
             return plan
-        ok, reason = risk.check_order(code, quote_px, volume, direction)
-        if not ok:
-            _audit("target_position.rejected", code, plan, reason)
-            return {**plan, "ok": False, "reason": reason}
-        res = await b.call_locked(b.gateway.place_order, code, direction,
-                                  "limit", quote_px, volume, "target_position", "")
-        _audit("target_position.order", code, plan, f"order_id={res.get('order_id')}")
-        return {**plan, "ok": True, "order_id": res.get("order_id")}
+        # 阶段 0-B（F6）：统一经 SignalRouter.submit()，由它完成
+        # 风控(check_order) + 幂等 + 审计 + 真实下单，杜绝绕过风控直接 place_order。
+        from app.state import state
+        sr = state.signal_router
+        if sr is None:
+            raise BrokerError("信号路由器未初始化")
+        res = await sr.submit(
+            code, direction, volume, quote_px, "limit",
+            source="target_position", broker_id=broker_id or "",
+            remark=f"target_pct={target_pct:.4f}", auto_confirm=True)
+        ok = bool(res.get("ok"))
+        reason = res.get("reason") or None
+        _audit("target_position.order", code, plan,
+               f"order_id={res.get('order_id')} ok={ok} reason={reason}")
+        return {**plan, "ok": ok, "order_id": res.get("order_id"), "reason": reason}

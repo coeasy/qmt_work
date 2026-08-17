@@ -58,6 +58,51 @@ def test_limitup_check_uses_board_pct():
     assert len(calls) <= 10
 
 
+def test_limitup_auto_buy_task_custody():
+    """阶段 2：_check 触发自动买入时任务托管登记，stop() 统一取消不再有游离下单。"""
+    import asyncio
+    m = LimitUpMonitor.__new__(LimitUpMonitor)
+    m._cfg = {"limit_pct": 0.0, "min_rise": 0.03, "cutoff": "10:00",
+              "do_trade": True, "buy_volume": 100}
+    m._pool = {"600519.SH": ""}
+    m._ticks = {}
+    m._triggered = set()
+    m._events = __import__("collections").deque(maxlen=200)
+    m._tasks = {}
+    m._task = None
+    m._wal = None
+    m._on_event = None   # _emit 直接访问 self._on_event，须显式置空
+    m._manager = None    # 本测试不触达 manager（fake_auto_buy 已替换真实下单）
+
+    started = asyncio.Event()
+
+    async def fake_auto_buy(code, limit_price):
+        started.set()
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            raise
+
+    m._auto_buy = fake_auto_buy   # 替换真实下单（不触碰 state/signal_router）
+
+    async def run():
+        # 构造一组 tick 使 600519.SH 触发涨停（主板 10%：昨收 10，涨停 11）
+        for i in range(12):
+            price = 10.0 + i * 0.1
+            m._check("600519.SH", {"last": price, "lastClose": 10.0}, True)
+            if "600519.SH" in m._tasks:
+                break
+        # 任务应被托管登记
+        assert "600519.SH" in m._tasks, "触发后 _auto_buy 任务应登记到 _tasks"
+        t = m._tasks["600519.SH"]
+        assert t is not None and not t.done()
+        # stop() 应取消托管任务
+        await m.stop()
+        assert not m._tasks, "stop() 后不应残留托管任务"
+
+    asyncio.run(run())
+
+
 # ---------------- P0#8：rebalance 真实涨跌停 ----------------
 def test_at_limit_real_prices():
     # 主板 10%：昨收 10，涨停 11.0，跌停 9.0
@@ -110,12 +155,18 @@ def test_confirm_fill_no_order_id_assumes_full():
             pass
         # 无 order_id → 保守全额
         assert await eng._confirm_fill(FakeB(), "", 1000) == 1000
-        # 查不到委托 → 全额
+        # 查不到委托（真实回报缺失）→ 未成交 0（阶段 2：以真实成交回报为准，不虚计 done）
         class FakeB2:
             gateway = type("G", (), {"get_orders": None})()
             async def call(self, fn, *a):
                 return []
-        assert await eng._confirm_fill(FakeB2(), "X1", 1000) == 1000
+        assert await eng._confirm_fill(FakeB2(), "X1", 1000) == 0
+        # 适配器未实现 get_orders（查询本身不可用）→ 保守降级全额
+        class FakeB0:
+            gateway = type("G", (), {})()
+            async def call(self, fn, *a):
+                return []
+        assert await eng._confirm_fill(FakeB0(), "X1", 1000) == 1000
         # 查到成交 → 返回真实成交（dealt 字段，XTP 适配器字段名）
         class FakeB3:
             gateway = type("G", (), {"get_orders": None})()

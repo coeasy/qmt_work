@@ -3,12 +3,17 @@
 - 建表采用**版本化迁移**：schema_migrations 记录已应用版本，新增表/字段只需追加迁移
   （旧库自动升级，无需手工删库）。
 """
+import asyncio
 import hashlib
 import json
+import logging
+import os
 import sqlite3
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
+
+log = logging.getLogger("qmt_work.db")
 
 _MIGRATIONS: list[tuple[int, str]] = [
     (1, """
@@ -378,8 +383,9 @@ _EXTRA_COLUMNS: dict[str, tuple[str, ...]] = {
     "api_keys": ("ip_allow", "expires_at", "grace_until"),
     # audit_log：D4 hash 链防篡改
     "audit_log": ("prev_hash", "hash"),
-    # condition_orders：A3 跨日续作与到期
-    "condition_orders": ("valid_days", "expire_at", "last_check_date", "expired_at"),
+    # condition_orders：A3 跨日续作与到期 + 阶段 2 拒单次日重试
+    "condition_orders": ("valid_days", "expire_at", "last_check_date", "expired_at",
+                         "retry_date", "retry_count"),
 }
 # 参与审计 hash 计算的字段（顺序固定，改动会使旧链失效）
 _AUDIT_HASH_FIELDS = ("actor", "api_key_id", "action", "target",
@@ -406,6 +412,11 @@ def audit_chain_hash(prev_hash: str, row: dict) -> str:
     return hashlib.sha256("\x1f".join(parts).encode("utf-8")).hexdigest()
 
 
+def _split_statements(sql: str) -> list[str]:
+    """把迁移脚本按分号切成单条 SQL（本库迁移脚本的字符串字面量不含分号，安全切分）。"""
+    return [s.strip() for s in sql.split(";") if s.strip()]
+
+
 class DB:
     """极简 SQLite 封装：线程安全、版本化迁移、自动建表。"""
 
@@ -430,7 +441,15 @@ class DB:
         self._conn.commit()
 
     def _migrate(self) -> None:
-        """按版本应用未执行的迁移。"""
+        """按版本应用未执行的迁移（阶段 3：事务化 + 失败回滚）。
+
+        原实现用 executescript 逐个执行——executescript 执行前会隐式 COMMIT，
+        且多条语句间不共享事务；某条中途失败会留下半成品 schema，但版本号未写入，
+        下次启动还会再跑、继续失败（半迁移僵尸态）。
+
+        现改为：每条迁移的全部语句 + 版本号写入放在**同一个事务**里，
+        任一步失败即 ROLLBACK 整体回滚，保证「要么完整应用、要么完全未应用」。
+        """
         self._conn.execute(
             "CREATE TABLE IF NOT EXISTS schema_migrations "
             "(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)")
@@ -439,10 +458,22 @@ class DB:
             if version in done:
                 continue
             with _lock:
-                self._conn.executescript(sql)
-                self._conn.execute(
-                    "INSERT OR REPLACE INTO schema_migrations (version, applied_at) VALUES (?, ?)",
-                    (version, now_iso()))
+                # 显式事务包裹（含 DDL）：任一步失败即整体回滚
+                self._conn.execute("BEGIN")
+                try:
+                    for stmt in _split_statements(sql):
+                        self._conn.execute(stmt)
+                    self._conn.execute(
+                        "INSERT INTO schema_migrations (version, applied_at) "
+                        "VALUES (?, ?)", (version, now_iso()))
+                    self._conn.execute("COMMIT")
+                except sqlite3.Error as exc:
+                    try:
+                        self._conn.execute("ROLLBACK")
+                    except sqlite3.Error:
+                        pass
+                    log.warning("迁移 v%d 失败并回滚：%s", version, exc)
+                    raise
 
     def _ensure_columns(self) -> None:
         """幂等补充各表的向后兼容扩展字段（旧库自动升级，不需删库）。"""
@@ -493,6 +524,53 @@ class DB:
             cur = self._conn.execute(sql, tuple(data.values()))
             self._conn.commit()
             return int(cur.lastrowid)
+
+    # ---------------- 阶段 3：异步包装（同步 sqlite 移出事件循环） ----------------
+    # 事件循环内的 async 代码应调用 a* 变体，把阻塞的 sqlite 调用 offload 到线程池，
+    # 避免高频写入（行情缓存/快照/通知/投递日志）卡住事件循环。
+    # 底层已用全局 threading.Lock + check_same_thread=False，线程池安全。
+
+    async def aexecute(self, sql: str, params: tuple = ()) -> sqlite3.Cursor:
+        return await asyncio.to_thread(self.execute, sql, params)
+
+    async def aquery(self, sql: str, params: tuple = ()) -> list[dict]:
+        return await asyncio.to_thread(self.query, sql, params)
+
+    async def aquery_one(self, sql: str, params: tuple = ()) -> dict | None:
+        return await asyncio.to_thread(self.query_one, sql, params)
+
+    async def ainsert(self, table: str, data: dict) -> int:
+        return await asyncio.to_thread(self.insert, table, data)
+
+    async def aupsert(self, table: str, data: dict) -> int:
+        return await asyncio.to_thread(self.upsert, table, data)
+
+    # ---------------- 阶段 3：一致性备份（sqlite3 backup API） ----------------
+    def backup_to(self, dst: Path) -> bool:
+        """用 sqlite3 backup API 生成**一致性**备份（含 WAL 中已提交但未 checkpoint 的数据）。
+
+        相比逐文件 copy 主库 + -wal/-shm（可能拿到中间状态、且重启时 -wal 失效），
+        `Connection.backup()` 在事务层面拷贝出单一完整文件，可直接单独使用/还原。
+        备份期间持有全局锁，避免写入并发导致快照不一致。
+        """
+        try:
+            dst = Path(dst)
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            tmp = str(dst) + ".tmp"
+            if os.path.exists(tmp):
+                os.remove(tmp)
+            dst_conn = sqlite3.connect(tmp)
+            try:
+                with _lock:
+                    self._conn.backup(dst_conn)
+                dst_conn.commit()
+            finally:
+                dst_conn.close()
+            os.replace(tmp, dst)   # 原子落位：进程崩溃不会留下半份备份
+            return True
+        except sqlite3.Error as exc:
+            log.warning("sqlite backup API 失败：%s", exc)
+            return False
 
     # ---------------- 审计日志（E4 脱敏 + D4 hash 链） ----------------
     def _last_audit_hash(self) -> str:

@@ -18,10 +18,12 @@
 import argparse
 import json
 import os
+import queue as _queue
 import sys
 import threading
 import time
 import traceback
+from concurrent.futures import ThreadPoolExecutor
 from typing import TextIO
 
 from xtquant_client.base import BrokerNotConnectedError
@@ -253,8 +255,60 @@ def serve_adapter(adapter, stdin=None, stdout=None,
             _write(stdout, {"id": rid, "ok": False, "error": _safe_err(exc),
                             "error_type": _err_type(exc)})
 
-    if log_init:
-        # 启动已失败：仅保持最小读取循环以便父端探测到 init_error
+    # ---- 阶段 1（C11）：读循环仅解析 + 分发，普通方法交给线程池执行 ----
+    # 痛点：此前单线程串行 dispatch 且 fn(*params) 无超时——一次 SDK 挂死会阻塞
+    # 全部请求（含 _ping 握手）直至整体重启。改为：
+    #  - 读循环（主线程）：只读行 + 解析；_ping/_shutdown 快速路径直接处理
+    #    （_ping 只是 is_connected 标志查询，绝不被普通方法拖累）；
+    #  - 普通方法（含 _subscribe_quote）：入 job 队列，由线程池并行执行——
+    #    单个 SDK 调用挂死只占一个 worker，其余请求照常响应；
+    #  - 方法级超时在客户端 _rpc（future.result(timeout)）承担（C13）。
+    _EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="bridge-job")
+    _job_q: _queue.Queue = _queue.Queue()
+    _SENTINEL = object()
+
+    def _worker() -> None:
+        while True:
+            try:
+                req = _job_q.get(timeout=0.5)
+            except _queue.Empty:
+                continue
+            if req is _SENTINEL:
+                return
+            try:
+                _dispatch(req)
+            except Exception:  # noqa: BLE001  worker 内异常不得中断队列消费
+                pass
+
+    _workers = [threading.Thread(target=_worker, daemon=True) for _ in range(4)]
+    for _w in _workers:
+        _w.start()
+
+    def _handle_line(req: dict) -> str | None:
+        """按方法类型分发：_ping/_shutdown 快速路径（读循环线程），其余入线程池。"""
+        method = req.get("method", "")
+        if method == "_ping":
+            return _dispatch(req)  # 快速：仅查 is_connected 标志，必须永不排队
+        if method == "_shutdown":
+            return _dispatch(req)  # 需要同步拿到 stop 信号退出读循环
+        _job_q.put(req)            # 普通方法（含 _subscribe_quote）入线程池
+        return None
+
+    try:
+        if log_init:
+            # 启动已失败：仅保持最小读取循环以便父端探测到 init_error
+            for line in stdin:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    req = json.loads(line)
+                except Exception:  # noqa: BLE001
+                    continue
+                if _handle_line(req) == "stop":
+                    break
+            return 1
+
         for line in stdin:
             line = line.strip()
             if not line:
@@ -263,29 +317,24 @@ def serve_adapter(adapter, stdin=None, stdout=None,
                 req = json.loads(line)
             except Exception:  # noqa: BLE001
                 continue
-            stop = _dispatch(req)
+            try:
+                stop = _handle_line(req)
+            except Exception:  # noqa: BLE001
+                stop = None
             if stop == "stop":
                 break
-        return 1
-
-    for line in stdin:
-        line = line.strip()
-        if not line:
-            continue
+    finally:
+        # 停止 worker 线程池（哨兵逐个唤醒，daemon 兜底不阻塞退出）
+        for _ in _workers:
+            try:
+                _job_q.put_nowait(_SENTINEL)
+            except Exception:  # noqa: BLE001
+                pass
+        _EXECUTOR.shutdown(wait=False, cancel_futures=True)
         try:
-            req = json.loads(line)
+            adapter.close()
         except Exception:  # noqa: BLE001
-            continue
-        try:
-            stop = _dispatch(req)
-        except Exception:  # noqa: BLE001
-            stop = None
-        if stop == "stop":
-            break
-    try:
-        adapter.close()
-    except Exception:  # noqa: BLE001
-        pass
+            pass
     return 0
 
 

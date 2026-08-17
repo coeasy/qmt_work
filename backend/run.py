@@ -70,8 +70,21 @@ def _acquire_singleton_lock(data_dir) -> int | None:
         return None
 
 
+def _is_remote_listen(host: str) -> bool:
+    """判定绑定地址是否可被远程访问（非 loopback 即视为可远程）。"""
+    if not host:
+        return True
+    low = str(host).strip().lower()
+    loopback = {"127.0.0.1", "localhost", "::1", "::ffff:127.0.0.1"}
+    return low not in loopback
+
+
 def _self_check() -> None:
-    """启动自检：数据库目录可写、时钟基准、API Key 存在性。"""
+    """启动自检：数据库目录可写、时钟基准、API Key 存在性。
+
+    0-E 安全基线：远程监听(host 非 loopback) + 默认 api_key=qmt-dev-key
+    属高危组合（他人可用默认密钥接管远程接口），直接拒绝启动。
+    """
     from datetime import datetime
     db_dir = os.path.dirname(str(settings.db_path)) or "."
     try:
@@ -89,10 +102,16 @@ def _self_check() -> None:
     if not settings.api_key:
         log.warning("自检：未配置 API Key（api_key），鉴权端点将拒绝访问")
     elif settings.api_key == "qmt-dev-key":
-        log.warning("自检：API Key 仍为默认值 qmt-dev-key —— 生产环境必须修改，"
-                    "否则远程调用可被他人用默认密钥接管！")
+        log.warning("自检：API Key 仍为默认值 qmt-dev-key —— 生产环境必须修改！")
+        if _is_remote_listen(settings.host):
+            log.error("自检：绑定地址 %s 可被远程访问，且 api_key 仍为默认值 qmt-dev-key，"
+                      "他人可用默认密钥接管全部接口。为避免未授权接管，拒绝启动。"
+                      "请在配置文件设置 api_key（并在需要时改回远程绑定 host）后重试。",
+                      settings.host)
+            sys.exit(1)
+        log.warning("自检：当前仅本机访问，默认密钥风险可控——但生产环境仍务必修改 api_key")
     else:
-        log.info("自检：API Key 已配置（%s）", settings.api_key)
+        log.info("自检：API Key 已配置（已脱敏）")
 
 
 def _port_in_use(port: int) -> bool:
@@ -186,7 +205,7 @@ if __name__ == "__main__":
         log.info("配置文件：%s（开发模式不生成，使用默认配置；打包运行将自动生成）", cfg_path)
     log.info("数据库：%s", settings.db_path)
     log.info("日志目录：%s", settings.log_dir)
-    log.info("API Key：%s", settings.api_key)
+    log.info("API Key：已配置（已脱敏，不打印明文）")
     # 端口来源提示：环境变量 QMT_PORT > 配置文件 port > 默认 21117
     _port_src = "默认值 21117"
     if os.environ.get("QMT_PORT"):

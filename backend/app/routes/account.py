@@ -2,6 +2,7 @@ from app.routes._common import ok, err, state, _need, _call, BrokerError
 
 from fastapi import APIRouter
 # --- stdlib imports injected by fix_route_imports ---
+import asyncio
 import time
 
 
@@ -325,11 +326,12 @@ async def account_batch_reconnect(body: dict):
         # 默认重连所有已标记 active 的连接
         cids = [c.cfg.conn_id for c in state.broker_manager.all_connections()
                 if c.cfg.active]
-    results = []
-    for cid in cids:
+
+    async def _one(cid: str) -> dict:
         rec = {"conn_id": cid, "status": "failed", "detail": ""}
         try:
-            state.broker_manager.connect(cid)
+            # 阶段 0-D（C7）：connect 同步阻塞（最坏 _ping 90s 超时），放线程池执行
+            await asyncio.to_thread(state.broker_manager.connect, cid)
             conn = state.broker_manager._conns.get(cid)
             if conn and conn.connected:
                 rec["status"] = "connected"
@@ -338,7 +340,16 @@ async def account_batch_reconnect(body: dict):
                 rec["detail"] = "重连后仍不可用"
         except (KeyError, BrokerError) as exc:
             rec["detail"] = str(exc)
-        results.append(rec)
+        return rec
+
+    # 阶段 0-D（C7）：批量重连并行执行 + 限并发（原实现串行同步阻塞，最坏 N×90s 冻结事件循环）
+    sem = asyncio.Semaphore(4)
+
+    async def _limited(cid: str) -> dict:
+        async with sem:
+            return await _one(cid)
+
+    results = await asyncio.gather(*(_limited(cid) for cid in cids))
     return ok({"total": len(cids), "results": results})
 
 

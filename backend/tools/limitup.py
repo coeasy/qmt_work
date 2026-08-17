@@ -25,11 +25,13 @@ class LimitUpMonitor:
         self._on_event = on_event
         self._wal = wal
         self._pool: dict[str, str] = {}          # code -> name(占位)
-        self._ticks: dict[str, deque] = {}       # code -> 最近 last 序列
+        self._ticks: dict[str, deque] = {}       # code -> 最近 last 序列（含涨停前）
         self._triggered: set[str] = set()
         self._events: deque = deque(maxlen=200)
         self._cfg: dict = {}
         self._task: asyncio.Task | None = None
+        # 阶段 2：_auto_buy 任务托管——stop()/停机时统一取消，避免停机后打板任务失控
+        self._tasks: dict[str, asyncio.Task] = {}
 
     def _wal_append(self, op: str, entity_id: str, payload: dict):
         if self._wal is not None:
@@ -91,6 +93,17 @@ class LimitUpMonitor:
         return self.status()
 
     async def stop(self) -> dict:
+        # 阶段 2：统一取消托管的打板任务，停机后不再有游离下单
+        for t in list(self._tasks.values()):
+            if t and not t.done():
+                t.cancel()
+        if self._tasks:
+            try:
+                await asyncio.gather(*[t for t in self._tasks.values() if not t.done()],
+                                     return_exceptions=True)
+            except Exception:  # noqa: BLE001
+                pass
+        self._tasks.clear()
         if self._task and not self._task.done():
             self._task.cancel()
             try:
@@ -102,7 +115,12 @@ class LimitUpMonitor:
 
     # ---------------- 核心循环 ----------------
     async def _loop(self):
+        from gateway.trading_session import default_session
         while True:
+            # 阶段 2：交易日 + 盘中时段判定——非交易日/非盘中不判定涨停、不触发打板下单
+            if not default_session.is_active():
+                await asyncio.sleep(max(float(self._cfg.get("interval", 2.0)), 30.0))
+                continue
             try:
                 b = self._manager.active_bridge()
                 if b is not None and self._pool:
@@ -112,40 +130,45 @@ class LimitUpMonitor:
                         self._check(code, q, in_window)
             except Exception as exc:  # noqa: BLE001
                 log.warning("limitup loop error: %s", exc)
-            # 盘中高频轮询；非交易时段降频探活（省资源、减券商压力）
-            from gateway.trading_session import default_session
-            iv = default_session.sleep_seconds(
-                float(self._cfg.get("interval", 2.0)), 30.0)
-            await asyncio.sleep(iv)
+            await asyncio.sleep(float(self._cfg.get("interval", 2.0)))
 
     def _check(self, code: str, q: dict, in_window: bool) -> None:
         last = q.get("last") or 0
         lc = q.get("lastClose") or 0
         if not last or not lc:
             return
+        # 阶段 2（F14）：记录**全部** tick（含涨停前的），涨幅基准取自「触发前」序列。
+        # 原实现只记录已涨停的 tick，buf 内价格≈涨停价 → rise 恒≈0 < min_rise（默认 3%），
+        # 涨停监控在默认配置下永远无法触发。
+        buf = self._ticks.setdefault(code, deque(maxlen=25))
+        buf.append(last)
         # 涨停幅度：显式配置 > 按板块自动（主板10/创业科创20/北交30/ST5）
         cfg_pct = float(self._cfg.get("limit_pct", 0.0) or 0.0)
         pct = cfg_pct if cfg_pct > 0 else _limit_factor(code, self._pool.get(code, ""))
         limit = round(lc * (1 + pct), 2)
         if last < limit - 1e-9:
             return
-        buf = self._ticks.setdefault(code, deque(maxlen=25))
-        buf.append(last)
         min_rise = float(self._cfg.get("min_rise", 0.03))
         min_ticks = int(self._cfg.get("min_ticks", 10))
-        rise_ok = len(buf) >= min_ticks and (buf[-1] / buf[0] - 1) >= min_rise
+        # 涨幅 = 当前价 / 缓冲区最早价 - 1（最早价即涨停前参考点）
+        ref = float(buf[0]) if buf else 0.0
+        rise = (last / ref - 1) if ref else 0.0
+        rise_ok = len(buf) >= min_ticks and rise >= min_rise
         if not (in_window and rise_ok):
             return
         if code in self._triggered:
             return
         self._triggered.add(code)
-        event = {"code": code, "price": last, "limit": limit,
+        event = {"code": code, "price": last, "limit": limit, "rise": round(rise, 4),
                  "ts": datetime.now().isoformat(timespec="seconds")}
         self._events.append(event)
         self._wal_append("trigger", code, event)
         self._emit({"type": "limitup", "data": event})
         if self._cfg.get("do_trade") and int(self._cfg.get("buy_volume", 0)) > 0:
-            asyncio.create_task(self._auto_buy(code, limit))
+            # 阶段 2：任务托管——登记句柄，stop()/停机统一取消
+            t = asyncio.create_task(self._auto_buy(code, limit))
+            self._tasks[code] = t
+            t.add_done_callback(lambda _t, c=code: self._tasks.pop(c, None))
 
     async def _auto_buy(self, code: str, limit_price: float) -> None:
         b = self._manager.active_bridge()
@@ -165,8 +188,12 @@ class LimitUpMonitor:
                                 {"limit_price": limit_price, "volume": vol},
                                 "金额超风控上限")
                     return
-            res = await b.call(b.gateway.place_order, code, "buy", "limit",
-                               float(limit_price), vol, "limitup", "打板自动买入")
+            # 阶段 0-B（F7）：经统一入口提交，携带完整风控（熔断/频率/持仓比例/黑白名单/
+            # 日额度），不再直接 gateway.place_order 绕过。auto_confirm=True 跳过人工 TOTP。
+            from app.state import state
+            res = await state.signal_router.submit(
+                code, "buy", vol, float(limit_price), "limit",
+                source="limitup", remark="打板自动买入", auto_confirm=True)
             self._emit({"type": "limitup_order", "data": {
                 "code": code, "order_id": res.get("order_id"),
                 "price": limit_price, "volume": vol}})
@@ -176,7 +203,7 @@ class LimitUpMonitor:
             self._audit("limitup.buy", code,
                         {"limit_price": limit_price, "volume": vol},
                         f"order_id={res.get('order_id')}")
-        except BrokerError as exc:
+        except Exception as exc:  # noqa: BLE001 —— 捕获全异常（含 BrokerError/超时/引擎异常）
             self._emit({"type": "limitup_order", "data": {"code": code, "error": str(exc)}})
             self._wal_append("error", code, {"error": str(exc), "price": limit_price, "volume": vol})
             self._audit("limitup.buy_failed", code,

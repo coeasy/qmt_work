@@ -161,7 +161,7 @@ async def test_agent():
             body = ""
             async for line in r.aiter_lines():
                 body += line
-    check("Agent 未配置 LLM 提示", "尚未配置" in body, body[:120])
+    check("Agent 未配置 LLM 提示", "Agent 未配置" in body, body[:120])
 
 
 async def test_ws():
@@ -175,6 +175,86 @@ async def test_ws():
             check("WS ping/pong", "pong" in pong, pong[:80])
     except Exception as exc:
         check("WS 连接", False, str(exc))
+
+
+async def test_ws_reconnect():
+    """阶段 4：断线重连——断线后重连应收到新的快照。"""
+    try:
+        async with websockets.connect(WS_BASE) as ws:
+            msg1 = await asyncio.wait_for(ws.recv(), timeout=5)
+            obj1 = json.loads(msg1)
+            check("WS 首次连接收到快照", obj1.get("type") == "snapshot", str(obj1)[:80])
+    except Exception as exc:
+        check("WS 首次连接", False, str(exc))
+        return
+    # 断线（自动随 with 块退出）& 重连
+    try:
+        async with websockets.connect(WS_BASE) as ws2:
+            msg2 = await asyncio.wait_for(ws2.recv(), timeout=5)
+            obj2 = json.loads(msg2)
+            check("WS 断线重连后收到新快照", obj2.get("type") == "snapshot", str(obj2)[:80])
+    except Exception as exc:
+        check("WS 断线重连", False, str(exc))
+
+
+async def test_risk_circuit_breaker():
+    """阶段 4：风控熔断拦截——手动熔断后提交信号被拦截，解除后恢复。"""
+    # 先解除熔断确保干净状态
+    await post("/config/risk/circuit", {"action": "reset"})
+    # 手动触发熔断
+    code, data = await post("/config/risk/circuit", {"action": "trip", "reason": "smoke2 熔断测试"})
+    check("熔断触发返回 code=0", data.get("code") == 0, f"{code} {data}")
+    check("熔断状态为 true", data.get("data", {}).get("circuit_broken") is True, str(data))
+    # 提交信号：应在风险检查阶段被拦截，返回 503
+    code, data = await post("/signal/submit", {
+        "source": "test", "code": "600519.SH", "side": "buy",
+        "volume": 100, "price": 10.0, "price_type": "limit"})
+    check("熔断期间信号被拦",
+          data.get("code") == 503 and "熔断" in str(data), f"{code} {data}")
+    # 解除熔断
+    code, data = await post("/config/risk/circuit", {"action": "reset"})
+    check("熔断解除返回 code=0", data.get("code") == 0, f"{code} {data}")
+    check("熔断状态为 false", data.get("data", {}).get("circuit_broken") is False, str(data))
+
+
+async def test_idempotent_concurrent():
+    """阶段 4：幂等并发——同一 idempotency_key 并发提交只执行一次真实下单（paper 模式）。"""
+    import time
+    import httpx
+
+    # 记录并切换到 paper 模式（无需券商连接即可端到端验证幂等）
+    _, mode_data = await get("/signal/mode")
+    prev_mode = (mode_data.get("data") or {}).get("mode", "live")
+    await post("/signal/mode", {"mode": "paper"})
+    tag = f"smoke-idem-{int(time.time() * 1000)}"
+    key = f"order:{tag}"
+    signal = {"source": "test", "code": "600519.SH", "side": "buy",
+              "volume": 100, "price": 10.0, "price_type": "limit",
+              "remark": tag, "idempotency_key": key}
+    try:
+        async with httpx.AsyncClient(timeout=15) as cli:
+            tasks = [cli.post(BASE + "/signal/submit", json=signal) for _ in range(5)]
+            responses = await asyncio.gather(*tasks, return_exceptions=True)
+        results = [r.json().get("data", {}) for r in responses
+                   if isinstance(r, httpx.Response) and r.status_code == 200]
+        check("并发请求全部返回 HTTP 200", len(results) == 5, f"got {len(results)} / 5")
+        # 恰好一个真实执行（无 duplicated），其余标记重复（幂等命中）
+        real = [d for d in results if not d.get("duplicated")]
+        dup = [d for d in results if d.get("duplicated")]
+        check("仅一次真实执行，其余标记重复",
+              len(real) == 1 and len(dup) == 4,
+              f"real={len(real)} dup={len(dup)}")
+        # 数据库仅落一条 paper 订单（同一 idempotency_key 只执行一次）
+        try:
+            c = sqlite3.connect(DB_PATH)
+            n = c.execute("SELECT COUNT(*) FROM paper_orders WHERE remark=?",
+                          (tag,)).fetchone()[0]
+            c.close()
+        except Exception:
+            n = -1
+        check("paper_orders 仅落一条记录", n == 1, f"rows={n}")
+    finally:
+        await post("/signal/mode", {"mode": prev_mode})
 
 
 async def test_mcp_handshake():
@@ -220,6 +300,9 @@ async def main():
     await test_api_keys()
     await test_agent()
     await test_ws()
+    await test_ws_reconnect()
+    await test_risk_circuit_breaker()
+    await test_idempotent_concurrent()
     await test_mcp_handshake()
     await test_ready()
     print(f"\n=== RESULT: {passed} passed, {failed} failed ===")

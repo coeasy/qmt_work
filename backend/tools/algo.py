@@ -26,6 +26,8 @@ class AlgoEngine:
         self._on_event = on_event
         self._wal = wal
         self._jobs: dict[str, dict] = {}
+        # 阶段 2：任务句柄托管——submit 创建的 _run 任务全部登记，stop() 统一取消清理
+        self._tasks: dict[str, asyncio.Task] = {}
         self._seq = 0
 
     def _wal_append(self, op: str, aid: str, payload: dict):
@@ -78,7 +80,7 @@ class AlgoEngine:
         }
         self._jobs[aid] = job
         self._wal_append("create", aid, job)
-        asyncio.create_task(self._run(aid))
+        self._tasks[aid] = asyncio.create_task(self._run(aid))  # 阶段 2：任务句柄托管
         return {"algo_id": aid, "status": "pending",
                 "algo": algo, "visible_pct": visible_pct,
                 "participation_rate": participation_rate}
@@ -102,14 +104,41 @@ class AlgoEngine:
             self._wal_append("resume", algo_id, {"status": "running"})
         return {"algo_id": algo_id, "status": job["status"]}
 
-    def cancel(self, algo_id: str) -> dict:
+    async def cancel(self, algo_id: str) -> dict:
         job = self._jobs.get(algo_id)
         if not job:
             raise KeyError(f"未知算法单：{algo_id}")
         if job["status"] in ("pending", "running", "paused"):
             job["status"] = "canceled"
             self._wal_append("cancel", algo_id, {"status": "canceled"})
+        # 阶段 2：真撤柜台子单——遍历未完全成交的子单逐一撤单（此前只改本地状态，
+        # 已发往柜台的子单仍会成交，造成「取消后继续成交」的误单）
+        b = self._manager.active_bridge()
+        if b is not None:
+            for child in list(job["children"]):
+                oid = child.get("order_id")
+                filled = int(child.get("filled") or 0)
+                vol = int(child.get("volume") or 0)
+                if oid and filled < vol:  # 未完全成交的子单需要撤
+                    try:
+                        await b.call(b.gateway.cancel_order, oid)
+                    except Exception as exc:  # noqa: BLE001
+                        log.warning("algo %s 撤子单 %s 失败: %s", algo_id, oid, exc)
         return {"algo_id": algo_id, "status": job["status"]}
+
+    async def stop(self) -> None:
+        """阶段 2：取消全部运行中算法单任务并撤已发子单（生命周期清理）。"""
+        for aid in list(self._jobs.keys()):
+            job = self._jobs.get(aid)
+            if job and job["status"] in ("pending", "running", "paused"):
+                try:
+                    await self.cancel(aid)
+                except Exception:  # noqa: BLE001
+                    pass
+            t = self._tasks.get(aid)
+            if t is not None and not t.done():
+                t.cancel()
+        self._tasks.clear()
 
     def list(self) -> list[dict]:
         return [self._view(j) for j in self._jobs.values()]
@@ -237,11 +266,17 @@ class AlgoEngine:
         total = job["volume"]
         vis = self._visible_qty(total, job.get("visible_pct", 10.0))
         gap = max(0.5, job["duration"] / max(1, job["slices"]))
+        # 阶段 2：迭代上限——若真实成交回报缺失（filled 恒 0），done 不推进，必须
+        # 有界退出，否则 while done<total 会无限重复下发同量单（重复下单事故）
+        max_idx = max(job["slices"] * 5, 20)
         idx = 0
         while job["done"] < total and job["status"] in ("running", "paused"):
             while job["status"] == "paused":
                 await asyncio.sleep(0.5)
             if job["status"] == "canceled":
+                break
+            if idx >= max_idx:
+                job["error"] = f"达最大切片次数({max_idx})仍未完成（无成交回报/流动性不足），剩余 {total - job['done']}"
                 break
             remaining = total - job["done"]
             vol = min(vis, remaining)
@@ -287,24 +322,28 @@ class AlgoEngine:
     async def _confirm_fill(self, b, order_id: str, intended: int) -> int:
         """确认真实成交数量：查当日委托，读 dealt/traded_volume。
 
-        查不到（适配器未实现/订单尚未可见）时保守按全额计，并写降级日志——
-        避免「切片发出即计 done 假设全额成交」的乐观错误，同时不阻塞下单流程。
+        阶段 2：以**真实成交回报**为准——订单在委托中但未成交（或查无此单）返回 0，
+        不再乐观按全额计；仅当券商适配器未实现 get_orders（查询本身不可用）时降级
+        按全额计，避免阻塞下单流程。防止「切片发出即计 done 假设全额成交」的超额。
         """
         if not order_id:
             return intended
+        if not hasattr(b.gateway, "get_orders"):
+            return intended  # 适配器未实现委托查询：无法确认，保守降级
+        last_filled = 0
         for _ in range(3):
             try:
                 rows = await b.call(b.gateway.get_orders) or []
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: BLE001  查询本身失败（非「无成交」）→ 降级全额
                 return intended
             for o in rows:
                 if str(o.get("order_id")) == str(order_id):
-                    filled = int(o.get("dealt") or o.get("traded_volume")
-                                 or o.get("filled_volume") or 0)
-                    if filled > 0:
-                        return filled
+                    last_filled = int(o.get("dealt") or o.get("traded_volume")
+                                     or o.get("filled_volume") or 0)
+                    if last_filled > 0:
+                        return last_filled
             await asyncio.sleep(0.3)
-        return intended
+        return last_filled  # 未成交（0）——以真实成交回报为准
 
     async def _place_slice(self, aid: str, idx: int, vol: int) -> None:
         job = self._jobs[aid]
@@ -320,8 +359,14 @@ class AlgoEngine:
                 q = await b.call(b.gateway.get_quote, job["code"])
                 price = float(q.get("last") or 0)
         try:
-            res = await b.call(b.gateway.place_order, job["code"], job["direction"],
-                               price_type, price, vol, f"algo_{job['algo']}", job.get("remark", ""))
+            # 阶段 0-B（F6）：经统一下单入口提交，携带完整风控（熔断/单笔/频率/黑白名单/
+            # 日额度），不再直接 gateway.place_order 绕过。auto_confirm=True：已授权算法单
+            # 跳过人工 TOTP 挂起，但仍走风控校验。
+            from app.state import state
+            res = await state.signal_router.submit(
+                job["code"], job["direction"], vol, price, price_type,
+                source=f"algo_{job['algo']}", remark=job.get("remark", ""),
+                auto_confirm=True)
             # 真实成交而非假设全额：查委托确认 filled，冰山/POV 据此推进，避免超额下发
             filled = await self._confirm_fill(b, res.get("order_id"), vol)
             job["done"] += filled

@@ -35,6 +35,7 @@ HIDDEN = [
     "sync", "backtest", "mcp_server", "gateway",
     "gateway.auth", "gateway.rate_limit", "gateway.risk",
     "gateway.apikey", "gateway.totp", "gateway.metrics", "gateway.notifier",
+    "gateway.idempotency",
     "gateway.alert_engine", "gateway.wal", "gateway.reconcile",
     "gateway.quote_bus", "gateway.health", "gateway.signal_router",
     "gateway.masking", "gateway.kline_cache", "gateway.webhook_out",

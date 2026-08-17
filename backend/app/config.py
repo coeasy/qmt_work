@@ -50,7 +50,9 @@ def _default_config_payload() -> dict[str, Any]:
                    "`_` 开头的键是说明，不会被解析。"
                    "db_path / log_dir 填相对路径时以本文件所在目录（exe 同目录）为基准。",
         "app_name": "qmt_work",
-        "host": "0.0.0.0",
+        # 默认仅本机可访问（0-E 安全基线）；需远程访问请改为 0.0.0.0
+        # 并务必修改 api_key，否则启动自检会拒绝在远程监听下使用默认密钥
+        "host": "127.0.0.1",
         "port": 21117,
         # ---- 存储与日志 ----
         "db_path": "data/app.db",
@@ -163,7 +165,8 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_prefix="QMT_", extra="ignore")
 
     app_name: str = "qmt_work"
-    host: str = "0.0.0.0"
+    # 0-E 安全基线：默认仅本机可访问；远程监听(0.0.0.0)且未改默认 api_key 时启动自检拒绝启动
+    host: str = "127.0.0.1"
     port: int = 21117
 
     # 引导连接（可选；不提供则需在 UI 中配置券商连接）

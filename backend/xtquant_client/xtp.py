@@ -405,6 +405,15 @@ class XTPQuantAdapter(BrokerAdapter):
         self._lock = threading.Lock()
         self._order_status_cache: dict[str, str] = {}
         self._name_cache: dict[str, str] = {}
+        # 阶段 0-A：报单回调闭环 —— 本地 seq → 柜台真实 order_id 双向映射，
+        # 以及 place_order 等待 response 回调的 pending 表。
+        self._seq_to_oid: dict[int, str] = {}
+        self._oid_to_seq: dict[str, int] = {}
+        self._pending_resp: dict[int, tuple[threading.Event, list]] = {}
+        # 外部钩子（由 sync 引擎 / manager 注入，用于把回报直推行情/对账管线）
+        self._on_order_cb = None
+        self._on_trade_cb = None
+        self._on_disconnect_cb = None
 
     # ---------------- 身份 ----------------
     @property
@@ -536,12 +545,140 @@ class XTPQuantAdapter(BrokerAdapter):
             cls = _acc_classes[self._account_type]
             self._acc = cls(self._account_id, self._account_type)
             trader.subscribe(self._acc)
+            # 阶段 0-A（C1）：注册回调，否则断线零感知、拿不到柜台 order_id 与成交回报。
+            # XtQuantTraderCallback 随 xtquant 版本命名不同，兼容新旧两处导入。
+            try:
+                from xtquant.xt_trader import XtQuantTraderCallback
+            except ImportError:
+                from xtquant.xttrader import XtQuantTraderCallback
+            try:
+                trader.register_callback(self._make_callback(XtQuantTraderCallback))
+            except Exception as exc:  # noqa: BLE001
+                # 回调注册失败不应阻断连接；但记日志以便排查（影响断线感知/回报）
+                log.warning("register_callback 失败（断线感知/成交回报将不可用）：%s", exc)
             self._trader = trader
             self._connected = True
         except BrokerNotConnectedError:
             raise
         except Exception as exc:  # noqa: BLE001
             raise BrokerNotConnectedError(f"交易连接异常：{exc}") from exc
+
+    # ---------------- 阶段 0-A：报单回调闭环 ----------------
+    def on_order(self, cb) -> None:
+        """注册报单响应回调（order_id 解析 / 状态更新 → 推 sync 引擎）。"""
+        self._on_order_cb = cb
+
+    def on_trade(self, cb) -> None:
+        """注册成交回报回调（替代纯轮询，直推 sync 引擎）。"""
+        self._on_trade_cb = cb
+
+    def on_disconnect(self, cb) -> None:
+        """注册断线回调（触发 manager 健康重连）。"""
+        self._on_disconnect_cb = cb
+
+    def _make_callback(self, base):
+        """动态构造 XtQuantTraderCallback 子类，把 SDK 对象转 dict 后交 adapter 方法处理。
+
+        动态子类（而非静态子类）是因为 XtQuantTraderCallback 仅在 xtquant 导入后存在；
+        adapter 方法接收**纯 dict**，便于在无 SDK 环境下单测。
+        """
+        adapter = self
+
+        def _order_as_dict(order) -> dict:
+            out = {}
+            for k in ("Seq", "OrderID", "OrderStatus", "ErrorID", "ErrorMsg",
+                     "StockCode", "OrderType", "Price", "Volume", "TradedVolume"):
+                out[k] = getattr(order, k, None)
+            return out
+
+        def _trade_as_dict(trade) -> dict:
+            out = {}
+            for k in ("OrderID", "StockCode", "TradeType", "Price", "Volume",
+                     "TradeTime", "TradeID"):
+                out[k] = getattr(trade, k, None)
+            return out
+
+        class _Cb(base):
+            def on_disconnected(self):
+                adapter._handle_disconnected()
+
+            def on_order_stock_response(self, order):
+                adapter._handle_order_response(_order_as_dict(order))
+
+            def on_cancel_error(self, order_id, error_id, error_msg):
+                adapter._handle_cancel_error(order_id, error_id, error_msg)
+
+            def on_stock_trade(self, trade):
+                adapter._handle_stock_trade(_trade_as_dict(trade))
+
+        return _Cb()
+
+    def _handle_disconnected(self) -> None:
+        """断线：翻转连接态并通知 manager 触发健康重连。"""
+        was = self._connected
+        self._connected = False
+        log.warning("XtQuantTrader 断线（adapter=%s account=%s）",
+                    self._account_id, self._account_type)
+        if was and self._on_disconnect_cb is not None:
+            try:
+                self._on_disconnect_cb()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _handle_order_response(self, o: dict) -> None:
+        """报单响应：建立 seq→柜台 order_id 映射，唤醒等待中的 place_order，并外推。"""
+        try:
+            seq = int(o.get("Seq", o.get("seq", -1)))
+        except (ValueError, TypeError):
+            seq = -1
+        oid = o.get("OrderID") or o.get("order_id")
+        if oid is not None:
+            oid = str(oid)
+            self._seq_to_oid[seq] = oid
+            self._oid_to_seq[oid] = seq
+        log.debug("order response seq=%s order_id=%s status=%s err=%s",
+                  seq, oid, o.get("OrderStatus"), o.get("ErrorMsg"))
+        pend = self._pending_resp.pop(seq, None)
+        if pend is not None:
+            ev, bucket = pend
+            bucket.append(o)
+            ev.set()
+        if self._on_order_cb is not None:
+            try:
+                self._on_order_cb(o)
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _handle_stock_trade(self, t: dict) -> None:
+        """成交回报：直推 sync 引擎（替代纯轮询）。"""
+        if self._on_trade_cb is not None:
+            try:
+                self._on_trade_cb(t)
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _handle_cancel_error(self, order_id, error_id, error_msg) -> None:
+        log.warning("cancel error order_id=%s error_id=%s msg=%s",
+                    order_id, error_id, error_msg)
+
+    def _wait_order_response(self, seq: int, timeout: float = 10.0) -> str | None:
+        """等待 on_order_stock_response 回调解析出柜台真实 order_id。
+
+        返回柜台 order_id（str）；超时未到返回 None（调用方应记作 status=unknown）。
+        回调已提前到达时（映射已建立）直接返回，不阻塞。
+        """
+        oid = self._seq_to_oid.get(seq)
+        if oid is not None:
+            return oid
+        ev = threading.Event()
+        bucket: list = []
+        self._pending_resp[seq] = (ev, bucket)
+        if ev.wait(timeout):
+            for o in bucket:
+                got = o.get("OrderID") or o.get("order_id")
+                if got is not None:
+                    return str(got)
+        return None
 
     def probe(self) -> dict:
         """结构化环境诊断（不依赖连接）：供 /brokers/test 与 tools/diag_qmt.py 展示。"""
@@ -552,11 +689,12 @@ class XTPQuantAdapter(BrokerAdapter):
 
     def close(self) -> None:
         self._connected = False
-        if self._trader is not None:
-            try:
-                self._trader.stop()
-            except Exception:  # noqa: BLE001
-                pass
+        # 阶段 0-A（C10）：清空 trader 与映射，避免对已 stop 的 trader 继续调用
+        self._seq_to_oid.clear()
+        self._oid_to_seq.clear()
+        self._pending_resp.clear()
+        self._trader = None
+        self._acc = None
 
     def is_connected(self) -> bool:
         return self._connected
@@ -694,10 +832,19 @@ class XTPQuantAdapter(BrokerAdapter):
                 hits.append({"code": c, "name": name})
         return hits
 
-    def subscribe_quote(self, codes: list[str], on_tick) -> None:
+    def subscribe_quote(self, codes: list[str], on_tick, period: str = "1m") -> None:
+        """订阅实时行情。
+
+        阶段 0-A（C8）：
+        - period 可指定 "tick"（真实逐笔/快照）或 "1m"（1 分钟 K 线）；默认 1m 保持兼容。
+        - 去重订阅（重复 symbols 不重复调 SDK，避免回调累积）。
+        - 回调异常不再 ``except: pass`` 静默吞掉，改为记日志便于排查。
+        - 回调内**不**同步重调 get_full_tick（避免阻塞推送线程），优先使用回调带入的 bar。
+        """
         if self._xtdata is None:
             raise BrokerSDKError("xtquant", "pip install xtquant")
-        codes = list(codes)
+        # 去重并保持顺序
+        codes = list(dict.fromkeys(codes))
 
         def _cb(datas):
             try:
@@ -708,21 +855,23 @@ class XTPQuantAdapter(BrokerAdapter):
                     for _p, bars in per.items():
                         if isinstance(bars, list) and bars:
                             bar = bars[-1]
-                    tick = self._xtdata.get_full_tick([code]).get(code) if bar is None else bar
-                    if tick:
-                        on_tick({"type": "quote", "data": self._norm_quote(code, tick)})
-            except Exception:  # noqa: BLE001
-                pass
+                    if bar is None:
+                        continue
+                    on_tick({"type": "quote", "data": self._norm_quote(code, bar)})
+            except Exception as exc:  # noqa: BLE001
+                log.warning("subscribe_quote callback error: %s", exc)
 
         for c in codes:
             try:
-                self._xtdata.subscribe_quote(c, period="1m", count=0, callback=_cb)
-            except Exception:  # noqa: BLE001
-                pass
+                self._xtdata.subscribe_quote(c, period=period, count=0, callback=_cb)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("subscribe_quote failed for %s: %s", c, exc)
 
     # ---------------- 账户 ----------------
     def _require_trader(self):
-        if self._trader is None or self._acc is None:
+        # 阶段 0-A（C10）：不仅检查对象存在，还要确认连接态——否则对已 stop 的
+        # trader 继续调用 order_stock/query_asset 会拿到错误结果或崩溃。
+        if not self._connected or self._trader is None or self._acc is None:
             raise BrokerNotConnectedError("交易未连接：未配置 account_id 或客户端未登录")
         return self._trader, self._acc
 
@@ -781,12 +930,14 @@ class XTPQuantAdapter(BrokerAdapter):
             deals = trader.query_stock_deals(acc) or []
         out = []
         for d in deals:
+            # 阶段 2：输出 seq（回报唯一 id），供 sync 成交去重键使用，避免同秒同价量部成碰撞丢单
             out.append({
                 "order_id": str(getattr(d, "order_id", "")), "code": getattr(d, "stock_code", ""),
                 "direction": "buy" if getattr(d, "order_type", 0) in (23, 33) else "sell",
                 "price": self._f(getattr(d, "deal_price", None)),
                 "volume": getattr(d, "deal_volume", 0),
                 "time": getattr(d, "deal_time", ""),
+                "seq": getattr(d, "seq", None),
             })
         return out
 
@@ -796,31 +947,48 @@ class XTPQuantAdapter(BrokerAdapter):
                     remark: str = "") -> dict:
         trader, acc = self._require_trader()
         xtc = _ensure_xtconstant()
-        op = (xtc.CREDIT_BUY if self._account_type == "CREDIT" and direction == "buy"
-              else xtc.CREDIT_SELL if self._account_type == "CREDIT" and direction == "sell"
-              else xtc.STOCK_BUY if direction == "buy" else xtc.STOCK_SELL)
+        # 阶段 0-A（C9）：信用账户裸常量 CREDIT_BUY/CREDIT_SELL 在部分 xtquant 版本
+        # 不存在（AttributeError）。用 getattr 兜底，缺失时回退标准买卖。
+        if self._account_type == "CREDIT" and direction == "buy":
+            op = getattr(xtc, "CREDIT_BUY", xtc.STOCK_BUY)
+        elif self._account_type == "CREDIT" and direction == "sell":
+            op = getattr(xtc, "CREDIT_SELL", xtc.STOCK_SELL)
+        elif direction == "buy":
+            op = xtc.STOCK_BUY
+        else:
+            op = xtc.STOCK_SELL
         pt = xtc.LATEST_PRICE if (price_type or "limit") == "market" else xtc.FIX_PRICE
         with self._lock:
-            oid = trader.order_stock(acc, code, op, pt, float(price), int(volume),
+            seq = trader.order_stock(acc, code, op, pt, float(price), int(volume),
                                      strategy_name or "", remark or "")
-        if not oid:
-            raise BrokerNotConnectedError("下单失败：客户端返回空委托号（检查交易权限/资金/标的可交易）")
-        return {"order_id": str(oid), "code": code, "direction": direction,
+        # 阶段 0-A（C2/F2）：order_stock 失败返回 -1（truthy，不能 `if not` 判断），
+        # 必须把 -1 显式判为失败并抛错，否则「下单失败被报成功」→ 审计记 ok、WAL 记 pending。
+        if seq is None or seq == -1:
+            raise BrokerSDKError(
+                "xtquant",
+                "下单失败：柜台返回 -1（资金不足/标的不在交易时段/无交易权限/风控拦截）")
+        seq = int(seq)
+        # 阶段 0-A：真实柜台 order_id 仅经 on_order_stock_response 回调下发，
+        # 提交后等待回调（带超时）——超时未到则记作 status=unknown（绝不伪报 submitted）。
+        oid = self._wait_order_response(seq, timeout=10.0)
+        order_id = oid or str(seq)
+        status = "unknown" if oid is None else "submitted"
+        return {"order_id": order_id, "seq": seq, "code": code, "direction": direction,
                 "price_type": price_type, "price": price, "volume": volume,
-                "status": "submitted", "ts": datetime.now().isoformat(timespec="seconds")}
+                "status": status, "ts": datetime.now().isoformat(timespec="seconds")}
 
     def cancel_order(self, order_id: str) -> dict:
         trader, acc = self._require_trader()
+        # order_id 可能是柜台真实 order_id（place_order 返回），直接传入；
+        # seq 已通过 _seq_to_oid 映射为真实 id，无需再转换。
         with self._lock:
             trader.cancel_order_stock(acc, int(order_id))
         return {"order_id": str(order_id), "status": "cancel_submitted"}
 
     def _order_status(self, st: int, oid: str) -> str:
-        mapping = {48: "unreported", 49: "wait_report", 50: "reported",
-                   51: "reported_cancel_pending", 52: "part_deal_cancel_pending",
-                   53: "part_cancel", 54: "canceled", 55: "part_deal",
-                   56: "fully_dealt", 57: "rejected", 86: "confirmed", 255: "unknown"}
-        return mapping.get(int(st), "unknown")
+        # 阶段 0-A（F12）：统一走共享词汇表，消除三处各说各话。
+        from .order_status import normalize_order_status
+        return normalize_order_status(st)
 
     # ---------------- 参考数据 / L2（真实 xtdata 调用） ----------------
     def get_sector_list(self) -> list[str]:

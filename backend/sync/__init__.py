@@ -32,6 +32,7 @@ class SyncEngine:
         self._account_task: asyncio.Task | None = None
         self._order_fp: dict[str, dict[str, str]] = {}   # account -> {order_id: status}
         self._deal_seen: dict[str, set] = {}             # account -> {deal_key}
+        self._fp_date: str = ""                          # 阶段 2：指纹归属交易日（跨日清理）
         self._last_account_bcast: float = 0.0
         self._quote_bus = quote_bus                      # 可选行情总线（内存/Redis）
         self._latency_stats: dict[str, list[float]] = {} # code -> 最近延迟样本
@@ -67,13 +68,16 @@ class SyncEngine:
                 self._quote_bus.dec_ref(c)
 
     def _subscribe_to_qmt(self, codes: list[str]) -> None:
-        self._subscribed_codes.update(codes)
         b = self.manager.active_bridge()
         if b is None:
             log.warning("subscribe skipped: 无活跃券商连接")
             return
         try:
             b.gateway.subscribe_quote(codes, lambda evt: b.enqueue(evt))
+            # 成功后才标记已订阅（C18）：原实现先 update 再调用，失败后仍认为
+            # 「已订阅」→ 永不重试，行情流静默丢失。BridgeAdapter 内部另维护
+            # 已订阅集合，子进程重启时会自动重新下发，双保险恢复订阅。
+            self._subscribed_codes.update(codes)
             log.info("subscribed to broker: %s", codes)
         except Exception as exc:  # noqa: BLE001
             log.warning("subscribe_quote failed %s: %s", codes, exc)
@@ -189,7 +193,8 @@ class SyncEngine:
                         snap = {"cash": cash, "net_value": round((cash.get("assets", 0.0) or 0.0) + pos_value, 2),
                                 "positions": pos, "broker": conn.cfg.name,
                                 "account_id": conn.cfg.account_id}
-                        self.db.insert("account_snapshot", {
+                        # 阶段 3：同步 sqlite 移出事件循环——快照写入走线程池，避免卡事件循环
+                        await self.db.ainsert("account_snapshot", {
                             "account_id": conn.cfg.account_id or conn.cfg.name, "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
                             "net_value": snap["net_value"],
                             "positions_json": json.dumps(pos, ensure_ascii=False),
@@ -234,16 +239,33 @@ class SyncEngine:
         self._account_task = asyncio.create_task(_loop())
 
     async def _push_order_deal_events(self, conn, acc_key: str) -> None:
-        """对比上次订单/成交快照，新订单/状态变化/新成交 -> WS 事件推送。"""
+        """对比上次订单/成交快照，新订单/状态变化/新成交 -> WS 事件推送。
+
+        阶段 2 加固：
+        - 指纹按交易日清理（order_id 跨日复用不再误判）；
+        - 成交去重键加入 seq（同秒同价量部成不再指纹碰撞丢单）；
+        - 状态迁移加终态锁（filled/cancelled/rejected 不可回退，拦截乱序 filled→pending）。
+        """
+        today = time.strftime("%Y-%m-%d")
+        if self._fp_date != today:
+            self._fp_date = today
+            self._order_fp.clear()
+            self._deal_seen.clear()
         orders = await conn.bridge.call(conn.adapter.get_orders) or []
         deals = await conn.bridge.call(conn.adapter.get_deals) or []
         fp = self._order_fp.setdefault(acc_key, {})
+        from xtquant_client.order_status import is_terminal
         for o in orders:
             oid = str(o.get("order_id", ""))
             if not oid:
                 continue
             st = o.get("status", "")
             prev = fp.get(oid)
+            if prev is not None and is_terminal(prev):
+                # 终态锁：已成交/已撤/废单不可回退——乱序/陈旧回报直接忽略
+                if prev != st:
+                    log.warning("order %s 已终态(%s)，忽略乱序状态 %s", oid, prev, st)
+                continue
             if prev is None:
                 await self._notify("order", {"type": "order_event", "data": o,
                                              "broker": conn.cfg.name, "event": "new"})
@@ -254,8 +276,9 @@ class SyncEngine:
             fp[oid] = st
         seen = self._deal_seen.setdefault(acc_key, set())
         for d in deals:
-            key = (str(d.get("order_id", "")), str(d.get("price")),
-                   str(d.get("volume")), str(d.get("time", "")))
+            # 成交去重键加入 seq/回报唯一 id，避免同秒同价量部成指纹碰撞丢单
+            key = (str(d.get("order_id", "")), str(d.get("seq", "") or d.get("deal_id", "")),
+                   str(d.get("price")), str(d.get("volume")), str(d.get("time", "")))
             if key not in seen:
                 seen.add(key)
                 await self._notify("deal", {"type": "deal_event", "data": d,
@@ -297,10 +320,14 @@ class WSManager:
         self._sockets: dict[str, WebSocket] = {}
         self._seq: dict[str, int] = {}
         self._recent: deque = deque(maxlen=3000)   # 最近行情环形缓冲（断线补发窗口，C4）
+        # 阶段 1（C20）：cid 单调自增，绝不复用——断连重连后若用 len(sockets)+1，
+        # 会生成重复 cid 覆盖现有 socket，导致订阅/退订/清理全错位
+        self._next_cid = 0
 
     async def connect(self, ws: WebSocket) -> str:
         await ws.accept()
-        cid = f"client-{len(self._sockets) + 1}"
+        self._next_cid += 1
+        cid = f"client-{self._next_cid}"
         self._sockets[cid] = ws
         self._seq[cid] = 0
         await self.send_full_snapshot(cid)

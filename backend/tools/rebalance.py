@@ -71,9 +71,12 @@ def register_rebalance_tools(mcp):
                     break
                 direction = "buy" if diff > 0 else "sell"
                 if do_trade:
-                    res = await b.call_locked(
-                        b.gateway.place_order, code, direction, "limit", price, volume,
-                        "rebalance", f"rebal-{code}")
+                    # 阶段 0-B（F9）：经统一入口提交，携带完整风控 + 幂等 + 审计，
+                    # 不再直接 gateway.place_order（否则重复调用即重复下单）。
+                    from app.state import state
+                    res = await state.signal_router.submit(
+                        code, direction, volume, price, "limit",
+                        source="rebalance", remark=f"rebal-{code}", auto_confirm=True)
                     orders.append({"code": code, "direction": direction,
                                    "volume": volume, "price": price, "order": res})
                 else:

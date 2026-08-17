@@ -121,6 +121,11 @@ class PaperEngine:
                         self._lots[p["code"]] = json.loads(raw)
                     except Exception:  # noqa: BLE001
                         self._lots[p["code"]] = []
+                else:
+                    # 阶段 2：存量持仓 lots 为 NULL（旧库/直接导入），按总量构造单一批次
+                    # （固定历史日期），使 T+1 下可正常卖出，不再「永久不可卖」。
+                    vol = float(p["volume"] or 0.0)
+                    self._lots[p["code"]] = [["2000-01-01", vol]] if vol > 0 else []
             # 无行情时用最近成交价兜底（仍是真实成交/行情价，不是编造价）
             for t in self.db.query(
                     "SELECT code, price FROM paper_trades ORDER BY id"):
@@ -323,6 +328,8 @@ class PaperEngine:
         with self._lock:
             out = []
             for code, pos in sorted(self.positions.items()):
+                # 阶段 2：据实标注盯市来源——有真实行情/trade 价 -> live；仅退化为成本价 -> cost
+                live = code in self.last_prices and float(self.last_prices.get(code) or 0) > 0
                 last = self._price_of(code, pos)
                 mv = last * pos["volume"]
                 upnl = (last - pos["avg_cost"]) * pos["volume"]
@@ -334,6 +341,7 @@ class PaperEngine:
                     "market_value": round(mv, 2), "cost": round(cost, 2),
                     "unrealized_pnl": round(upnl, 2),
                     "profit_ratio": round(upnl / cost, 4) if cost else 0.0,
+                    "marking": "live" if live else "cost",
                 })
             return out
 
@@ -351,8 +359,8 @@ class PaperEngine:
             upnl = sum(p["unrealized_pnl"] for p in positions)
             rpnl = self.realized_pnl()
             total = self.cash + mv
-            # 盯市来源标注：有真实行情最新价 -> live；缺行情退化成本价 -> frozen（不编造涨跌）
-            marking_source = "live" if any(p["last_price"] > 0 for p in positions) else "frozen"
+            # 盯市来源标注：任一持仓有真实行情/trade 价 -> live；全部退化成本价 -> frozen
+            marking_source = "live" if any(p.get("marking") == "live" for p in positions) else "frozen"
             return {
                 "cash": round(self.cash, 2),
                 "market_value": round(mv, 2),

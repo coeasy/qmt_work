@@ -89,6 +89,7 @@ class Notifier:
         self._lock = asyncio.Lock()
         self._http = httpx.AsyncClient(timeout=30.0)
         self.on_event = None  # 可选回调：notify 时同步回调（告警引擎订阅用）
+        self._tasks: set[asyncio.Task] = set()  # 后台发送任务（防 GC + close 时清理）
 
     def _dedup_allowed(self, key: tuple) -> bool:
         """静默期去重：同一 key 在窗口内只放行一次；0 = 不启用。
@@ -109,6 +110,11 @@ class Notifier:
         return True
 
     async def close(self):
+        for t in list(self._tasks):
+            t.cancel()
+        if self._tasks:
+            await asyncio.gather(*self._tasks, return_exceptions=True)
+        self._tasks.clear()
         await self._http.aclose()
 
     def invalidate(self):
@@ -116,7 +122,8 @@ class Notifier:
 
     async def _configs(self) -> list[dict]:
         if self._cache is None:
-            rows = self.db.query(
+            # 阶段 3：事件循环内读配置走 a* 变体（线程池），不阻塞事件循环
+            rows = await self.db.aquery(
                 "SELECT id, name, channel, enabled, params_json, events, template "
                 "FROM notifications ORDER BY id")
             for r in rows:
@@ -155,7 +162,12 @@ class Notifier:
                 continue
             tasks.append(self._send_one(cfg, msg))
         if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+            # P1 修复：fire-and-forget —— 通知发送绝不阻塞调用方（内联重试最坏阻塞上百秒）。
+            # 调用方不应等待通知完成，通知失败也不影响主流程。
+            for t in tasks:
+                task = asyncio.create_task(t)
+                self._tasks.add(task)
+                task.add_done_callback(self._tasks.discard)
 
     async def _send_one(self, cfg: dict, msg: NotifyMessage):
         ctx = {

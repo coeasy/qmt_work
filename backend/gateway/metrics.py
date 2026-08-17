@@ -52,6 +52,11 @@ class Metrics:
         self._runtime_mode = defaultdict(int)  # (conn_id, mode) -> 1
         self._errors = defaultdict(int)
         self._recent_traces: list[dict] = []
+        # 阶段 3：生命周期/幂等/风控/对账可观测
+        self._conn_events = defaultdict(int)   # (conn_id, ev) -> 1
+        self._idem_hits = 0
+        self._risk_blocked = defaultdict(int)  # rule -> 1
+        self._reconcile_diffs = defaultdict(int)  # scope -> 1
 
     def record_order(self, side: str, status: str) -> None:
         with self._lock:
@@ -120,6 +125,28 @@ class Metrics:
         """错误计数（scope: trade/market/auth/ws/...）。"""
         with self._lock:
             self._errors[scope] += 1
+
+    # ---------------- 阶段 3：生命周期/幂等/风控/对账可观测 ----------------
+
+    def record_conn_event(self, conn_id: str, ev: str) -> None:
+        """连接事件计数（ev: disconnected/reconnected/subscription_recovered）。"""
+        with self._lock:
+            self._conn_events[(conn_id, ev)] += 1
+
+    def record_idempotency_hit(self) -> None:
+        """幂等命中计数（同一 client_order_id 重复请求被单飞拦截）。"""
+        with self._lock:
+            self._idem_hits += 1
+
+    def record_risk_blocked(self, rule: str) -> None:
+        """风控拦截计数（rule: circuit/limit/frequency/daily_loss/...）。"""
+        with self._lock:
+            self._risk_blocked[(rule or "unknown")] += 1
+
+    def record_reconcile_diff(self, scope: str) -> None:
+        """对账差异计数（scope: order/deal/position/account）。"""
+        with self._lock:
+            self._reconcile_diffs[(scope or "unknown")] += 1
 
     def record_trace(self, req_id: str, path: str, status: int,
                      ms: float, scope: str = "") -> None:
@@ -242,6 +269,32 @@ class Metrics:
         counter("qmt_errors_total", "total errors by scope", 0)
         for scope, v in er.items():
             lines.append(f'qmt_errors_total{{scope="{scope}"}} {v}')
+
+        # ---------------- 阶段 3：生命周期/幂等/风控/对账可观测 ----------------
+
+        with self._lock:
+            ce = dict(self._conn_events)
+            idem = self._idem_hits
+            rb = dict(self._risk_blocked)
+            rd = dict(self._reconcile_diffs)
+
+        lines.append("# HELP qmt_conn_events_total connection lifecycle events "
+                     "(disconnected/reconnected/subscription_recovered)")
+        lines.append("# TYPE qmt_conn_events_total counter")
+        for (conn_id, ev), v in ce.items():
+            lines.append(f'qmt_conn_events_total{{conn_id="{conn_id}",event="{ev}"}} {v}')
+
+        counter("qmt_idempotency_hits_total", "idempotency (single-flight) hits", idem)
+
+        lines.append("# HELP qmt_risk_blocked_total risk blocks by rule")
+        lines.append("# TYPE qmt_risk_blocked_total counter")
+        for rule, v in rb.items():
+            lines.append(f'qmt_risk_blocked_total{{rule="{rule}"}} {v}')
+
+        lines.append("# HELP qmt_reconcile_diffs_total reconcile diffs by scope")
+        lines.append("# TYPE qmt_reconcile_diffs_total counter")
+        for scope, v in rd.items():
+            lines.append(f'qmt_reconcile_diffs_total{{scope="{scope}"}} {v}')
 
         return "\n".join(lines) + "\n"
 

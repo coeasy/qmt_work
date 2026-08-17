@@ -124,11 +124,22 @@ class BrokerManager:
         conn = self._conns.get(conn_id)
         if not conn:
             return
-        conn.adapter.close()
-        conn.connected = False
+        # 阶段 0-D（C16）：手动断开必须清 active + 取消重连任务——
+        # 原实现不清 active，健康监控在 5s 内把已断开连接自动重连回来；
+        # 不取消 reconnect_task 则后台重连任务继续拉起子进程（已删除连接被"复活"）。
+        if conn.cfg.active:
+            conn.cfg.active = False
+            self._persist(conn.cfg)
         if self._active_id == conn_id:
             self._active_id = None
             self._persist_active()
+        rt = conn.reconnect_task
+        if rt is not None:
+            if not rt.done():
+                rt.cancel()
+            conn.reconnect_task = None
+        conn.adapter.close()
+        conn.connected = False
 
     def remove(self, conn_id: str) -> None:
         self.disconnect(conn_id)

@@ -213,12 +213,14 @@ def create_app() -> FastAPI:
         state.broker_manager.load_persisted()
         _bootstrap_from_env()
         # 2. 启动各连接 bridge（异步泵，使用应用事件循环）
+        # 注意：行情管道（quote handler）的注册在 SyncEngine 构造之后统一进行（C3），
+        # 原实现在此处注册时 state.sync_engine 尚为 None → AttributeError 被吞，
+        # 每次启动所有 active 连接行情管道全断（latest_quotes 恒空/风控最新价恒 None）。
         for conn in state.broker_manager.all_connections():
             if conn.cfg.active:
                 try:
                     await conn.bridge.start()
                     conn.connected = conn.adapter.is_connected()
-                    conn.bridge.on("quote", state.sync_engine.on_event)
                     log.info("broker connection started: %s (%s) connected=%s",
                              conn.cfg.name, conn.cfg.conn_id, conn.connected)
                 except Exception as exc:  # noqa: BLE001
@@ -244,7 +246,7 @@ def create_app() -> FastAPI:
             from gateway.db_backup import DBBackup
             db_backup = DBBackup(
                 settings.db_path, keep=settings.db_backup_keep,
-                interval=settings.db_backup_interval)
+                interval=settings.db_backup_interval, db=state.db)
             db_backup.backup_once("startup")
             await db_backup.start()
             log.info("db backup enabled: interval=%.0fs keep=%d",
@@ -269,6 +271,12 @@ def create_app() -> FastAPI:
                                        runtime_config=state.runtime_config)
         state.ws_manager = WSManager(state.sync_engine)
         state.sync_engine.on_notify(state.ws_manager.broadcast)
+        # C3 修复：行情管道统一在此（SyncEngine 构造之后）为所有连接注册。
+        # 运行期新增连接由下方 _pump_guard 兜底补注册，保证行情管道永不缺失。
+        _register_quote_handlers = state.sync_engine.on_event
+        for conn in state.broker_manager.all_connections():
+            if conn.bridge is not None:
+                conn.bridge.on("quote", _register_quote_handlers)
         state.sync_engine.start_batch()
         await state.sync_engine.start_account_snapshots(interval=5.0)
         # 3.5 券商连接健康状态机 + 自动重连
@@ -288,6 +296,13 @@ def create_app() -> FastAPI:
                     b = conn.bridge
                     if b is None or not (conn.cfg.active or conn.connected):
                         continue
+                    # C3：运行期新增/手动 connect 的连接补注册行情 handler（幂等去重）。
+                    # 否则新增连接的行情管道永远缺失（原实现只在启动循环注册一次）。
+                    if state.sync_engine is not None:
+                        try:
+                            b.ensure_handler("quote", state.sync_engine.on_event)
+                        except Exception as exc:  # noqa: BLE001
+                            log.warning("quote handler guard %s: %s", conn.cfg.conn_id, exc)
                     if not b.pump_running():
                         try:
                             b.start_pump_on(loop)
@@ -321,27 +336,48 @@ def create_app() -> FastAPI:
         state.signal_router = SignalRouter(
             state.broker_manager, state.risk, state.db, state.wal,
             state.notifier, state.ws_manager.broadcast)
-        # 4.5 WAL 启动重放：恢复未完成的算法单（条件单从 DB 恢复）
-        def _replay_algo(rec: dict):
-            if rec.get("op") != "create":
-                return
-            payload = rec.get("payload", {})
-            status = payload.get("status", "")
-            if status not in ("pending", "running"):
+        # 4.5 WAL 启动重放：恢复未完成的算法单（F3：按 algo_id 聚合终态，仅重放最终态
+        # pending/running 者——原实现逐个 create 记录重放、不查其后是否有 final/cancel，
+        # 每次重启都会把历史每个算法单（含已取消/已完成）重新 _run → 大规模重复拆单下单）
+        def _replay_algos() -> None:
+            if not state.wal:
                 return
             try:
-                asyncio.create_task(state.algo_engine.submit(
-                    payload.get("code", ""), payload.get("direction", "buy"),
-                    int(payload.get("volume", 0)), payload.get("algo", "twap"),
-                    int(payload.get("duration", 300)), int(payload.get("slices", 5)),
-                    payload.get("price_type", "market"),
-                    float(payload.get("limit_price", 0) or 0), payload.get("remark", "")))
+                records = state.wal.all_records()
             except Exception as exc:  # noqa: BLE001
-                log.warning("wal replay algo failed: %s", exc)
+                log.warning("wal replay read failed: %s", exc)
+                return
+            # 按 algo_id 聚合：create 之后若出现 final/cancel（含 pause 后 final），
+            # 该单最终态不是运行中，跳过；仅保留「最后动作仍是 create 且状态 pending/running」者。
+            pending_jobs: dict[str, dict] = {}
+            for rec in records:
+                if rec.get("entity") != "algo":
+                    continue
+                aid = str(rec.get("entity_id") or "")
+                op = rec.get("op", "")
+                if not aid or op in ("pause", "resume"):
+                    continue
+                if op == "create":
+                    pending_jobs[aid] = rec.get("payload", {})
+                elif op in ("final", "cancel"):
+                    pending_jobs.pop(aid, None)
+            replayed = 0
+            for aid, payload in pending_jobs.items():
+                if payload.get("status", "") not in ("pending", "running"):
+                    continue
+                try:
+                    asyncio.create_task(state.algo_engine.submit(
+                        payload.get("code", ""), payload.get("direction", "buy"),
+                        int(payload.get("volume", 0)), payload.get("algo", "twap"),
+                        int(payload.get("duration", 300)), int(payload.get("slices", 5)),
+                        payload.get("price_type", "market"),
+                        float(payload.get("limit_price", 0) or 0), payload.get("remark", "")))
+                    replayed += 1
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("wal replay algo failed: %s", exc)
+            log.info("wal algo replay: %d pending job(s) restarted", replayed)
 
-        if state.wal:
-            summary = state.wal.replay({"algo": _replay_algo})
-            log.info("wal replayed: %s", summary)
+        _replay_algos()
         # 4.7 A2 委托对账核销：启动后立即对账一次，并定时巡检
         from gateway.reconcile import OrderReconciler
         state.reconciler = OrderReconciler(

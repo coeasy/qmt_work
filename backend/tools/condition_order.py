@@ -48,6 +48,11 @@ def _is_expired(expire_at: str) -> bool:
         return False
 
 
+def _tomorrow() -> str:
+    """次日日期（YYYY-MM-DD），用于「拒单次日重试」。"""
+    return (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+
+
 class ConditionOrderEngine:
     """条件单引擎（事件循环内轮询真实行情触发）。"""
 
@@ -61,6 +66,9 @@ class ConditionOrderEngine:
         self._orders: dict[str, dict] = {}
         self._task: asyncio.Task | None = None
         self._cfg: dict = {"interval": 2.0}
+        # 阶段 2：拒单/异常进「次日重试」队列（cid -> order，含 retry_date/retry_count）
+        self._retry_queue: dict[str, dict] = {}
+        self._retry_limit = 3
 
     def _wal_append(self, op: str, oid: str, payload: dict):
         if self._wal is not None:
@@ -70,27 +78,38 @@ class ConditionOrderEngine:
 
     # ---------------- 生命周期 ----------------
     def load_from_db(self) -> None:
-        """恢复未完成且未到期的条件单（重启后继续监控；A3 跨日续作）。"""
+        """恢复未完成且未到期的条件单（重启后继续监控；A3 跨日续作）。
+
+        阶段 2：`status='triggered'` 的记录是「上次触发但下单未完成/未知结果」（崩溃或异常
+        中断），同样载入并进「次日重试」队列待恢复，绝不丢弃。
+        """
         if self._db is None:
             return
         try:
-            rows = self._db.query("SELECT * FROM condition_orders WHERE status='pending'")
+            rows = self._db.query(
+                "SELECT * FROM condition_orders WHERE status IN ('pending','triggered')")
             expired_now = 0
             for r in rows:
                 d = dict(r)
-                # A3：启动时清理已到期但仍是 pending 的条件单
+                # A3：启动时清理已到期但仍是 pending/triggered 的条件单
                 if _is_expired(d.get("expire_at") or ""):
                     d["status"] = "expired"
                     d["expired_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
                     self._db.execute(
                         "UPDATE condition_orders SET status=?, expired_at=? WHERE id=?",
                         ("expired", d["expired_at"], d["id"]))
+                    self._retry_queue.pop(d["id"], None)
                     expired_now += 1
                     continue
                 self._orders[d["id"]] = d
+                if d.get("status") == "triggered":
+                    # 上次触发未完成 → 进次日重试队列
+                    d.setdefault("retry_count", 0)
+                    d.setdefault("retry_date", _tomorrow())
+                    self._retry_queue[d["id"]] = d
             if rows:
-                log.info("condition orders restored: %d (expired-on-startup: %d)",
-                         len(self._orders), expired_now)
+                log.info("condition orders restored: %d (retry-queued: %d, expired-on-startup: %d)",
+                         len(self._orders), len(self._retry_queue), expired_now)
         except Exception as exc:  # noqa: BLE001
             log.warning("condition orders restore failed: %s", exc)
 
@@ -164,8 +183,9 @@ class ConditionOrderEngine:
         o = self._orders.get(cid)
         if not o:
             raise KeyError(f"未知条件单：{cid}")
-        if o["status"] == "pending":
+        if o["status"] in ("pending", "triggered"):
             o["status"] = "canceled"
+            self._retry_queue.pop(cid, None)
             self._persist(o)
             self._wal_append("cancel", cid, {"status": "canceled"})
         return {"id": cid, "status": o["status"]}
@@ -178,13 +198,14 @@ class ConditionOrderEngine:
                 "INSERT OR REPLACE INTO condition_orders "
                 "(id, code, side, trigger_type, trigger_price, price_type, price, "
                 "volume, status, order_id, remark, created_at, triggered_at, "
-                "valid_days, expire_at, last_check_date, expired_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "valid_days, expire_at, last_check_date, expired_at, retry_date, retry_count) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (o["id"], o["code"], o["side"], o["trigger_type"], o["trigger_price"],
                  o["price_type"], o["price"], o["volume"], o["status"], o["order_id"],
                  o["remark"], o["created_at"], o["triggered_at"],
                  o.get("valid_days", 0), o.get("expire_at", ""),
-                 o.get("last_check_date", ""), o.get("expired_at", "")))
+                 o.get("last_check_date", ""), o.get("expired_at", ""),
+                 o.get("retry_date", ""), o.get("retry_count", 0)))
         except Exception as exc:  # noqa: BLE001
             log.warning("condition order persist failed: %s", exc)
 
@@ -215,6 +236,20 @@ class ConditionOrderEngine:
                             await self._fire(b, o, last)
                     except Exception as exc:  # noqa: BLE001
                         log.debug("condition check %s failed: %s", o["code"], exc)
+                # 阶段 2：拒单次日重试 —— 到期的重试项重新尝试下单
+                if self._retry_queue:
+                    for cid, o in list(self._retry_queue.items()):
+                        if today < (o.get("retry_date") or ""):
+                            continue
+                        if b is None:
+                            continue
+                        if _is_expired(o.get("expire_at") or ""):
+                            await self._expire(o)
+                            continue
+                        try:
+                            await self._fire(b, o, 0.0, is_retry=True)
+                        except Exception as exc:  # noqa: BLE001
+                            log.warning("condition retry %s failed: %s", cid, exc)
             except Exception as exc:  # noqa: BLE001
                 log.warning("condition loop error: %s", exc)
             interval = float(self._cfg.get("interval", 2.0))
@@ -232,6 +267,7 @@ class ConditionOrderEngine:
         """A3：条件单到期失效，写库 + 推送 + 通知。"""
         o["status"] = "expired"
         o["expired_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+        self._retry_queue.pop(o["id"], None)
         self._persist(o)
         self._wal_append("expire", o["id"], {"status": "expired", "expired_at": o["expired_at"]})
         self._emit({"type": "condition_expired", "data": self._view(o)})
@@ -246,39 +282,88 @@ class ConditionOrderEngine:
             except Exception:  # noqa: BLE001
                 pass
 
-    async def _fire(self, b, o: dict, last_price: float) -> None:
-        o["status"] = "triggered"
-        o["triggered_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
-        self._persist(o)
-        self._wal_append("trigger", o["id"], self._view(o))
-        self._emit({"type": "condition_triggered", "data": self._view(o)})
-        # 过风控
-        risk = self._risk
-        if risk is not None:
-            ok, reason = risk.check_order(o["code"], o["trigger_price"], o["volume"], o["side"])
-            if not ok:
-                o["status"] = "failed"
-                o["remark"] = f"风控拒绝：{reason}"
-                self._persist(o)
-                self._emit({"type": "condition_failed", "data": self._view(o)})
-                self._audit("condition.rejected", o, reason)
-                return
+    async def _fire(self, b, o: dict, last_price: float, is_retry: bool = False) -> None:
+        """触发条件单下单（阶段 2 加固）。
+
+        - **触发用最新价校验**：下单前重拉一次最新行情，确认触发条件仍成立（lte 止损 /
+          gte 突破），避免瞬时脉冲误触发；条件已回退则不成交。
+        - **捕获全异常并保留 triggered 记录待恢复**：下单抛任意异常（非仅 BrokerError）
+          都不让记录丢失，进「次日重试」队列。
+        - **拒单进次日重试队列**：下单被拒（ok=False）也进重试队列，达上限才标 failed。
+        """
+        # 触发用最新价校验：重新拉最新行情确认条件仍成立
+        fresh = 0
         try:
+            q = await b.call(b.gateway.get_quote, o["code"])
+            fresh = q.get("last") or 0
+        except Exception:  # noqa: BLE001
+            pass
+        if fresh > 0:
+            hit = (fresh >= o["trigger_price"]) if o["trigger_type"] == "gte" \
+                else (0 < fresh <= o["trigger_price"]) if o["trigger_type"] == "lte" else False
+            if not hit:
+                if is_retry:
+                    self._schedule_retry(o, "触发价已回退，重试时条件不再成立")
+                else:
+                    # 首次触发校验不通过：保持 pending 继续监控，不误下单
+                    o["status"] = "pending"
+                    self._persist(o)
+                    log.info("condition %s trigger re-check miss (fresh=%s)，保持监控",
+                             o["id"], fresh)
+                return
+            last_price = fresh
+        # 首次触发：状态 → triggered 并持久化（保留 triggered 记录待恢复）
+        if not is_retry:
+            o["status"] = "triggered"
+            o["triggered_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+            self._persist(o)
+            self._wal_append("trigger", o["id"], self._view(o))
+            self._emit({"type": "condition_triggered", "data": self._view(o)})
+        # 阶段 0-B（F6）：统一经 SignalRouter.submit()，由它完成风控 + 幂等 + 审计 + 真实下单。
+        try:
+            from app.state import state
+            sr = state.signal_router
             price = o["price"] if (o["price_type"] == "limit" and o["price"] > 0) else last_price
-            res = await b.call(b.gateway.place_order, o["code"], o["side"],
-                               o["price_type"], price, o["volume"], "condition", o["remark"])
-            o["order_id"] = res.get("order_id", "")
-            self._persist(o)
-            self._wal_append("order", o["id"], {"order_id": o["order_id"], "status": "filled"})
-            self._emit({"type": "condition_order", "data": self._view(o)})
-            self._audit("condition.triggered", o, f"order_id={o['order_id']}")
-        except BrokerError as exc:
+            if sr is None:
+                raise RuntimeError("信号路由器未初始化")
+            res = await sr.submit(o["code"], o["side"], o["volume"], price, o["price_type"],
+                                  source="condition", broker_id="",
+                                  remark=o["remark"] or "条件单触发", auto_confirm=True)
+        except Exception as exc:  # noqa: BLE001 —— 捕获全异常（含超时/网络/引擎异常）
+            self._schedule_retry(o, f"下单异常：{exc}")
+            return
+        if not res.get("ok"):
+            self._schedule_retry(o, f"下单被拒：{res.get('reason', '')}")
+            return
+        o["order_id"] = res.get("order_id", "")
+        o["status"] = "filled"
+        self._retry_queue.pop(o["id"], None)
+        self._persist(o)
+        self._wal_append("order", o["id"], {"order_id": o["order_id"], "status": "filled"})
+        self._emit({"type": "condition_order", "data": self._view(o)})
+        self._audit("condition.triggered", o, f"order_id={o['order_id']}")
+
+    def _schedule_retry(self, o: dict, reason: str) -> None:
+        """拒单/异常 → 次日重试队列；达重试上限则标 failed 不再重试。"""
+        count = int(o.get("retry_count", 0)) + 1
+        o["retry_count"] = count
+        o["remark"] = reason
+        if count >= self._retry_limit:
             o["status"] = "failed"
-            o["remark"] = str(exc)
-            self._persist(o)
-            self._wal_append("error", o["id"], {"status": "failed", "error": str(exc)})
-            self._emit({"type": "condition_failed", "data": self._view(o)})
-            self._audit("condition.failed", o, str(exc))
+            self._retry_queue.pop(o["id"], None)
+            log.warning("condition %s 达重试上限(%d)，标记 failed: %s", o["id"], count, reason)
+        else:
+            o["status"] = "triggered"          # 保留触发记录待恢复
+            o["retry_date"] = _tomorrow()      # 次日重试
+            self._retry_queue[o["id"]] = o
+            log.info("condition %s 进次日重试队列(%d/%d): %s",
+                     o["id"], count, self._retry_limit, reason)
+        self._persist(o)
+        self._wal_append("error", o["id"], {"status": o["status"], "error": reason,
+                                            "retry_count": count,
+                                            "retry_date": o.get("retry_date", "")})
+        self._emit({"type": "condition_failed", "data": self._view(o)})
+        self._audit("condition.failed", o, reason)
 
     def _audit(self, action: str, o: dict, result: str) -> None:
         if self._db is not None:

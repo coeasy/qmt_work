@@ -3,9 +3,12 @@
 覆盖：风控规则 / 回测成本模型 / xtquant 自动发现 / 条件单校验 / 下单幂等。
 运行：cd backend && python -m pytest tests/test_unit.py -q
 """
+import asyncio
 import os
+import sqlite3
 import sys
 import tempfile
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -161,6 +164,117 @@ def test_condition_submit_validation():
     assert eng._orders[r["id"]]["status"] == "canceled"
 
 
+# ---------------- 阶段 2：条件单拒单次日重试队列 ----------------
+class _FakeCondBridge:
+    """极简假 bridge：get_quote 返回稳定价格，支持 b.call 包装。"""
+
+    class _GW:
+        def get_quote(self, code):
+            return {"code": code, "last": 11.0}   # > trigger 10 → 触发成立
+
+    gateway = _GW()
+
+    async def call(self, fn, *a, **k):
+        if fn.__name__ == "get_quote":
+            return fn(*a, **k)
+        raise AssertionError(f"意外调用 {fn.__name__}")
+
+
+class _FakeCondManager:
+    def __init__(self):
+        self.b = _FakeCondBridge()
+
+    def active_bridge(self):
+        return self.b
+
+
+def test_condition_reject_goes_retry_queue(monkeypatch):
+    """阶段 2：拒单进次日重试队列，保留 triggered 记录待恢复，达上限才标 failed。"""
+    from app.state import state
+    eng = ConditionOrderEngine(manager=_FakeCondManager(), on_event=lambda _e: None)
+    eng._retry_limit = 2
+
+    rejected = {"calls": 0}
+
+    class _FakeRouter:
+        async def submit(self, *a, **k):
+            rejected["calls"] += 1
+            return {"ok": False, "reason": "风控拒绝（模拟）", "order_id": ""}
+
+    state.signal_router = _FakeRouter()
+    try:
+        r = eng.submit("600519.SH", "buy", "gte", 10, 100)
+        cid = r["id"]
+        # 首次触发：拒单 → 进重试队列，status 保持 triggered，retry_count=1
+        asyncio.run(eng._fire(_FakeCondBridge(), eng._orders[cid], 11.0))
+        o = eng._orders[cid]
+        assert o["status"] == "triggered"
+        assert cid in eng._retry_queue
+        assert o["retry_count"] == 1
+        assert o["retry_date"]  # 次日重试
+        assert rejected["calls"] == 1
+        # 第二次（达上限）→ 标 failed 并移出队列
+        asyncio.run(eng._fire(_FakeCondBridge(), eng._orders[cid], 11.0, is_retry=True))
+        o = eng._orders[cid]
+        assert o["status"] == "failed"
+        assert cid not in eng._retry_queue
+        assert rejected["calls"] == 2
+    finally:
+        state.signal_router = None
+
+
+def test_condition_fire_success_marks_filled(monkeypatch):
+    """阶段 2：下单成功 → status=filled + order_id，且不残留重试队列。"""
+    from app.state import state
+    eng = ConditionOrderEngine(manager=_FakeCondManager(), on_event=lambda _e: None)
+
+    class _FakeRouter:
+        async def submit(self, *a, **k):
+            return {"ok": True, "order_id": "SR-1", "reason": ""}
+
+    state.signal_router = _FakeRouter()
+    try:
+        r = eng.submit("600519.SH", "buy", "gte", 10, 100)
+        cid = r["id"]
+        o = eng._orders[cid]
+        o["status"] = "triggered"   # 模拟已被触发
+        asyncio.run(eng._fire(_FakeCondBridge(), o, 11.0))
+        o = eng._orders[cid]
+        assert o["status"] == "filled"
+        assert o["order_id"] == "SR-1"
+        assert cid not in eng._retry_queue
+    finally:
+        state.signal_router = None
+
+
+def test_condition_fire_recheck_keeps_pending(monkeypatch):
+    """阶段 2：触发用最新价校验——行情回退（fresh 不成立）时不误下单，保持 pending。"""
+    from app.state import state
+    eng = ConditionOrderEngine(manager=_FakeCondManager(), on_event=lambda _e: None)
+
+    class _DroppedBridge(_FakeCondBridge):
+        class _GW(_FakeCondBridge._GW):
+            def get_quote(self, code):
+                return {"code": code, "last": 9.0}   # < trigger 10 → 条件已回退
+
+        gateway = _GW()
+
+    class _FakeRouter:
+        async def submit(self, *a, **k):
+            raise AssertionError("条件已回退不应下单")
+
+    state.signal_router = _FakeRouter()
+    try:
+        r = eng.submit("600519.SH", "buy", "gte", 10, 100)
+        cid = r["id"]
+        asyncio.run(eng._fire(_DroppedBridge(), eng._orders[cid], 11.0))
+        o = eng._orders[cid]
+        assert o["status"] == "pending"      # 回退 → 保持监控
+        assert cid not in eng._retry_queue
+    finally:
+        state.signal_router = None
+
+
 # ---------------- 下单幂等 ----------------
 def test_idempotency():
     import time
@@ -172,6 +286,85 @@ def test_idempotency():
     assert hit and hit["order_id"] == "100"
     trading._IDEMPOTENCY["k1"] = (time.time() - 60, hit)  # 过期
     assert trading._idempotent_get("k1") is None
+
+
+# ---------------- 阶段 0-B：单飞幂等——并发同键只执行一次 ----------------
+def test_single_flight_concurrent_only_one_execution():
+    """阶段 0-B（F1）：并发同 key 的单飞——真实逻辑只执行一次，其余复用结果。"""
+    from gateway.idempotency import _cache, _inflight, single_flight
+    _cache.clear()
+    _inflight.clear()
+
+    executed = {"n": 0}
+
+    async def factory():
+        executed["n"] += 1
+        await asyncio.sleep(0.05)
+        return {"order_id": "SF-1", "ok": True}
+
+    async def run():
+        results = await asyncio.gather(
+            single_flight("same-key", factory),
+            single_flight("same-key", factory),
+            single_flight("same-key", factory),
+        )
+        return results
+
+    results = asyncio.run(run())
+    assert executed["n"] == 1, f"并发同键应只执行一次，实际 {executed['n']} 次"
+    assert all(r["order_id"] == "SF-1" for r in results)
+    dup = [r for r in results if r.get("duplicated")]
+    assert len(dup) == 2, "两个并发请求应被标记 duplicated"
+
+
+def test_single_flight_window_cache_hit():
+    """阶段 0-B（F1）：窗口内重复请求命中缓存并标记 duplicated，不二次下单。"""
+    from gateway.idempotency import _cache, _inflight, single_flight
+    _cache.clear()
+    _inflight.clear()
+
+    executed = {"n": 0}
+
+    async def factory():
+        executed["n"] += 1
+        return {"order_id": "SF-2", "ok": True}
+
+    async def run():
+        r1 = await single_flight("w-key", factory)
+        r2 = await single_flight("w-key", factory)   # 窗口内重复
+        return r1, r2
+
+    r1, r2 = asyncio.run(run())
+    assert executed["n"] == 1
+    assert r2.get("duplicated") is True
+    assert r2["order_id"] == "SF-2"
+
+
+def test_single_flight_failure_not_cached():
+    """阶段 0-B（F1）：执行失败不缓存，下次可重试（避免把错误结果当成功）。"""
+    from gateway.idempotency import _cache, _inflight, single_flight
+    _cache.clear()
+    _inflight.clear()
+
+    attempts = {"n": 0}
+
+    async def factory():
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            raise RuntimeError("第一次失败")
+        return {"order_id": "SF-3", "ok": True}
+
+    async def run():
+        try:
+            await single_flight("f-key", factory)
+        except RuntimeError:
+            pass
+        r2 = await single_flight("f-key", factory)   # 失败后应可重试成功
+        return r2
+
+    r2 = asyncio.run(run())
+    assert attempts["n"] == 2
+    assert r2["order_id"] == "SF-3"
 
 
 # ---------------- TOTP 二次确认（D2） ----------------
@@ -206,6 +399,29 @@ def test_metrics_render():
     assert 'qmt_api_requests_total{scope="trade",status="200",key_id="k1"} 1' in text
     assert "qmt_ws_clients 2" in text
     assert 'qmt_broker_connected{conn_id="c1"} 1' in text
+
+
+# ---------------- 阶段 3：生命周期/幂等/风控/对账可观测（metrics） ----------------
+def test_metrics_stage3_observability():
+    """阶段 3：断线/重连/订阅恢复/幂等命中/风控拦截/对账差异指标正确输出。"""
+    from gateway.metrics import Metrics
+    m = Metrics()
+    m.record_conn_event("c1", "disconnected")
+    m.record_conn_event("c1", "reconnected")
+    m.record_conn_event("bridge", "subscription_recovered")
+    m.record_idempotency_hit()
+    m.record_idempotency_hit()
+    m.record_risk_blocked("frequency")
+    m.record_risk_blocked("validation")
+    m.record_reconcile_diff("order")
+    text = m.render({})
+    assert 'qmt_conn_events_total{conn_id="c1",event="disconnected"} 1' in text
+    assert 'qmt_conn_events_total{conn_id="c1",event="reconnected"} 1' in text
+    assert 'qmt_conn_events_total{conn_id="bridge",event="subscription_recovered"} 1' in text
+    assert "qmt_idempotency_hits_total 2" in text
+    assert 'qmt_risk_blocked_total{rule="frequency"} 1' in text
+    assert 'qmt_risk_blocked_total{rule="validation"} 1' in text
+    assert 'qmt_reconcile_diffs_total{scope="order"} 1' in text
 
 
 # ---------------- API Key 过期 / IP 白名单（D1+D3） ----------------
@@ -259,15 +475,48 @@ def test_wal_checkpoint_and_replay():
         w.close()
 
 
+# ---------------- 阶段 3：WAL fsync 批量/后台 + 损坏行告警 ----------------
+def test_wal_fsync_batched_and_corrupt_line_warned():
+    """阶段 3：append 不再每条同步 fsync（后台线程批量），损坏行记录计数并告警。"""
+    from gateway.wal import WAL
+    with tempfile.TemporaryDirectory() as d:
+        p = os.path.join(d, "wal.jsonl")
+        w = WAL(p)
+        try:
+            # 大量快速 append：不逐条同步 fsync，而是攒到阈值后由后台线程执行
+            w._last_fsync = time.time()  # 重置，避免首条即触发
+            w._unfsynced = 0
+            for i in range(10):
+                w.append("order", "signal", f"oid{i}", {"code": "600519.SH"})
+            # 攒满阈值后应触发一次后台 fsync（事件被置位；后台线程消费）
+            assert w._unfsynced <= w._fsync_count
+            # 写入内容完整可读（flush 保证进程崩溃不丢）
+            recs = w.all_records()
+            assert len(recs) == 10
+        finally:
+            w.close()   # close 兜底同步 fsync
+        # 构造损坏行：写坏行后再 append，replay 应记录 corrupt 计数而非崩溃
+        with open(p, "a", encoding="utf-8") as fh:
+            fh.write("{not-json}\n")
+        w2 = WAL(p)
+        try:
+            w2.append("order", "signal", "oidX", {"code": "000001.SZ"})
+            summary = w2.replay({})
+            assert summary["corrupt"] >= 1, "损坏行应被计数告警而非静默跳过"
+        finally:
+            w2.close()
+
+
 # ---------------- 委托对账核销（A2） ----------------
 def test_reconcile_status_normalize():
-    from gateway.reconcile import _norm_status
-    assert _norm_status("已成") == "filled"
-    assert _norm_status("部成") == "part_filled"
-    assert _norm_status("已撤") == "canceled"
-    assert _norm_status("废单") == "rejected"
-    assert _norm_status("已报") == "open"
-    assert _norm_status("") == "unknown"
+    # 阶段 0-A：状态归一化收敛到统一词汇表（gateway.reconcile 不再私有 _norm_status）
+    from xtquant_client.order_status import normalize_order_status
+    assert normalize_order_status("已成") == "filled"
+    assert normalize_order_status("部成") == "partial"
+    assert normalize_order_status("已撤") == "cancelled"
+    assert normalize_order_status("废单") == "rejected"
+    assert normalize_order_status("已报") == "pending"
+    assert normalize_order_status("") == "unknown"
 
 
 def test_reconcile_pending_from_wal():
@@ -296,14 +545,20 @@ def test_reconcile_no_broker():
 
     from gateway.wal import WAL
     with tempfile.TemporaryDirectory() as d:
-        w = WAL(os.path.join(d, "wal.jsonl"))
-        w.append("order", "signal", "B1", {"code": "600519.SH", "volume": 100, "side": "buy"})
-        rec = OrderReconciler(manager=_NoMgr(), wal=w)
-        res = _a.run(rec.reconcile())
-        # 券商不可用 → 当日委托查不到 → 标记 stale 并核销，不再重复对账
-        assert res["checked"] == 1 and res["stale"] == 1
-        assert rec._pending_from_wal() == {}
-        w.close()
+            w = WAL(os.path.join(d, "wal.jsonl"))
+            w.append("order", "signal", "B1", {"code": "600519.SH", "volume": 100, "side": "buy"})
+            rec = OrderReconciler(manager=_NoMgr(), wal=w)
+            # 阶段 0-A（F11）：券商不可用「查无此单」不能立即核销为 stale
+            # （瞬时断连/分页/会话重置会误销活单）。首轮记 open，不写核销记录。
+            res = _a.run(rec.reconcile())
+            assert res["checked"] == 1 and res["stale"] == 0 and res["open"] == 1
+            assert rec._pending_from_wal() != {}  # 未核销，等待后续轮次确认
+            # 连续 missing_rounds 轮仍查不到 → 标 stale 并核销，不再重复对账
+            for _ in range(rec.missing_rounds - 1):
+                res = _a.run(rec.reconcile())
+            assert res["stale"] == 1
+            assert rec._pending_from_wal() == {}
+            w.close()
 
 
 # ---------------- 告警规则引擎（E3） ----------------
@@ -828,6 +1083,58 @@ def test_notifier_dedup():
     assert n2._dedup_allowed(key) is True
 
 
+# ---------------- P1：notify 非阻塞（fire-and-forget）----------------
+def test_notifier_non_blocking():
+    """阶段 4 / P1：notify 必须非阻塞——内联重试不再卡死调用方。
+
+    配置一个指向不可达地址的 webhook，原实现会在 notify 内联重试（最坏阻塞上百秒，
+    曾使 /config/risk/circuit 等接口 ReadTimeout）；修复后 notify 即刻返回，
+    发送在后台任务中完成（失败落库 failed）。
+    """
+    from gateway.notifier import Notifier
+
+    class _FakeDB:
+        def __init__(self, rows):
+            self._rows = rows
+            self.logs = []
+
+        async def aquery(self, sql, params=()):
+            return [dict(r) for r in self._rows]
+
+        def execute(self, sql, params=()):
+            self.logs.append((sql, params))
+
+        def insert(self, table, row):
+            self.logs.append((table, row))
+            return len(self.logs)
+
+    rows = [{
+        "id": 1, "name": "坏 webhook", "channel": "webhook", "enabled": 1,
+        "events": "*", "params_json": '{"url": "http://127.0.0.1:1/nope"}',
+        "template": "{{title}}",
+    }]
+    db = _FakeDB(rows)
+    n = Notifier(db=db, max_retries=1, base_delay=0.05)
+
+    async def _run():
+        start = time.monotonic()
+        await n.notify("order.filled", "成交", "test")
+        elapsed = time.monotonic() - start
+        # 修复后 notify 即刻返回（< 1s），绝不做内联重试
+        assert elapsed < 1.0, f"notify 阻塞了 {elapsed:.2f}s"
+        # 等待后台发送任务完成（失败重试落库）
+        for _ in range(100):
+            if not n._tasks:
+                break
+            await asyncio.sleep(0.05)
+        await n.close()
+
+    asyncio.run(_run())
+    # 后台任务最终把日志置为 failed（重试发生在后台，不阻塞调用方）
+    updates = [params for sql, params in db.logs if sql.startswith("UPDATE notification_log")]
+    assert updates and updates[-1][0] == "failed", f"未记录发送失败: {db.logs}"
+
+
 # ---------------- P1：DB 索引补全（迁移 v9）----------------
 def test_db_indexes_v9():
     db, d = _tmp_db()
@@ -839,6 +1146,78 @@ def test_db_indexes_v9():
                      "idx_backtest_jobs_status", "idx_webhook_deliveries_created",
                      "idx_messages_session", "idx_market_cache_code"):
             assert want in idx, want
+    finally:
+        _cleanup(db, d)
+
+
+# ---------------- 阶段 3：DB 事务化迁移 + 失败回滚 ----------------
+def test_db_migrate_transactional_rollback(monkeypatch):
+    """阶段 3：迁移任一步失败即整体回滚——不留下半成品 schema，也不写版本号。"""
+    import app.db as db_mod
+    from pathlib import Path
+
+    # 构造两条迁移：v10 成功建表；v11 中间含一条非法语句（触发失败）
+    fake_migrations = [
+        (10, "CREATE TABLE IF NOT EXISTS ok_tbl (id INTEGER PRIMARY KEY, name TEXT);"),
+        (11, "CREATE TABLE IF NOT EXISTS part_tbl (id INTEGER PRIMARY KEY);"
+             "CREATE TABLE IF NOT EXISTS bad_tbl (id INTEGER); "
+             "THIS IS NOT VALID SQL;"),
+    ]
+    monkeypatch.setattr(db_mod, "_MIGRATIONS", fake_migrations)
+
+    d = tempfile.mkdtemp()
+    p = Path(d) / "txn.db"
+    raised = False
+    db_ref = {"db": None}
+    try:
+        db_ref["db"] = db_mod.DB(p)
+    except sqlite3.Error:
+        raised = True
+    try:
+        assert raised, "含非法语句的迁移应抛错"
+        # 回滚后：不残留半成品表，版本号未写入
+        conn = sqlite3.connect(str(p))
+        try:
+            tables = {r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")}
+            assert "part_tbl" not in tables, "前置合法语句应在回滚窗口内一并撤销"
+            assert "bad_tbl" not in tables
+            done = {r[0] for r in conn.execute(
+                "SELECT version FROM schema_migrations")}
+            assert 11 not in done, "失败的迁移不应写入版本号"
+            assert 10 in done, "独立的成功迁移应正常应用"
+        finally:
+            conn.close()
+    finally:
+        try:
+            if db_ref["db"] is not None:
+                db_ref["db"]._conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+        _cleanup(None, d)
+
+
+def test_db_backup_consistency_api():
+    """阶段 3：sqlite backup API 生成一致备份（单文件、可打开、含 schema_migrations）。"""
+    from app.db import DB
+    from pathlib import Path
+
+    db, d = _tmp_db()
+    try:
+        db.insert("audit_log", {"actor": "t", "action": "x", "target": "y",
+                                "created_at": "2026-01-01T00:00:00"})
+        dst = Path(d) / "backups" / "app.bak.db"
+        assert db.backup_to(dst) is True, "backup API 应返回成功"
+        assert dst.exists() and dst.stat().st_size > 0
+        # 备份文件可独立打开，且数据一致
+        conn = sqlite3.connect(str(dst))
+        try:
+            n = conn.execute("SELECT COUNT(*) FROM audit_log").fetchone()[0]
+            assert n >= 1, "备份应包含已写入数据"
+            m = conn.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0]
+            assert m >= 1
+        finally:
+            conn.close()
     finally:
         _cleanup(db, d)
 
@@ -934,10 +1313,11 @@ def test_bridge_conn_state_and_quote_payload_still_in_data():
     a._on_event("conn_state", {"event": "conn_state", "data": {"connected": False}})
     assert a._connected is False
 
-    got = []
-    a._quote_handlers.append(got.append)
     a._on_event("quote", {"event": "quote", "data": {"code": "600519.SH"}})
-    assert got == [{"code": "600519.SH"}]
+    # 阶段 1（C12）：quote 经独立有界队列异步派发（reader 线程不再同步执行 handler）。
+    # 载荷仍须完整保留（code 在 data 内），此处直接驱动队列验证不回归。
+    evt = a._quote_q.get(timeout=2.0)
+    assert evt == {"code": "600519.SH"}
 
 
 def test_humanize_init_error_passthrough():

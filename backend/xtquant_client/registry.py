@@ -96,6 +96,15 @@ _PROFILE_MAP = {p.id: p for p in BROKER_PROFILES}
 
 
 def get_profile(broker_id: str) -> BrokerProfile | None:
+    # 阶段 1（C21）：热插拔档案（registry 单例，含运行期 hotplug_profile 与
+    # DB 持久化的自定义券商）优先于内置 _PROFILE_MAP——此前 create_adapter 只走
+    # 模块级 _PROFILE_MAP，热插拔券商一实例化就抛「未知券商」。
+    try:
+        p = registry._profiles.get(broker_id)
+        if p is not None:
+            return p
+    except Exception:  # noqa: BLE001  registry 未就绪时回退内置
+        pass
     return _PROFILE_MAP.get(broker_id)
 
 

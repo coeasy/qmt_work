@@ -10,10 +10,9 @@ import asyncio
 import logging
 import time
 
-log = logging.getLogger("qmt_work.order_watchdog")
+from xtquant_client.order_status import is_active
 
-# 视为「未成交活跃」的状态集合（小写比较）
-_ACTIVE = {"submitted", "pending", "queued", "active", "not_dealt", "submitting"}
+log = logging.getLogger("qmt_work.order_watchdog")
 
 
 def collect_stale(orders: list[dict], first_seen: dict[str, float],
@@ -24,16 +23,20 @@ def collect_stale(orders: list[dict], first_seen: dict[str, float],
     - 活跃委托首次出现 -> 记 now；持续超过 timeout -> 标记超时
     - 已非活跃（成交/撤单/失败）-> 清除记录
     - 本轮未再出现的活跃记录（单已被撤/已成交但不在本轮返回）-> 清除
+
+    状态判定统一走 ``is_active``（阶段 0-A）：覆盖 xtp 真实返回的
+    pending/partial（含 unreported/reported/part_deal 等），不再用与 xtp 状态
+    **零交集**的硬编码集合（原 ``_ACTIVE`` 导致超时撤单对真实柜台整体失效）。
     """
     stale: list[dict] = []
     seen: set[str] = set()
     for o in orders:
         oid = str(o.get("order_id") or "")
-        status = str(o.get("status") or "").lower()
+        status = str(o.get("status") or "")
         if not oid:
             continue
         seen.add(oid)
-        if status in _ACTIVE:
+        if is_active(status):
             t0 = first_seen.setdefault(oid, now)
             if timeout > 0 and now - t0 >= timeout:
                 stale.append(o)

@@ -14,32 +14,14 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from datetime import datetime
 from typing import Any
 
+from xtquant_client.order_status import (
+    normalize_order_status, is_active, FILLED, CANCELLED, REJECTED, UNKNOWN,
+)
+
 log = logging.getLogger("qmt_work.reconcile")
-
-# 券商返回的状态 → 归一化终态
-_FINAL = {
-    "已成": "filled", "全部成交": "filled", "filled": "filled",
-    "部成": "part_filled", "部分成交": "part_filled", "part_filled": "part_filled",
-    "已撤": "canceled", "已撤单": "canceled", "canceled": "canceled", "cancelled": "canceled",
-    "废单": "rejected", "已拒绝": "rejected", "rejected": "rejected", "junk": "rejected",
-}
-_OPEN = {"未报", "待报", "已报", "已报待撤", "部成待撤", "pending", "submitted", "reported"}
-
-
-def _norm_status(raw: Any) -> str:
-    s = str(raw or "").strip()
-    if not s:
-        return "unknown"
-    low = s.lower()
-    if s in _FINAL:
-        return _FINAL[s]
-    if low in _FINAL:
-        return _FINAL[low]
-    if s in _OPEN or low in _OPEN:
-        return "open"
-    return low
 
 
 class OrderReconciler:
@@ -51,6 +33,10 @@ class OrderReconciler:
         self._notifier = notifier
         self._task: asyncio.Task | None = None
         self.last_result: dict = {}
+        # 阶段 0-A（F11）：「查无此单」不再立即核销为 stale。记录连续未命中轮数，
+        # 仅当连续 missing_rounds 轮查不到（且同日）或跨日才标 stale，避免瞬时断连误销活单。
+        self.missing_rounds = 3
+        self._missing: dict[str, int] = {}
 
     # ---------------- WAL 侧：待核销集合 ----------------
     def _pending_from_wal(self) -> dict[str, dict]:
@@ -71,7 +57,7 @@ class OrderReconciler:
             if op == "reconciled":
                 done.add(oid)
                 continue
-            if entity not in ("signal", "order"):
+            if entity not in ("signal", "order", "condition"):
                 continue
             if op not in ("order", "submit", "create"):
                 continue
@@ -117,24 +103,48 @@ class OrderReconciler:
             self.last_result = {"checked": 0, "note": "无待核销委托"}
             return self.last_result
         orders, deals = await self._broker_snapshot(conn_id)
-        summary = {"checked": len(pending), "filled": 0, "part_filled": 0,
-                   "canceled": 0, "rejected": 0, "open": 0, "stale": 0,
-                   "mismatched": 0, "details": []}
+        # 状态计数键统一为规范词汇（与 xtquant_client.order_status 对齐）
+        summary = {"checked": len(pending), "filled": 0, "partial": 0,
+                   "cancelled": 0, "rejected": 0, "open": 0, "stale": 0,
+                   "unknown": 0, "mismatched": 0, "details": []}
         for oid, payload in pending.items():
             row = orders.get(oid)
             traded = deals.get(oid, 0.0)
             want = float(payload.get("volume") or 0)
             if row is None:
-                # 券商当日委托里没有 → 跨日或已清算
-                status = "stale" if traded <= 0 else "filled"
-            else:
-                status = _norm_status(row.get("status") or row.get("order_status"))
-                if status == "open":
-                    # 仍在挂单，不核销，下次继续跟踪
+                # 阶段 0-A（F11）：券商当日委托里没有该单，不立即核销。
+                # 连续 missing_rounds 轮查不到（同日）→ 视为 stale；跨日（委托产生日≠今日）
+                # 才确认已清算标 stale，避免瞬时断连/分页/会话重置误销活单。
+                self._missing[oid] = self._missing.get(oid, 0) + 1
+                if self._missing[oid] < self.missing_rounds:
                     summary["open"] += 1
                     continue
-                if status == "unknown" and traded > 0:
-                    status = "filled" if traded >= want > 0 else "part_filled"
+                # 跨日判定：wal_ts 是 unix 浮点时间戳，payload.ts 可能是 ISO 字符串，
+                # 统一换算成 YYYY-MM-DD 再与今日比较（不能直接取字符串前 10 位，那恒不等于今日）。
+                created_raw = payload.get("ts") or payload.get("wal_ts") or ""
+                cdate = ""
+                if isinstance(created_raw, (int, float)) and created_raw > 1e9:
+                    try:
+                        cdate = datetime.fromtimestamp(float(created_raw)).strftime("%Y-%m-%d")
+                    except (ValueError, OSError):
+                        cdate = ""
+                elif isinstance(created_raw, str) and created_raw[:10]:
+                    cdate = created_raw[:10]
+                # 跨日委托（券商当日委托表已清空）→ stale；当日委托连续 N 轮查不到 →
+                # 按成交判定（有成交=已清算，无成交=疑似消失/废单）。
+                if cdate and cdate != datetime.now().strftime("%Y-%m-%d"):
+                    status = "stale"
+                else:
+                    status = "filled" if traded > 0 else "stale"
+            else:
+                self._missing.pop(oid, None)
+                status = normalize_order_status(row.get("status") or row.get("order_status"))
+                if is_active(status):
+                    # 仍在挂单（pending/partial），不核销，下次继续跟踪
+                    summary["open"] += 1
+                    continue
+                if status == UNKNOWN and traded > 0:
+                    status = FILLED if traded >= want > 0 else "part_filled"
             summary[status] = summary.get(status, 0) + 1
             detail = {"order_id": oid, "code": payload.get("code", ""),
                       "side": payload.get("side", ""), "want": want,
@@ -143,6 +153,12 @@ class OrderReconciler:
             if status == "filled" and want > 0 and traded > 0 and abs(traded - want) > 1e-6:
                 detail["mismatch"] = True
                 summary["mismatched"] += 1
+                # 阶段 3：对账差异可观测——指标 qmt_reconcile_diffs_total{scope="order"}
+                try:
+                    from gateway.metrics import get_metrics
+                    get_metrics().record_reconcile_diff("order")
+                except Exception:  # noqa: BLE001
+                    pass
             summary["details"].append(detail)
             self._write_off(oid, detail)
         if summary["details"]:

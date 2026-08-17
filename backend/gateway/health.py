@@ -70,15 +70,26 @@ class BrokerHealthMonitor:
             if conn.health_status != "connected":
                 conn.health_status = "connected"
                 conn.reconnect_attempts = 0
-                if conn.reconnect_task:
-                    conn.reconnect_task.cancel()
+                rt = conn.reconnect_task
+                if rt is not None:
+                    # C4：无论任务是否已结束，一律清理字段——旧代码仅当循环异常退出
+                    # 才清 reconnect_task，重连成功路径不清 → 该字段残留非 None，
+                    # 下方 `is None` 判定永远为假，自愈能力随机永久失效。
+                    if not rt.done():
+                        rt.cancel()
+                        try:
+                            await rt
+                        except Exception:  # noqa: BLE001
+                            pass
                     conn.reconnect_task = None
                 self._emit(conn.cfg.conn_id, "connected", {"detail": "ok"})
         else:
             if conn.health_status in ("connected", "connecting"):
                 conn.health_status = "disconnected"
                 self._emit(conn.cfg.conn_id, "disconnected", {"last_error": conn.last_error})
-            if conn.cfg.active and conn.reconnect_task is None:
+            # C4：用 task.done() 判定而非仅 `is None`——重连成功后字段残留非 None 时
+            # （旧代码 bug）也能继续创建新的重连任务，保证自愈不失效。
+            if conn.cfg.active and (conn.reconnect_task is None or conn.reconnect_task.done()):
                 conn.reconnect_task = asyncio.create_task(self._reconnect(conn))
 
     async def _reconnect(self, conn):
@@ -97,6 +108,9 @@ class BrokerHealthMonitor:
                     conn.reconnect_attempts = 0
                     conn.last_error = ""
                     self._emit(conn.cfg.conn_id, "connected", {"detail": "reconnected"})
+                    # C4 关键：成功路径必须清空 reconnect_task——否则该字段残留
+                    # 非 None，_check 的 `is None` 判定永不成立，自愈能力随机永久失效。
+                    conn.reconnect_task = None
                     return
             except Exception as exc:  # noqa: BLE001
                 conn.last_error = str(exc)[:200]
@@ -112,6 +126,13 @@ class BrokerHealthMonitor:
         传入正确参数；若返回协程则调度到事件循环（原实现未 await 且把 dict 当 event_type 传，
         导致 broker.connected/disconnected 事件从未真正推送到前端）。
         """
+        # 阶段 3：断线/重连可观测——指标 qmt_conn_events_total{event=disconnected/connected/reconnected}
+        try:
+            from gateway.metrics import get_metrics
+            ev = "reconnected" if data.get("detail") == "reconnected" else event
+            get_metrics().record_conn_event(conn_id, ev)
+        except Exception:  # noqa: BLE001
+            pass
         if not self._on_event:
             return
         try:

@@ -40,6 +40,27 @@ def _today() -> str:
     return time.strftime("%Y-%m-%d")
 
 
+# 交易方向归一化（中英 / 多同义词）。未知方向必须显式拒绝，绝不能按「卖出」处理
+# （阶段 0-B / F5：原实现未知方向一律按卖出，导致熔断禁买失效、买入检查被绕过）。
+_BUY_SYN = {"buy", "b", "1", "long", "开仓", "买入", "purchase", "bid", "买"}
+_SELL_SYN = {"sell", "s", "2", "short", "平仓", "卖出", "sale", "ask", "卖"}
+
+
+def normalize_direction(direction) -> str | None:
+    """归一化交易方向：buy / sell / None（未知）。
+
+    未知方向返回 None —— 调用方必须拒绝，而非默认当作卖出。
+    """
+    d = str(direction or "").strip().lower()
+    if not d:
+        return None
+    if d in _BUY_SYN:
+        return "buy"
+    if d in _SELL_SYN:
+        return "sell"
+    return None
+
+
 @dataclass
 class RiskManager:
     max_amount: float = 100_000.0
@@ -270,7 +291,11 @@ class RiskManager:
         amount = price * volume
         if amount > self.max_amount:
             return False, f"order amount {amount:.0f} > max amount {self.max_amount:.0f}"
-        is_buy = str(direction).lower() in ("buy", "b", "1", "long", "开仓")
+        # 阶段 0-B（F5）：方向归一化；未知方向显式拒绝，绝不按卖出处理
+        nd = normalize_direction(direction)
+        if nd is None:
+            return False, f"未知交易方向：{direction!r}（须为 buy/sell 或其同义表述）"
+        is_buy = nd == "buy"
         # ---- B4 日级熔断：熔断期间只允许卖出平仓 ----
         if self._broken and is_buy:
             return False, f"风控熔断中，禁止买入开仓（{self._broken_reason or '人工熔断'}）"
@@ -311,18 +336,32 @@ class RiskManager:
         """下单前校验 + 计入频率窗口与日级用量（放行的委托才计数）。"""
         self._roll_day()
         now = time.time()
-        self._order_times.append(now)
-        # 频率限制：滑动窗口 60s 内下单数
+        # 频率窗口当前计数（不含本次）——先判窗口，再校验
         while self._order_times and now - self._order_times[0] > 60:
             self._order_times.popleft()
-        if len(self._order_times) > self.max_orders_per_min:
+        if len(self._order_times) >= self.max_orders_per_min:
+            # 阶段 3：风控拦截可观测（频率）
+            try:
+                from gateway.metrics import get_metrics
+                get_metrics().record_risk_blocked("frequency")
+            except Exception:  # noqa: BLE001
+                pass
             return False, (
                 f"下单频率超限：近 60s 已 {len(self._order_times)} 笔 "
                 f"> 上限 {self.max_orders_per_min}")
         ok, reason = self._validate_order(code, price, volume, direction)
         if not ok:
+            # 阶段 3：风控拦截可观测（校验类：额度/黑名单/偏离/熔断/仓位）
+            try:
+                from gateway.metrics import get_metrics
+                get_metrics().record_risk_blocked("validation")
+            except Exception:  # noqa: BLE001
+                pass
+            # 阶段 0-B（F5 修正）：被拒单**不占用频率额度**，避免频率 DoS
+            # （连续构造被拒委托即可耗尽频率窗口、阻断正常下单）。
             return False, reason
-        # 全部通过 -> 计入日级用量（只统计放行的委托）
+        # 全部通过 -> 计入频率窗口与日级用量（只统计放行的委托）
+        self._order_times.append(now)
         amount = price * volume
         self._day_amount += amount
         self._day_orders += 1

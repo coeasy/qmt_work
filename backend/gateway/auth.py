@@ -10,12 +10,23 @@
 from fastapi import Request
 from fastapi.responses import JSONResponse
 
+import hmac
+
 from .apikey import scope_for_path, scope_match, _is_public_path
 
 _LOOPBACK = {"127.0.0.1", "::1", "localhost"}
 
 
 def is_loopback(request) -> bool:
+    """loopback 免鉴权判定。
+
+    阶段 0-E（F10）：原实现仅看 request.client.host——一旦启用 --proxy-headers 或
+    同机反代，伪造 `X-Forwarded-For: 127.0.0.1` 即可绕过全部鉴权。现要求：
+    只要请求携带任何转发头（x-forwarded-for / forwarded），一律不再信任
+    client.host，必须走完整鉴权。
+    """
+    if request.headers.get("x-forwarded-for") or request.headers.get("forwarded"):
+        return False
     host = (request.client.host if request.client else "") or ""
     return host in _LOOPBACK
 
@@ -50,8 +61,8 @@ def make_auth_middleware(master_key: str, store_getter, limiter_getter):
             return resp
         token = _extract_token(request)
         required_scope = scope_for_path(path)
-        # 1) 主密钥（向后兼容，全权限）
-        if token and master_key and token == master_key:
+        # 1) 主密钥（向后兼容，全权限）；阶段 0-E：常量时间比较防时序侧信道
+        if token and master_key and hmac.compare_digest(token, master_key):
             resp = await call_next(request)
             m.record_request("admin", resp.status_code, "master")
             return resp

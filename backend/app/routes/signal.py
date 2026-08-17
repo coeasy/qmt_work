@@ -41,7 +41,12 @@ async def signal_submit(body: dict):
         remark=body.get("remark", ""),
         broker_id=body.get("broker_id", ""),
         payload=body.get("payload", {}))
-    res = await state.signal_router.route(sig)
+    # 阶段 4：idempotency_key 非空时经 submit() 单飞幂等（同 key 只执行一次真实逻辑）
+    idem = str(body.get("idempotency_key", "") or "").strip()
+    res = await state.signal_router.submit(
+        code=sig.code, side=sig.side, volume=sig.volume, price=sig.price,
+        price_type=sig.price_type, source=sig.source, broker_id=sig.broker_id,
+        remark=sig.remark, idempotency_key=idem, payload=sig.payload)
     if isinstance(res, dict) and res.get("ok"):
         return ok(res)
     return err(503, res.get("reason", "信号路由失败") if isinstance(res, dict) else "信号路由失败")
