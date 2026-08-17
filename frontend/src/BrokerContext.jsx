@@ -45,11 +45,11 @@ export function BrokerProvider({ children }) {
     await refresh();
   }, [refresh]);
 
-  const connect = useCallback(async (id) => {
-    const r = await api.connectBroker(id);
-    await refresh();
-    return r;
-  }, [refresh]);
+  const connect = useCallback((id, opts = {}) => {
+    // 阶段 4 修复：支持 AbortController.signal——前端「取消连接」按钮的真正依赖。
+    // 无此参数时与旧版本完全兼容（api.post 不传 signal 走原路径）。
+    return api.connectBroker(id, opts);
+  }, []);
 
   const disconnect = useCallback(async (id) => {
     await api.disconnectBroker(id);

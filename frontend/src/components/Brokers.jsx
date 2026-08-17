@@ -1,6 +1,6 @@
 // 券商连接管理：多券商 / 多客户端版本。添加、连接、断开、设为活跃、删除、探测。
 // 所有券商逻辑在后端 BrokerManager；前端仅透传配置，绝不内置任何券商实现。
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useBroker } from "../BrokerContext.jsx";
 
 const ACCOUNT_TYPES = ["STOCK", "CREDIT", "OPTION", "FUTURES"];
@@ -53,9 +53,53 @@ export default function Brokers() {
   const [runtimes, setRuntimes] = useState(null); // ABI 运行时矩阵
   const [health, setHealth] = useState({});       // conn_id -> 健康检查结果
   const [healthBusy, setHealthBusy] = useState("");
+  // 「连接中」状态：按 conn_id 维度记录——避免同一连接重复点击、显示"连接中…"
+  // 提示，并支持取消。必须用 ref + state 双轨：state 触发重渲染，ref 持有
+  // AbortController 让"取消"能真正打断后端连接请求（不依赖用户在 spinner
+  // 上傻等 30s+）。是解决「无法点击连接」的最关键 UX 修复。
+  const [connecting, setConnecting] = useState({});  // conn_id -> { startedAt, hint }
+  const connectAbortRef = useRef({});                 // conn_id -> AbortController
 
   async function loadRuntimes() {
     try { setRuntimes(await api.brokerRuntimes()); } catch (e) { setRuntimes({ error: e.message }); }
+  }
+  // 阶段 4 修复：连接按钮必须可点击、可取消、有可见反馈。
+  // 后端握手最坏 30s（短链），按 1s tick 刷新计时器文案，避免用户"以为卡死"。
+  // 关键改动：fetch + AbortController.abort() 会立即中断请求，不再 spinner 死转。
+  async function doConnect(connId) {
+    setMsg(null);
+    const ac = new AbortController();
+    connectAbortRef.current[connId] = ac;
+    const startedAt = Date.now();
+    setConnecting((c) => ({ ...c, [connId]: {
+      startedAt,
+      hint: "正在拉起桥接子进程（30s 内返回）；若一直停留，请确认 QMT 客户端已登录。",
+    }}));
+    // 1s 刷新"连接中…"秒数（避免被误判为卡死）
+    const tick = setInterval(() => {
+      setConnecting((c) => c[connId] ? { ...c, [connId]: { ...c[connId] } } : c);
+    }, 1000);
+    try {
+      const r = await connect(connId, { signal: ac.signal });
+      const okc = !!(r && r.connected);
+      setMsg({ ok: okc, t: okc ? "连接成功" : friendlyErr(r && r.detail) });
+    } catch (e) {
+      const txt = String(e && e.message || e);
+      if (ac.signal.aborted) {
+        setMsg({ ok: false, t: "已取消连接" });
+      } else {
+        setMsg({ ok: false, t: friendlyErr(txt) });
+      }
+    } finally {
+      clearInterval(tick);
+      setConnecting((c) => { const { [connId]: _, ...rest } = c; return rest; });
+      delete connectAbortRef.current[connId];
+    }
+  }
+  function cancelConnect(connId) {
+    const ac = connectAbortRef.current[connId];
+    if (ac) ac.abort();
+    setMsg({ ok: false, t: "已请求取消连接（如后端仍忙，请稍候片刻）" });
   }
   async function checkHealth(connId) {
     setHealthBusy(connId);
@@ -172,6 +216,17 @@ export default function Brokers() {
         支持多券商（国金 / 华鑫 / 银河 / 中信建投 / 兴业 / 广发 / 同花顺 / 恒生PTrade / 掘金）× 多客户端版本。
         所有下单 / 行情均经真实券商 SDK，未连接时页面给出明确提示，不返回任何假数据。
       </p>
+      {/* 阶段 4 修复：连接前最强提示。
+          用户反馈「无法点击连接 / 点击无响应」，根本原因几乎都是 QMT 客户端未登录
+          导致 SDK 在子进程内阻塞——这里用红框 + 加粗把"必须先登录"放在最显眼处。 */}
+      <div className="toast err" style={{ position: "static", maxWidth: "none",
+        marginBottom: 12, padding: "10px 14px", whiteSpace: "pre-wrap", lineHeight: 1.7 }}>
+        <b>连接前必读</b>
+        {"\n"}1) 打开并<b>登录</b> QMT 客户端（极速/普通模式均可），保持客户端运行；
+        {"\n"}2) 在客户端里完成<b>行情 + 交易</b> 登录（任一未登录都会让连接失败）；
+        {"\n"}3) 点击下方「连接」按钮，最长 30 秒内返回结果（可随时取消）。
+        {"\n"}若 30 秒后仍提示「握手超时」，几乎都是 QMT 客户端未登录或客户端路径错误。
+      </div>
       {/* 提示渲染规则：.toast 默认是右下角 fixed + max-width 360px，装不下
           多行排查指引（会被截断，且与常驻诊断横幅重叠在同一位置）。
           因此多行文案改为页面内静态展示并保留换行；单行仍用轻量角标提示。 */}
@@ -367,19 +422,23 @@ export default function Brokers() {
                       <div className="op-stack">
                         {b.connected ? (
                           <button className="ghost" onClick={() => disconnect(b.conn_id)}>断开</button>
+                        ) : connecting[b.conn_id] ? (
+                          <div className="op-stack" style={{ gap: 6 }}>
+                            <button className="ghost" disabled>
+                              <span className="spin">⟳</span> 连接中…
+                              <span className="muted" style={{ fontSize: 11 }}>
+                                {Math.max(0, Math.floor((Date.now() - connecting[b.conn_id].startedAt) / 1000))}s
+                              </span>
+                            </button>
+                            <button className="ghost danger" onClick={() => cancelConnect(b.conn_id)}>取消</button>
+                            <p className="muted" style={{ fontSize: 11, marginTop: 4, lineHeight: 1.5 }}>
+                              {connecting[b.conn_id].hint}
+                            </p>
+                          </div>
                         ) : (
-                          <button onClick={async () => {
-                            setMsg(null);
-                            try {
-                              const r = await connect(b.conn_id);
-                              const okc = !!(r && r.connected);
-                              setMsg({ ok: okc, t: okc ? "连接成功" : friendlyErr(r && r.detail) });
-                            } catch (e) {
-                              setMsg({ ok: false, t: friendlyErr(e.message) });
-                            }
-                          }}>连接</button>
+                          <button onClick={() => doConnect(b.conn_id)}>连接</button>
                         )}
-                        {!b.active && (
+                        {!b.active && !connecting[b.conn_id] && (
                           <button className="ghost" onClick={() => setActive(b.conn_id)}>设为活跃</button>
                         )}
                         <button className="ghost" onClick={() => checkHealth(b.conn_id)} disabled={healthBusy === b.conn_id}>

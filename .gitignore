@@ -21,6 +21,8 @@ backend/static/
 # exe 同目录自动生成的运行期配置
 smart_qmt_config.json
 qmt_work_config.json
+# 运行期生成的端口发现文件（非源码）
+backend/.qmt_work.port
 
 # ---------- 前端 ----------
 frontend/node_modules/

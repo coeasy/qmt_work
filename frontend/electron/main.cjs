@@ -41,12 +41,18 @@ function startBackend() {
   const { cmd, args } = backendEntry();
   // 启动前清理陈旧端口文件（上次异常退出可能残留过期端口，导致健康检查等错端口）
   try { fs.unlinkSync(portFile()); } catch { /* 不存在则忽略 */ }
-  // 运行时数据（SQLite）写入用户可写目录，避免 Program Files 只读问题
+  // 运行时数据（SQLite / 日志）写入用户可写目录，避免 Program Files 与
+  // extraResources 资源目录只读导致日志无法落地（历史上曾因 asar 不可写
+  // 导致用户点击「连接」后看不到任何后端日志，无从排障）。
   const env = {
     ...process.env,
     QMT_DB_PATH: path.join(app.getPath("userData"), "app.db"),
+    QMT_LOG_DIR: path.join(app.getPath("userData"), "logs"),
     QMT_PORT_FILE: portFile(),
   };
+  // 确保日志目录存在；PyInstaller 打包后的 EXE 无写权限到 resources/，
+  // 必须提前在 userData 创建好 logs 目录。
+  try { fs.mkdirSync(env.QMT_LOG_DIR, { recursive: true }); } catch { /* 忽略 */ }
   backend = spawn(cmd, args, { stdio: ["ignore", "pipe", "pipe"], windowsHide: true, env });
   backend.stdout.on("data", (d) => console.log("[backend]", d.toString().trim()));
   backend.stderr.on("data", (d) => console.error("[backend-err]", d.toString().trim()));

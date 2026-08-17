@@ -19,25 +19,52 @@ function _authHeaders(extra = {}) {
   return extra;
 }
 
-async function _req(method, path, { params, body } = {}) {
+async function _req(method, path, { params, body, signal, timeoutMs } = {}) {
   const url = new URL(BASE + path, window.location.origin);
   if (params) Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v));
-  const r = await fetch(url.toString(), {
-    method,
-    headers: _authHeaders(body ? { "Content-Type": "application/json" } : {}),
-    body: body ? JSON.stringify(body) : undefined,
-  });
+  // 阶段 5 关键修复：实现 signal + timeoutMs 真正生效（否则取消按钮无效、连接超时无意义）。
+  // 双轨：外部 signal（用户点取消）+ 内部 timer（默认 35s 后端兜底），任一触发立即中断 fetch。
+  // 此前 _req 解构丢弃 signal，传给 fetch 时也未带 signal，30s spinner 死转、按钮按了无反应
+  // 就是这个 bug 直接导致。
+  const ctrl = new AbortController();
+  let timer = null;
+  const onAbort = () => ctrl.abort();
+  if (signal) {
+    if (signal.aborted) ctrl.abort();
+    else signal.addEventListener("abort", onAbort, { once: true });
+  }
+  if (timeoutMs && timeoutMs > 0) {
+    timer = setTimeout(() => {
+      try { ctrl.abort(new Error(`请求超时（${timeoutMs}ms）`)); } catch { ctrl.abort(); }
+    }, timeoutMs);
+  }
+  let r;
+  try {
+    r = await fetch(url.toString(), {
+      method,
+      signal: ctrl.signal,
+      headers: _authHeaders(body ? { "Content-Type": "application/json" } : {}),
+      body: body ? JSON.stringify(body) : undefined,
+    });
+  } catch (e) {
+    // abort 异常转成友好错误（区分"主动取消"和"真超时"）
+    const aborted = signal && signal.aborted;
+    throw new Error(aborted ? "已取消请求" : (e && e.message) || "网络请求失败");
+  } finally {
+    if (timer) clearTimeout(timer);
+    if (signal) signal.removeEventListener("abort", onAbort);
+  }
   const j = await r.json().catch(() => ({}));
   if (j.code !== 0) throw new Error(j.message || `HTTP ${r.status}`);
   return j.data;
 }
 
 export const api = {
-  get: (path, params) => _req("GET", path, { params }),
-  post: (path, body) => _req("POST", path, { body }),
-  put: (path, body) => _req("PUT", path, { body }),
-  patch: (path, body) => _req("PATCH", path, { body }),
-  del: (path) => _req("DELETE", path),
+  get: (path, params, opts) => _req("GET", path, { params, ...(opts || {}) }),
+  post: (path, body, opts) => _req("POST", path, { body, ...(opts || {}) }),
+  put: (path, body, opts) => _req("PUT", path, { body, ...(opts || {}) }),
+  patch: (path, body, opts) => _req("PATCH", path, { body, ...(opts || {}) }),
+  del: (path, opts) => _req("DELETE", path, opts || {}),
 };
 
 // ---------------- 券商连接管理（多券商 / 多客户端版本）----------------
@@ -47,7 +74,8 @@ api.listBrokers = () => api.get("/brokers");
 api.addBroker = (body) => api.post("/brokers", body);
 api.testBroker = (body) => api.post("/brokers/test", body);
 api.autoDetectBrokers = () => api.get("/brokers/auto-detect");
-api.connectBroker = (id) => api.post(`/brokers/${id}/connect`);
+api.connectBroker = (id, { signal } = {}) =>
+  _req("POST", `/brokers/${id}/connect`, { body: {}, signal, timeoutMs: 35000 });
 api.disconnectBroker = (id) => api.post(`/brokers/${id}/disconnect`);
 api.setActiveBroker = (id) => api.post(`/brokers/${id}/active`);
 api.removeBroker = (id) => api.del(`/brokers/${id}`);

@@ -116,6 +116,9 @@ code { background: var(--bg-2); border: 1px solid var(--border); border-radius: 
 /* 连接操作按钮竖排 */
 .op-stack { display: flex; flex-direction: column; gap: 6px; align-items: flex-start; }
 .op-stack button { padding: 5px 10px; font-size: 12px; }
+/* 「连接中…」旋转动画。纯 CSS keyframes，避免引入额外动画库。 */
+.spin { display: inline-block; animation: qmt-spin 1s linear infinite; margin-right: 4px; }
+@keyframes qmt-spin { to { transform: rotate(360deg); } }
 
 .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
 .spacer { flex: 1; }
