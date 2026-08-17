@@ -113,6 +113,48 @@ class BrokerManager:
         conn = self._conns.get(conn_id)
         if not conn:
             raise KeyError(f"未知连接：{conn_id}")
+        # 阶段 5：连接前快速检查 QMT/恒生UF 客户端是否在运行。
+        # 这是"无法连接正在运行的QMT客户端"反馈的核心：用户已开客户端但 SDK
+        # 仍报"未登录"——根因是 client_path 填错或 client_path 指向 userdata_mini
+        # 但 xtquant 在子目录。先用 discovery 做一次轻量探测，把根因提前给到用户。
+        try:
+            from .xtp import probe_environment
+            from .discovery import discover
+            client_path = conn.cfg.client_path or ""
+            probe = probe_environment(client_path, light=True)
+            # 路径不存在 / xtquant 未定位：提前抛错（带结构化诊断），避免 SDK 在子进程内阻塞
+            if not probe.get("client_exists"):
+                raise RuntimeError(
+                    f"客户端路径不存在：{client_path}\n"
+                    f"→ 请在「券商连接」页确认路径，"
+                    f"通常为 ...\\客户端根\\userdata_mini 目录。")
+            if not probe.get("xtquant_found"):
+                # 进一步：扫描本机是否有运行中的 QMT 客户端，提示用户参考
+                try:
+                    cands = discover()
+                    running = [c["root"] for c in cands if c.get("running")]
+                    hint = ""
+                    if running:
+                        hint = (f"\n→ 已在本机发现运行中的 QMT 客户端：{', '.join(running[:3])}。"
+                                f"请确认「客户端路径」与之一致（注意：应填客户端根下的 userdata_mini）。")
+                    else:
+                        hint = "\n→ 未发现运行中的 QMT 客户端；请先启动并登录客户端。"
+                    raise RuntimeError(
+                        f"在「{client_path}」中未找到 xtquant SDK（xtquant/ 目录）。"
+                        f"→ 请确认 client_path 指向客户端根或 userdata_mini 目录，"
+                        f"而非其他无关目录。{hint}")
+                except RuntimeError:
+                    raise
+                except Exception:
+                    raise RuntimeError(
+                        f"在「{client_path}」中未找到 xtquant SDK（xtquant/ 目录）。"
+                        f"→ 请确认 client_path 指向客户端根或 userdata_mini 目录。")
+        except RuntimeError:
+            # 探测发现的根因已包含可操作指引，直接透出
+            raise
+        except Exception:
+            # 探测本身失败不阻断（兼容未来 xtquant 路径变化），由 SDK 报错兜底
+            pass
         conn.adapter.start()
         conn.connected = conn.adapter.is_connected()
         if conn.connected and self._active_id is None:

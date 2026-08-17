@@ -31,7 +31,9 @@ _PRICE_TYPE = {}
 # 已解析的 xtquant site-packages 路径缓存（规范化 client_path -> path 或 None）
 _XTQUANT_CACHE: dict[str, str | None] = {}
 
-# 客户端内 xtquant 常见相对位置（相对客户端根目录；按出现频率排序）
+# 客户端内 xtquant 常见相对位置（相对客户端根目录；按出现频率排序）。
+# 阶段 5 扩展：增加恒生 UF 定制版与各券商白标常见的 SDK 嵌入位——
+# 部分券商把 xtquant 嵌在 client/inner/python 或 app/lib 等非 bin.x64 路径。
 _XTQUANT_REL = [
     os.path.join("bin.x64", "Lib", "site-packages"),
     os.path.join("bin.x64", "Python", "Lib", "site-packages"),
@@ -39,6 +41,15 @@ _XTQUANT_REL = [
     os.path.join("bin.x64", "python311", "Lib", "site-packages"),
     os.path.join("bin.x64", "python312", "Lib", "site-packages"),
     os.path.join("bin.x64", "python310", "Lib", "site-packages"),
+    # 恒生 UF 定制版：xtquant 经常被复制到 client/python 或 app/python 下
+    os.path.join("client", "python", "Lib", "site-packages"),
+    os.path.join("client", "python311", "Lib", "site-packages"),
+    os.path.join("client", "python312", "Lib", "site-packages"),
+    os.path.join("app", "python", "Lib", "site-packages"),
+    os.path.join("app", "lib", "site-packages"),
+    os.path.join("uf", "python", "Lib", "site-packages"),
+    os.path.join("uf", "Lib", "site-packages"),
+    os.path.join("inner", "Lib", "site-packages"),
     os.path.join("Lib", "site-packages"),
     os.path.join("python", "Lib", "site-packages"),
     os.path.join("Python", "Lib", "site-packages"),
@@ -77,15 +88,30 @@ def _candidate_roots(client_path: str) -> list[str]:
             s += 5
         if os.path.isdir(os.path.join(d, "bin.x64", "Lib", "site-packages", "xtquant")):
             s += 20
+        # 阶段 5：恒生 UF 定制版常见嵌入位（client/uf/inner/app 下的 python site-packages）
+        for sub in ("client", "uf", "inner", "app"):
+            if os.path.isdir(os.path.join(d, sub, "python", "Lib", "site-packages", "xtquant")):
+                s += 15
+            if os.path.isdir(os.path.join(d, sub, "Lib", "site-packages", "xtquant")):
+                s += 12
         return s
     return sorted(cands, key=lambda d: -_score(d))
 
 
 def _is_likely_root(d: str) -> bool:
-    """目录是否像客户端根（含 bin.x64 / userdata_mini / userdata 标记）。"""
-    return (os.path.isdir(os.path.join(d, "bin.x64"))
+    """目录是否像客户端根（含 bin.x64 / userdata_mini / userdata / 恒生UF子目录）。"""
+    if (os.path.isdir(os.path.join(d, "bin.x64"))
             or os.path.isdir(os.path.join(d, "userdata_mini"))
-            or os.path.isdir(os.path.join(d, "userdata")))
+            or os.path.isdir(os.path.join(d, "userdata"))):
+        return True
+    # 阶段 5：恒生 UF 定制版典型结构（client/uf/inner 子目录 + userdata 标记）
+    for sub in ("client", "uf", "inner", "app"):
+        if (os.path.isdir(os.path.join(d, sub))
+                and (os.path.isdir(os.path.join(d, sub, "python"))
+                     or os.path.isdir(os.path.join(d, sub, "Lib"))
+                     or os.path.isdir(os.path.join(d, sub, "userdata_mini")))):
+            return True
+    return False
 
 
 # 向上 walk 时禁止进入的系统目录（父级命中则只 walk 自身，防误命中无关 xtquant）
@@ -490,12 +516,38 @@ class XTPQuantAdapter(BrokerAdapter):
             # 仅行情模式（无交易账号）：行情可用，交易不可用。
             # 在 start() 阶段就给出明确指引，而不是等到 get_quote 才抛 SDK 原话
             #「无法连接行情服务！」——那种报错会让用户误以为是平台 bug。
+            # 阶段 5：恒生UF 等定制版的诊断细化——区分「客户端未登录」「客户端未运行」
+            # 「客户端路径错误」等场景，给出可操作指引。
             if not xtdata_ok:
+                # 根据 xtdata_detail 关键字推断场景（无需修改 SDK）
+                low = (xtdata_detail or "").lower()
+                if "未登录" in xtdata_detail or "login" in low or "auth" in low:
+                    scene = "客户端未登录（行情/交易服务尚未登录）"
+                    steps = (
+                        f"1) 在 QMT 客户端中完成<b>行情 + 交易</b>登录（极速/普通模式均可）；\n"
+                        f"2) 确认客户端界面能正常显示行情（否则 SDK 无法连接）；\n"
+                        f"3) 保持客户端运行，再重试连接。")
+                elif "未启动" in xtdata_detail or "not running" in low or "not started" in low:
+                    scene = "客户端未启动"
+                    steps = (
+                        f"1) 启动 QMT 客户端（恒生UF：HsUFTrader / UFClient）；\n"
+                        f"2) 完成登录后保持客户端运行；\n"
+                        f"3) 再次点击连接。")
+                elif "端口" in xtdata_detail or "port" in low or "rpc" in low:
+                    scene = "客户端 RPC 端口未就绪"
+                    steps = (
+                        f"1) 重启 QMT 客户端；\n"
+                        f"2) 确认客户端登录后无防火墙拦截；\n"
+                        f"3) 再次点击连接。")
+                else:
+                    scene = "行情服务不可用"
+                    steps = (
+                        f"1) 打开并登录 QMT 客户端（极速/普通模式均可），保持客户端运行；\n"
+                        f"2) 确认客户端能正常显示行情；\n"
+                        f"3) 确认「客户端路径」指向 userdata_mini 目录。")
                 raise BrokerNotConnectedError(
-                    f"行情服务连接失败（{xtdata_detail}）。请按顺序排查：\n"
-                    f"1) 打开并登录 QMT 客户端（极速/普通模式均可），保持客户端运行；\n"
-                    f"2) 确认客户端能正常显示行情；\n"
-                    f"3) 确认「客户端路径」指向 userdata_mini 目录。")
+                    f"行情服务连接失败（{scene}，SDK 返回：{xtdata_detail}）。\n"
+                    f"请按顺序排查：\n{steps}")
             self._connected = True
             return
 

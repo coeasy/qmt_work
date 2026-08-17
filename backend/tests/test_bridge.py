@@ -185,3 +185,40 @@ def test_bridge_init_error_propagates():
     finally:
         a.close()
     assert raised, "非法 server_module 应导致 start 抛错"
+
+
+def test_bridge_concurrent_start_no_duplicate_subprocess():
+    """阶段4盲区 · 重连竞态：并发 start()（健康重连/手动 connect 同时触发）只拉起一个子进程。
+
+    无 C6 锁时两个线程会各自 Popen → 双孤儿子进程、同账户双交易会话（资金安全级）。
+    锁必须串行化：仅一个线程执行 _start_inner，另一个进入后因幂等直接复用。
+    """
+    import threading
+    a = _make_adapter()
+    barrier = threading.Barrier(2)
+    errors = []
+
+    def _start():
+        try:
+            barrier.wait(timeout=10)
+            a.start()
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    t1 = threading.Thread(target=_start)
+    t2 = threading.Thread(target=_start)
+    try:
+        t1.start()
+        t2.start()
+        t1.join(timeout=20)
+        t2.join(timeout=20)
+        assert not errors, errors
+        assert a._proc is not None and a._proc.poll() is None, "应有一个存活子进程"
+        assert a.is_connected(), "并发 start 后应正常连接"
+        # 防双进程泄漏：记下当前 PID 再 start，仍应为同一进程（锁内幂等复用）
+        pid1 = a._proc.pid
+        a.start()
+        assert a._proc is not None and a._proc.pid == pid1
+    finally:
+        a.close()
+    assert a._proc is None

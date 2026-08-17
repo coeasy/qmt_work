@@ -20,6 +20,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 DIST = ROOT / "dist"
 
+CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
+
 HIDDEN = [
     "uvicorn.logging", "uvicorn.loops", "uvicorn.loops.auto",
     "uvicorn.protocols", "uvicorn.protocols.http", "uvicorn.protocols.http.auto",
@@ -120,7 +122,8 @@ def main():
     clean_env = {k: v for k, v in os.environ.items()
                  if k not in ("CODEBUDDY_SESSION_ID", "CLAUDE_SESSION_ID", "CODEBUDDY_SAFE_DELETE_SANDBOX")}
     print(">>>", " ".join(cmd))
-    subprocess.run(cmd, cwd=str(ROOT), check=True, env=clean_env)
+    subprocess.run(cmd, cwd=str(ROOT), check=True, env=clean_env,
+                   creationflags=CREATE_NO_WINDOW)
     print(f"\n完成：{DIST / 'qmt_work' / 'qmt_work.exe'}")
 
 

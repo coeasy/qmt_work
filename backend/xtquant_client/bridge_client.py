@@ -26,6 +26,14 @@ from .runtime import select_runtime, require_runtime_or_raise
 
 log = logging.getLogger("qmt_work")
 
+# 握手超时：从 90s 收紧到 30s。
+# 设计依据：QMT 客户端已登录时 _ping < 5s 即可返回；未登录时 SDK 在 10~30s 内
+# 必然阻塞/异常。30s 既覆盖慢机器冷启动，也能在用户感知层「点了就连不上」
+# 时及时给反馈（原 90s 期间按钮 spinner 死转、无任何提示，被反馈为「无法点击」）。
+# 阶段 0-D（C6）：超时后必须强制 kill 子进程，否则 SDK 在进程内死锁，
+# 下次 start 复用旧 proc 同样卡住——是「连接按钮点很多次都不通」的根因之一。
+_HANDSHAKE_TIMEOUT = 30.0
+
 # Windows：spawn 桥接子进程（python.exe，控制台子系统）时隐藏其控制台窗口，
 # 避免桌面运行时券商连接/重连时弹出黑窗。其他平台该值为 0（无副作用）。
 CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
@@ -225,8 +233,10 @@ class BridgeAdapter(BrokerAdapter):
         self._quote_thread.start()
 
         # 握手：_ping 确认子进程 IPC 就绪；超时则清理并抛错（附 stderr 便于定位）
+        # 阶段 5：超时从 90s 收紧到 30s，与 _HANDSHAKE_TIMEOUT 一致；
+        # 早期 90s 时用户看到「连接中」 spinner 30s+ 无反应，会误判为「点不动连接」。
         try:
-            self._rpc("_ping", [], timeout=90.0)
+            self._rpc("_ping", [], timeout=_HANDSHAKE_TIMEOUT)
         except Exception as exc:  # noqa: BLE001
             err = self._stderr_tail()
             # 握手超时几乎是「QMT 客户端未登录导致 SDK 阻塞」的专属信号：
@@ -234,8 +244,8 @@ class BridgeAdapter(BrokerAdapter):
             # 窗口内响应 _ping。给出明确指引，避免用户误以为是平台 bug。
             hint = ""
             if isinstance(exc, TimeoutError) or "Timeout" in type(exc).__name__:
-                hint = ("（握手超时：子进程 90s 内无响应——最常见原因是 QMT 客户端"
-                        "未登录，导致 xtquant 交易连接 SDK 阻塞。请先登录客户端后重试）")
+                hint = (f"（握手超时：子进程 {_HANDSHAKE_TIMEOUT:.0f}s 内无响应——最常见原因是 QMT 客户端"
+                        f"未登录，导致 xtquant 交易连接 SDK 阻塞。请先登录客户端后重试）")
             # 失败必落日志（打包 EXE 黑盒下，qmt_work.log 是唯一诊断通道）
             try:
                 log.error("bridge 握手失败: %s%s | 子进程 stderr: %s | proc rc=%s",

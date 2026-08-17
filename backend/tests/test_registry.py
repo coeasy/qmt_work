@@ -1,4 +1,5 @@
 """券商档案注册表测试：落库持久化 + 能力协商 + 动态探测。"""
+import os
 import tempfile
 from pathlib import Path
 
@@ -98,3 +99,40 @@ def test_list_profiles_v2_marks_custom():
     items = {it["id"]: it for it in list_profiles_v2()}
     assert items["guojin"]["is_custom"] is False
     assert items["cb2"]["is_custom"] is True
+
+
+def test_uf_broker_registered():
+    """阶段 5 修复：恒生 UF 定制版（华泰/国泰君安/海通 等白标）内置档案。"""
+    from xtquant_client.registry import BROKER_PROFILES
+    ids = {p.id for p in BROKER_PROFILES}
+    assert "uf" in ids
+    p = next(p for p in BROKER_PROFILES if p.id == "uf")
+    # 适配器复用 xtp（同 SDK）；支持账户类型覆盖股票/信用/期权/期货
+    assert p.adapter == "xtp"
+    assert "STOCK" in p.supported_account_types
+    assert "OPTION" in p.supported_account_types
+    # 默认路径指向 C:\恒生UF\userdata_mini
+    assert "恒生UF" in p.default_client_path
+
+
+def test_discovery_recognizes_uf_procs():
+    """阶段 5 修复：discovery 识别恒生 UF 系列进程名（HsUFTrader / UFClient 等）。"""
+    from xtquant_client.discovery import _QMT_PROC_NAMES, _ROOT_HINTS
+    uf_procs = {"hsuftrader.exe", "ufclient.exe", "uftrader.exe",
+                "hundsunuf.exe", "ufqmt.exe", "ufminiqmt.exe"}
+    assert uf_procs.issubset(_QMT_PROC_NAMES), f"缺少 UF 进程识别: {uf_procs - _QMT_PROC_NAMES}"
+    # 关键词 hint 能把"恒生" / "Hundsun" 路径归到 uf 档案
+    uf_hints = [k for k, b in _ROOT_HINTS if b == "uf"]
+    assert any("恒生" in k for k in uf_hints)
+    assert any("hundsun" in k.lower() for k in uf_hints)
+
+
+def test_xtp_resolves_uf_layout():
+    """阶段 5 修复：xtp._XTQUANT_REL 包含恒生 UF 定制版常见嵌入位（client/uf/app/inner）。"""
+    from xtquant_client.xtp import _XTQUANT_REL
+    rel_strs = "\\".join(p.replace("\\", "/") for p in _XTQUANT_REL)
+    # 至少包含 client/python/Lib/site-packages 与 uf/Lib/site-packages
+    assert any("client" in p and "python" in p and "site-packages" in p for p in _XTQUANT_REL), \
+        f"缺少 client/python 路径: {_XTQUANT_REL}"
+    assert any("uf" in p.split(os.sep) for p in _XTQUANT_REL), \
+        f"缺少 uf 路径: {_XTQUANT_REL}"

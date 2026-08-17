@@ -27,15 +27,27 @@ CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 # - 广发 / 迅投通用 ItClient：XtItClient.exe；部分券商为 XtClient.exe / XtMini.exe
 # - 标准 MiniQMT：XtMiniQmt.exe / miniquote.exe / xtquant.exe
 # - 交易端：xttrader.exe / quant_trader.exe / stock_trader.exe / xttraderapi.exe
+# - 恒生 UF 定制版（部分券商基于 UF 内核再包装迅投 SDK）：HsUFTrader.exe / UFClient.exe
+#   / UFTrader.exe / HsUftMiniQmt.exe / HsUFQmt.exe / UFMiniQmt.exe / HundsunUF*.exe
+# - 银河海王星 / 中信建投 / 东方财富 等定制：xingye*.exe / dc*.exe / eastmoney*.exe
 _QMT_PROC_NAMES = {
+    # 迅投原生主程序族
     "xtminiqmt.exe", "miniqmt.exe", "miniquote.exe", "xtquant.exe",
     "xtmonitor.exe", "xtdaemon.exe", "quant_trader.exe", "stock_trader.exe",
     "xttrader.exe", "xttraderapi.exe",
     "xtitclient.exe", "xtclient.exe", "xtmini.exe",
     "stockclient.exe", "qmtclient.exe", "xtp.exe",
+    # 恒生 UF 定制（券商白标外壳）
+    "hsuftrader.exe", "ufclient.exe", "uftrader.exe", "hsufminiqmt.exe",
+    "hsufqmt.exe", "ufminiqmt.exe", "hundsunuf.exe", "hundsun_uf.exe",
+    "ufqmt.exe", "ufitclient.exe", "ufstockclient.exe",
+    # 各券商定制白标（部分仅留残影 + bin.x64）
+    "gdzqmt.exe", "htqmt.exe", "gfqmt.exe", "xyqmt.exe", "zhaoshangqmt.exe",
+    "gfyhzq.exe", "guojinqmt.exe",
 }
 _QMT_PROC_KEYWORDS = ("qmt", "xtmini", "miniquote", "xtitclient",
-                      "xtclient", "itclient", "xttrader", "stocktrader")
+                      "xtclient", "itclient", "xttrader", "stocktrader",
+                      "uf", "uftrader", "hsuf", "hundsun")
 
 # 需排除的进程（本平台自身进程名 / 路径含 qmt_work / workbuddy 会误命中）
 _QMT_EXCLUDE_KEYWORDS = ("qmt_work", "workbuddy")
@@ -44,13 +56,14 @@ _QMT_EXCLUDE_KEYWORDS = ("qmt_work", "workbuddy")
 # 注：本平台 qmt_work.exe 路径含 "qmt_work" 已由上面排除关键词提前拦截，不会误命中。
 _QMT_CLIENT_DIR_RE = re.compile(
     r"[\\/](bin\.x64|bin\.x32|bin_x64|bin32|userdata_mini|userdata|"
-    r"qmt|xtquant|miniqmt|xtmini)[\\/]")
+    r"qmt|xtquant|miniqmt|xtmini|hsuf|ufclient|uftrader|hundsun)[\\/]",
+    re.IGNORECASE)
 
 # 客户端内部的辅助进程（CEF 渲染壳 / 浏览器内核 / node 等），虽与主程序同在 bin.x64
 # 下，但非交易主程序，排除以避免进程枚举虚高与潜在误判。
 _QMT_AUX_EXCLUDE = ("cefviewwing", "chrome", "node", "edge", "electron", "webkit")
 
-# 常见安装位置（一级探测）
+# 常见安装位置（一级探测）。覆盖迅投系标准目录 + 恒生 UF 定制版典型安装位。
 _COMMON_ROOTS = [
     r"C:\国金证券QMT交易端", r"C:\国金QMT",
     r"C:\华鑫证券\奇点QMT交易端", r"C:\华鑫证券QMT",
@@ -59,6 +72,14 @@ _COMMON_ROOTS = [
     r"C:\兴业证券QMT交易端", r"C:\兴业QMT",
     r"C:\广发证券QMT交易端", r"C:\广发QMT", r"C:\广发证券\QMT",
     r"C:\QMT", r"C:\迅投QMT", r"C:\MiniQMT", r"D:\QMT", r"D:\MiniQMT",
+    # 恒生 UF 定制版典型安装位（部分券商使用 D:\ 装数据盘）
+    r"C:\恒生UF", r"C:\HundsunUF", r"C:\hsUF", r"C:\hs_uf", r"C:\UF",
+    r"C:\UFTrader", r"C:\UFClient", r"C:\Hundsun", r"C:\恒生",
+    r"D:\恒生UF", r"D:\HundsunUF", r"D:\UF", r"D:\UFTrader",
+    r"C:\恒生证券\UF", r"C:\恒生证券QMT", r"C:\Hundsun\UF",
+    r"C:\华泰证券\恒生UF", r"C:\华泰证券QMT",
+    r"C:\国泰君安\UF", r"C:\国泰君安QMT",
+    r"C:\海通证券\UF", r"C:\海通UF",
 ]
 
 # 根路径关键词 -> 疑似券商档案 id
@@ -66,6 +87,9 @@ _ROOT_HINTS = [
     ("广发", "gf"), ("gdzq", "gf"), ("gd_qmt", "gf"), ("国金", "guojin"),
     ("华鑫", "huaxin"), ("奇点", "huaxin"), ("银河", "yinhe"),
     ("建投", "zxjt"), ("兴业", "xy"), ("中信", "zxjt"),
+    # 恒生 UF：关键词命中即归入 uf 档案
+    ("恒生", "uf"), ("hundsun", "uf"), ("hs_uf", "uf"), ("hsuf", "uf"),
+    ("ufclient", "uf"), ("uftrader", "uf"), ("ufqmt", "uf"),
 ]
 
 
@@ -148,11 +172,14 @@ def _root_from_exe(exe_path: str) -> str | None:
 
 
 # 疑似客户端根的判定标记（目录或文件存在其一即视为疑似客户端根）。
-# 覆盖：标准结构（bin.x64 / userdata_mini）、各券商主程序 exe、xtquant 包。
+# 覆盖：标准结构（bin.x64 / userdata_mini）、各券商主程序 exe、xtquant 包、恒生UF壳。
 _CLIENT_MARKERS = (
     "bin.x64", "bin.x32", "bin_x64", "userdata_mini", "userdata",
     "XtItClient.exe", "XtMiniQmt.exe", "miniquote.exe", "xttrader.exe",
     "xtquant.exe", "stock_trader.exe", "quant_trader.exe", "xtmonitor.exe",
+    # 恒生 UF 定制（部分券商主程序 exe）
+    "HsUFTrader.exe", "UFClient.exe", "UFTrader.exe", "HsUftMiniQmt.exe",
+    "HundsunUF.exe", "UFMiniQmt.exe", "UFQmt.exe",
 )
 
 
@@ -173,7 +200,7 @@ def _scan_installed() -> list[str]:
     相比旧版「仅盘符顶层 *QMT* 目录 / 深度 2 层」，新版扩展：
     1) 盘符从硬编码 C/D/E/P/F 改为遍历 A~Z 全部存在盘符 —— 适配装在 G:/H:/非
        默认盘的客户端（如某些券商客户端默认装到数据盘）；
-    2) 深度从 2 提升到 3 层 —— 适配装在 D:\Program Files\Broker\QMT 之类 3 层路径；
+    2) 深度从 2 提升到 3 层 —— 适配装在 D:\\Program Files\\Broker\\QMT 之类 3 层路径；
     3) 增加 %ProgramFiles% / %ProgramFiles(x86)% / 用户目录下的券商常见子目录
        作为优先探测点（部分券商客户端默认装到 Program Files 下）；
     4) 客户端根判定标记：保留 bin.x64 / userdata_mini / 主程序 exe 等。

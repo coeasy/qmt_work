@@ -239,7 +239,19 @@ def create_app() -> FastAPI:
             log.warning("trading calendar unavailable, fallback weekday rule: %s", exc)
         log.info("trading session: %s", default_session.stats())
         # 3. 同步引擎 + WS 管理 + 风控 + MCP
-        state.risk = RiskManager.load_from_db(state.db, defaults=risk.to_dict())
+        # 阶段 0-B（F4）：消灭双 RiskManager。模块级 `risk` 为唯一实例并挂载 MCP；
+        # 运行时把持久化风控参数载入同一实例（原地 update），state.risk 指向它，
+        # REST 路由 / 各引擎 / MCP 工具因此共享同一个风控闸门，配置变更对全部入口即时生效。
+        state.risk = risk
+        if state.db is not None:
+            try:
+                row = state.db.query_one(
+                    "SELECT params_json FROM risk_config WHERE scope='global'")
+                if row and row.get("params_json"):
+                    import json
+                    state.risk.update_from(json.loads(row["params_json"]))
+            except Exception as exc:  # noqa: BLE001
+                log.warning("load risk config failed, use defaults: %s", exc)
         state.started_at = time.time()
         # 数据库自动备份：启动时一次 + 后台周期（关闭前再备份一次）
         if settings.db_backup_enabled:

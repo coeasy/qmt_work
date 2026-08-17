@@ -75,6 +75,16 @@ BROKER_PROFILES: list[BrokerProfile] = [
         default_client_path=r"C:\广发证券QMT交易端\userdata_mini",
         supported_account_types=["STOCK", "CREDIT"],
         sdk_required="xtquant", min_version="迅投 xtquant", note="广发 MiniQMT"),
+    # 阶段 5 修复：恒生 UF 定制版（多券商白标）—— 与迅投 xtquant 同 SDK，
+    # 进程名/路径不同（HsUFTrader / UFClient），需独立档案以便自动发现与诊断。
+    # 兼容券商：华泰 / 国泰君安 / 海通 / 中泰 / 东吴 / 东方 等基于 UF 内核再包装的客户端。
+    BrokerProfile(
+        id="uf", name="恒生 UF 定制版", adapter="xtp",
+        default_client_path=r"C:\恒生UF\userdata_mini",
+        supported_account_types=["STOCK", "CREDIT", "OPTION", "FUTURES"],
+        sdk_required="xtquant", min_version="迅投 xtquant（恒生 UF 壳）",
+        note="恒生 UF 定制版（华泰/国泰君安/海通/中泰等）：HsUFTrader/UFClient，"
+             "SDK 与 MiniQMT 同源，路径按券商不同请手动调整"),
     BrokerProfile(
         id="ths", name="同花顺量化", adapter="ths",
         default_client_path="", supported_account_types=["STOCK"],
