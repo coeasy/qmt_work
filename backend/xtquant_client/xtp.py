@@ -414,6 +414,61 @@ def _probe_xtdata(xtdata) -> tuple[bool, str]:
     return True, ""  # 无可用预检 API：放行，由后续真实调用暴露问题
 
 
+# ---------------- 多版本 SDK 兼容辅助 ----------------
+# 不同 xtquant 版本对象属性命名不一致：旧版 xttrader 全小写（order_id/stock_code/
+# order_status/traded_volume…），新版部分用 CamelCase（OrderID/StockCode/OrderStatus/
+# DealVolume…）。统一用「候选名逐个取第一个非 None」兼容两套命名，避免某一版本下
+# 取到全 0 / None 的失真数据（曾导致旧版客户端订单 volume/dealt/status 全错）。
+def _pick(obj, *names, default=None):
+    """从 obj 按候选属性名取第一个非 None 的值；全部缺失返回 default。
+
+    用 ``is not None`` 判定（非 falsy），使 ``0``/``""``/``[]`` 这类合法值不被误当缺失。
+    """
+    for n in names:
+        try:
+            v = getattr(obj, n, None)
+        except Exception:  # noqa: BLE001
+            continue
+        if v is not None:
+            return v
+    return default
+
+
+def _dget(d, *keys, default=None):
+    """从 dict 按候选键名取第一个非 None 的值；全部缺失返回 default。
+
+    用于回调载荷（dict）的键名兼容：旧 xttrader 用小写（seq/order_id/order_status），
+    新版部分用 CamelCase（Seq/OrderID/OrderStatus）。与 :func:`_pick` 区分——后者读
+    对象属性（SDK 实体对象），本函数读本就是 dict 的回调载荷。
+    """
+    if not isinstance(d, dict):
+        return default
+    for k in keys:
+        v = d.get(k, None)
+        if v is not None:
+            return v
+    return default
+
+
+# 下单方向操作码（xtconstant）：买类含 担保品买入(23)/买券还券(29)/专项买券还券(42)；
+# 卖类含 担保品卖出(24)/卖券还款(31)/专项卖券还款(44)。部分旧版无 33 之类码。
+_BUY_ORDER_TYPES = frozenset({23, 29, 42})
+_SELL_ORDER_TYPES = frozenset({24, 31, 44})
+
+
+def _direction_from_order_type(ot: object) -> str:
+    """由订单操作类型码推断买卖方向；未知/无法判定返回空串（不臆测）。"""
+    try:
+        iv = int(ot)
+    except (TypeError, ValueError):
+        return ""
+    if iv in _BUY_ORDER_TYPES:
+        return "buy"
+    if iv in _SELL_ORDER_TYPES:
+        return "sell"
+    return ""
+
+
 class XTPQuantAdapter(BrokerAdapter):
     """迅投 XTQuant 真实适配器。"""
 
@@ -524,27 +579,27 @@ class XTPQuantAdapter(BrokerAdapter):
                 if "未登录" in xtdata_detail or "login" in low or "auth" in low:
                     scene = "客户端未登录（行情/交易服务尚未登录）"
                     steps = (
-                        f"1) 在 QMT 客户端中完成<b>行情 + 交易</b>登录（极速/普通模式均可）；\n"
-                        f"2) 确认客户端界面能正常显示行情（否则 SDK 无法连接）；\n"
-                        f"3) 保持客户端运行，再重试连接。")
+                        "1) 在 QMT 客户端中完成<b>行情 + 交易</b>登录（极速/普通模式均可）；\n"
+                        "2) 确认客户端界面能正常显示行情（否则 SDK 无法连接）；\n"
+                        "3) 保持客户端运行，再重试连接。")
                 elif "未启动" in xtdata_detail or "not running" in low or "not started" in low:
                     scene = "客户端未启动"
                     steps = (
-                        f"1) 启动 QMT 客户端（恒生UF：HsUFTrader / UFClient）；\n"
-                        f"2) 完成登录后保持客户端运行；\n"
-                        f"3) 再次点击连接。")
+                        "1) 启动 QMT 客户端（恒生UF：HsUFTrader / UFClient）；\n"
+                        "2) 完成登录后保持客户端运行；\n"
+                        "3) 再次点击连接。")
                 elif "端口" in xtdata_detail or "port" in low or "rpc" in low:
                     scene = "客户端 RPC 端口未就绪"
                     steps = (
-                        f"1) 重启 QMT 客户端；\n"
-                        f"2) 确认客户端登录后无防火墙拦截；\n"
-                        f"3) 再次点击连接。")
+                        "1) 重启 QMT 客户端；\n"
+                        "2) 确认客户端登录后无防火墙拦截；\n"
+                        "3) 再次点击连接。")
                 else:
                     scene = "行情服务不可用"
                     steps = (
-                        f"1) 打开并登录 QMT 客户端（极速/普通模式均可），保持客户端运行；\n"
-                        f"2) 确认客户端能正常显示行情；\n"
-                        f"3) 确认「客户端路径」指向 userdata_mini 目录。")
+                        "1) 打开并登录 QMT 客户端（极速/普通模式均可），保持客户端运行；\n"
+                        "2) 确认客户端能正常显示行情；\n"
+                        "3) 确认「客户端路径」指向 userdata_mini 目录。")
                 raise BrokerNotConnectedError(
                     f"行情服务连接失败（{scene}，SDK 返回：{xtdata_detail}）。\n"
                     f"请按顺序排查：\n{steps}")
@@ -633,32 +688,65 @@ class XTPQuantAdapter(BrokerAdapter):
 
         动态子类（而非静态子类）是因为 XtQuantTraderCallback 仅在 xtquant 导入后存在；
         adapter 方法接收**纯 dict**，便于在无 SDK 环境下单测。
+
+        多版本兼容：新旧 SDK 的回调方法名与签名都不一致，这里**同时覆盖两套**：
+        - 新 SDK：``on_order_stock_response(order)`` + ``on_cancel_error(order_id, error_id, error_msg)``
+        - 旧 SDK (xttrader)：``on_order_stock_async_response(response)`` +
+          ``on_cancel_error(cancel_error)``（1 个对象参数）+ ``on_order_error(order_error)``
+        只要基类定义了对应方法，覆盖后即生效；基类未定义的方法名覆盖无副作用。
         """
         adapter = self
 
         def _order_as_dict(order) -> dict:
-            out = {}
-            for k in ("Seq", "OrderID", "OrderStatus", "ErrorID", "ErrorMsg",
-                     "StockCode", "OrderType", "Price", "Volume", "TradedVolume"):
-                out[k] = getattr(order, k, None)
-            return out
+            # 兼容新旧 SDK：旧 xttrader 用全小写（seq/order_id/order_status/error_msg），
+            # 新版部分用 CamelCase（Seq/OrderID/OrderStatus/ErrorMsg）。
+            return {
+                "seq": _pick(order, "Seq", "seq"),
+                "order_id": _pick(order, "OrderID", "order_id"),
+                "order_status": _pick(order, "OrderStatus", "order_status"),
+                "error_id": _pick(order, "ErrorID", "error_id"),
+                "error_msg": _pick(order, "ErrorMsg", "error_msg"),
+                "stock_code": _pick(order, "StockCode", "stock_code"),
+                "order_type": _pick(order, "OrderType", "order_type"),
+                "price": _pick(order, "Price", "price"),
+                "volume": _pick(order, "Volume", "order_volume", "volume", default=0),
+                "traded_volume": _pick(order, "TradedVolume", "traded_volume", default=0),
+            }
 
         def _trade_as_dict(trade) -> dict:
-            out = {}
-            for k in ("OrderID", "StockCode", "TradeType", "Price", "Volume",
-                     "TradeTime", "TradeID"):
-                out[k] = getattr(trade, k, None)
-            return out
+            # 真实成交（XtTrade）用 traded_price/traded_time；旧 SDK 退化路径（见
+            # _query_stock_deals）以「已成交订单」近似，订单对象用 price/order_time，
+            # 故两者都列入候选（真实成交的 traded_price 优先命中，不会被 price 覆盖）。
+            return {
+                "order_id": _pick(trade, "OrderID", "order_id"),
+                "stock_code": _pick(trade, "StockCode", "stock_code"),
+                "trade_type": _pick(trade, "TradeType", "trade_type"),
+                "price": _pick(trade, "traded_price", "deal_price", "DealPrice", "price"),
+                "volume": _pick(trade, "Volume", "traded_volume", "deal_volume", default=0),
+                "trade_time": _pick(trade, "TradeTime", "traded_time", "deal_time", "order_time"),
+                "trade_id": _pick(trade, "TradeID", "traded_id", "deal_id"),
+            }
 
         class _Cb(base):
             def on_disconnected(self):
                 adapter._handle_disconnected()
 
+            # 新 SDK: on_order_stock_response(order)
             def on_order_stock_response(self, order):
                 adapter._handle_order_response(_order_as_dict(order))
 
-            def on_cancel_error(self, order_id, error_id, error_msg):
-                adapter._handle_cancel_error(order_id, error_id, error_msg)
+            # 旧 SDK (xttrader): on_order_stock_async_response(response)
+            def on_order_stock_async_response(self, response):
+                adapter._handle_order_response(_order_as_dict(response))
+
+            # 旧 SDK 报单失败回调（XtOrderError 对象）
+            def on_order_error(self, order_error):
+                adapter._handle_order_error(order_error)
+
+            # 兼容两种签名：旧 SDK on_cancel_error(cancel_error: 对象) /
+            # 新 SDK on_cancel_error(order_id, error_id, error_msg)
+            def on_cancel_error(self, *args):
+                adapter._handle_cancel_error(*args)
 
             def on_stock_trade(self, trade):
                 adapter._handle_stock_trade(_trade_as_dict(trade))
@@ -678,18 +766,23 @@ class XTPQuantAdapter(BrokerAdapter):
                 pass
 
     def _handle_order_response(self, o: dict) -> None:
-        """报单响应：建立 seq→柜台 order_id 映射，唤醒等待中的 place_order，并外推。"""
+        """报单响应：建立 seq→柜台 order_id 映射，唤醒等待中的 place_order，并外推。
+
+        键名兼容新旧两套：旧 xttrader 用全小写（seq/order_id/order_status/error_msg），
+        新版部分用 CamelCase（Seq/OrderID/OrderStatus/ErrorMsg）。
+        """
         try:
-            seq = int(o.get("Seq", o.get("seq", -1)))
+            seq = int(_dget(o, "seq", "Seq") or -1)
         except (ValueError, TypeError):
             seq = -1
-        oid = o.get("OrderID") or o.get("order_id")
+        oid = _dget(o, "order_id", "OrderID")
         if oid is not None:
             oid = str(oid)
             self._seq_to_oid[seq] = oid
             self._oid_to_seq[oid] = seq
         log.debug("order response seq=%s order_id=%s status=%s err=%s",
-                  seq, oid, o.get("OrderStatus"), o.get("ErrorMsg"))
+                  seq, oid, _dget(o, "order_status", "OrderStatus"),
+                  _dget(o, "error_msg", "ErrorMsg"))
         pend = self._pending_resp.pop(seq, None)
         if pend is not None:
             ev, bucket = pend
@@ -701,6 +794,34 @@ class XTPQuantAdapter(BrokerAdapter):
             except Exception:  # noqa: BLE001
                 pass
 
+    def _handle_order_error(self, order_error) -> None:
+        """旧 SDK 报单失败回调（XtOrderError）：记录以便审计与诊断。"""
+        oid = getattr(order_error, "order_id", None)
+        eid = getattr(order_error, "error_id", None)
+        emsg = getattr(order_error, "error_msg", None)
+        log.warning("order error order_id=%s error_id=%s msg=%s", oid, eid, emsg)
+
+    def _handle_cancel_error(self, *args) -> None:
+        """撤单失败回调，兼容两种 SDK 签名：
+
+        - 旧 SDK：``on_cancel_error(cancel_error: XtCancelError)`` —— 1 个对象参数，
+          从中取 ``order_id`` / ``error_id`` / ``error_msg``；
+        - 新 SDK：``on_cancel_error(order_id, error_id, error_msg)`` —— 3 个标量参数。
+        """
+        oid = eid = emsg = None
+        if len(args) == 1:
+            ce = args[0]
+            if ce is not None:
+                oid = getattr(ce, "order_id", None)
+                eid = getattr(ce, "error_id", None)
+                emsg = getattr(ce, "error_msg", None)
+                if oid is None and eid is None and emsg is None and not isinstance(ce, (list, dict)):
+                    # 个别版本直接传错误字符串/整型
+                    emsg = str(ce)
+        elif len(args) >= 3:
+            oid, eid, emsg = args[0], args[1], args[2]
+        log.warning("cancel error order_id=%s error_id=%s msg=%s", oid, eid, emsg)
+
     def _handle_stock_trade(self, t: dict) -> None:
         """成交回报：直推 sync 引擎（替代纯轮询）。"""
         if self._on_trade_cb is not None:
@@ -708,10 +829,6 @@ class XTPQuantAdapter(BrokerAdapter):
                 self._on_trade_cb(t)
             except Exception:  # noqa: BLE001
                 pass
-
-    def _handle_cancel_error(self, order_id, error_id, error_msg) -> None:
-        log.warning("cancel error order_id=%s error_id=%s msg=%s",
-                    order_id, error_id, error_msg)
 
     def _wait_order_response(self, seq: int, timeout: float = 10.0) -> str | None:
         """等待 on_order_stock_response 回调解析出柜台真实 order_id。
@@ -727,7 +844,7 @@ class XTPQuantAdapter(BrokerAdapter):
         self._pending_resp[seq] = (ev, bucket)
         if ev.wait(timeout):
             for o in bucket:
-                got = o.get("OrderID") or o.get("order_id")
+                got = _dget(o, "order_id", "OrderID")
                 if got is not None:
                     return str(got)
         return None
@@ -930,12 +1047,32 @@ class XTPQuantAdapter(BrokerAdapter):
     def get_account(self) -> dict:
         trader, acc = self._require_trader()
         with self._lock:
-            a = trader.query_asset(acc)
+            a = self._query_asset(trader, acc)
         if a is None:
             raise BrokerNotConnectedError("账户查询返回空（客户端未就绪）")
         return {"account_id": self._account_id, "account_type": self._account_type,
-                "cash": self._f(a.cash), "frozen": self._f(a.frozen_cash),
-                "market_value": self._f(a.market_value), "assets": self._f(a.total_asset)}
+                "cash": self._f(getattr(a, "cash", None)),
+                "frozen": self._f(getattr(a, "frozen_cash", None)),
+                "market_value": self._f(getattr(a, "market_value", None)),
+                "assets": self._f(getattr(a, "total_asset", None))}
+
+    def _query_asset(self, trader, acc):
+        """查资产，兼容 ``query_asset``（新 SDK）与 ``query_stock_asset``（旧 SDK）。
+
+        旧版 xttrader 只有 ``query_stock_asset(account)``，无 ``query_asset``；
+        直接调 ``query_asset`` 会在该版本 AttributeError。两者返回的资产对象属性
+        都是小写（cash/frozen_cash/market_value/total_asset），上层取出一致。
+        """
+        fn = getattr(trader, "query_asset", None) or getattr(trader, "query_stock_asset", None)
+        if fn is None:
+            return None
+        try:
+            return fn(acc)
+        except Exception:  # noqa: BLE001
+            try:
+                return trader.query_stock_asset(acc)
+            except Exception:  # noqa: BLE001
+                return None
 
     def get_positions(self, symbol: str | None = None) -> list[dict]:
         trader, acc = self._require_trader()
@@ -965,33 +1102,67 @@ class XTPQuantAdapter(BrokerAdapter):
             orders = trader.query_stock_orders(acc) or []
         out = []
         for o in orders:
-            oid = str(getattr(o, "order_id", ""))
+            # 多版本属性兼容：旧版全小写（order_id/stock_code/order_volume/
+            # traded_volume/order_status），新版部分 CamelCase。
+            oid = str(_pick(o, "order_id", "OrderID") or "")
+            code = _pick(o, "stock_code", "StockCode")
+            otype = _pick(o, "order_type", "OrderType")
             out.append({
-                "order_id": oid, "code": getattr(o, "stock_code", ""),
-                "direction": "buy" if getattr(o, "order_type", 0) in (23, 33) else "sell",
-                "price": self._f(getattr(o, "price", None)),
-                "volume": getattr(o, "ordered_volume", 0),
-                "dealt": getattr(o, "deal_volume", 0),
-                "status": self._order_status(getattr(o, "status", -1), oid),
+                "order_id": oid,
+                "code": code,
+                "direction": _direction_from_order_type(otype),
+                "price": self._f(_pick(o, "price", "Price")),
+                "volume": _pick(o, "order_volume", "ordered_volume", "Volume", default=0),
+                "dealt": _pick(o, "traded_volume", "deal_volume", "DealVolume", default=0),
+                "status": self._order_status(_pick(o, "order_status", "Status", default=-1), oid),
             })
         return out
 
     def get_deals(self) -> list[dict]:
         trader, acc = self._require_trader()
         with self._lock:
-            deals = trader.query_stock_deals(acc) or []
+            deals = self._query_stock_deals(trader, acc)
+        if not deals:
+            return []
         out = []
         for d in deals:
-            # 阶段 2：输出 seq（回报唯一 id），供 sync 成交去重键使用，避免同秒同价量部成碰撞丢单
+            # 多版本属性兼容（同 get_orders / _trade_as_dict）。
+            # 注意退化路径（旧 SDK 无 query_stock_deals）用「已成交订单」近似，
+            # 订单对象用 price/order_time，故一并列入候选（真实成交的
+            # traded_price/traded_time 优先命中，不会被覆盖）。
+            oid = str(_pick(d, "order_id", "OrderID") or "")
+            code = _pick(d, "stock_code", "StockCode")
+            otype = _pick(d, "order_type", "OrderType")
             out.append({
-                "order_id": str(getattr(d, "order_id", "")), "code": getattr(d, "stock_code", ""),
-                "direction": "buy" if getattr(d, "order_type", 0) in (23, 33) else "sell",
-                "price": self._f(getattr(d, "deal_price", None)),
-                "volume": getattr(d, "deal_volume", 0),
-                "time": getattr(d, "deal_time", ""),
-                "seq": getattr(d, "seq", None),
+                "order_id": oid,
+                "code": code,
+                "direction": _direction_from_order_type(otype),
+                "price": self._f(_pick(d, "traded_price", "deal_price", "DealPrice", "price")),
+                "volume": _pick(d, "traded_volume", "deal_volume", "DealVolume", default=0),
+                "time": _pick(d, "traded_time", "deal_time", "DealTime", "order_time") or "",
+                "seq": _pick(d, "seq", "Seq"),
             })
         return out
+
+    def _query_stock_deals(self, trader, acc) -> list:
+        """查询成交记录，兼容有无 ``query_stock_deals`` 的 SDK 版本。
+
+        - 新 SDK：``trader.query_stock_deals(acc)``；
+        - 旧 SDK（xttrader）：无此方法，退化为「已成交订单」近似（仅用于成交展示，
+          真实成交回报仍以 on_stock_trade 回调为准，不会漏单 / 不会重复计）。
+        """
+        fn = getattr(trader, "query_stock_deals", None)
+        if fn is not None:
+            try:
+                return fn(acc) or []
+            except Exception:  # noqa: BLE001
+                pass
+        try:
+            orders = trader.query_stock_orders(acc) or []
+            return [o for o in orders
+                    if int(_pick(o, "traded_volume", "deal_volume", default=0) or 0) > 0]
+        except Exception:  # noqa: BLE001
+            return []
 
     # ---------------- 交易 ----------------
     def place_order(self, code: str, direction: str, price_type: str,
@@ -1009,7 +1180,11 @@ class XTPQuantAdapter(BrokerAdapter):
             op = xtc.STOCK_BUY
         else:
             op = xtc.STOCK_SELL
-        pt = xtc.LATEST_PRICE if (price_type or "limit") == "market" else xtc.FIX_PRICE
+        # 价格类型常量：部分旧版可能无 LATEST_PRICE / 用 MARKET_PRICE，getattr 兜底避免
+        # AttributeError；最终数字码与新版一致（LATEST_PRICE=5, FIX_PRICE=11）。
+        _mkt = getattr(xtc, "LATEST_PRICE", getattr(xtc, "MARKET_PRICE", 5))
+        _fix = getattr(xtc, "FIX_PRICE", 11)
+        pt = _mkt if (price_type or "limit") == "market" else _fix
         with self._lock:
             seq = trader.order_stock(acc, code, op, pt, float(price), int(volume),
                                      strategy_name or "", remark or "")
@@ -1063,8 +1238,19 @@ class XTPQuantAdapter(BrokerAdapter):
         if self._xtdata is None:
             raise BrokerSDKError("xtquant", "pip install xtquant")
         try:
-            cal = self._xtdata.get_trading_calendar(start or "", end or "") or []
-            return [str(d) for d in cal]
+            # 多版本签名兼容：
+            # - 旧 SDK：get_trading_calendar(market, start_time='', end_time='', tradetimes=False)
+            #   首个位置参数必填为 market，乱填 start 会查错市场；
+            # - 新 SDK：可能 get_trading_calendar(start_time, end_time, ...) 无 market。
+            # 用 inspect 探测首参名决定调用方式（SH/SZ 交易日一致，取 SH 即可）。
+            import inspect
+            sig = inspect.signature(self._xtdata.get_trading_calendar)
+            params = [p for p in sig.parameters]
+            if params and params[0].lower().startswith("market"):
+                cal = self._xtdata.get_trading_calendar("SH", start or "", end or "")
+            else:
+                cal = self._xtdata.get_trading_calendar(start or "", end or "")
+            return [str(d) for d in (cal or [])]
         except Exception as exc:  # noqa: BLE001
             raise BrokerNotConnectedError(f"交易日历获取失败：{exc}") from exc
 
@@ -1096,7 +1282,14 @@ class XTPQuantAdapter(BrokerAdapter):
         if self._xtdata is None:
             raise BrokerSDKError("xtquant", "pip install xtquant")
         try:
-            data = self._xtdata.get_l2_transaction([code], "", int(count))
+            # 多版本参数顺序兼容：旧 SDK 为
+            # get_l2_transaction(field_list=[], stock_code='', start_time='', end_time='',
+            #                   count=-1)，首参是 field_list。用关键字 stock_code=/count=
+            # 调用最稳；个别版本若关键字不接收则退化为位置参数。
+            try:
+                data = self._xtdata.get_l2_transaction(stock_code=code, count=int(count))
+            except TypeError:
+                data = self._xtdata.get_l2_transaction([], code, "", "", int(count))
         except Exception as exc:  # noqa: BLE001
             raise BrokerNotConnectedError(f"L2 逐笔获取失败：{exc}") from exc
         df = (data or {}).get(code)
