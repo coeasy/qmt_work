@@ -97,20 +97,22 @@ if _xq.is_dir():
         DATAS.append(f"{_py};{_dest}")
 
 
-# 修复：conda-forge Python 的 _ctypes.pyd 等依赖 MSVC C++ 运行库 msvcp140*.dll，
-# PyInstaller 默认只收集 vcruntime140，漏掉 msvcp140 → 打包后 import ctypes 报
-# "DLL load failed while importing _ctypes: 找不到指定的模块"。
-# 这里显式把源环境（sys.base_prefix）的 msvcp140 系列打进 _internal 根目录。
+# 修复：conda-forge Python 的 _ctypes.pyd 等依赖 MSVC C++ 运行库 msvcp140*.dll 与
+# vcruntime140*.dll，PyInstaller 默认只收集 vcruntime140，漏掉 msvcp140 → 打包后
+# import ctypes 报 "DLL load failed while importing _ctypes: 找不到指定的模块"。
+# 另外残缺 venv（缺 DLLs 目录）会导致 python313.dll 未被收集，_ctypes 同样加载失败。
+# 这里显式把源环境（sys.base_prefix）的关键 DLL 打进 _internal 根目录。
 def _collect_msvc_runtime() -> list[str]:
     base = Path(sys.base_prefix)
     # conda-forge Python 的 _ctypes.pyd 依赖 ffi-8.dll（而非 libffi-8.dll），
     # PyInstaller 误收集 libffi-8.dll 导致 import ctypes 报 DLL 找不到。
     names = ["msvcp140.dll", "msvcp140_1.dll", "msvcp140_2.dll",
              "msvcp140_atomic_wait.dll", "msvcp140_codecvt_ids.dll",
-             "ffi-8.dll"]
+             "vcruntime140.dll", "vcruntime140_1.dll",
+             "python313.dll", "ffi-8.dll"]
     found: list[str] = []
     seen: set[str] = set()
-    for d in [base / "Library" / "bin", base]:
+    for d in [base / "Library" / "bin", base / "DLLs", base]:
         for name in names:
             if name in seen:
                 continue
