@@ -97,6 +97,30 @@ if _xq.is_dir():
         DATAS.append(f"{_py};{_dest}")
 
 
+# 修复：conda-forge Python 的 _ctypes.pyd 等依赖 MSVC C++ 运行库 msvcp140*.dll，
+# PyInstaller 默认只收集 vcruntime140，漏掉 msvcp140 → 打包后 import ctypes 报
+# "DLL load failed while importing _ctypes: 找不到指定的模块"。
+# 这里显式把源环境（sys.base_prefix）的 msvcp140 系列打进 _internal 根目录。
+def _collect_msvc_runtime() -> list[str]:
+    base = Path(sys.base_prefix)
+    # conda-forge Python 的 _ctypes.pyd 依赖 ffi-8.dll（而非 libffi-8.dll），
+    # PyInstaller 误收集 libffi-8.dll 导致 import ctypes 报 DLL 找不到。
+    names = ["msvcp140.dll", "msvcp140_1.dll", "msvcp140_2.dll",
+             "msvcp140_atomic_wait.dll", "msvcp140_codecvt_ids.dll",
+             "ffi-8.dll"]
+    found: list[str] = []
+    seen: set[str] = set()
+    for d in [base / "Library" / "bin", base]:
+        for name in names:
+            if name in seen:
+                continue
+            f = d / name
+            if f.is_file():
+                seen.add(name)
+                found.append(str(f))
+    # dest 为空串表示 _internal 根目录（onedir 模式）
+    return [f"{f};." for f in found]
+
 def main():
     # 控制台开关（可移植）：默认 --noconsole（发布友好，无黑框窗口）；
     # 调试需要看后端 stdout 时设 QMT_BUILD_CONSOLE=1 或传 --console 参数。
@@ -120,6 +144,9 @@ def main():
         cmd.append(f"--exclude-module={e}")
     for c in COLLECT_ALL:
         cmd.append(f"--collect-all={c}")
+    # 修复 _ctypes DLL 缺失：补 MSVC C++ 运行库
+    for b in _collect_msvc_runtime():
+        cmd.append(f"--add-binary={b}")
     for d in DATAS:
         cmd.append(f"--add-data={d}")
     # 沙箱安全删除 shim 通过 CODEBUDDY_SESSION_ID 激活，会拦截 os.remove 并 fail-closed，
