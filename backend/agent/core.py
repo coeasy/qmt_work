@@ -1,12 +1,13 @@
 """Agent 核心：会话持久化（复用孤儿表）+ 工具调用循环。
 
 - 会话落 sessions / messages（阶段 5 重建，非深化）；
-- 对话循环：调用 LLM Provider → 若有 tool_calls 则依次执行注册表工具 → 注入结果
+- 对话循环：调用 LLM Provider → 若有 tool_calls 则并行执行注册表工具 → 注入结果
   → 再次调用，直至模型不再请求工具或达到 max_iterations；
 - 真实 LLM，缺 Provider/Key 构造 AgentCore 即抛 AgentNotConfigured（端点转 503）。
 """
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import datetime, timezone
 
@@ -95,8 +96,9 @@ class AgentCore:
             last_content = content
             if not tc:
                 break
-            # 顺序执行工具调用（并行 tool_use 为后续增强）
-            for call in tc:
+            # 并行执行同一轮的所有工具调用（阶段 5.3），结果顺序与 tc 保持一致。
+            # 交易类工具自身带 single-flight 幂等 + 统一风控 + 锁，并行安全。
+            async def _exec_one(call: dict) -> str:
                 name = call["name"]
                 try:
                     args = json.loads(call.get("arguments_json") or "{}")
@@ -107,7 +109,9 @@ class AgentCore:
                     result_str = json.dumps(result, ensure_ascii=False, default=str)
                 except Exception as exc:  # noqa: BLE001
                     result_str = f"工具执行错误：{exc}"
-                tool_msg = f"[工具 {name} 返回]\n{result_str}"
+                return f"[工具 {name} 返回]\n{result_str}"
+            tool_msgs = await asyncio.gather(*(_exec_one(c) for c in tc))
+            for tool_msg in tool_msgs:
                 messages.append({"role": "user", "content": tool_msg})
                 self._append(session_id, "user", tool_msg)
 

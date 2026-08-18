@@ -34,9 +34,9 @@ CREATE TABLE IF NOT EXISTS api_keys (
     status TEXT DEFAULT 'active',
     created_at TEXT NOT NULL
 );
--- ⚠️ 孤儿表（阶段 5 Agent 预留）：sessions / messages / llm_config
--- 当前无任何后端代码读写（agent/ 后端已删），仅为阶段 5 重建 AgentCore 会话持久化预留。
--- 切勿删除，否则阶段 5 需重新建表；亦切勿在其它模块误用。
+-- 会话持久化表：sessions / messages 已由 backend/agent/（AgentCore）读写（会话列表与历史）。
+-- llm_config 仍为预留（当前未直接读写，供后续 Agent 配置持久化使用）。
+-- 切勿删除，否则 Agent 会话持久化需重新建表；亦切勿在其它模块误用。
 CREATE TABLE IF NOT EXISTS sessions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER,
