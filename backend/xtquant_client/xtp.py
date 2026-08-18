@@ -414,6 +414,101 @@ def _probe_xtdata(xtdata) -> tuple[bool, str]:
     return True, ""  # 无可用预检 API：放行，由后续真实调用暴露问题
 
 
+def _probe_quote_service(client_path: str) -> dict:
+    """深度诊断行情服务不可达的根因（纯标准库：进程 / 端口 / 配置三路探测）。
+
+    在 xtdata.connect()/get_client() 失败后调用，主动探测：
+      - QMT 客户端主进程是否在运行（据 client_path 推断 bin.x64 目录，Windows tasklist）
+      - 行情端口（xtdata.ini 默认 58610，可能被 .xtquant/*/xtdata.cfg 覆盖）是否被监听
+      - xtdata.cfg 配置的客户端根目录是否与 client_path 一致（若指向了别的客户端，
+        说明本机装了多个 QMT 而当前连的是另一个）
+    返回结构化结果供上层生成精确指引；任何探测异常都吞掉，绝不因诊断失败阻断主流程。
+    """
+    import socket
+    res = {
+        "client_running": False,
+        "listening_ports": [],
+        "expected_port": 58610,
+        "cfg_port": None,
+        "cfg_root": None,
+        "cfg_matches": None,
+        "bin_dir": None,
+    }
+    # 1) 据 client_path 推断客户端根目录 / bin.x64（复用现有候选根逻辑）
+    bin_dir = None
+    try:
+        for r in _candidate_roots(client_path):
+            b = os.path.join(r, "bin.x64")
+            if os.path.isdir(b):
+                bin_dir = b
+                break
+    except Exception:  # noqa: BLE001
+        pass
+    res["bin_dir"] = bin_dir
+
+    # 2) 行情端口：默认 58610；扫描 %USERPROFILE%/.xtquant/*/xtdata.cfg 看是否被覆盖
+    ports = {58610}
+    cfg_root, cfg_port, cfg_matches = None, None, None
+    try:
+        import glob
+        import json as _json
+        for cfg in glob.glob(os.path.join(
+                os.environ.get("USERPROFILE", ""), ".xtquant", "*", "xtdata.cfg")):
+            try:
+                data = _json.load(open(cfg, "r", encoding="utf-8"))
+            except Exception:  # noqa: BLE001
+                continue
+            p_ = data.get("port")
+            if p_:
+                ports.add(int(p_))
+                cfg_port = int(p_)
+            root_dir = data.get("root_dir")
+            if root_dir:
+                cfg_root = root_dir
+                try:
+                    nc = _normalize(client_path or "")
+                    cfg_matches = (
+                        nc in (_normalize(cfg_root) + os.sep)
+                        or _normalize(os.path.join(cfg_root, "userdata_mini")) == nc
+                        or _normalize(cfg_root) == nc)
+                except Exception:  # noqa: BLE001
+                    cfg_matches = None
+    except Exception:  # noqa: BLE001
+        pass
+    res.update(expected_port=58610, cfg_port=cfg_port, cfg_root=cfg_root,
+               cfg_matches=cfg_matches)
+
+    # 3) 端口监听探测（127.0.0.1 短超时）
+    try:
+        for port in ports:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(1.0)
+            try:
+                if s.connect_ex(("127.0.0.1", port)) == 0:
+                    res["listening_ports"].append(port)
+            finally:
+                s.close()
+    except Exception:  # noqa: BLE001
+        pass
+
+    # 4) 客户端进程检测（Windows tasklist；非 Windows 跳过）
+    try:
+        import subprocess
+        if os.name == "nt":
+            out = subprocess.run(
+                ["tasklist", "/FO", "CSV"], capture_output=True, text=True,
+                timeout=8, errors="ignore",
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout or ""
+            low = out.lower()
+            res["client_running"] = any(
+                exe in low for exe in ("xtitclient.exe", "xtminiqmt.exe",
+                                       "xtminiqt.exe", "xtquantclient.exe"))
+    except Exception:  # noqa: BLE001
+        pass
+    return res
+
+
+
 # ---------------- 多版本 SDK 兼容辅助 ----------------
 # 不同 xtquant 版本对象属性命名不一致：旧版 xttrader 全小写（order_id/stock_code/
 # order_status/traded_volume…），新版部分用 CamelCase（OrderID/StockCode/OrderStatus/
@@ -611,14 +706,40 @@ class XTPQuantAdapter(BrokerAdapter):
                         "2) 确认客户端登录后无防火墙拦截；\n"
                         "3) 再次点击连接。")
                 else:
-                    scene = "行情服务不可用"
-                    steps = (
-                        "1) 打开并登录 QMT 客户端（极速/普通模式均可），保持客户端运行；\n"
-                        "2) 确认客户端能正常显示行情；\n"
-                        "3) 确认「客户端路径」指向 userdata_mini 目录。")
+                    # 深度诊断：主动探测进程 / 端口 / 配置一致性，替代笼统的「不可用」
+                    probe = _probe_quote_service(self.client_path)
+                    _probe_diag = (f"[探测] client_running={probe['client_running']} "
+                                   f"listening={probe['listening_ports']} "
+                                   f"cfg_root={probe['cfg_root']} "
+                                   f"cfg_matches={probe['cfg_matches']}")
+                    log.info("%s", _probe_diag)
+                    if not probe["client_running"]:
+                        scene = "QMT 客户端未运行"
+                        steps = (
+                            "1) 打开并登录 QMT 客户端（极速/普通模式均可），保持客户端运行；\n"
+                            "2) 确认客户端界面能正常显示行情；\n"
+                            "3) 再重试连接。")
+                    elif not probe["listening_ports"]:
+                        scene = f"客户端在运行，但行情端口 {probe['expected_port']} 未监听"
+                        steps = (
+                            "1) 客户端已在运行，但行情服务端口未就绪；\n"
+                            "2) 请确认 QMT 已完成<b>行情登录</b>（部分券商需单独登录行情）；\n"
+                            "3) 确认客户端行情图正常刷新后，重启客户端再重试连接。")
+                    elif probe["cfg_matches"] is False:
+                        scene = "行情配置指向了其他 QMT 客户端"
+                        steps = (
+                            f"1) 检测到行情配置指向：{probe['cfg_root']}，与当前客户端路径不一致；\n"
+                            "2) 请确认本机只运行与「客户端路径」匹配的那一个 QMT；\n"
+                            "3) 若本机装有多个 QMT（如广发/机构版），请运行路径对应的那个并重新登录。")
+                    else:
+                        scene = "行情服务不可用"
+                        steps = (
+                            "1) 打开并登录 QMT 客户端（极速/普通模式均可），保持客户端运行；\n"
+                            "2) 确认客户端能正常显示行情；\n"
+                            "3) 确认「客户端路径」指向 userdata_mini 目录。")
                 raise BrokerNotConnectedError(
                     f"行情服务连接失败（{scene}，SDK 返回：{xtdata_detail}）。\n"
-                    f"请按顺序排查：\n{steps}")
+                    f"请按顺序排查：\n{steps}\n{_probe_diag}")
             self._connected = True
             return
 
