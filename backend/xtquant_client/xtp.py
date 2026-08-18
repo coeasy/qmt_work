@@ -450,6 +450,16 @@ def _dget(d, *keys, default=None):
     return default
 
 
+def _normalize_kline_period(period: str) -> str:
+    """迅投协议周期归一化：平台展示别名 -> xtquant 实际周期名。
+
+    迅投各版本 xtdata 的 K 线周期统一为 1m/5m/15m/30m/1h/1d（+服务端 1w/1mon/tick），
+    没有 "60m"——那是平台展示别名。传入 "60m" 时映射为 "1h"，其余原样返回。
+    """
+    p = (period or "1d").strip().lower()
+    return "1h" if p == "60m" else p
+
+
 # 下单方向操作码（xtconstant）：买类含 担保品买入(23)/买券还券(29)/专项买券还券(42)；
 # 卖类含 担保品卖出(24)/卖券还款(31)/专项卖券还款(44)。部分旧版无 33 之类码。
 _BUY_ORDER_TYPES = frozenset({23, 29, 42})
@@ -483,7 +493,11 @@ class XTPQuantAdapter(BrokerAdapter):
         self._trader = None
         self._acc = None
         self._connected = False
-        self._lock = threading.Lock()
+        self._lock = threading.Lock()  # 交易调用串行锁（SDK 侧互斥）
+        # 回调锁：专门保护 seq→oid / oid→seq / pending 三张映射（SDK 回调线程与
+        # 业务线程并发访问）。与 _lock 分离，避免「锁内调 SDK 方法 + SDK 同步派发
+        # 回调再取同一把锁」造成死锁。
+        self._map_lock = threading.Lock()
         self._order_status_cache: dict[str, str] = {}
         self._name_cache: dict[str, str] = {}
         # 阶段 0-A：报单回调闭环 —— 本地 seq → 柜台真实 order_id 双向映射，
@@ -525,6 +539,8 @@ class XTPQuantAdapter(BrokerAdapter):
 
     @property
     def supported_periods(self) -> list[str]:
+        # 展示层用平台命名（"60m"）；真实调用经 get_kline/subscribe_quote 内的
+        # _normalize_kline_period 归一化为迅投协议周期（"60m"->"1h"）。
         return ["1m", "5m", "15m", "30m", "60m", "1d", "1w", "1mon"]
 
     @property
@@ -757,6 +773,10 @@ class XTPQuantAdapter(BrokerAdapter):
         """断线：翻转连接态并通知 manager 触发健康重连。"""
         was = self._connected
         self._connected = False
+        with self._map_lock:
+            self._seq_to_oid.clear()
+            self._oid_to_seq.clear()
+            self._pending_resp.clear()
         log.warning("XtQuantTrader 断线（adapter=%s account=%s）",
                     self._account_id, self._account_type)
         if was and self._on_disconnect_cb is not None:
@@ -776,14 +796,15 @@ class XTPQuantAdapter(BrokerAdapter):
         except (ValueError, TypeError):
             seq = -1
         oid = _dget(o, "order_id", "OrderID")
-        if oid is not None:
-            oid = str(oid)
-            self._seq_to_oid[seq] = oid
-            self._oid_to_seq[oid] = seq
+        with self._map_lock:
+            if oid is not None:
+                oid = str(oid)
+                self._seq_to_oid[seq] = oid
+                self._oid_to_seq[oid] = seq
+            pend = self._pending_resp.pop(seq, None)
         log.debug("order response seq=%s order_id=%s status=%s err=%s",
                   seq, oid, _dget(o, "order_status", "OrderStatus"),
                   _dget(o, "error_msg", "ErrorMsg"))
-        pend = self._pending_resp.pop(seq, None)
         if pend is not None:
             ev, bucket = pend
             bucket.append(o)
@@ -835,14 +856,23 @@ class XTPQuantAdapter(BrokerAdapter):
 
         返回柜台 order_id（str）；超时未到返回 None（调用方应记作 status=unknown）。
         回调已提前到达时（映射已建立）直接返回，不阻塞。
+
+        并发安全：注册 pending 与回调侧写映射/弹 pending 都在 _map_lock 内，
+        消除「回调落在 get(seq) 之后、Event 注册之前」的竞态窗口；等待结束后
+        再查一次映射，覆盖「回调已建映射但 event 未触发」的边界。
         """
-        oid = self._seq_to_oid.get(seq)
-        if oid is not None:
-            return oid
-        ev = threading.Event()
-        bucket: list = []
-        self._pending_resp[seq] = (ev, bucket)
+        with self._map_lock:
+            oid = self._seq_to_oid.get(seq)
+            if oid is not None:
+                return oid
+            ev = threading.Event()
+            bucket: list = []
+            self._pending_resp[seq] = (ev, bucket)
         if ev.wait(timeout):
+            with self._map_lock:
+                oid = self._seq_to_oid.get(seq)
+            if oid is not None:
+                return oid
             for o in bucket:
                 got = _dget(o, "order_id", "OrderID")
                 if got is not None:
@@ -859,9 +889,10 @@ class XTPQuantAdapter(BrokerAdapter):
     def close(self) -> None:
         self._connected = False
         # 阶段 0-A（C10）：清空 trader 与映射，避免对已 stop 的 trader 继续调用
-        self._seq_to_oid.clear()
-        self._oid_to_seq.clear()
-        self._pending_resp.clear()
+        with self._map_lock:
+            self._seq_to_oid.clear()
+            self._oid_to_seq.clear()
+            self._pending_resp.clear()
         self._trader = None
         self._acc = None
 
@@ -927,6 +958,9 @@ class XTPQuantAdapter(BrokerAdapter):
                   start: str = "", end: str = "") -> list[dict]:
         if self._xtdata is None:
             raise BrokerSDKError("xtquant", "pip install xtquant")
+        # 迅投协议周期：各版本 xtdata 均用 "1h"（本地缓存集合 {1m,5m,15m,30m,1h,1d}），
+        # 平台展示用 "60m" 只是别名——必须归一化，否则旧版 get_market_data("60m") 失败。
+        period = _normalize_kline_period(period)
         field_list = ["open", "high", "low", "close", "volume", "amount"]
         try:
             data = self._xtdata.get_market_data(
@@ -1016,6 +1050,7 @@ class XTPQuantAdapter(BrokerAdapter):
         """
         if self._xtdata is None:
             raise BrokerSDKError("xtquant", "pip install xtquant")
+        period = _normalize_kline_period(period)  # "60m" -> "1h"（迅投协议）
         # 去重并保持顺序
         codes = list(dict.fromkeys(codes))
 
@@ -1091,13 +1126,14 @@ class XTPQuantAdapter(BrokerAdapter):
             pos = trader.query_stock_positions(acc) or []
         out = []
         for p in pos:
-            code = getattr(p, "stock_code", None)
+            # 多版本属性兼容：旧版全小写，新版部分 CamelCase。
+            code = _pick(p, "stock_code", "StockCode")
             if symbol and code != symbol:
                 continue
-            vol = getattr(p, "volume", 0)
-            avail = getattr(p, "can_use_volume", 0)
-            cost = self._f(getattr(p, "open_price", None))
-            mv = self._f(getattr(p, "market_value", None))
+            vol = _pick(p, "volume", "Volume", default=0)
+            avail = _pick(p, "can_use_volume", "CanUseVolume", default=0)
+            cost = self._f(_pick(p, "open_price", "OpenPrice", "cost_price", "CostPrice"))
+            mv = self._f(_pick(p, "market_value", "MarketValue"))
             out.append({"code": code, "name": self._name(code), "volume": vol,
                         "avail": avail, "cost": cost, "market_value": mv})
         return out
@@ -1196,8 +1232,11 @@ class XTPQuantAdapter(BrokerAdapter):
         _mkt = getattr(xtc, "LATEST_PRICE", getattr(xtc, "MARKET_PRICE", 5))
         _fix = getattr(xtc, "FIX_PRICE", 11)
         pt = _mkt if (price_type or "limit") == "market" else _fix
+        # 注意参数顺序：真实旧版 order_stock(account, stock_code, order_type, order_volume,
+        # price_type, price, strategy_name, order_remark)。原代码把 pt 放在 order_volume
+        # 位置会导致真实下单时「量=价格类型、价格类型=价格、价格=量」——交易灾难。
         with self._lock:
-            seq = trader.order_stock(acc, code, op, pt, float(price), int(volume),
+            seq = trader.order_stock(acc, code, op, int(volume), pt, float(price),
                                      strategy_name or "", remark or "")
         # 阶段 0-A（C2/F2）：order_stock 失败返回 -1（truthy，不能 `if not` 判断），
         # 必须把 -1 显式判为失败并抛错，否则「下单失败被报成功」→ 审计记 ok、WAL 记 pending。

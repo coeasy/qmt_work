@@ -76,21 +76,49 @@ class FakeXtAsset:
         self.total_asset = total
 
 
+class FakeXtPosition:
+    def __init__(self, **kwargs):
+        for k, v in kwargs.items():
+            setattr(self, k, v)
+
+
 class FakeTrader:
     """旧 SDK trader：只有 query_stock_asset（无 query_asset），无 query_stock_deals。"""
-    def __init__(self, orders, trades, asset):
+    def __init__(self, orders, trades, asset, positions=None):
         self._orders = orders
         self._trades = trades
         self._asset = asset
+        self._positions = positions or []
+        self.order_calls: list[dict] = []
+        self.cancel_calls: list[tuple] = []
 
     def query_stock_orders(self, acc):
         return list(self._orders)
 
     def query_stock_positions(self, acc):
-        return []
+        return list(self._positions)
 
     def query_stock_asset(self, acc):
         return self._asset
+
+    def order_stock(self, account, stock_code, order_type, order_volume,
+                    price_type, price, strategy_name='', order_remark=''):
+        """模拟旧版 order_stock 签名，捕获调用参数供测试断言。"""
+        self.order_calls.append({
+            "account": account,
+            "stock_code": stock_code,
+            "order_type": order_type,
+            "order_volume": order_volume,
+            "price_type": price_type,
+            "price": price,
+            "strategy_name": strategy_name,
+            "order_remark": order_remark,
+        })
+        return len(self.order_calls)  # seq
+
+    def cancel_order_stock(self, account, order_id):
+        self.cancel_calls.append((account, order_id))
+        return 0
     # 故意不提供 query_asset / query_stock_deals —— 强制走兼容兜底
 
 
@@ -318,10 +346,12 @@ class _FakeQuoteSink:
     """捕获 subscribe_quote 注册的回调（模拟旧版单 code + callback 签名）。"""
     def __init__(self):
         self.callbacks: dict[str, object] = {}
+        self.periods: dict[str, str] = {}
 
     def subscribe_quote(self, stock_code, period="1d", start_time="",
                         end_time="", count=0, callback=None):
         self.callbacks[stock_code] = callback
+        self.periods[stock_code] = period
 
 
 def test_subscribe_cb_old_list_payload():
@@ -357,3 +387,159 @@ def test_subscribe_cb_new_dict_payload():
     assert captured["data"]["code"] == "600000"
     assert captured["data"]["last"] == 10.5
     assert captured["data"]["volume"] == 500
+
+
+# ---------------- place_order：参数顺序（交易安全关键） ----------------
+def test_place_order_param_order():
+    """order_stock 参数顺序必须与真实旧版 SDK 一致（原 bug：量/价/类型错位）。"""
+    import xtquant_client.xtp as xtp_mod
+    orig = xtp_mod._ensure_xtconstant
+    xtp_mod._ensure_xtconstant = lambda: type("X", (), {
+        "STOCK_BUY": 23, "STOCK_SELL": 24,
+        "CREDIT_BUY": 23, "CREDIT_SELL": 24,
+        "LATEST_PRICE": 5, "FIX_PRICE": 11})()
+    try:
+        a = _new_adapter()
+        # 避免等待回调 10s 超时，只校验 order_stock 调用参数顺序
+        a._wait_order_response = lambda seq, timeout=10.0: None
+        res = a.place_order("600000", "buy", "limit", 10.5, 300,
+                            strategy_name="s1", remark="r1")
+        assert len(a._trader.order_calls) == 1
+        c = a._trader.order_calls[0]
+        assert c["stock_code"] == "600000"
+        assert c["order_type"] == 23          # STOCK_BUY
+        assert c["order_volume"] == 300
+        assert c["price_type"] == 11          # FIX_PRICE
+        assert c["price"] == 10.5
+        assert c["strategy_name"] == "s1"
+        assert c["order_remark"] == "r1"
+        assert res["status"] == "unknown"     # 无回调，seq 未映射到真实 order_id
+        # 市价单：price_type 应为 LATEST_PRICE=5
+        a.place_order("000001", "sell", "market", 9.8, 200)
+        c2 = a._trader.order_calls[1]
+        assert c2["order_type"] == 24         # STOCK_SELL
+        assert c2["price_type"] == 5
+        assert c2["price"] == 9.8
+        assert c2["order_volume"] == 200
+    finally:
+        xtp_mod._ensure_xtconstant = orig
+
+
+# ---------------- get_positions：多版本字段兼容 ----------------
+def test_get_positions_lowercase_and_camelcase():
+    """持仓字段兼容旧版全小写与新版 CamelCase。"""
+    a = _new_adapter()
+    # 旧版全小写
+    p1 = FakeXtPosition(stock_code="600000", volume=1000, can_use_volume=800,
+                        open_price=10.0, market_value=12000.0)
+    # 新版 CamelCase
+    p2 = FakeXtPosition(StockCode="000001", Volume=500, CanUseVolume=400,
+                        OpenPrice=8.5, MarketValue=4500.0)
+    a._trader._positions = [p1, p2]
+    rows = a.get_positions()
+    assert len(rows) == 2
+    r = {x["code"]: x for x in rows}
+    assert r["600000"]["volume"] == 1000
+    assert r["600000"]["avail"] == 800
+    assert r["600000"]["cost"] == 10.0
+    assert r["000001"]["volume"] == 500
+    assert r["000001"]["avail"] == 400
+    assert r["000001"]["cost"] == 8.5
+
+
+# ---------------- K 线/订阅周期归一化（60m -> 1h） ----------------
+def test_normalize_kline_period_60m_maps_to_1h():
+    from xtquant_client.xtp import _normalize_kline_period
+    assert _normalize_kline_period("60m") == "1h"
+    assert _normalize_kline_period("1m") == "1m"
+    assert _normalize_kline_period("1d") == "1d"
+    assert _normalize_kline_period("tick") == "tick"
+    assert _normalize_kline_period("") == "1d"
+    assert _normalize_kline_period(None) == "1d"
+
+
+class _FakeKlineDF:
+    """伪 DataFrame：仅实现 get_kline 用到的 iterrows/len（行是 dict）。"""
+    def __init__(self, rows):
+        self._rows = rows
+
+    def iterrows(self):
+        return iter(enumerate(self._rows))
+
+    def __len__(self):
+        return len(self._rows)
+
+
+class _FakeKlineSink:
+    def __init__(self):
+        self.calls: list[dict] = []
+
+    def get_market_data(self, **kwargs):
+        self.calls.append(kwargs)
+        code = kwargs["stock_list"][0]
+        return {code: _FakeKlineDF([{
+            "open": 10.0, "high": 11.0, "low": 9.5, "close": 10.5,
+            "volume": 1000, "amount": 1e6}])}
+
+
+def test_get_kline_60m_maps_to_1h():
+    """get_kline("60m") 必须归一化为迅投协议周期 "1h"（旧版无 60m）。"""
+    a = _new_adapter()
+    sink = _FakeKlineSink()
+    a._xtdata = sink
+    rows = a.get_kline("600000", "60m", 5)
+    assert sink.calls and sink.calls[0]["period"] == "1h"
+    assert len(rows) == 1
+    assert rows[0]["close"] == 10.5
+
+
+def test_subscribe_quote_60m_maps_to_1h():
+    a = _new_adapter()
+    sink = _FakeQuoteSink()
+    a._xtdata = sink
+    a.subscribe_quote(["600000"], lambda evt: None, period="60m")
+    assert sink.periods["600000"] == "1h"
+
+
+# ---------------- seq→oid 映射并发锁 / 竞态 ----------------
+def test_wait_order_response_callback_first_no_race():
+    """回调先于 wait 注册到达：立即返回真实 oid，不超时、不误判 unknown。"""
+    a = _new_adapter()
+    a._handle_order_response({"seq": 7, "order_id": "REAL1"})  # 回调先到
+    oid = a._wait_order_response(7, timeout=0.2)
+    assert oid == "REAL1"
+
+
+def test_wait_order_response_timeout_returns_none():
+    a = _new_adapter()
+    oid = a._wait_order_response(9999, timeout=0.05)  # 无回调
+    assert oid is None
+
+
+# ---------------- 占位适配器（未接入 SDK）：结构化错误，绝无假数据 ----------------
+def test_placeholder_adapters_structured_error():
+    from xtquant_client.adapters.juejin import JuejinAdapter
+    from xtquant_client.adapters.ptrade import PTradeAdapter
+    from xtquant_client.adapters.ths import ThsAdapter
+    from xtquant_client.base import BrokerSDKError
+
+    for cls in (ThsAdapter, PTradeAdapter, JuejinAdapter):
+        ad = cls()
+        # start 必须抛 SDK 缺失（带安装指引），而不是假成功
+        try:
+            ad.start()
+        except BrokerSDKError as exc:
+            assert "安装" in str(exc) or "pip" in str(exc)
+        else:
+            raise AssertionError(f"{cls.__name__}.start() 不应成功")
+        # 查询类方法同样必须抛错，绝不返回假数据
+        try:
+            ad.get_account()
+            raise AssertionError("不应返回假数据")
+        except BrokerSDKError:
+            pass
+        try:
+            ad.get_quote("600000")
+            raise AssertionError("不应返回假数据")
+        except BrokerSDKError:
+            pass
