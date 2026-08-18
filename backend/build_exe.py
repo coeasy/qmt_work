@@ -103,7 +103,7 @@ def main():
         "run.py",
         "--name", "qmt_work",
         "--onedir",
-        "--noconsole",
+        "--console",
         "--noconfirm",
         f"--distpath={DIST}",
         f"--workpath={ROOT / 'build'}",

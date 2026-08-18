@@ -68,7 +68,7 @@
 cd backend
 python -m venv .venv && .venv\Scripts\activate
 pip install -r requirements.txt
-python run.py        # http://127.0.0.1:21117
+python run.py        # http://127.0.0.1:21118
 
 # 2. 前端（另开终端）
 cd frontend
@@ -174,24 +174,24 @@ build_all.bat          # Windows CMD
 
 ```bash
 # 账户信息
-curl -H "X-API-Key: $QMT_API_KEY" http://127.0.0.1:21117/api/v1/account
+curl -H "X-API-Key: $QMT_API_KEY" http://127.0.0.1:21118/api/v1/account
 
 # 行情查询
-curl -H "X-API-Key: $QMT_API_KEY" "http://127.0.0.1:21117/api/v1/market/quote?code=000001.SZ"
+curl -H "X-API-Key: $QMT_API_KEY" "http://127.0.0.1:21118/api/v1/market/quote?code=000001.SZ"
 
 # 下单
 curl -X POST -H "X-API-Key: $QMT_API_KEY" -H "Content-Type: application/json" \
-  http://127.0.0.1:21117/api/v1/trading/order \
+  http://127.0.0.1:21118/api/v1/trading/order \
   -d '{"conn_id":"xxx","code":"000001.SZ","price":10.0,"qty":100,"side":"BUY"}'
 
 # 回测
-curl -X POST -H "X-API-Key: $QMT_API_KEY" http://127.0.0.1:21117/api/v1/backtest/run
+curl -X POST -H "X-API-Key: $QMT_API_KEY" http://127.0.0.1:21118/api/v1/backtest/run
 ```
 
 ### MCP 配置
 
 ```
-http://127.0.0.1:21117/mcp
+http://127.0.0.1:21118/mcp
 ```
 
 （Streamable HTTP；支持 FastMCP 标准工具的 Cursor / Claude Desktop 客户端）
@@ -202,7 +202,7 @@ http://127.0.0.1:21117/mcp
 
 | 变量 | 说明 | 默认值 |
 |------|------|--------|
-| `QMT_PORT` | 监听端口（被占用自动 +1） | `21117` |
+| `QMT_PORT` | 监听端口（被占用自动 +1） | `21118` |
 | `QMT_API_KEY` | 鉴权密钥 | `qmt-dev-key`（生产必须修改） |
 | `QMT_RISK_MAX_AMOUNT` | 单笔最大金额 | `100000` |
 | `QMT_ORDER_WATCHDOG_TIMEOUT` | 订单超时自动撤单（秒） | `60` |

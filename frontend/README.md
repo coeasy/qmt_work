@@ -6,10 +6,10 @@
 
 ```bash
 npm install
-npm run dev        # http://localhost:5173，API/WS 经 vite proxy 转发到 :21117 后端
+npm run dev        # http://localhost:5173，API/WS 经 vite proxy 转发到 :21118 后端
 ```
 
-开发态默认连接本机 `http://127.0.0.1:21117`，后端需先启动：`cd ../backend && python run.py`。
+开发态默认连接本机 `http://127.0.0.1:21118`，后端需先启动：`cd ../backend && python run.py`。
 
 ## 构建（产出到后端静态目录）
 
@@ -17,7 +17,7 @@ npm run dev        # http://localhost:5173，API/WS 经 vite proxy 转发到 :21
 npm run build      # 输出到 ../backend/static，FastAPI 自动托管
 ```
 
-构建后访问 `http://127.0.0.1:21117/` 即为完整 Web 应用。
+构建后访问 `http://127.0.0.1:21118/` 即为完整 Web 应用。
 
 ## 桌面壳 + 独立 EXE 打包（Phase 6）
 

@@ -897,7 +897,7 @@ def test_config_auto_generate_frozen():
         created = cfg.ensure_config_file()
         assert created.exists()
         payload = cfg._json_config_source()
-        assert payload.get("port") == 21117
+        assert payload.get("port") == 21118
         assert "api_key" in payload and "_readme" in cfg._default_config_payload()
         # db_path 相对路径解析到 exe 同目录
         s = cfg.Settings()

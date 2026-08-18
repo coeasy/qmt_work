@@ -10,10 +10,14 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 
 _WINDOW = 30.0
-_lock = asyncio.Lock()
+# 用 threading.Lock 而非 asyncio.Lock：模块级 asyncio.Lock 会绑定第一个使用它的
+# 事件循环，测试/多 asyncio.run() 场景下跨循环复用会抛 "bound to a different event loop"。
+# 本临界区不包含 await，普通线程锁即可（单线程事件循环下同样安全）。
+_lock = threading.Lock()
 _cache: dict[str, tuple[float, object]] = {}
 _inflight: dict[str, "asyncio.Future"] = {}
 
@@ -30,7 +34,7 @@ async def single_flight(key: str, coro_factory, window: float = _WINDOW):
     coro_factory: 无参协程工厂（每次执行时调用，返回真实结果）。
     """
     now = time.time()
-    async with _lock:
+    with _lock:
         hit = _cache.get(key)
         if hit and now - hit[0] <= window:
             # 阶段 3：幂等命中可观测——重复请求被窗口缓存拦截，不再二次下单
@@ -41,14 +45,18 @@ async def single_flight(key: str, coro_factory, window: float = _WINDOW):
                 pass
             return _mark_dup(hit[1])
         fut = _inflight.get(key)
-        if fut is not None:
-            # 并发同 key：复用进行中的执行，不重复下发，同样标记 duplicated
-            # （与窗口缓存命中语义一致——凡未执行真实逻辑的调用都标记重复）
-            result = await fut
-            return _mark_dup(result)
-        loop = asyncio.get_event_loop()
-        fut = loop.create_future()
-        _inflight[key] = fut
+        if fut is None:
+            loop = asyncio.get_event_loop()
+            fut = loop.create_future()
+            _inflight[key] = fut
+            created = True
+        else:
+            created = False
+    # 关键：`await` 必须放到锁外（临界区无 await，threading.Lock 才安全）。
+    # 并发同 key 且已有进行中的执行 → 复用其 future，不重复下发，标记 duplicated。
+    if not created:
+        result = await fut
+        return _mark_dup(result)
     try:
         result = await coro_factory()
     except Exception as exc:  # noqa: BLE001
@@ -59,4 +67,5 @@ async def single_flight(key: str, coro_factory, window: float = _WINDOW):
         _cache[key] = (time.time(), result)
         return result
     finally:
-        _inflight.pop(key, None)
+        with _lock:
+            _inflight.pop(key, None)

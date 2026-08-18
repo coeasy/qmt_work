@@ -1,6 +1,6 @@
 """开发/运行入口：python run.py
 
-端口处理：默认 21117；端口可在用户配置文件中修改（qmt_work_config.json 的 port 字段，
+端口处理：默认 21118；端口可在用户配置文件中修改（qmt_work_config.json 的 port 字段，
 打包运行时首次启动自动生成该文件）。若目标端口被占用则自动 +1 平滑改口（最多 10 次），
 避免旧实例残留导致启动失败；实际监听端口通过 QMT_PORT_FILE 写出（桌面壳据此发现，
 前端始终同源加载，无需感知端口）。
@@ -206,18 +206,18 @@ if __name__ == "__main__":
     log.info("数据库：%s", settings.db_path)
     log.info("日志目录：%s", settings.log_dir)
     log.info("API Key：已配置（已脱敏，不打印明文）")
-    # 端口来源提示：环境变量 QMT_PORT > 配置文件 port > 默认 21117
-    _port_src = "默认值 21117"
+    # 端口来源提示：环境变量 QMT_PORT > 配置文件 port > 默认 21118
+    _port_src = "默认值 21118"
     if os.environ.get("QMT_PORT"):
         _port_src = f"环境变量 QMT_PORT={os.environ['QMT_PORT']}"
     else:
         try:
             import json as _json
             _cfg = _json.loads(cfg_path.read_text(encoding="utf-8")) if cfg_path.exists() else {}
-            if isinstance(_cfg.get("port"), int) and _cfg["port"] != 21117:
+            if isinstance(_cfg.get("port"), int) and _cfg["port"] != 21118:
                 _port_src = f"配置文件 port={_cfg['port']}"
             elif isinstance(_cfg.get("port"), int):
-                _port_src = "配置文件 port（等于默认值 21117）"
+                _port_src = "配置文件 port（等于默认值 21118）"
         except Exception:  # noqa: BLE001
             pass
     log.info("监听端口：%s（来源：%s）", settings.port, _port_src)

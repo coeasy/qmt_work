@@ -11,7 +11,7 @@ python -m venv .venv && .venv\Scripts\activate
 pip install -r requirements.txt
 
 # 2. 启动
-python run.py    # http://127.0.0.1:21117
+python run.py    # http://127.0.0.1:21118
 ```
 
 ## 冒烟测试
@@ -34,7 +34,7 @@ python build_exe.py
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| `QMT_PORT` | `21117` | 监听端口（被占用自动 +1） |
+| `QMT_PORT` | `21118` | 监听端口（被占用自动 +1） |
 | `QMT_API_KEY` | `qmt-dev-key` | 鉴权密钥（生产必须修改） |
 | `QMT_RISK_MAX_AMOUNT` | `100000` | 单笔最大金额 |
 

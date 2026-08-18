@@ -3,6 +3,8 @@
 下单前过统一风控（单笔金额/最小数量/单票上限/频率限制）；全部走真实券商 SDK；
 所有交易动作写入审计日志（audit_log），工业级可追溯。
 """
+import asyncio
+import threading
 import time
 
 from . import get_bridge
@@ -37,6 +39,26 @@ def _idempotent_set(key: str, result: dict) -> None:
     if key:
         _IDEMPOTENCY[key] = (time.time(), result)
 
+# F1 修复：幂等「get 检查 → 异步下单 → set 写入」之间存在竞态——两个同 idempotency_key
+# 的并发调用（LLM 超时重试 / 前端双击）会同时通过 _idempotent_get 检查、各下一单，
+# 造成真实重复成交。这里用 per-key asyncio.Lock 把「get→下单→set」包成原子临界区，
+# 确保同一幂等键并发时只有一个进入下单。
+_IDEMPOTENT_LOCKS: dict[str, "asyncio.Lock"] = {}
+# guard 用 threading.Lock（不绑定事件循环）：模块级 asyncio.Lock 在跨多个
+# asyncio.run()/事件循环场景会抛 "bound to a different event loop"；本临界区
+# 仅保护字典读写、不含 await，普通线程锁即可（单线程事件循环下同样安全）。
+_IDEMPOTENT_LOCKS_GUARD = threading.Lock()
+
+
+def _idempotent_lock(key: str) -> "asyncio.Lock":
+    """取 key 对应的互斥锁（惰性创建，key 复用同一把锁）。"""
+    with _IDEMPOTENT_LOCKS_GUARD:
+        lock = _IDEMPOTENT_LOCKS.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            _IDEMPOTENT_LOCKS[key] = lock
+        return lock
+
 
 def register_trading_tools(mcp, risk):
     @mcp.tool()
@@ -55,25 +77,42 @@ def register_trading_tools(mcp, risk):
 
         idempotency_key：可选幂等键，30s 内同键直接返回首次结果（防重复提交/网络重试双单）。
         """
-        dup = _idempotent_get(idempotency_key)
-        if dup is not None:
-            dup["duplicated"] = True
-            return dup
-        b = get_bridge(broker_id or None)
-        ok, reason = risk.check_order(code, price if price > 0 else 100.0, volume, direction)
-        params = {"code": code, "direction": direction, "volume": volume,
-                  "price": price, "price_type": price_type,
-                  "strategy": strategy_name, "remark": remark, "broker_id": broker_id}
-        if not ok:
-            _audit("order.rejected", code, params, reason)
-            return {"ok": False, "reason": reason}
-        result = await b.call_locked(
-            b.gateway.place_order, code, direction, price_type, price, volume,
-            strategy_name, remark)
-        result["ok"] = True
-        _audit("order.submitted", code, params, f"order_id={result.get('order_id')}")
-        _idempotent_set(idempotency_key, result)
-        return result
+        async def _impl() -> dict:
+            # 幂等检查与写入必须在同一把锁内完成（F1），避免并发穿透
+            dup = _idempotent_get(idempotency_key)
+            if dup is not None:
+                dup["duplicated"] = True
+                return dup
+            b = get_bridge(broker_id or None)
+            ok, reason = risk.check_order(code, price if price > 0 else 100.0,
+                                          volume, direction)
+            params = {"code": code, "direction": direction, "volume": volume,
+                      "price": price, "price_type": price_type,
+                      "strategy": strategy_name, "remark": remark,
+                      "broker_id": broker_id}
+            if not ok:
+                _audit("order.rejected", code, params, reason)
+                return {"ok": False, "reason": reason}
+            result = await b.call_locked(
+                b.gateway.place_order, code, direction, price_type, price, volume,
+                strategy_name, remark)
+            result["ok"] = True
+            _audit("order.submitted", code, params,
+                   f"order_id={result.get('order_id')}")
+            _idempotent_set(idempotency_key, result)
+            return result
+
+        if not idempotency_key:
+            return await _impl()
+        lock = _idempotent_lock(idempotency_key)
+        async with lock:
+            try:
+                return await _impl()
+            finally:
+                # 释放后清理：幂等缓存已过期（key 已不在 _IDEMPOTENCY）则移除对应锁，
+                # 避免唯一 key 累积造成锁表无界增长。
+                if idempotency_key not in _IDEMPOTENCY:
+                    _IDEMPOTENT_LOCKS.pop(idempotency_key, None)
 
     @mcp.tool()
     async def cancel_order(order_id: str, broker_id: str = "") -> dict:

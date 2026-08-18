@@ -53,7 +53,7 @@ def _default_config_payload() -> dict[str, Any]:
         # 默认仅本机可访问（0-E 安全基线）；需远程访问请改为 0.0.0.0
         # 并务必修改 api_key，否则启动自检会拒绝在远程监听下使用默认密钥
         "host": "127.0.0.1",
-        "port": 21117,
+        "port": 21118,
         # ---- 存储与日志 ----
         "db_path": "data/app.db",
         "log_dir": "logs",
@@ -167,7 +167,7 @@ class Settings(BaseSettings):
     app_name: str = "qmt_work"
     # 0-E 安全基线：默认仅本机可访问；远程监听(0.0.0.0)且未改默认 api_key 时启动自检拒绝启动
     host: str = "127.0.0.1"
-    port: int = 21117
+    port: int = 21118
 
     # 引导连接（可选；不提供则需在 UI 中配置券商连接）
     broker_id: str = ""

@@ -15,7 +15,7 @@ import os
 import sqlite3
 import websockets
 
-BASE = os.environ.get("QMT_TEST_BASE", "http://127.0.0.1:21117/api/v1")
+BASE = os.environ.get("QMT_TEST_BASE", "http://127.0.0.1:21118/api/v1")
 WS_BASE = BASE.replace("http://", "ws://").rstrip("/") + "/ws"
 # 默认指向源码库；验收打包 EXE 时通过 QMT_DB_PATH 指向其同目录库（reset 才生效）
 DB_PATH = os.environ.get("QMT_DB_PATH", "data/app.db")

@@ -1,24 +1,39 @@
 @echo off
 REM qmt_work 一键构建脚本 (Windows)
-REM 依次执行：前端构建 -> 后端 EXE -> Electron 桌面壳打包（默认 NSIS 安装包）
+REM 依次执行：前端构建 -> 后端 EXE -> Electron 桌面壳打包（默认 zip 便携版）
 REM
 REM 用法:
-REM   build_all.bat
-REM   build_all.bat --portable     仅产出 zip 便携版（不做 NSIS 安装包）
+REM   build_all.bat                 全量构建（zip 便携版）
+REM   build_all.bat --portable      同全量构建
+REM   build_all.bat --backend-only  仅打包后端 EXE
+REM   build_all.bat --desktop-only  跳过后端 EXE，仅打包 Electron（需 backend/dist 已存在）
+REM   build_all.bat --skip-frontend 跳过前端构建
+REM   build_all.bat --force         跳过运行中实例检测（不推荐）
 REM
-REM 可选参数:
-REM   --desktop-only   跳过后端 EXE，仅打包 Electron（需 backend/dist 已存在）
-REM   --backend-only   仅打包后端 EXE
-REM   --skip-frontend  跳过前端构建
-REM   --portable       只打 zip 便携版（默认打 NSIS 安装包 + zip）
-REM   --force          跳过运行中实例检测（不推荐）
+REM 本机无 NSIS，仅打包 zip 便携版；如需 NSIS 安装包请在构建环境安装 NSIS 后自行修改。
 REM
 REM 环境变量（可选）:
-REM   QMT_UPDATE_URL   自动更新服务器地址（默认 GitHub Releases）
-REM   CSC_LINK         Windows 代码签名证书路径（*.pfx）
-REM   CSC_KEY_PASSWORD 证书密码（设置后自动签名）
+REM   QMT_UPDATE_URL     自动更新服务器地址（默认 GitHub Releases）
+REM   CSC_LINK           Windows 代码签名证书路径（*.pfx）
+REM   CSC_KEY_PASSWORD   证书密码（设置后自动签名）
+REM
 
 setlocal enabledelayedexpansion
+
+REM ---- 托管 Python 解释器（PyInstaller 构建必须使用；含 fastmcp/pyinstaller） ----
+set "MANAGED_PYTHON=C:\Users\Administrator\.workbuddy\binaries\python\envs\default\Scripts\python.exe"
+if not exist "!MANAGED_PYTHON!" (
+    echo [error] 托管 Python 不存在: !MANAGED_PYTHON!
+    exit /b 1
+)
+
+REM ---- 托管 Node.js（把 node/npm 所在目录加入 PATH，npm 自动使用托管 node） ----
+set "MANAGED_NODE_DIR=C:\Users\Administrator\.workbuddy\binaries\node\versions\22.22.2"
+if not exist "!MANAGED_NODE_DIR!\node.exe" (
+    echo [error] 托管 Node 不存在: !MANAGED_NODE_DIR!
+    exit /b 1
+)
+
 set ROOT=%~dp0
 set BACKEND=%ROOT%backend
 set FRONTEND=%ROOT%frontend
@@ -26,6 +41,8 @@ set FRONTEND=%ROOT%frontend
 echo =========================================
 echo  qmt_work 一键构建 (Windows)
 echo  工作目录: %ROOT%
+echo  Python:   !MANAGED_PYTHON!
+echo  Node:     !MANAGED_NODE_DIR!
 echo =========================================
 echo.
 
@@ -33,8 +50,8 @@ REM 解析参数
 set SKIP_FRONTEND=false
 set BACKEND_ONLY=false
 set DESKTOP_ONLY=false
-set USE_NSIS=true
 set FORCE=false
+set USE_NSIS=false
 
 :parse_args
 if "%~1"=="" goto done_parse
@@ -42,23 +59,22 @@ if "%~1"=="--skip-frontend" set SKIP_FRONTEND=true
 if "%~1"=="--backend-only" set BACKEND_ONLY=true
 if "%~1"=="--desktop-only" set DESKTOP_ONLY=true
 if "%~1"=="--portable" set USE_NSIS=false
+if "%~1"=="--nsis" set USE_NSIS=true
 if "%~1"=="--force" set FORCE=true
 shift /1
 goto parse_args
 
 :done_parse
 
-REM ---- 运行中实例检测：构建会覆盖运行中的 EXE/静态资源，
-REM      导致运行中进程句柄异常（前端 500），必须先退出 ----
+REM ---- 运行中实例检测 ----
 if "%DESKTOP_ONLY%"=="false" (
     tasklist /FI "IMAGENAME eq qmt_work.exe" 2>nul | findstr /i "qmt_work.exe" >nul
     if !errorlevel! equ 0 (
         if "%FORCE%"=="true" (
-            echo [warn] 后端 EXE 正在运行，使用 --force 继续（不推荐）
+            echo [warn] 后端 EXE 正在运行，使用 --force 继续
         ) else (
             echo [error] 后端 EXE 正在运行（qmt_work.exe）。
-            echo         请先完全退出（托盘右键-退出，或任务管理器结束所有 qmt_work.exe），
-            echo         或加 --force 跳过本检查。
+            echo         请先完全退出，或加 --force 跳过本检查。
             exit /b 1
         )
     )
@@ -66,18 +82,17 @@ if "%DESKTOP_ONLY%"=="false" (
 tasklist /FI "IMAGENAME eq electron.exe" 2>nul | findstr /i "electron.exe" >nul
 if !errorlevel! equ 0 (
     if "%FORCE%"=="true" (
-        echo [warn] 桌面壳实例正在运行，使用 --force 继续（不推荐）
+        echo [warn] 桌面壳实例正在运行，使用 --force 继续
     ) else (
         echo [error] 桌面壳（electron.exe）正在运行，请先退出后再构建。
         exit /b 1
     )
 )
 
-REM ---- 自动更新地址：未配置时用 GitHub Releases 占位 ----
+REM ---- 自动更新地址 ----
 if "%QMT_UPDATE_URL%"=="" (
     set "QMT_UPDATE_URL=https://github.com/qmt-work/qmt_work/releases/download"
     echo [warn] QMT_UPDATE_URL 未设置，使用默认: !QMT_UPDATE_URL!
-    echo         请按实际仓库地址设置环境变量 QMT_UPDATE_URL 后重新构建。
 )
 set "QMT_UPDATE_URL=!QMT_UPDATE_URL!"
 
@@ -85,6 +100,7 @@ REM ---- 前端依赖：node_modules 缺失时自动安装 ----
 if not exist "%FRONTEND%\node_modules" (
     echo [build] frontend/node_modules 不存在，执行 npm install ...
     cd /d "%FRONTEND%"
+    set "PATH=!MANAGED_NODE_DIR!;!PATH!"
     call npm install
     if !errorlevel! neq 0 (
         echo [error] npm install 失败
@@ -102,6 +118,21 @@ if "%DESKTOP_ONLY%"=="false" (
             echo [error] frontend/package.json 不存在
             exit /b 1
         )
+
+        REM 关键：沙箱 safe-delete shim 会拦截 vite 对 backend/static/assets 的清空操作。
+        REM 预先手动清理目标目录，vite 即可正常构建。
+        if exist "%BACKEND%\static\assets" (
+            echo [build] 清理旧静态资源: %BACKEND%\static\assets
+            rd /s /q "%BACKEND%\static\assets"
+        )
+        if exist "%BACKEND%\static\index.html" (
+            del /q "%BACKEND%\static\index.html"
+        )
+        if exist "%BACKEND%\static\manifest.json" (
+            del /q "%BACKEND%\static\manifest.json"
+        )
+
+        set "PATH=!MANAGED_NODE_DIR!;!PATH!"
         call npm run build
         if !errorlevel! neq 0 (
             echo [error] 前端构建失败
@@ -125,7 +156,7 @@ if "%DESKTOP_ONLY%"=="false" (
     if not exist "static\index.html" (
         echo [warn] backend/static 为空，前端可能未构建
     )
-    python build_exe.py
+    "!MANAGED_PYTHON!" build_exe.py
     if !errorlevel! neq 0 (
         echo [error] 后端 EXE 打包失败
         exit /b 1
@@ -152,9 +183,11 @@ if exist "%BACKEND%\dist\qmt_work\qmt_work.exe" (
 
 if "%USE_NSIS%"=="true" (
     echo [build] 打包 NSIS 安装包 + zip 便携版
+    set "PATH=!MANAGED_NODE_DIR!;!PATH!"
     call npm run dist
 ) else (
-    echo [build] 仅打包 zip 便携版
+    echo [build] 打包 zip 便携版（本机无 NSIS）
+    set "PATH=!MANAGED_NODE_DIR!;!PATH!"
     call npm run dist:portable
 )
 
