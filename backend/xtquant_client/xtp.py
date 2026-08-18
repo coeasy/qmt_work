@@ -886,19 +886,23 @@ class XTPQuantAdapter(BrokerAdapter):
     def _norm_quote(self, code: str, tick: dict) -> dict:
         def _lst(v, i):
             return v[i] if isinstance(v, (list, tuple)) and len(v) > i else (v if not isinstance(v, (list, tuple)) else None)
+        # 键名兼容：tick 快照用 CamelCase（lastPrice/lastClose/bidPrice），K 线 bar 用
+        # 小写（close/open/high/low/volume/amount）。last 缺失用 close 兜底（K 线 bar
+        # 无最新价字段）、lastClose 缺失用 preClose/pre_close 兜底，避免旧版 K 线订阅
+        # 推送的行情 last/lastClose 为 None。
         return {
             "code": code,
-            "last": tick.get("lastPrice"),
-            "open": tick.get("open"),
-            "high": tick.get("high"),
-            "low": tick.get("low"),
-            "lastClose": tick.get("lastClose"),
-            "volume": tick.get("volume"),
-            "amount": tick.get("amount"),
-            "bid": _lst(tick.get("bidPrice"), 0),
-            "ask": _lst(tick.get("askPrice"), 0),
-            "bid_vol": _lst(tick.get("bidVolume"), 0),
-            "ask_vol": _lst(tick.get("askVolume"), 0),
+            "last": _dget(tick, "lastPrice", "close"),
+            "open": _dget(tick, "open", "Open"),
+            "high": _dget(tick, "high", "High"),
+            "low": _dget(tick, "low", "Low"),
+            "lastClose": _dget(tick, "lastClose", "preClose", "pre_close"),
+            "volume": _dget(tick, "volume", "Volume"),
+            "amount": _dget(tick, "amount", "Amount"),
+            "bid": _lst(_dget(tick, "bidPrice", "bid_price"), 0),
+            "ask": _lst(_dget(tick, "askPrice", "ask_price"), 0),
+            "bid_vol": _lst(_dget(tick, "bidVolume", "bid_volume"), 0),
+            "ask_vol": _lst(_dget(tick, "askVolume", "ask_volume"), 0),
             "ts": datetime.now().isoformat(timespec="seconds"),
         }
 
@@ -1018,13 +1022,20 @@ class XTPQuantAdapter(BrokerAdapter):
         def _cb(datas):
             try:
                 for code, per in (datas or {}).items():
-                    if not isinstance(per, dict):
+                    bars = None
+                    if isinstance(per, dict):
+                        # 新版 xtdata：{code: {period: [bars]}} —— 取任一有数据的周期最后一根
+                        for _p, _bars in per.items():
+                            if isinstance(_bars, list) and _bars:
+                                bars = _bars
+                                break
+                    elif isinstance(per, list) and per:
+                        # 旧版 xtdata：{code: [data1, data2, ...]} —— 值直接是 bar 列表
+                        bars = per
+                    if not bars:
                         continue
-                    bar = None
-                    for _p, bars in per.items():
-                        if isinstance(bars, list) and bars:
-                            bar = bars[-1]
-                    if bar is None:
+                    bar = bars[-1]
+                    if not isinstance(bar, dict):
                         continue
                     on_tick({"type": "quote", "data": self._norm_quote(code, bar)})
             except Exception as exc:  # noqa: BLE001

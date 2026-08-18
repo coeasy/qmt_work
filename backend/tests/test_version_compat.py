@@ -293,3 +293,67 @@ def test_l2_transaction_positional_fallback_on_typeerror():
     assert calls[0][0] == []            # field_list
     assert calls[0][1] == "600000"       # stock_code 落在正确位置
     assert calls[0][4] == 30            # count
+
+
+# ---------------- 行情归一化 / 订阅回调：新旧两套载荷结构 ----------------
+def test_norm_quote_kline_bar_field_fallback():
+    """旧版 K 线 bar（小写字段）归一化：last 用 close、lastClose 用 preClose 兜底。"""
+    a = _new_adapter()
+    bar = {"close": 10.5, "open": 10.2, "high": 10.8, "low": 10.1,
+           "volume": 12345, "amount": 1.3e7}
+    q = a._norm_quote("600000", bar)
+    assert q["last"] == 10.5        # 曾为 None（K 线 bar 无 lastPrice）
+    assert q["lastClose"] is None   # 无 preClose 时保持 None
+    # tick 快照（CamelCase）不受影响
+    tick = {"lastPrice": 11.0, "lastClose": 10.5, "bidPrice": [10.9, 10.8],
+            "askPrice": [11.0, 11.1], "bidVolume": [100, 200], "askVolume": [150, 50]}
+    q2 = a._norm_quote("600000", tick)
+    assert q2["last"] == 11.0
+    assert q2["lastClose"] == 10.5
+    assert q2["bid"] == 10.9
+    assert q2["ask_vol"] == 150
+
+
+class _FakeQuoteSink:
+    """捕获 subscribe_quote 注册的回调（模拟旧版单 code + callback 签名）。"""
+    def __init__(self):
+        self.callbacks: dict[str, object] = {}
+
+    def subscribe_quote(self, stock_code, period="1d", start_time="",
+                        end_time="", count=0, callback=None):
+        self.callbacks[stock_code] = callback
+
+
+def test_subscribe_cb_old_list_payload():
+    """旧版订阅回调载荷 {code: [bar, ...]}（值直接是 list）必须被推送（曾静默失效）。"""
+    a = _new_adapter()
+    captured = {}
+    sink = _FakeQuoteSink()
+    a._xtdata = sink
+    a.subscribe_quote(["600000"], lambda evt: captured.update(evt))
+    assert "600000" in sink.callbacks
+    # 旧版载荷：{code: [bar1, bar2]} —— 值直接是 bar 列表，无 period 嵌套
+    sink.callbacks["600000"]({"600000": [
+        {"close": 10.0, "open": 9.9, "high": 10.1, "low": 9.8, "volume": 100},
+        {"close": 10.2, "open": 10.0, "high": 10.3, "low": 9.9, "volume": 200},
+    ]})
+    assert captured["type"] == "quote"
+    assert captured["data"]["code"] == "600000"
+    assert captured["data"]["last"] == 10.2   # 最后一根 bar 的 close 兜底
+    assert captured["data"]["volume"] == 200
+
+
+def test_subscribe_cb_new_dict_payload():
+    """新版订阅回调载荷 {code: {period: [bar, ...]}} 必须继续被推送（回归保护）。"""
+    a = _new_adapter()
+    captured = {}
+    sink = _FakeQuoteSink()
+    a._xtdata = sink
+    a.subscribe_quote(["600000"], lambda evt: captured.update(evt))
+    sink.callbacks["600000"]({"600000": {"1m": [
+        {"close": 10.5, "volume": 500},
+    ]}})
+    assert captured["type"] == "quote"
+    assert captured["data"]["code"] == "600000"
+    assert captured["data"]["last"] == 10.5
+    assert captured["data"]["volume"] == 500
