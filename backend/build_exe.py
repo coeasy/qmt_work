@@ -156,8 +156,19 @@ def main():
     clean_env = {k: v for k, v in os.environ.items()
                  if k not in ("CODEBUDDY_SESSION_ID", "CLAUDE_SESSION_ID", "CODEBUDDY_SAFE_DELETE_SANDBOX")}
     print(">>>", " ".join(cmd))
-    subprocess.run(cmd, cwd=str(ROOT), check=True, env=clean_env,
-                   creationflags=CREATE_NO_WINDOW)
+    # capture_output=True + 失败时打印：CREATE_NO_WINDOW 会把子进程 stdout/stderr 丢弃，
+    # PyInstaller 报错时只看到 wrapper 的 CalledProcessError，真实原因被吞掉。
+    proc = subprocess.run(cmd, cwd=str(ROOT), check=False, env=clean_env,
+                          capture_output=True, text=True,
+                          encoding="utf-8", errors="replace",
+                          creationflags=CREATE_NO_WINDOW)
+    if proc.returncode != 0:
+        print("\n[PyInstaller 输出-最后 80 行]")
+        print("\n".join((proc.stdout or "").splitlines()[-80:]))
+        print("\n[PyInstaller 错误-最后 40 行]")
+        print("\n".join((proc.stderr or "").splitlines()[-40:]))
+        raise SystemExit(proc.returncode)
+    print(proc.stdout[-800:] if proc.stdout else "")
     print(f"\n完成：{DIST / 'qmt_work' / 'qmt_work.exe'}")
 
 
