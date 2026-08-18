@@ -98,12 +98,17 @@ if _xq.is_dir():
 
 
 def main():
+    # 控制台开关（可移植）：默认 --noconsole（发布友好，无黑框窗口）；
+    # 调试需要看后端 stdout 时设 QMT_BUILD_CONSOLE=1 或传 --console 参数。
+    console_flag = "--console" if (
+        os.environ.get("QMT_BUILD_CONSOLE") == "1" or "--console" in sys.argv[1:]
+    ) else "--noconsole"
     cmd = [
         sys.executable, "-m", "PyInstaller",
         "run.py",
         "--name", "qmt_work",
         "--onedir",
-        "--console",
+        console_flag,
         "--noconfirm",
         f"--distpath={DIST}",
         f"--workpath={ROOT / 'build'}",
