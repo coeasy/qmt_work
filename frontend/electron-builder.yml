@@ -41,4 +41,6 @@ nsis:
   artifactName: ${productName}-Setup-${version}.${ext}
 publish:
   - provider: generic
-    url: ${env.QMT_UPDATE_URL}
+    # 支持未设置环境变量时使用默认更新地址（electron-builder 的 :- 默认值语法），
+    # 使 npm run dist:portable 开箱可用；设置 QMT_UPDATE_URL 仍可覆盖。
+    url: ${env.QMT_UPDATE_URL:-https://github.com/qmt-work/qmt_work/releases/download}
