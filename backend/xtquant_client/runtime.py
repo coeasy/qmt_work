@@ -242,8 +242,12 @@ def discover_system_runtimes() -> dict[int, str]:
     # 4) PATH 目录扫描（绿色版 / 便携 Python / 虚拟环境，覆盖 3.13.12 managed 等）
     #    跳过 Windows 系统目录（含成千上万文件、几乎无 python.exe，listdir 极慢且无意义）；
     #    并限制目录数上限，防止极端长 PATH 下首次扫描卡死（结果有进程内缓存，仅首次较慢）。
-    _SKIP_DIR_HINTS = ("windows", "system32", "syswow64", "servicing",
-                       "$recycle.bin", "programdata", "appdata")
+    # 注意：不要用宽泛的 "appdata" 跳过——WPS 灵犀、便携 Python 等常装在
+    # AppData 下（~\AppData\Roaming\...\python-env），跳过会漏掉当前可用运行时。
+    # 仅精确跳过 Temp 与系统目录（这些目录几乎不可能有可用的 python.exe）。
+    # low 为反斜杠路径（d.lower()），故 hint 用反斜杠形式。
+    _SKIP_DIR_HINTS = ("system32", "syswow64", "servicing", "$recycle.bin",
+                       "\\programdata\\", "appdata\\local\\temp")
     _path_dirs = [d.strip() for d in os.environ.get("PATH", "").split(os.pathsep) if d.strip()]
     for d in _path_dirs[:80]:
         low = d.lower()
