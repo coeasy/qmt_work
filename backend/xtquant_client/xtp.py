@@ -379,8 +379,12 @@ def _load_trader_api() -> tuple:
     return XtQuantTrader, accounts
 
 
-def _probe_xtdata(xtdata) -> tuple[bool, str]:
+def _probe_xtdata(xtdata, client_path: str | None = None) -> tuple[bool, str]:
     """探测行情服务是否可用，返回 (ok, detail)。兼容多版本 xtquant API。
+
+    大/小窗口全兼容：xtdata.connect() 默认走 .xtquant/*/xtdata.cfg 指定端口
+    （默认 58610）。若不可达且本机 miniquote 正监听其他端口（多客户端并存 /
+    cfg 残留场景），自动逐个回退尝试，绝不因端口配置漂移误判为故障。
 
     版本差异（踩坑记录）：
     - 部分新版本提供 `xtdata.connect()`；
@@ -392,6 +396,7 @@ def _probe_xtdata(xtdata) -> tuple[bool, str]:
     设计原则：预检只用于**确定失败**的场景。两个 API 都不存在时返回 True 放行，
     把判断交给后续真实调用，绝不因 SDK 版本差异把可用的连接误判为故障。
     """
+    last_detail = ""
     for name in ("connect", "get_client"):
         fn = getattr(xtdata, name, None)
         if not callable(fn):
@@ -400,28 +405,116 @@ def _probe_xtdata(xtdata) -> tuple[bool, str]:
             res = fn()
         except Exception as exc:  # noqa: BLE001
             # SDK 原话（如「无法连接行情服务！」）是有效诊断信息，保留并上抛
-            return False, (str(exc).strip() or type(exc).__name__)
+            last_detail = str(exc).strip() or type(exc).__name__
+            # 端口回退：默认端口连不上时，自动尝试本机 miniquote 实际监听的端口
+            if client_path:
+                try:
+                    probe = _probe_quote_service(client_path)
+                except Exception:  # noqa: BLE001
+                    probe = {}
+                alt_ports = [p for p in (probe.get("quote_ports") or []) if p != 58610]
+                if name == "connect":
+                    for port in alt_ports:
+                        try:
+                            res = fn(port=port)
+                        except Exception as exc2:  # noqa: BLE001
+                            last_detail = str(exc2).strip() or last_detail
+                            continue
+                        chk = getattr(res, "is_connected", None)
+                        if callable(chk):
+                            try:
+                                if not chk():
+                                    continue
+                            except Exception:  # noqa: BLE001
+                                pass
+                        return True, ""
+            return False, last_detail
         if res is None or res is False:
-            return False, f"xtdata.{name}() 未返回可用连接"
+            last_detail = f"xtdata.{name}() 未返回可用连接"
+            continue
         chk = getattr(res, "is_connected", None)
         if callable(chk):
             try:
                 if not chk():
-                    return False, "行情客户端未处于连接状态"
+                    last_detail = "行情客户端未处于连接状态"
+                    continue
             except Exception:  # noqa: BLE001
                 pass  # is_connected 自身异常不作为失败依据
         return True, ""
+    if last_detail:
+        return False, last_detail
     return True, ""  # 无可用预检 API：放行，由后续真实调用暴露问题
+
+
+def _scan_qmt_listeners() -> list[dict]:
+    """扫描本机 58600-58620 端口段，返回监听端口的进程归属（仅 Windows）。
+
+    返回 [{"port": int, "pid": int, "process": "miniquote.exe"}, ...]，按端口升序。
+    端口段依据迅投系客户端惯例：
+      - 58610：miniquote.exe 行情服务（小窗口 XtMiniQmt / 大窗口的独立行情子进程）
+      - 58600：XtItClient.exe 大窗口交易端口（xttrader 可用；xtdata 行情 RPC 不可用，
+        连接会报「未找到处理函数」，因此不能把 58600 当作行情端口）
+    任何一步失败都返回已收集到的部分结果，绝不抛异常。
+    """
+    out: list[dict] = []
+    if os.name != "nt":
+        return out
+    import subprocess
+    # 1) netstat 拿 LISTENING 端口 -> PID
+    try:
+        ns = subprocess.run(
+            ["netstat", "-ano", "-p", "TCP"], capture_output=True, text=True,
+            timeout=10, errors="ignore",
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout or ""
+        listeners: dict[int, int] = {}
+        for line in ns.splitlines():
+            parts = line.split()
+            if len(parts) >= 5 and parts[3] == "LISTENING":
+                try:
+                    _addr, port = parts[1].rsplit(":", 1)
+                    port = int(port)
+                    pid = int(parts[4])
+                except ValueError:
+                    continue
+                if 58600 <= port <= 58620:
+                    listeners.setdefault(port, pid)
+        if not listeners:
+            return out
+    except Exception:  # noqa: BLE001
+        return out
+    # 2) tasklist CSV 拿 PID -> 进程名
+    proc_by_pid: dict[int, str] = {}
+    try:
+        tl = subprocess.run(
+            ["tasklist", "/FO", "CSV", "/NH"], capture_output=True, text=True,
+            timeout=10, errors="ignore",
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout or ""
+        for line in tl.splitlines():
+            cells = [c.strip('"') for c in line.split('","')]
+            if len(cells) >= 2:
+                try:
+                    proc_by_pid[int(cells[1])] = cells[0].lower()
+                except ValueError:
+                    continue
+    except Exception:  # noqa: BLE001
+        pass
+    for port in sorted(listeners):
+        pid = listeners[port]
+        out.append({"port": port, "pid": pid,
+                    "process": proc_by_pid.get(pid, "")})
+    return out
 
 
 def _probe_quote_service(client_path: str) -> dict:
     """深度诊断行情服务不可达的根因（纯标准库：进程 / 端口 / 配置三路探测）。
 
+    大窗口 / 小窗口全兼容：自动识别本机已运行的迅投系客户端类型——
+      - 大窗口 XtItClient（完整客户端）：监听 58600 交易端口，xttrader 交易可用；
+        但 xtdata 行情 RPC 需要小窗口（XtMiniQmt / miniquote / 独立行情）提供。
+      - 小窗口 XtMiniQmt + miniquote：监听 58610 行情端口，行情 + 交易均可用。
     在 xtdata.connect()/get_client() 失败后调用，主动探测：
-      - QMT 客户端主进程是否在运行（据 client_path 推断 bin.x64 目录，Windows tasklist）
-      - 行情端口（xtdata.ini 默认 58610，可能被 .xtquant/*/xtdata.cfg 覆盖）是否被监听
-      - xtdata.cfg 配置的客户端根目录是否与 client_path 一致（若指向了别的客户端，
-        说明本机装了多个 QMT 而当前连的是另一个）
+      - 58600-58620 端口段的监听与进程归属（miniquote = 行情服务已就绪）
+      - xtdata.cfg 配置的客户端根目录是否与 client_path 一致（悬空/错指向检测）
     返回结构化结果供上层生成精确指引；任何探测异常都吞掉，绝不因诊断失败阻断主流程。
     """
     import socket
@@ -431,8 +524,17 @@ def _probe_quote_service(client_path: str) -> dict:
         "expected_port": 58610,
         "cfg_port": None,
         "cfg_root": None,
+        "cfg_root_exists": None,
         "cfg_matches": None,
         "bin_dir": None,
+        # ---- 大/小窗口识别（新增）----
+        "port_map": [],          # [{port, pid, process}] 58600-58620 监听明细
+        "full_client_running": False,   # 大窗口 XtItClient 在运行
+        "mini_client_running": False,   # 小窗口 XtMiniQmt 在运行
+        "quote_ports": [],       # miniquote 监听的行情端口（xtdata 可连）
+        "trade_ports": [],       # XtItClient 监听的交易端口
+        "client_type": "none",   # full / mini / both / none
+        "quote_service_ok": False,  # 行情端口已监听（可能仍需登录才出实时数据）
     }
     # 1) 据 client_path 推断客户端根目录 / bin.x64（复用现有候选根逻辑）
     bin_dir = None
@@ -448,7 +550,7 @@ def _probe_quote_service(client_path: str) -> dict:
 
     # 2) 行情端口：默认 58610；扫描 %USERPROFILE%/.xtquant/*/xtdata.cfg 看是否被覆盖
     ports = {58610}
-    cfg_root, cfg_port, cfg_matches = None, None, None
+    cfg_root, cfg_port, cfg_matches, cfg_root_exists = None, None, None, None
     try:
         import glob
         import json as _json
@@ -466,6 +568,10 @@ def _probe_quote_service(client_path: str) -> dict:
             if root_dir:
                 cfg_root = root_dir
                 try:
+                    cfg_root_exists = os.path.isdir(root_dir)
+                except Exception:  # noqa: BLE001
+                    cfg_root_exists = None
+                try:
                     nc = _normalize(client_path or "")
                     cfg_matches = (
                         nc in (_normalize(cfg_root) + os.sep)
@@ -476,22 +582,37 @@ def _probe_quote_service(client_path: str) -> dict:
     except Exception:  # noqa: BLE001
         pass
     res.update(expected_port=58610, cfg_port=cfg_port, cfg_root=cfg_root,
-               cfg_matches=cfg_matches)
+               cfg_root_exists=cfg_root_exists, cfg_matches=cfg_matches)
 
-    # 3) 端口监听探测（127.0.0.1 短超时）
+    # 3) 端口监听探测 + 进程归属识别（大/小窗口全兼容）
+    #    cfg 端口与默认 58610 用 TCP 短超时探测（跨平台兜底）；Windows 下额外用
+    #    netstat+tasklist 扫描 58600-58620 段并识别进程归属：
+    #    miniquote.exe -> 行情端口（xtdata 可连）；XtItClient.exe -> 大窗口交易端口。
     try:
-        for port in ports:
+        for port in sorted(ports):
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             s.settimeout(1.0)
             try:
-                if s.connect_ex(("127.0.0.1", port)) == 0:
+                if s.connect_ex(("127.0.0.1", port)) == 0 \
+                        and port not in res["listening_ports"]:
                     res["listening_ports"].append(port)
             finally:
                 s.close()
     except Exception:  # noqa: BLE001
         pass
+    port_map = _scan_qmt_listeners()
+    res["port_map"] = port_map
+    for item in port_map:
+        proc = (item.get("process") or "").lower()
+        port = item.get("port")
+        if port not in res["listening_ports"]:
+            res["listening_ports"].append(port)
+        if "miniquote" in proc:
+            res["quote_ports"].append(port)
+        elif "xtitclient" in proc or "xtclient" in proc or "itclient" in proc:
+            res["trade_ports"].append(port)
 
-    # 4) 客户端进程检测（Windows tasklist；非 Windows 跳过）
+    # 4) 客户端进程检测：大窗口 / 小窗口分别识别（含未监听端口的运行中进程）
     try:
         import subprocess
         if os.name == "nt":
@@ -500,11 +621,26 @@ def _probe_quote_service(client_path: str) -> dict:
                 timeout=8, errors="ignore",
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout or ""
             low = out.lower()
-            res["client_running"] = any(
-                exe in low for exe in ("xtitclient.exe", "xtminiqmt.exe",
-                                       "xtminiqt.exe", "xtquantclient.exe"))
+            res["full_client_running"] = any(
+                exe in low for exe in ("xtitclient.exe", "xtclient.exe"))
+            res["mini_client_running"] = any(
+                exe in low for exe in ("xtminiqmt.exe", "miniqmt.exe",
+                                       "miniquote.exe", "xtminiqt.exe"))
+            res["client_running"] = (res["full_client_running"]
+                                     or res["mini_client_running"])
     except Exception:  # noqa: BLE001
         pass
+    # miniquote 可能作为大窗口的「独立行情」子进程运行（无 XtMiniQmt 主进程）；
+    # 反之 XtItClient 监听了 58600 也可确认大窗口在运行。
+    if res["quote_ports"] and not res["mini_client_running"]:
+        res["mini_client_running"] = True
+    if res["trade_ports"] and not res["full_client_running"]:
+        res["full_client_running"] = True
+    res["client_type"] = (
+        "both" if res["full_client_running"] and res["mini_client_running"]
+        else "full" if res["full_client_running"]
+        else "mini" if res["mini_client_running"] else "none")
+    res["quote_service_ok"] = bool(res["quote_ports"])
     return res
 
 
@@ -676,7 +812,7 @@ class XTPQuantAdapter(BrokerAdapter):
                 "或手动 pip install xtquant") from exc
 
         self._xtdata = xtdata
-        xtdata_ok, xtdata_detail = _probe_xtdata(xtdata)
+        xtdata_ok, xtdata_detail = _probe_xtdata(xtdata, self.client_path)
 
         if not self._account_id:
             # 仅行情模式（无交易账号）：行情可用，交易不可用。
@@ -708,17 +844,43 @@ class XTPQuantAdapter(BrokerAdapter):
                 else:
                     # 深度诊断：主动探测进程 / 端口 / 配置一致性，替代笼统的「不可用」
                     probe = _probe_quote_service(self.client_path)
-                    _probe_diag = (f"[探测] client_running={probe['client_running']} "
-                                   f"listening={probe['listening_ports']} "
+                    _probe_diag = (f"[探测] client_type={probe.get('client_type')} "
+                                   f"full={probe.get('full_client_running')} "
+                                   f"mini={probe.get('mini_client_running')} "
+                                   f"port_map={probe.get('port_map')} "
+                                   f"quote_ports={probe.get('quote_ports')} "
+                                   f"trade_ports={probe.get('trade_ports')} "
                                    f"cfg_root={probe['cfg_root']} "
+                                   f"cfg_root_exists={probe['cfg_root_exists']} "
                                    f"cfg_matches={probe['cfg_matches']}")
                     log.info("%s", _probe_diag)
                     if not probe["client_running"]:
                         scene = "QMT 客户端未运行"
                         steps = (
-                            "1) 打开并登录 QMT 客户端（极速/普通模式均可），保持客户端运行；\n"
+                            "1) 打开并登录 QMT 客户端（大窗口或小窗口均可），保持客户端运行；\n"
                             "2) 确认客户端界面能正常显示行情；\n"
                             "3) 再重试连接。")
+                    elif (probe.get("full_client_running")
+                          and not probe.get("quote_service_ok")
+                          and not probe.get("mini_client_running")):
+                        scene = ("大窗口客户端（XtItClient）已登录，"
+                                 "但小窗口行情服务（miniquote）未运行")
+                        steps = (
+                            "1) xtdata 行情接口由<b>小窗口</b>（miniQmt / 极简模式）提供，"
+                            "大窗口的 58600 端口仅支持交易，不支持行情 RPC；\n"
+                            "2) 方案A：在大窗口客户端中开启「独立行情 / 极简模式」"
+                            "（会自动拉起 miniquote 行情服务）；\n"
+                            "3) 方案B：直接运行客户端目录 bin.x64\\XtMiniQmt.exe 并完成登录"
+                            "（部分券商首次需输入验证码）；\n"
+                            "4) 小窗口就绪后（端口 58610 监听），无需重启平台，直接重试连接。")
+                    elif (probe.get("full_client_running")
+                          and probe.get("mini_client_running")
+                          and not probe.get("quote_service_ok")):
+                        scene = "大小窗口均在运行，但行情端口未监听（miniquote 未就绪）"
+                        steps = (
+                            "1) 小窗口可能停留在登录界面（含验证码）尚未完成登录；\n"
+                            "2) 请在弹出的 XtMiniQmt 登录窗口输入账号/密码/验证码；\n"
+                            "3) 登录成功后 miniquote 将监听 58610，再重试连接。")
                     elif not probe["listening_ports"]:
                         scene = f"客户端在运行，但行情端口 {probe['expected_port']} 未监听"
                         steps = (
@@ -726,11 +888,19 @@ class XTPQuantAdapter(BrokerAdapter):
                             "2) 请确认 QMT 已完成<b>行情登录</b>（部分券商需单独登录行情）；\n"
                             "3) 确认客户端行情图正常刷新后，重启客户端再重试连接。")
                     elif probe["cfg_matches"] is False:
-                        scene = "行情配置指向了其他 QMT 客户端"
-                        steps = (
-                            f"1) 检测到行情配置指向：{probe['cfg_root']}，与当前客户端路径不一致；\n"
-                            "2) 请确认本机只运行与「客户端路径」匹配的那一个 QMT；\n"
-                            "3) 若本机装有多个 QMT（如广发/机构版），请运行路径对应的那个并重新登录。")
+                        if probe.get("cfg_root_exists") is False:
+                            scene = "行情配置为旧残留，指向已不存在的客户端目录"
+                            steps = (
+                                f"1) 检测到残留配置 {os.path.join(os.environ.get('USERPROFILE', ''), '.xtquant', '*', 'xtdata.cfg')} 指向不存在的目录：{probe['cfg_root']}；\n"
+                                "2) 这是旧 QMT 客户端（如机构版 jigou_qmt）卸载后遗留的配置；\n"
+                                "3) 请删除 %USERPROFILE%\\.xtquant\\ 下对应 guid 目录中的 xtdata.cfg，\n"
+                                "   或重启当前 QMT 客户端（gd_qmt）使其重新生成正确配置，再重试连接。")
+                        else:
+                            scene = "行情配置指向了其他 QMT 客户端"
+                            steps = (
+                                f"1) 检测到行情配置指向：{probe['cfg_root']}，与当前客户端路径不一致；\n"
+                                "2) 请确认本机只运行与「客户端路径」匹配的那一个 QMT；\n"
+                                "3) 若本机装有多个 QMT（如广发/机构版），请运行路径对应的那个并重新登录。")
                     else:
                         scene = "行情服务不可用"
                         steps = (

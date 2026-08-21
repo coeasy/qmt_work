@@ -18,6 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from xtquant_client.xtp import (  # noqa: E402
     _is_likely_root,
     probe_environment,
+    _probe_quote_service,
 )
 
 # 常见迅投系客户端安装位置（探测时自动尝试）
@@ -128,6 +129,29 @@ def main() -> int:
         print(f"\n■ {client_path}\\ 目录结构（前两层）：")
         for line in _dump_tree(client_path):
             print(line)
+
+    # 大/小窗口识别：端口扫描 + 进程归属（大窗口 XtItClient / 小窗口 miniQmt）
+    print("\n■ 客户端类型识别（端口 58600-58620 扫描）：")
+    probe = _probe_quote_service(client_path or "")
+    type_names = {"full": "大窗口（XtItClient 完整客户端）",
+                  "mini": "小窗口（XtMiniQmt / miniquote）",
+                  "both": "大 + 小窗口同时在运行",
+                  "none": "未检测到运行中的 QMT 客户端"}
+    print(f"■ 客户端类型      : {type_names.get(probe['client_type'], probe['client_type'])}")
+    for item in probe.get("port_map", []):
+        role = ("行情端口（xtdata 可连）" if item["port"] in probe["quote_ports"]
+                else "大窗口交易端口（仅 xttrader，不支持行情 RPC）"
+                if item["port"] in probe["trade_ports"] else "未知用途")
+        print(f"  - 端口 {item['port']:<5} 进程 {item['process'] or '?':<18} {role}")
+    if not probe.get("port_map"):
+        print("  （无 58600-58620 端口监听：客户端未运行或行情服务未就绪）")
+    if probe.get("full_client_running") and not probe.get("quote_service_ok"):
+        print("  ⚠ 大窗口已登录但小窗口行情服务（miniquote）未运行：xtdata 行情不可用；")
+        print("    请在大窗口开启「独立行情/极简模式」，或运行 bin.x64\\XtMiniQmt.exe 并登录。")
+    if probe.get("cfg_matches") is False:
+        state = "已不存在（悬空残留）" if probe.get("cfg_root_exists") is False else "存在"
+        print(f"  ⚠ 行情配置指向其他客户端（{state}）：{probe['cfg_root']}")
+        print("    请修正 %USERPROFILE%\\.xtquant\\*/xtdata.cfg 的 root_dir 指向当前客户端。")
 
     # ABI 提示
     if not diag["xtquant_importable"] and diag["xtquant_found"]:

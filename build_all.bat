@@ -176,6 +176,16 @@ if exist "%BACKEND%\dist\qmt_work\qmt_work.exe" (
     echo [warn] backend EXE not found, desktop shell will not start backend
 )
 
+REM KEY: dist:portable re-runs `vite build`, whose emptyDir() hits the
+REM safe-delete shim when cleaning the already-populated backend/static.
+REM Pre-clean it (like Step 1) so vite's emptyDir is a no-op and succeeds.
+if exist "%BACKEND%\static\assets" (
+    echo [build] cleaning old static before electron: %BACKEND%\static\assets
+    rd /s /q "%BACKEND%\static\assets"
+)
+if exist "%BACKEND%\static\index.html" del /q "%BACKEND%\static\index.html"
+if exist "%BACKEND%\static\manifest.json" del /q "%BACKEND%\static\manifest.json"
+
 if "%USE_NSIS%"=="true" (
     echo [build] NSIS installer + zip portable
     set "PATH=!MANAGED_NODE_DIR!;!PATH!"
