@@ -6,8 +6,9 @@
 前端始终同源加载，无需感知端口）。
 
 端口锁定（多实例防冲突）：当发生自动 +1 改口时，实际端口会持久化到
-<db_dir>/.qmt_work.port。下次启动优先复用该端口（端口锁定），避免每次重启漂移；
-若该端口又空闲则稳定复用，被占用则重新扫描并更新锁文件。
+<db_dir>/.qmt_work.port。仅当默认/配置起始端口「当前被占用」时，才复用历史锁定端口
+（端口锁定，避免持久冲突下每次重启在默认/改口端口间漂移）；若起始端口已空闲，
+则优先用起始端口，避免陈旧锁导致全新启动绑定到非预期端口（如 21119）造成排查困惑。
 不同实例使用不同数据库目录即天然获得不同端口，多实例部署互不冲突。
 
 可用环境变量：
@@ -159,15 +160,20 @@ def _write_locked_port(port: int) -> None:
 def _pick_port(start: int) -> int:
     """端口选择（多实例防冲突）：
 
-    1. 若存在历史锁定端口（上次自动改口得到的实际端口）且当前空闲 → 优先复用（端口锁定，
-       避免每次重启在默认端口与改口端口之间漂移）；
-    2. 否则从 start 开始找第一个可用端口（平滑改口）；
-    3. 全部占用则返回 start（交由 uvicorn 报错）。
+    1. 若默认/配置起始端口 start 当前被占用，且存在历史上次改口得到的实际端口（端口锁定）
+       且该端口当前空闲 → 复用锁定端口（避免持久冲突下每次重启在默认/改口端口间漂移）；
+    2. 若 start 当前空闲 → 直接用 start（默认/配置端口优先，避免陈旧锁导致绑定非预期端口）；
+    3. 否则从 start 开始找第一个可用端口（平滑改口）；
+    4. 全部占用则返回 start（交由 uvicorn 报错）。
     """
-    locked = _read_locked_port()
-    if locked is not None and locked != start and not _port_in_use(locked):
-        log.info("端口锁定：复用上次实际端口 %s（锁文件 %s）", locked, _port_lock_file())
-        return locked
+    # 仅当默认端口确实被占用时，才考虑复用历史锁定端口；否则陈旧锁会让全新启动
+    # 绑定到非预期的改口端口（如 21119），造成「EXE 起不来/端口对不上」的排查困惑。
+    if _port_in_use(start):
+        locked = _read_locked_port()
+        if locked is not None and locked != start and not _port_in_use(locked):
+            log.info("端口锁定：默认端口 %s 被占用，复用上次实际端口 %s（锁文件 %s）",
+                     start, locked, _port_lock_file())
+            return locked
     for port in range(start, start + _MAX_PORT_RETRY):
         if not _port_in_use(port):
             return port
