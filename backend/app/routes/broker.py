@@ -4,6 +4,7 @@ from fastapi import APIRouter
 # --- stdlib imports injected by fix_route_imports ---
 import asyncio
 import sys
+import time
 
 
 
@@ -37,6 +38,68 @@ async def broker_runtimes():
         "bundled_runtimes": {str(k): v for k, v in sorted(bundled.items())},
         "supported_abi_note": "迅投 xtquant 官方支持 cp36~cp312；cp313 暂未发布变体",
     })
+
+
+@router.get("/brokers/diagnostics")
+async def broker_diagnostics(deep: bool = False):
+    """端到端可观测性快照（排障 / 长时段稳定性观察用，不依赖真实券商）。
+
+    默认浅层（快）：宿主 ABI、随包桥接运行时、各连接状态与行情泵健康。
+    ``?deep=1`` 额外含系统 Python 运行时发现与各连接的 ABI 桥接方案
+    （首次会 spawn ``py`` 启动器 + 注册表扫描，较重但进程内缓存，故放线程池避免
+    阻塞事件循环）。
+    """
+    from xtquant_client.runtime import (
+        host_python_minor, discover_bundled_runtimes, discover_system_runtimes)
+
+    host_abi = host_python_minor()
+    bundled = discover_bundled_runtimes()
+    payload: dict = {
+        "host_python": sys.version.split()[0],
+        "host_abi": host_abi,
+        "bundled_runtimes": {str(k): v for k, v in sorted(bundled.items())},
+        "connections": [],
+        "generated_at": time.time(),
+    }
+    if deep:
+        system = await asyncio.to_thread(discover_system_runtimes)
+        payload["system_runtimes"] = {str(k): v for k, v in sorted(system.items())}
+
+    conns = state.broker_manager.all_connections()
+    for conn in conns:
+        active = (state.broker_manager._active_id == conn.cfg.conn_id)
+        entry = {
+            "conn_id": conn.cfg.conn_id,
+            "name": conn.cfg.name,
+            "broker_id": conn.cfg.broker_id,
+            "broker_name": conn.adapter.broker_name,
+            "adapter": conn.adapter.adapter_id,
+            "client_path": conn.cfg.client_path,
+            "connected": conn.connected,
+            "active": active,
+            "health_status": conn.health_status,
+            "last_error": conn.last_error,
+            "reconnect_attempts": conn.reconnect_attempts,
+            "pump_running": bool(conn.bridge and conn.bridge.pump_running()),
+        }
+        if deep:
+            # 各连接 ABI 桥接方案（in_process / bridge + 解释器路径）；失败不阻断快照
+            try:
+                entry["runtime_plan"] = await asyncio.to_thread(
+                    _runtime_plan_for, conn.cfg.client_path)
+            except Exception:  # noqa: BLE001
+                entry["runtime_plan"] = None
+        payload["connections"].append(entry)
+    return ok(payload)
+
+
+def _runtime_plan_for(client_path: str):
+    """安全计算某 client_path 的 ABI 运行时方案（供 deep 诊断），失败返回 None。"""
+    try:
+        from xtquant_client.runtime import xtp_runtime_plan
+        return xtp_runtime_plan(client_path or "")
+    except Exception:  # noqa: BLE001
+        return None
 
 
 @router.get("/brokers/profiles")
