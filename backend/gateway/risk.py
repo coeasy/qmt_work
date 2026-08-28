@@ -252,12 +252,32 @@ class RiskManager:
         }
 
     # ---------------- 校验 ----------------
+    def _effective_price(self, code: str, price: float, price_type: str = "limit") -> float:
+        """估算委托金额用有效价：限价单用下单价；市价单用最新价（取不到则 0）。
+
+        供金额闸门/日额度/仓位比例统一使用，避免校验与计数口径不一致（P1-4）。
+        """
+        if float(price) > 0:
+            return float(price)
+        if (price_type or "limit").lower() != "market":
+            return 0.0
+        try:
+            r = self._price_provider(code) if self._price_provider else None
+        except Exception:  # noqa: BLE001
+            r = None
+        return float(r) if r and r > 0 else 0.0
+
     def _validate_order(self, code: str, price: float, volume: int,
-                        direction: str) -> tuple[bool, str]:
+                        direction: str, price_type: str = "limit") -> tuple[bool, str]:
         """纯校验（不修改任何计数/状态）：返回 (是否放行, 原因)。
 
         供 `precheck_order` 复用 —— 预检只判断「这笔委托会不会被风控拦截」，
         但不计入频率窗口与日级用量，避免预检本身污染真实风控计数。
+
+        price_type 区分限价/市价：
+        - 限价单：price 必须 >0（防「限价单以 0 元送出」灾难），价格相关校验齐全；
+        - 市价单：成交价未知，价格偏离不校验；金额/仓位/日额度尽量用最新价估算，
+          无最新价可估时仅放行（qty/白黑名单/频率等非价格闸门已校验）。
         """
         self._roll_day()
         if volume <= 0:
@@ -266,6 +286,9 @@ class RiskManager:
             return False, f"volume {volume} < min qty {self.min_qty}"
         if volume % 100 != 0:
             return False, f"volume {volume} 须为 100 的整数倍"
+        is_market = (price_type or "limit") == "market"
+        if not is_market and price <= 0:
+            return False, f"限价单必须提供 >0 的委托价，当前 price={price}"
         # ---- P1 标的白/黑名单 ----
         deny = {s.strip() for s in self.symbol_deny.split(",") if s.strip()}
         allow = {s.strip() for s in self.symbol_allow.split(",") if s.strip()}
@@ -273,8 +296,8 @@ class RiskManager:
             return False, f"{code} 在风控黑名单中，禁止交易"
         if allow and code not in allow:
             return False, f"{code} 不在风控白名单中，禁止交易"
-        # ---- P1 价格偏离拒单：下单价相对最新价偏离超限即拒 ----
-        if self.price_deviation_pct > 0 and price > 0:
+        # ---- P1 价格偏离拒单：下单价相对最新价偏离超限即拒（仅限价单）----
+        if not is_market and self.price_deviation_pct > 0 and price > 0:
             ref = None
             if self._price_provider is not None:
                 try:
@@ -288,8 +311,14 @@ class RiskManager:
                         f"price deviation {dev * 100:.1f}% > "
                         f"limit {self.price_deviation_pct * 100:.1f}% "
                         f"(latest {ref:.2f})")
-        amount = price * volume
-        if amount > self.max_amount:
+        # P1-4：统一用有效价估算金额（限价=下单价；市价=最新价）
+        eff_price = self._effective_price(code, price, price_type)
+        amount = eff_price * volume
+        # 市价单取不到最新价（amount<=0 且价格未给出）时无法核算金额 → 拒绝，
+        # 不再「跳过金额类校验放行」（P0-4/P1-4：避免无价市价单绕过金额闸门）。
+        if (price_type or "limit").lower() == "market" and eff_price <= 0:
+            return False, "市价单无法取得最新行情，无法估算金额与仓位，已拒绝（请先获取行情）"
+        if amount > 0 and amount > self.max_amount:
             return False, f"order amount {amount:.0f} > max amount {self.max_amount:.0f}"
         # 阶段 0-B（F5）：方向归一化；未知方向显式拒绝，绝不按卖出处理
         nd = normalize_direction(direction)
@@ -305,34 +334,38 @@ class RiskManager:
             if used >= self.per_code_daily_orders:
                 return False, (f"{code} 今日下单 {used} 笔已达上限 "
                                f"{self.per_code_daily_orders}")
-        # ---- B4 日累计下单金额上限（达到上限即拒单）----
-        if self.daily_amount_limit > 0 and self._day_amount + amount >= self.daily_amount_limit:
+        # ---- B4 日累计下单金额上限（达到上限即拒单；金额可估时生效）----
+        if amount > 0 and self.daily_amount_limit > 0 and self._day_amount + amount >= self.daily_amount_limit:
             return False, (f"日累计下单金额将达 {self._day_amount + amount:.0f} "
                            f"≥ 上限 {self.daily_amount_limit:.0f}"
                            f"（今日已用 {self._day_amount:.0f}）")
-        if is_buy:
+        if is_buy and amount > 0:
             cur = self.positions_value.get(code, 0.0)
-            new_ratio = (cur + amount) / self.total_assets
-            if new_ratio > self.max_single_position_ratio:
+            # P1-4：单票占比用「单票市值 + 本单金额」
+            new_single = (cur + amount) / self.total_assets
+            if new_single > self.max_single_position_ratio:
                 return False, (
-                    f"single position ratio would be {new_ratio:.2f} > "
+                    f"single position ratio would be {new_single:.2f} > "
                     f"max {self.max_single_position_ratio:.2f}")
-            if new_ratio > self.max_position_ratio:
+            # P0-4/P1-4：全局总仓位占比用「组合总市值 + 本单金额」，单票占比规则
+            # 不再重复遮蔽全局规则（此前两者都按单票，max_position_ratio 永不生效）。
+            port = (sum(self.positions_value.values()) + amount) / self.total_assets
+            if port > self.max_position_ratio:
                 return False, (
-                    f"position ratio would be {new_ratio:.2f} > "
+                    f"portfolio position ratio would be {port:.2f} > "
                     f"max ratio {self.max_position_ratio:.2f}")
         return True, "ok"
 
     def precheck_order(self, code: str, price: float, volume: int,
-                       direction: str) -> tuple[bool, str]:
+                       direction: str, price_type: str = "limit") -> tuple[bool, str]:
         """非变更型预检：判断委托是否会被风控放行，但不计入频率/日级用量。
 
         前端「风控预检」按钮调用，避免预检本身污染真实风控计数（与 `check_order` 的区别）。
         """
-        return self._validate_order(code, price, volume, direction)
+        return self._validate_order(code, price, volume, direction, price_type)
 
     def check_order(self, code: str, price: float, volume: int,
-                    direction: str) -> tuple[bool, str]:
+                    direction: str, price_type: str = "limit") -> tuple[bool, str]:
         """下单前校验 + 计入频率窗口与日级用量（放行的委托才计数）。"""
         self._roll_day()
         now = time.time()
@@ -349,7 +382,7 @@ class RiskManager:
             return False, (
                 f"下单频率超限：近 60s 已 {len(self._order_times)} 笔 "
                 f"> 上限 {self.max_orders_per_min}")
-        ok, reason = self._validate_order(code, price, volume, direction)
+        ok, reason = self._validate_order(code, price, volume, direction, price_type)
         if not ok:
             # 阶段 3：风控拦截可观测（校验类：额度/黑名单/偏离/熔断/仓位）
             try:
@@ -361,8 +394,10 @@ class RiskManager:
             # （连续构造被拒委托即可耗尽频率窗口、阻断正常下单）。
             return False, reason
         # 全部通过 -> 计入频率窗口与日级用量（只统计放行的委托）
+        # P1-4：日额度用**有效价**估算金额（市价单用最新价），避免「校验用估价、
+        # 计数却用原始 price(市价=0)」导致日累计金额被低估。
         self._order_times.append(now)
-        amount = price * volume
+        amount = self._effective_price(code, price, price_type) * volume
         self._day_amount += amount
         self._day_orders += 1
         self._day_code_orders[code] = self._day_code_orders.get(code, 0) + 1

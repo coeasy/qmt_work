@@ -15,7 +15,7 @@ import logging
 import threading
 from datetime import datetime
 
-from tools.ashare import is_valid_lot
+from tools.ashare import is_valid_lot, limit_price
 
 log = logging.getLogger("qmt_work.paper")
 
@@ -78,6 +78,14 @@ class PaperEngine:
         self._lots: dict[str, list] = {}
         self._lock = threading.RLock()
         self._seq = 0
+        # P1-7：昨收提供者（fn(code) -> 昨收 float|None），用于模拟盘委托价涨跌停校验。
+        # 由集成方接券商行情 preClose 设置；未设置/取不到则跳过校验并标注 limit_check="skipped"。
+        self._ref_close_provider: object = None
+
+    def set_ref_close_provider(self, provider) -> "PaperEngine":
+        """外部注入昨收数据源（真实行情 preClose），用于模拟盘委托价涨跌停校验。"""
+        self._ref_close_provider = provider
+        return self
 
     # ---------------- 生命周期 ----------------
     def init(self, db) -> "PaperEngine":
@@ -205,6 +213,11 @@ class PaperEngine:
         if not is_valid_lot(int(round(volume)), MIN_LOT):
             raise ValueError(f"volume 须为 {MIN_LOT} 股的整数倍（A 股 1 手）")
         vol_int = int(round(volume))
+        # P1-7：委托价涨跌停区间校验（用真实昨收；取不到则跳过并标注 skipped，不造假）。
+        limit_check = self._check_limit_band(code, price)
+        if limit_check not in ("ok", "skipped"):
+            # 委托价超出 [跌停价, 涨停价]：模拟盘拒绝（柜台必然拒单，演练结论应如实反映）。
+            raise ValueError(limit_check)
 
         with self._lock:
             amount = price * vol_int
@@ -277,7 +290,34 @@ class PaperEngine:
                     "side": side, "price": round(price, 4), "volume": vol_int,
                     "price_type": price_type or "limit", "remark": remark or "",
                     "commission": commission, "pnl": round(pnl, 4),
-                    "cash_after": round(self.cash, 2), "status": "filled"}
+                    "cash_after": round(self.cash, 2), "status": "filled",
+                    "limit_check": limit_check}
+
+    def _check_limit_band(self, code: str, price: float) -> str:
+        """P1-7：按昨收与板块涨跌停幅度校验委托价是否在 [跌停价, 涨停价] 内。
+
+        返回 "ok" / "skipped"（无昨收，跳过校验）/ 拒绝原因字符串。
+        昨收经 _ref_close_provider（真实行情 preClose）获取，绝不编造。
+        """
+        ref = 0.0
+        if self._ref_close_provider is not None:
+            try:
+                r = self._ref_close_provider(code)
+                ref = float(r or 0.0)
+            except (TypeError, ValueError):
+                ref = 0.0
+        if not ref or ref <= 0:
+            return "skipped"
+        try:
+            up = limit_price(ref, "up", None, code, False)
+            down = limit_price(ref, "down", None, code, False)
+        except Exception:  # noqa: BLE001
+            return "skipped"
+        if price > up + 1e-6:
+            return f"委托价 {price:.2f} 超过涨停价 {up:.2f}，模拟盘拒绝（P1-7）"
+        if price < down - 1e-6:
+            return f"委托价 {price:.2f} 低于跌停价 {down:.2f}，模拟盘拒绝（P1-7）"
+        return "ok"
 
     # ---------------- 行情盯市 ----------------
     def process_quote(self, code: str, price: float) -> dict:

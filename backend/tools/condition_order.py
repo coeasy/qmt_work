@@ -13,6 +13,9 @@ import uuid
 from datetime import datetime, timedelta
 
 from xtquant_client.base import BrokerError
+from xtquant_client.order_status import (  # P1-5：调用统一状态词汇表做终态核销
+    normalize_order_status, is_active,
+)
 
 log = logging.getLogger("qmt_work")
 
@@ -66,9 +69,12 @@ class ConditionOrderEngine:
         self._orders: dict[str, dict] = {}
         self._task: asyncio.Task | None = None
         self._cfg: dict = {"interval": 2.0}
-        # 阶段 2：拒单/异常进「次日重试」队列（cid -> order，含 retry_date/retry_count）
+        # 阶段 2：拒单/异常进「重试」队列（cid -> order，含 retry_date/retry_count）
         self._retry_queue: dict[str, dict] = {}
         self._retry_limit = 3
+        # P1-5 分级重试：当日盘中重试（间隔 30s，上限 5 次）用尽后转次日（上限 _retry_limit）
+        self._intraday_interval = 30.0
+        self._intraday_retry_limit = 5
 
     def _wal_append(self, op: str, oid: str, payload: dict):
         if self._wal is not None:
@@ -172,6 +178,9 @@ class ConditionOrderEngine:
             "created_at": created_at, "triggered_at": "",
             "valid_days": valid_days, "expire_at": _compute_expire(valid_days),
             "last_check_date": _today(), "expired_at": "",
+            # P1-5：重试/核销字段，新建即初始化，保证 _schedule_retry/_settle_submitted 直接读写
+            "retry_count": 0, "retry_date": "", "intraday_retry": 0,
+            "next_retry_at": "", "settle_status": "",
         }
         self._orders[cid] = order
         self._persist(order)
@@ -198,14 +207,17 @@ class ConditionOrderEngine:
                 "INSERT OR REPLACE INTO condition_orders "
                 "(id, code, side, trigger_type, trigger_price, price_type, price, "
                 "volume, status, order_id, remark, created_at, triggered_at, "
-                "valid_days, expire_at, last_check_date, expired_at, retry_date, retry_count) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "valid_days, expire_at, last_check_date, expired_at, retry_date, retry_count, "
+                "intraday_retry, next_retry_at, settle_status) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (o["id"], o["code"], o["side"], o["trigger_type"], o["trigger_price"],
                  o["price_type"], o["price"], o["volume"], o["status"], o["order_id"],
                  o["remark"], o["created_at"], o["triggered_at"],
                  o.get("valid_days", 0), o.get("expire_at", ""),
                  o.get("last_check_date", ""), o.get("expired_at", ""),
-                 o.get("retry_date", ""), o.get("retry_count", 0)))
+                 o.get("retry_date", ""), o.get("retry_count", 0),
+                 o.get("intraday_retry", 0), o.get("next_retry_at", ""),
+                 o.get("settle_status", "")))
         except Exception as exc:  # noqa: BLE001
             log.warning("condition order persist failed: %s", exc)
 
@@ -236,15 +248,26 @@ class ConditionOrderEngine:
                             await self._fire(b, o, last)
                     except Exception as exc:  # noqa: BLE001
                         log.debug("condition check %s failed: %s", o["code"], exc)
-                # 阶段 2：拒单次日重试 —— 到期的重试项重新尝试下单
+                # P1-5：已受理（submitted）订单对账核销 —— 查询券商当日委托，
+                # 若已到终态（filled/canceled/part_filled/rejected）则回写条件单并推事件。
+                await self._settle_submitted(b)
+                # 重试队列（盘中等时重试 + 次日重试）
                 if self._retry_queue:
                     for cid, o in list(self._retry_queue.items()):
-                        if today < (o.get("retry_date") or ""):
-                            continue
                         if b is None:
                             continue
                         if _is_expired(o.get("expire_at") or ""):
                             await self._expire(o)
+                            continue
+                        # 当日盘中重试按 next_retry_at 判定是否到点；次日重试按 retry_date 判定
+                        nra = o.get("next_retry_at") or ""
+                        if nra:
+                            try:
+                                if datetime.now() < datetime.fromisoformat(nra):
+                                    continue
+                            except Exception:  # noqa: BLE001
+                                pass
+                        elif today < (o.get("retry_date") or ""):
                             continue
                         try:
                             await self._fire(b, o, 0.0, is_retry=True)
@@ -336,32 +359,101 @@ class ConditionOrderEngine:
             self._schedule_retry(o, f"下单被拒：{res.get('reason', '')}")
             return
         o["order_id"] = res.get("order_id", "")
-        o["status"] = "filled"
+        # P1-5：拿到 order_id 仅代表「已受理」，未成交不可标 filled。
+        # 置 submitted 并写 WAL（entity=condition, op=order），OrderReconciler 依据该记录
+        # 与券商当日委托对账；_settle_submitted 把终态回写条件单。
+        o["status"] = "submitted"
+        o["intraday_retry"] = 0
+        o["next_retry_at"] = ""
+        o.setdefault("settle_status", "")
         self._retry_queue.pop(o["id"], None)
         self._persist(o)
-        self._wal_append("order", o["id"], {"order_id": o["order_id"], "status": "filled"})
+        self._wal_append("order", o["id"], {"order_id": o["order_id"], "status": "submitted"})
         self._emit({"type": "condition_order", "data": self._view(o)})
-        self._audit("condition.triggered", o, f"order_id={o['order_id']}")
+        self._audit("condition.triggered", o, f"order_id={o['order_id']}（已受理，待成交）")
+
+    # ---------------- P1-5：submitted 订单终态核销 ----------------
+    async def _settle_submitted(self, b) -> None:
+        """已受理（submitted）订单对账核销。
+
+        拉取券商当日委托，捞出 order_id 对应的现行行；若已到终态
+        （filled / cancelled / rejected / part_filled）则把条件单回写为终态并推事件，
+        避免"已受理"停留在半途、撤单/部成不被反映。
+        """
+        subs = [o for o in self._orders.values()
+                if o.get("status") == "submitted" and o.get("order_id")]
+        if not subs:
+            return
+        rows: dict[str, dict] = {}
+        try:
+            rr = await b.call_locked(b.gateway.get_orders)
+            for r in rr or []:
+                oid = str(r.get("order_id") or r.get("id") or "")
+                if oid:
+                    rows[oid] = r
+        except Exception as exc:  # noqa: BLE001
+            log.debug("settle get_orders failed: %s", exc)
+            return
+        for o in subs:
+            oid = o.get("order_id", "")
+            row = rows.get(oid)
+            if not row:
+                continue
+            status = normalize_order_status(row.get("status") or row.get("order_status"))
+            if is_active(status):
+                # 仍在挂单（pending/partial），不核销，继续跟踪
+                continue
+            o["status"] = status
+            o["settle_status"] = status
+            self._persist(o)
+            self._wal_append("settle", o["id"],
+                             {"order_id": oid, "status": status, "settle_status": status})
+            self._emit({"type": "condition_settled", "data": self._view(o)})
+            self._audit("condition.settled", o, f"order_id={oid} status={status}")
+            log.info("condition %s 核销为终态: %s", o["id"], status)
 
     def _schedule_retry(self, o: dict, reason: str) -> None:
-        """拒单/异常 → 次日重试队列；达重试上限则标 failed 不再重试。"""
-        count = int(o.get("retry_count", 0)) + 1
-        o["retry_count"] = count
+        """拒单/异常 → 分级重试（P1-5）。
+
+        - 当日盘中重试：间隔 ``_intraday_interval``（30s），上限 ``_intraday_retry_limit``（5）
+          次，止损/突破单避免风险敞口拖到次日（新增 ``intraday_retry`` 计数）；
+        - 盘中次数用尽转次日重试：``retry_count`` 累计跨日重试次数（语义不变），
+          上限 ``_retry_limit``（3）；
+        - 达跨日上限则标 ``failed`` 不再重试。
+        """
+        intraday = int(o.get("intraday_retry", 0))
         o["remark"] = reason
-        if count >= self._retry_limit:
+        if intraday < self._intraday_retry_limit:
+            o["intraday_retry"] = intraday + 1
+            o["status"] = "triggered"          # 保留触发记录待恢复
+            o["next_retry_at"] = time.strftime(
+                "%Y-%m-%dT%H:%M:%S", time.localtime(time.time() + self._intraday_interval))
+            o["retry_date"] = _today()         # 盘中重试仍属当日
+            self._retry_queue[o["id"]] = o
+            log.info("condition %s 当日盘中重试(%d/%d，%ds后): %s",
+                     o["id"], intraday + 1, self._intraday_retry_limit,
+                     self._intraday_interval, reason)
+        elif int(o.get("retry_count", 0)) + 1 >= self._retry_limit:
             o["status"] = "failed"
             self._retry_queue.pop(o["id"], None)
-            log.warning("condition %s 达重试上限(%d)，标记 failed: %s", o["id"], count, reason)
+            log.warning("condition %s 达跨日重试上限(%d)，标记 failed: %s",
+                        o["id"], self._retry_limit, reason)
         else:
-            o["status"] = "triggered"          # 保留触发记录待恢复
+            # 当日盘中 5 次用尽 → 转次日重试，重置盘中计数
+            o["intraday_retry"] = 0
+            o["retry_count"] = int(o.get("retry_count", 0)) + 1
+            o["next_retry_at"] = ""
+            o["status"] = "triggered"
             o["retry_date"] = _tomorrow()      # 次日重试
             self._retry_queue[o["id"]] = o
             log.info("condition %s 进次日重试队列(%d/%d): %s",
-                     o["id"], count, self._retry_limit, reason)
+                     o["id"], o["retry_count"], self._retry_limit, reason)
         self._persist(o)
         self._wal_append("error", o["id"], {"status": o["status"], "error": reason,
-                                            "retry_count": count,
-                                            "retry_date": o.get("retry_date", "")})
+                                            "retry_count": o.get("retry_count", 0),
+                                            "intraday_retry": o.get("intraday_retry", 0),
+                                            "retry_date": o.get("retry_date", ""),
+                                            "next_retry_at": o.get("next_retry_at", "")})
         self._emit({"type": "condition_failed", "data": self._view(o)})
         self._audit("condition.failed", o, reason)
 

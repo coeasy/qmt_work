@@ -1,10 +1,11 @@
-"""阶段 5 Agent 测试：默认工具集 / 会话持久化 / 503 降级（无 LLM 网络依赖）。
+"""阶段 5 Agent 测试：默认工具集 / 会话持久化 / 503 降级 / 幂等下单（无 LLM 网络依赖）。
 
 用 FakeProvider 模拟 LLM 返回（无需真实 API Key），验证：
 - 默认工具集注册了 read/trade 工具；
 - 会话落 sessions/messages 孤儿表，可持久化与重载；
 - 工具调用循环：provider 返回 tool_calls → AgentCore 执行真实工具（未连券商返回明确错误，不造假）；
-- 缺配置时 _build_core 抛 AgentNotConfigured（REST 端点转 503）。
+- 缺配置时 _build_core 抛 AgentNotConfigured（REST 端点转 503）；
+- submit_order 经 single-flight 幂等：同参数重试窗口内不二次下单（N3 增强）。
 """
 import pytest
 
@@ -36,6 +37,7 @@ class FakeProvider(Provider):
 def _tmp_db():
     import tempfile
     from pathlib import Path
+
     from app.db import DB
     d = Path(tempfile.mkdtemp())
     return DB(d / "app.db"), d
@@ -118,3 +120,57 @@ def test_tool_registry_unknown_is_none():
     reg = ToolRegistry()
     assert reg.get("nope") is None
 
+
+def test_agent_submit_order_idempotent_dedup():
+    """N3 增强：submit_order 经 single-flight 幂等——同参数重试窗口内不二次下单。
+
+    模拟 LLM 超时重试同一笔单：第一次真实下单，第二次（同 key）命中窗口缓存
+    返回 duplicated 标记，券商 place_order 只被调用一次。
+    """
+    import asyncio
+
+    from agent.default_tools import _submit_order
+    from app.state import state
+
+    placed = []
+
+    class _G:
+        async def place_order(self, code, direction, price_type, price, volume,
+                              source, remark):
+            placed.append((code, direction, volume))
+            return {"code": 0, "order_id": "AG-1", "ok": True}
+
+    class _Bridge:
+        gateway = _G()
+
+        async def call(self, fn, *a, **k):
+            r = fn(*a, **k)
+            return await r if asyncio.iscoroutine(r) else r
+
+    class _Risk:
+        def check_order(self, code, price, volume, direction, price_type):
+            return True, "ok"
+
+    class _BM:
+        def bridge(self, conn_id=None):
+            return _Bridge()
+
+    from gateway.idempotency import _cache, _inflight
+    _cache.clear()
+    _inflight.clear()
+
+    old_risk, old_bm = state.risk, state.broker_manager
+    state.risk, state.broker_manager = _Risk(), _BM()
+    args = {"code": "600519.SH", "direction": "buy", "volume": 100,
+            "price": 10.0, "price_type": "limit"}
+    try:
+        r1 = asyncio.run(_submit_order(dict(args)))
+        r2 = asyncio.run(_submit_order(dict(args)))   # 窗口内同参数重试
+    finally:
+        state.risk, state.broker_manager = old_risk, old_bm
+        _cache.clear()
+        _inflight.clear()
+
+    assert len(placed) == 1, f"同参数重试不应二次下单，实际 {len(placed)}"
+    assert placed[0] == ("600519.SH", "buy", 100)
+    assert r2.get("duplicated") is True, "窗口内重试应被标记 duplicated"

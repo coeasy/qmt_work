@@ -64,15 +64,22 @@ async def _submit_order(args: dict) -> dict:
     if not code or direction not in ("buy", "sell") or volume <= 0:
         return {"error": "参数非法：需 code / buy|sell / volume>0"}
     b = _active_bridge(args.get("conn_id") or None)
-    okc, reason = state.risk.check_order(
-        code, price if price > 0 else 100.0, volume, direction)
-    if not okc:
-        return {"error": f"风控拒绝：{reason}"}
-    res = await b.call(b.gateway.place_order, code, direction, price_type,
-                       price, volume, "agent", args.get("remark", ""))
-    if isinstance(res, dict) and res.get("code", 0) != 0:
-        return {"error": res.get("message", "下单失败"), "detail": res}
-    return {"order": res}
+    idem = args.get("idempotency_key") or ""
+
+    async def _run():
+        okc, reason = state.risk.check_order(code, price, volume, direction, price_type)
+        if not okc:
+            return {"error": f"风控拒绝：{reason}"}
+        res = await b.call(b.gateway.place_order, code, direction, price_type,
+                           price, volume, "agent", args.get("remark", ""))
+        if isinstance(res, dict) and res.get("code", 0) != 0:
+            return {"error": res.get("message", "下单失败"), "detail": res}
+        return {"order": res}
+
+    # 幂等：显式 idempotency_key 优先；否则按内容去重，LLM 超时重试同参数不双单。
+    from gateway.idempotency import single_flight
+    key = idem or f"order:{code}:{direction}:{volume}:{price}:{price_type}"
+    return await single_flight(key, _run, window=5.0)
 
 
 def build_default_registry():

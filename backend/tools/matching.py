@@ -167,8 +167,9 @@ def simulate(closes: list[float], sig: list[int], kline: list[dict],
         else:
             equity.append(cash + shares * price)
 
-    # 末笔持仓按收盘价强制平仓（计入盈亏，与旧引擎语义一致）
-    if shares > 0 and trades and trades[-1]["side"] == "buy":
+    # P1-6：末笔持仓按收盘价强制平仓（计入盈亏）。不再要求「最后一笔成交是 buy」——
+    # 容量分笔平仓后末笔为 sell 仍可能残留持仓，此时同样需强平，否则净值/成交口径漂移。
+    if shares > 0:
         last = closes[-1]
         sell_px = last * (1 - slip)
         if cfg.use_spread_slippage:

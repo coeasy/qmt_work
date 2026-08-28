@@ -33,7 +33,8 @@ class Signal:
 
 
 class SignalRouter:
-    def __init__(self, manager, risk=None, db=None, wal=None, notifier=None, on_event=None):
+    def __init__(self, manager, risk=None, db=None, wal=None, notifier=None, on_event=None,
+                 runtime_config=None):
         from app.config import settings
         self._manager = manager
         self._risk = risk
@@ -41,18 +42,69 @@ class SignalRouter:
         self._wal = wal
         self._notifier = notifier
         self._on_event = on_event
-        self.mode = "live"   # live / paper / dry_run
+        self._runtime_config = runtime_config
+        # P0-1：模式持久化 + 安全默认。启动时从 runtime_config 读取；读取失败或无记录
+        # 时默认 paper（而非 live），避免升级/崩溃/自动更新重启后无提示恢复实盘。
+        self.mode = self._load_persisted_mode("paper")
         self.threshold = getattr(settings, "signal_confirm_threshold", 100_000.0)
         self.totp_secret = getattr(settings, "totp_secret", "")
         self.totp_digits = getattr(settings, "totp_digits", 6)
         self._pending: dict[str, dict] = {}
+        # P2-4：待二次确认令牌 TTL（默认 10 分钟），超时自动清理，防内存泄漏与过期确认
+        self._pending_ttl = float(getattr(settings, "signal_confirm_ttl", 600.0) or 600.0)
+
+    def _prune_pending(self) -> None:
+        """清理超时未确认的下单令牌（P2-4）。"""
+        if not self._pending:
+            return
+        now = time.time()
+        stale = [tok for tok, e in self._pending.items()
+                 if now - float(e.get("ts", now)) > self._pending_ttl]
+        for tok in stale:
+            self._pending.pop(tok, None)
+
+    def _load_persisted_mode(self, fallback: str = "paper") -> str:
+        """从 runtime_config 读取持久化信号模式；失败无记录返回安全默认 paper。"""
+        rc = self._runtime_config
+        if rc is None and self._db is not None:
+            # 兼容：未注入 runtime_config 时直接从 runtime_config 表读取
+            try:
+                row = self._db.query_one("SELECT value FROM runtime_config WHERE key='signal.mode'")
+                if row and row.get("value"):
+                    val = str(row["value"]).strip().strip("\"")
+                    if val in ("live", "paper", "dry_run"):
+                        return val
+                return fallback
+            except Exception:  # noqa: BLE001
+                return fallback
+        try:
+            val = rc.get("signal.mode") if rc is not None else None
+        except Exception:  # noqa: BLE001
+            val = None
+        if val in ("live", "paper", "dry_run"):
+            return str(val)
+        return fallback
 
     def set_mode(self, mode: str) -> str:
         if mode not in ("live", "paper", "dry_run"):
             raise ValueError(f"未知信号模式：{mode}")
         old = self.mode
         self.mode = mode
-        log.info("signal mode: %s -> %s", old, mode)
+        # P0-1：持久化到 runtime_config，确保重启后保持，绝不静默回退 live。
+        if self._runtime_config is not None:
+            try:
+                self._runtime_config.set_many({"signal.mode": mode})
+            except Exception:  # noqa: BLE001
+                pass
+        elif self._db is not None:
+            try:
+                import json
+                self._db.upsert("runtime_config", {
+                    "key": "signal.mode", "value": json.dumps(mode),
+                    "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S")})
+            except Exception:  # noqa: BLE001
+                pass
+        log.info("signal mode: %s -> %s（已持久化）", old, mode)
         return mode
 
     async def route(self, sig: Signal, auto_confirm: bool = False) -> dict:
@@ -79,11 +131,34 @@ class SignalRouter:
             self._emit({"type": "signal_dry_run", "data": plan})
             return {"ok": True, **plan}
 
+        # P2-4：清理超时的挂起确认令牌
+        self._prune_pending()
+
         # 阶段 0-B（F13）：市价/无价单用**最新价**估算金额（而非写死的 100.0），
         # 否则大额市价单会绕过 TOTP 二次确认与金额类风控。
         est_price = await self._est_price_async(sig)
+        # P0-4：市价单取不到最新行情（est_price=0）时，绝不盲目放行——
+        # 手动单挂起人工确认；自动化引擎（auto_confirm=True）直接拒绝。
+        is_market = (sig.price_type or "limit").lower() == "market"
+        if is_market and est_price <= 0:
+            if not auto_confirm:
+                import uuid
+                token = uuid.uuid4().hex
+                self._pending[token] = {"sig": sig.__dict__, "ts": time.time(),
+                                        "mode": self.mode, "pending_price_unknown": True}
+                self._emit({"type": "signal_pending", "data": {
+                    "confirm_token": token, "reason": "无最新行情，无法估算市价单金额",
+                    "requires_totp": bool(self.totp_secret), "mode": self.mode}})
+                return {"ok": True, "pending_confirmation": True, "confirm_token": token,
+                        "pending_price_unknown": True,
+                        "reason": "无最新行情，无法估算市价单金额",
+                        "mode": self.mode}
+            self._audit("signal.rejected", code, sig.__dict__,
+                        "无最新行情，无法估算市价单金额")
+            return {"ok": False, "reason": "无最新行情，无法估算市价单金额", "mode": self.mode}
         if self._risk is not None:
-            ok, reason = self._risk.check_order(code, est_price, sig.volume, side)
+            ok, reason = self._risk.check_order(code, est_price, sig.volume, side,
+                                                price_type=sig.price_type)
             if not ok:
                 self._audit("signal.rejected", code, sig.__dict__, reason)
                 if self._notifier:
@@ -107,7 +182,11 @@ class SignalRouter:
         return await self._execute(sig)
 
     async def _est_price_async(self, sig: Signal) -> float:
-        """估算下单金额所用价格：有价用价，市价/无价则取最新行情价。"""
+        """估算下单金额所用价格：有价用价，市价/无价则取最新行情价。
+
+        P0-4：取不到最新行情时返回 0（此前兜底 100.0，导致大额市价单被低估而绕过
+        金额类风控与大额 TOTP 二次确认）。由调用方根据 0 决定「挂起」还是「拒绝」。
+        """
         if sig.price and sig.price > 0:
             return float(sig.price)
         b = self._manager.bridge(sig.broker_id or None)
@@ -120,7 +199,7 @@ class SignalRouter:
                         return float(p)
             except Exception:  # noqa: BLE001
                 pass
-        return 100.0
+        return 0.0
 
     async def submit(self, code: str, side: str, volume: int, price: float = 0.0,
                      price_type: str = "limit", source: str = "manual",
@@ -153,6 +232,7 @@ class SignalRouter:
     async def confirm(self, token: str, totp_code: str = "") -> dict:
         """二次确认：校验 TOTP（若启用）后执行挂起的下单。"""
         from gateway.totp import verify_totp
+        self._prune_pending()   # P2-4：先清理超时令牌，避免用过期 entry 误放行
         entry = self._pending.pop(token, None)
         if not entry:
             return {"ok": False, "reason": "确认令牌无效或已过期"}
