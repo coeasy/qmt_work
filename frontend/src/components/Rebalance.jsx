@@ -22,7 +22,7 @@ export default function Rebalance() {
     setErr(""); setBusy(true);
     try {
       const r = await api.post("/rebalance", {
-        targets: rows.filter((r) => r.code),
+        targets: rows.filter((row) => row.code),
         conn_id: activeId,
         do_trade: doTrade,
         delta_min: Number(deltaMin),

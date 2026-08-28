@@ -16,7 +16,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BACKEND = os.path.join(ROOT, "backend")
 FRONTEND = os.path.join(ROOT, "frontend")
 
-EXPECTED_TESTS = 192
+EXPECTED_TESTS = 301
 EXPECTED_COMPONENTS = 32
 
 

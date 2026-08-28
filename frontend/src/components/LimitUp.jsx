@@ -1,22 +1,12 @@
 import { useEffect, useState, useRef } from "react";
 import { api } from "../api.js";
+import { useServerEvents } from "../hooks/useSystemWS.js";
+import { fmtAmount, fmtLimitDur } from "../lib/format.js";
 
 // 涨停板 / 打板助手：
 //  - 涨停板：真实行情扫描板块内涨停（或接近涨停）个股，列出最新数据，点击可快速下单
 //  - 打板监控：股票池 + 三因子触发（涨停价/时间窗/tick涨幅）+ 可选自动买入
 const SECTORS = ["沪深A股", "沪深京A股", "创业板", "科创板", "上证50", "沪深300", "中证500", "中证1000"];
-
-function fmtAmount(v) {
-  if (v == null) return "—";
-  if (v >= 1e8) return (v / 1e8).toFixed(2) + "亿";
-  if (v >= 1e4) return (v / 1e4).toFixed(1) + "万";
-  return String(v);
-}
-function fmtLimitDur(sec) {
-  if (!sec) return "—";
-  const m = Math.floor(sec / 60), s = sec % 60;
-  return m > 0 ? `${m}分${s}秒` : `${s}秒`;
-}
 
 export default function LimitUp() {
   const [view, setView] = useState("board"); // board | monitor
@@ -46,7 +36,8 @@ export default function LimitUp() {
   useEffect(() => {
     if (view !== "board") return;
     loadBoard();
-    timer.current = setInterval(loadBoard, 5000);
+    // P2-2：低频兜底轮询（≥30s）防事件丢失；近实时刷新由 useServerEvents 的 limitup/quote 事件驱动
+    timer.current = setInterval(loadBoard, 30000);
     return () => clearInterval(timer.current);
   }, [view, sector, onlyLimit, minPct]);
 
@@ -70,7 +61,9 @@ export default function LimitUp() {
   async function load() {
     try { setSt(await api.limitupStatus()); } catch (e) { setErr(e.message); }
   }
-  useEffect(() => { load(); const t = setInterval(load, 3000); return () => clearInterval(t); }, []);
+  useEffect(() => { load(); const t = setInterval(load, 30000); return () => clearInterval(t); }, []);
+  // P2-2：limitup/limitup_order 事件驱动近实时刷新（触发/自动买入时立即更新），保留 30s 兜底轮询
+  useServerEvents(["limitup"], () => { loadBoard(); load(); });
 
   async function add() {
     const c = code.trim();
@@ -120,7 +113,7 @@ export default function LimitUp() {
               <label><input type="checkbox" checked={onlyLimit}
                             onChange={(e) => setOnlyLimit(e.target.checked)} /> 仅看涨停</label>
               <button onClick={loadBoard} disabled={loading}>{loading ? "刷新中…" : "刷新"}</button>
-              <span className="muted">每 5 秒自动刷新</span>
+              <span className="muted">事件驱动刷新 · 兜底 30s</span>
             </div>
             {boardErr && <div className="toast err">{boardErr}</div>}
             {!boardErr && (

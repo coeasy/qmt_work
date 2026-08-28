@@ -30,18 +30,23 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # 逐文件运行：避免 Windows 上“全量同进程”跑测试偶发硬崩溃（进程互相干扰）；
-      # 同时任一文件失败即阻断 PR。所有用例不依赖券商 SDK（xtquant 运行时按需从
-      # 用户客户端加载），未连券商的端点返回 503 引导，零 mock。
-      - name: Run backend tests (per-file)
+      # 自动发现 tests/test_*.py 全部测试文件、逐文件运行：自动纳入新增测试，
+      # 避免硬编码清单漏掉 test_*.py（P2-3）；逐文件隔离避免 Windows 上同进程
+      # 偶发硬崩溃。依赖真实券商连接/需特意排除的用例，应在 tests/conftest.py 里以
+      # `pytest.mark.broker` 标记，并在此处追加到 BROKER_TESTS 排除清单中说明。
+      - name: Run backend tests (per-file, auto-discover)
         run: |
           fail=0
-          for f in test_factors test_stage1_financial test_stage3_research \
-                   test_backtest_vectorized test_paper test_optimizer_fixes \
-                   test_strategy_market test_unit test_gateway_pump test_runtime \
-                   test_bridge test_bridge_watchdog; do
-            echo "::group::$f"
-            python -m pytest "tests/$f.py" -q -p no:cacheprovider || fail=1
+          # 明确需要真实券商账号/客户端的文件（默认无，均为自包含单测）。
+          # 如需排除：把文件名（不含 .py）加入此空格分隔清单。
+          BROKER_TESTS=""
+          for f in tests/test_*.py; do
+            name=$(basename "$f" .py)
+            case " $BROKER_TESTS " in
+              *" $name "*) echo "::group::$name (skipped: broker-dependent)"; echo "::endgroup::"; continue ;;
+            esac
+            echo "::group::$name"
+            python -m pytest "$f" -q -p no:cacheprovider || fail=1
             echo "::endgroup::"
           done
           exit $fail
@@ -88,6 +93,14 @@ jobs:
 
       - name: Install frontend dependencies
         run: npm ci
+
+      # C3/P2-3：前端门禁扩面 —— ESLint（no-undef/no-shadow/react-hooks）+ vitest 纯函数单测。
+      # 与后端 ruff 一致：只拦真实 bug（漏导入/命名遮蔽/hooks 误用），不搞风格洁癖。
+      - name: Frontend lint (eslint)
+        run: npm run lint
+
+      - name: Frontend unit tests (vitest)
+        run: npm test
 
       - name: Build frontend
         run: npm run build

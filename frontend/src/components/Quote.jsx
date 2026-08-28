@@ -21,9 +21,17 @@ export default function Quote() {
   const retryRef = useRef(0);      // 连续重连次数（指数退避）
   const timerRef = useRef(null);   // 重连定时器
   const wantSymRef = useRef(code); // 期望订阅的代码（重连后自动恢复）
+  // 最大自动重连次数：后端宕机时防止无限指数退避重连（项目硬性约束）
+  const MAX_RETRIES = 10;
 
   function scheduleReconnect() {
     if (timerRef.current) return;          // 已有定时器，避免叠加
+    if (retryRef.current >= MAX_RETRIES) {
+      // 已达最大重试：停止自动重连并提示，等用户手动订阅/组件重挂载再试
+      setWsState("offline");
+      setErr(`后端连接失败，已停止自动重连（已达 ${MAX_RETRIES} 次上限）。请检查后端是否运行后重试。`);
+      return;
+    }
     const delay = Math.min(0.5 * Math.pow(2, retryRef.current), 15);
     retryRef.current += 1;
     setWsState("reconnecting");
@@ -36,6 +44,8 @@ export default function Quote() {
   function connect(sym) {
     wantSymRef.current = sym;
     if (wsRef.current) { try { wsRef.current.close(); } catch { /* noop */ } wsRef.current = null; }
+    // 主动（重）连接：复位重试计数，允许停机后由用户操作/重挂载恢复
+    retryRef.current = 0;
     const ws = new WebSocket(wsUrl());
     wsRef.current = ws;
     ws.onopen = () => {

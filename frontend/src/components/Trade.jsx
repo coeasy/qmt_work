@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api } from "../api.js";
 import { useBroker } from "../BrokerContext.jsx";
+import { useServerEvents } from "../hooks/useSystemWS.js";
 
 // 手动交易面板：下单 / 持仓 / 委托 / 成交 / 条件单 / 目标仓位（全部真实接口，下单过风控）
 export default function Trade() {
@@ -39,7 +40,9 @@ export default function Trade() {
     const fail = [p, o, d, c].find((x) => x.status === "rejected");
     if (fail && !err) setErr(fail.reason?.message || "");
   }
-  useEffect(() => { load(); const t = setInterval(load, 5000); return () => clearInterval(t); }, [activeId]);
+  // P2-2：WS 事件驱动近实时刷新（委托/成交/条件单/信号），并用 ≥30s 低频兜底轮询防事件丢失
+  useEffect(() => { load(); const t = setInterval(load, 30000); return () => clearInterval(t); }, [activeId]);
+  useServerEvents(["order", "trade", "condition", "signal", "algo", "reconcile"], () => { load(); });
 
   // 从涨停板 / 行情等页面「快速交易」带单过来：填充代码+涨停价并切到下单页
   useEffect(() => {

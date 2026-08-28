@@ -19,7 +19,8 @@ export default function Audit() {
       setErr("");
     } catch (e) { setErr(e.message); }
   }
-  useEffect(() => { load(); const t = setInterval(load, 8000); return () => clearInterval(t); }, [action]);
+  // 审计无独立事件推送（写入时随其他动作广播），采用低频兜底轮询即可（≥15s）
+  useEffect(() => { load(); const t = setInterval(load, 15000); return () => clearInterval(t); }, [action]);
 
   function fmtParams(p) {
     try { return JSON.stringify(JSON.parse(p)); } catch { return p; }
@@ -36,7 +37,7 @@ export default function Audit() {
   return (
     <div>
       <h2 className="page-title">审计日志</h2>
-      <p className="page-sub">全部交易动作（下单/撤单/算法单/打板/风控拒绝/连接变更/风控配置）可追溯，8s 自动刷新</p>
+      <p className="page-sub">全部交易动作（下单/撤单/算法单/打板/风控拒绝/连接变更/风控配置）可追溯，15s 自动刷新</p>
       {err && <div className="toast err">{err}</div>}
 
       <div className="card">

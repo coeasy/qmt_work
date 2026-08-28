@@ -2,6 +2,7 @@
 // 所有券商逻辑在后端 BrokerManager；前端仅透传配置，绝不内置任何券商实现。
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useBroker } from "../BrokerContext.jsx";
+import { api } from "../api.js";
 
 const ACCOUNT_TYPES = ["STOCK", "CREDIT", "OPTION", "FUTURES"];
 
@@ -42,7 +43,7 @@ export default function Brokers() {
   const { profiles, brokers, activeId, add, connect, disconnect, remove, setActive, test, autoDetect } = useBroker();
   const [brokerId, setBrokerId] = useState("");
   const [form, setForm] = useState({
-    client_path: "", account_id: "", account_type: "STOCK",
+    client_path: "", client_mode: "auto", account_id: "", account_type: "STOCK",
     session_id: "", min_version: "", active: false, autoconnect: true,
   });
   const [msg, setMsg] = useState(null);
@@ -134,22 +135,25 @@ export default function Brokers() {
     } finally { setDetecting(false); }
   }
 
-  // 点击候选：填入券商档案 + 客户端路径 + 账户类型，并自动跑一次探测
+  // 点击候选：填入券商档案 + 客户端路径 + 客户端模式 + 账户，并自动跑一次探测
   function pickCandidate(c) {
     setBrokerId(c.broker_id || "");
     // 用回调形式读取最新 form.account_id（避免闭包捕获旧值）
     setForm((prev) => ({
       ...prev,
       client_path: c.client_path || "",
+      client_mode: c.client_mode || "auto",
       account_type: "STOCK",
+      // 自动发现到资金账号时回填；未发现则留空（后端将自动补全）
+      account_id: c.default_account_id || prev.account_id || "",
     }));
     setTestRes(null);
     // 延迟读取最新 state：setForm 是批量的，这里用 setTimeout 让它先落盘
-    // （或者直接用 c 触发探测，account_id 由用户填写后再手动测试）
     test({
       broker_id: c.broker_id || "",
       client_path: c.client_path || "",
-      account_id: "",  // 候选不自动带 account_id，避免空账户误报"未配置"
+      client_mode: c.client_mode || "auto",
+      account_id: c.default_account_id || "",  // 候选自动带资金账号
       account_type: "STOCK",
       session_id: 0,
       min_version: "",
@@ -177,6 +181,7 @@ export default function Brokers() {
       const r = await add({
         broker_id: brokerId,
         client_path: form.client_path,
+        client_mode: form.client_mode,
         account_id: form.account_id,
         account_type: form.account_type,
         session_id: parseInt(form.session_id || "0", 10) || 0,
@@ -185,8 +190,9 @@ export default function Brokers() {
         autoconnect: form.autoconnect,
       });
       setMsg({ ok: true, t: `已添加连接 ${r.name}（${r.connected ? "已连接" : "未连接，请检查客户端路径"}）` });
-      setBrokerId(""); setForm({ client_path: "", account_id: "", account_type: "STOCK",
-        session_id: "", min_version: "", active: false, autoconnect: true });
+      setBrokerId(""); setForm({ client_path: "", client_mode: "auto", account_id: "",
+        account_type: "STOCK", session_id: "", min_version: "", active: false,
+        autoconnect: true });
     } catch (e) {
       setMsg({ ok: false, t: e.message });
     } finally { setBusy(false); }
@@ -198,6 +204,7 @@ export default function Brokers() {
       const r = await test({
         broker_id: brokerId,
         client_path: form.client_path,
+        client_mode: form.client_mode,
         account_id: form.account_id,
         account_type: form.account_type,
         session_id: parseInt(form.session_id || "0", 10) || 0,
@@ -207,6 +214,18 @@ export default function Brokers() {
     } catch (e) {
       setTestRes({ connected: false, detail: e.message });
     } finally { setBusy(false); }
+  }
+
+  // 按模式启动 QMT 客户端主程序（完整版 / 极速版 / 独立行情），需用户在弹出的窗口登录
+  const [launching, setLaunching] = useState("");
+  async function doLaunch(mode) {
+    setMsg(null); setLaunching(mode);
+    try {
+      const r = await api.launchBrokerClient({ client_path: form.client_path, mode });
+      setMsg({ ok: !!(r.launched || r.already_running), t: r.hint || (r.launched ? "已启动" : "启动失败") });
+    } catch (e) {
+      setMsg({ ok: false, t: `启动失败：${e.message}` });
+    } finally { setLaunching(""); }
   }
 
   return (
@@ -275,9 +294,21 @@ export default function Brokers() {
             </p>
           )}
 
-          <label>客户端路径（userdata_mini）</label>
-          <input value={form.client_path} placeholder="如 C:\国金证券QMT交易端\userdata_mini"
+          <label>客户端路径（userdata_mini / userdata）</label>
+          <input value={form.client_path} placeholder="如 C:\国金证券QMT交易端\userdata_mini（完整版填 ...\userdata）"
             onChange={(e) => setForm({ ...form, client_path: e.target.value })} />
+
+          <label>客户端模式</label>
+          <select value={form.client_mode}
+            onChange={(e) => setForm({ ...form, client_mode: e.target.value })}>
+            <option value="auto">自动识别（推荐）</option>
+            <option value="mini">极速版 MiniQMT（userdata_mini）</option>
+            <option value="full">完整版大客户端（userdata，交易+行情一体）</option>
+          </select>
+          <p className="muted" style={{ fontSize: 11, marginTop: 4 }}>
+            极速版用 <code>userdata_mini</code> 数据目录；完整版大客户端用 <code>userdata</code>。
+            选「自动识别」时按路径后缀 / 运行进程 / 目录存在性智能判断。
+          </p>
 
           <label>资金账号</label>
           <input value={form.account_id} placeholder="如 55012345"
@@ -321,6 +352,23 @@ export default function Brokers() {
             <button onClick={doTest} disabled={busy || !brokerId}>探测可用性</button>
             <button onClick={doAdd} disabled={busy || !brokerId}>添加连接</button>
           </div>
+          <div className="btn-row" style={{ marginTop: 6 }}>
+            <button className="btn-sm" onClick={() => doLaunch("full")} disabled={!!launching}
+              title="启动完整版大客户端 XtItClient（交易+行情一体）">
+              {launching === "full" ? "启动中…" : "启动完整版"}
+            </button>
+            <button className="btn-sm" onClick={() => doLaunch("mini")} disabled={!!launching}
+              title="启动极速版 XtMiniQmt（MiniQMT，行情+极速交易）">
+              {launching === "mini" ? "启动中…" : "启动极速版"}
+            </button>
+            <button className="btn-sm" onClick={() => doLaunch("quote")} disabled={!!launching}
+              title="启动独立行情小窗口 miniquote（为完整版补齐 58610 行情服务）">
+              {launching === "quote" ? "启动中…" : "启动独立行情"}
+            </button>
+          </div>
+          <p className="muted" style={{ fontSize: 11, marginTop: 4 }}>
+            以上按钮从客户端路径自动定位并启动对应模式的 exe（需在弹出窗口完成登录）。
+          </p>
           {cands && cands.length > 0 && !detecting && (
             <div className="card" style={{ marginTop: 12, padding: 10 }}>
               <div className="row" style={{ marginBottom: 6 }}>
@@ -339,7 +387,11 @@ export default function Brokers() {
                     <span style={{ fontWeight: 600 }}>{c.name}</span>
                     {c.running && <span className="tag ok">运行中</span>}
                     {!c.running && <span className="tag warn">已安装</span>}
-                    {c.broker_id ? <span className="tag run">疑似 {c.broker_id}</span> : <span className="tag">需选券商</span>}
+                    {c.broker_name
+                      ? <span className="tag run">{c.broker_name}</span>
+                      : c.broker_id
+                        ? <span className="tag run">疑似 {c.broker_id}</span>
+                        : <span className="tag">需选券商</span>}
                     <span className={`tag ${c.xtquant_importable ? "ok" : c.xtquant_found ? "warn" : "fail"}`}>
                       xtquant {c.xtquant_importable ? "可用" : c.xtquant_found ? "已定位·导入失败" : "未定位"}
                     </span>
@@ -347,7 +399,21 @@ export default function Brokers() {
                   <div className="muted" style={{ fontSize: 11, marginTop: 4, wordBreak: "break-all" }}>
                     {c.root}
                     {c.has_userdata_mini ? " · userdata_mini ✓" : ""}
+                    {c.has_userdata ? " · userdata ✓" : ""}
+                    {c.client_mode === "mini"
+                      ? " · [极速版]" : c.client_mode === "full" ? " · [完整版]" : ""}
                   </div>
+                  {Array.isArray(c.accounts) && c.accounts.length > 0 && (
+                    <div style={{ marginTop: 4, fontSize: 11, wordBreak: "break-all" }}>
+                      <span className="muted">资金账号：</span>
+                      {c.accounts.map((a, i) => (
+                        <span key={i} className="tag ok" style={{ marginRight: 4 }}>
+                          {a.account_id} · {a.account_type}
+                          {a.account_id === c.default_account_id ? " ✓默认" : ""}
+                        </span>
+                      ))}
+                    </div>
+                  )}
                   {c.import_error && (
                     <div className="muted" style={{ fontSize: 11, marginTop: 2, color: "#e6a23c" }}>
                       导入错误：{String(c.import_error).slice(0, 160)}

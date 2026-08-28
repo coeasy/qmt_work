@@ -73,6 +73,7 @@ api.brokerProfiles = () => api.get("/brokers/profiles");
 api.listBrokers = () => api.get("/brokers");
 api.addBroker = (body) => api.post("/brokers", body);
 api.testBroker = (body) => api.post("/brokers/test", body);
+api.launchBrokerClient = (body) => api.post("/brokers/launch", body);
 api.autoDetectBrokers = () => api.get("/brokers/auto-detect");
 api.connectBroker = (id, { signal } = {}) =>
   _req("POST", `/brokers/${id}/connect`, { body: {}, signal, timeoutMs: 35000 });

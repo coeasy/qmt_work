@@ -23,6 +23,13 @@ smart_qmt_config.json
 qmt_work_config.json
 # 运行期生成的端口发现文件（非源码）
 backend/.qmt_work.port
+# 运行期测试端口文件（探针排错产物，不入库）
+.test_port.txt
+# 行情导出目录（POST /api/v1/market/kline/sync 产物，不入库）
+kline_data/
+kline_sync/
+# 测试输出目录（pytest 落盘日志等）
+output/
 
 # ---------- 前端 ----------
 frontend/node_modules/
@@ -48,3 +55,5 @@ ROADMAP_VERSION_COMPAT.md
 docs/QMT量化Agent平台方案.md
 docs/基于deepseek-harness的客户端重构方案.md
 docs/竞品对比与优化改进方案.md
+docs/二轮复查与优化改进计划（2026-08-27）.md
+docs/功能层问题与改进优化方案（2026-08-26审计版）.md

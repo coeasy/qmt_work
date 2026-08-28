@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 
 const listeners = new Set();
 const brokerHandlers = new Set();
+const eventHandlers = new Set();   // P2-2：通用事件订阅（Trade/Algo/LimitUp/Dashboard 等页面）
 let ws = null;
 let retry = 0;
 let reconnectTimer = null;
@@ -11,6 +12,12 @@ let pingTimer = null;
 let lastLatency = null;
 let sysData = null;
 let connState = "connecting";
+
+// 最大自动重连次数：防止后端持续宕机/端口异常时无限指数退避重连
+// （项目硬性约束：WS 重连必须有上限，杜绝无限重连循环）。
+const MAX_RETRIES = 10;
+// 显式停机后禁止再自动重连（shutdown 事件后 onclose 不再调度重连）。
+let stopped = false;
 
 function emit() {
   const snap = { status: connState, sys: sysData, latency: lastLatency, retries: retry };
@@ -24,8 +31,36 @@ export function subscribeBroker(cb) {
   return () => brokerHandlers.delete(cb);
 }
 
+// P2-2：通用事件订阅。cb(msg) 收到每条入站 WS 消息（含 type/data），返回退订函数。
+// 页面用它监听相关事件近实时刷新，同时保留低频兜底轮询防事件丢失。
+export function subscribeEvent(cb) {
+  eventHandlers.add(cb);
+  connect();
+  return () => eventHandlers.delete(cb);
+}
+
+// P2-2：便捷 hook —— 监听若干事件类型，命中即回调刷新函数。
+// types: 事件类型前缀数组（如 ["order", "trade"]）。列表为空则订阅全部事件。
+export function useServerEvents(types = [], onEvent) {
+  const typeSet = new Set(types);
+  useEffect(() => {
+    return subscribeEvent((msg) => {
+      if (!typeSet.size || typeSet.has(msg.type)
+          || [...typeSet].some((t) => msg.type && msg.type.startsWith(t))) {
+        try { onEvent(msg); } catch { /* noop */ }
+      }
+    });
+  }, []);
+}
+
 function scheduleReconnect() {
-  if (reconnectTimer) return;
+  if (reconnectTimer || stopped) return;
+  if (retry >= MAX_RETRIES) {
+    // 已达最大重试次数：停止自动重连，置为离线并等待显式触发（组件重挂载 connect()）。
+    connState = "offline";
+    emit();
+    return;
+  }
   const delay = Math.min(0.5 * Math.pow(2, retry), 15);
   retry += 1;
   connState = "reconnecting";
@@ -36,8 +71,16 @@ function scheduleReconnect() {
   }, delay * 1000);
 }
 
+function stopTimers() {
+  if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+  if (pingTimer) { clearInterval(pingTimer); pingTimer = null; }
+}
+
 function connect() {
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
+  // 主动（重）连接：复位停机标志与重试计数，允许停机后由组件重挂载/用户操作恢复。
+  stopped = false;
+  retry = 0;
   const proto = location.protocol === "https:" ? "wss" : "ws";
   const url = `${proto}://${location.host}/api/v1/ws`;
   try {
@@ -52,7 +95,7 @@ function connect() {
     retry = 0;
     connState = "connected";
     emit();
-    if (pingTimer) clearInterval(pingTimer);
+    stopTimers();
     pingTimer = setInterval(() => {
       if (ws && ws.readyState === WebSocket.OPEN) {
         ws._pingAt = performance.now();
@@ -66,7 +109,11 @@ function connect() {
     if (msg.type === "system") {
       sysData = msg.data || {};
       if (msg.data && msg.data.event === "shutdown") {
+        // 后端显式停机：停止自动重连 + 心跳，关闭当前连接
+        stopped = true;
+        stopTimers();
         connState = "offline";
+        try { ws && ws.close(); } catch { /* noop */ }
       }
       emit();
     } else if (msg.type === "pong") {
@@ -84,11 +131,18 @@ function connect() {
         } catch { /* noop */ }
       });
     }
+    // P2-2：通用事件分发——把每条入站消息广播给事件订阅者（用于近实时刷新而非轮询）
+    if (typeof msg === "object" && msg !== null && typeof msg.type === "string") {
+      eventHandlers.forEach((cb) => {
+        try { cb(msg); } catch { /* noop */ }
+      });
+    }
   };
   ws.onclose = () => {
     connState = "offline";
     emit();
-    scheduleReconnect();
+    // 显式停机后 / 已达最大重试时不再自动重连
+    if (!stopped) scheduleReconnect();
   };
   ws.onerror = () => { try { ws.close(); } catch { /* noop */ } };
 }

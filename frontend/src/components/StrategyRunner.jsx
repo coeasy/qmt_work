@@ -78,7 +78,8 @@ export default function StrategyRunner({ prefill }) {
   const [codes, setCodes] = useState(prefill?.code || "600519.SH");
   const [mode, setMode] = useState("paper");
   const [name, setName] = useState("");
-  const [interval, setInterval] = useState(60);
+  // P2-2：state 命名 intervalSec，避免遮蔽全局 setInterval（no-shadow 规范）
+  const [intervalSec, setIntervalSec] = useState(60);
   const [params, setParams] = useState(
     prefill?.params || DEFAULT_PARAMS[prefill?.strategy_type || "ma_cross"]);
   const [runs, setRuns] = useState([]);
@@ -102,7 +103,7 @@ export default function StrategyRunner({ prefill }) {
       if (r.strategy_type) setRtype(r.strategy_type);
       if (r.codes?.length) setCodes(r.codes.join(","));
       if (r.mode) setMode(r.mode);
-      if (r.interval_seconds) setInterval(r.interval_seconds);
+      if (r.interval_seconds) setIntervalSec(r.interval_seconds);
       if (r.params) setParams({ ...DEFAULT_PARAMS[r.strategy_type] || {}, ...r.params });
       setMsg(`已加载实例 #${r.id}（${r.name || ""}）`);
     } catch (e) { setLoadErr(e.message); }
@@ -133,7 +134,7 @@ export default function StrategyRunner({ prefill }) {
       codes: codesArr,
       params: { ...params, volume },
       mode,
-      interval_seconds: Number(interval) || 60,
+      interval_seconds: Number(intervalSec) || 60,
     };
     try {
       const r = await api.strategyRunCreate(body);
@@ -215,8 +216,8 @@ export default function StrategyRunner({ prefill }) {
               <option value="live">实盘（真实下单）</option>
             </select>
             <label style={{ width: 90 }}>轮询间隔(s)</label>
-            <input style={{ width: 90 }} value={interval}
-                   onChange={(e) => setInterval(e.target.value)} />
+            <input style={{ width: 90 }} value={intervalSec}
+                   onChange={(e) => setIntervalSec(e.target.value)} />
           </div>
           <ParamFields rtype={rtype} params={params} setParams={setParams} />
           <div className="btn-row">

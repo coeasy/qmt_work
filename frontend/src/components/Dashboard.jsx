@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { api } from "../api.js";
 import { useBroker } from "../BrokerContext.jsx";
-import { useSystemStatus } from "../hooks/useSystemWS.js";
+import { useSystemStatus, useServerEvents } from "../hooks/useSystemWS.js";
 import Chart from "./Chart.jsx";
 
 export default function Dashboard() {
@@ -26,7 +26,8 @@ export default function Dashboard() {
   useEffect(() => { loadHealth(); }, []);
   useEffect(() => {
     api.aggregate().then(setAgg).catch(() => {});
-    const t = setInterval(() => api.aggregate().then(setAgg).catch(() => {}), 10000);
+    // P2-2：低频兜底轮询（≥30s），近实时由下方事件驱动刷新
+    const t = setInterval(() => api.aggregate().then(setAgg).catch(() => {}), 30000);
     return () => clearInterval(t);
   }, [activeId]);
 
@@ -42,7 +43,14 @@ export default function Dashboard() {
       else setErr(e.message);
     }
   }
-  useEffect(() => { load(); const t = setInterval(load, 8000); return () => clearInterval(t); }, [activeId]);
+  // P2-2：账户/委托/成交/对账事件驱动近实时刷新（system tick 已由 useSystemStatus 实时驱动），
+  // 保留 ≥30s 低频兜底轮询防事件丢失
+  useEffect(() => {
+    load();
+    const t = setInterval(load, 30000);
+    return () => clearInterval(t);
+  }, [activeId]);
+  useServerEvents(["account", "order", "trade", "reconcile"], () => { load(); api.aggregate().then(setAgg).catch(() => {}); });
 
   const pnlOption = {
     backgroundColor: "transparent",
@@ -61,7 +69,7 @@ export default function Dashboard() {
     <div>
       <h2 className="page-title">仪表盘</h2>
       <p className="page-sub">
-        账户总览与净值曲线（每 8s 刷新）
+        账户总览与净值曲线（事件驱动 · 兜底 30s 刷新）
         {activeBroker && <span className="muted"> · 当前连接：{activeBroker.broker_name} · {activeBroker.account_id || "—"}</span>}
       </p>
       {err && <div className="toast err">{err}</div>}

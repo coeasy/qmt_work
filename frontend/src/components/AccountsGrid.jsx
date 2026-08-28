@@ -2,6 +2,7 @@
 // 后端 /account/grid 与 /account/batch/* 是唯一真相来源；前端仅透传 conn_id，绝不内置券商逻辑。
 import { useEffect, useRef, useState, Fragment } from "react";
 import { api } from "../api.js";
+import { useServerEvents } from "../hooks/useSystemWS.js";
 
 const PRICE_TYPES = [
   { v: "limit", t: "限价" },
@@ -51,9 +52,13 @@ export default function AccountsGrid() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // C2/N5：账户快照事件（account_snapshot，每交易周期广播）驱动近实时刷新；
+  // 自动刷新仅作低频兜底轮询（30s），防事件丢失。关闭 auto 后仅保留事件驱动。
+  useServerEvents(["account"], () => { if (auto) load(); });
+
   useEffect(() => {
     if (timer.current) clearInterval(timer.current);
-    if (auto) timer.current = setInterval(load, 5000);
+    if (auto) timer.current = setInterval(load, 30000);
     return () => { if (timer.current) clearInterval(timer.current); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [auto]);
@@ -73,7 +78,7 @@ export default function AccountsGrid() {
         <div className="row" style={{ gap: 10 }}>
           <label className="row" style={{ margin: 0, gap: 6 }}>
             <input type="checkbox" style={{ width: "auto" }} checked={auto} onChange={(e) => setAuto(e.target.checked)} />
-            自动刷新（5s）
+            自动刷新（事件驱动 + 30s 兜底）
           </label>
           <button className="ghost" onClick={load} disabled={loading}>
             {loading ? "刷新中…" : "手动刷新"}

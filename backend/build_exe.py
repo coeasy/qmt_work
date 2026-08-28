@@ -67,6 +67,9 @@ COLLECT_ALL = ["mcp", "fastmcp", "starlette", "uvicorn", "docket", "burner_redis
 EXCLUDES = [
     "torch", "torchvision", "torchaudio",   # 巨型深度学习框架，未使用
     "sqlalchemy", "alembic", "apscheduler",  # 调度/迁移/ORM，未使用
+    "pyarrow", "pyarrow.libs",  # K线导出 feather 用；但打包进 onedir 会因残缺 stub 破坏
+    #                            桥接子进程 pandas 导入与客户端 xtquant 探测，故排除。
+    #                            打包产物用 csv/json（无需 pyarrow）；feather 在源码/dev 环境可用。
 ]
 
 # 额外数据：前端静态资源（FastAPI 同源托管）
@@ -123,6 +126,28 @@ def _collect_msvc_runtime() -> list[str]:
     # dest 为空串表示 _internal 根目录（onedir 模式）
     return [f"{f};." for f in found]
 
+# 构建后清理：删除 _internal 里会让「桥接嵌入运行时」误载的残缺命名空间 stub 目录。
+#
+# 背景：PyInstaller onedir 把 pandas/numpy/pyarrow 的编译子包(.pyd/.dll)留在
+# _internal/<pkg>/* 目录，而其纯 Python __init__.py 被打进 PYZ 归档——所以磁盘上的
+# 这些目录多数没有 __init__.py，只是「残缺命名空间包」。桥接子进程(runtimes/cpXXX)
+# 用普通 import（不是 PyInstaller 冻结 loader），经 ._pth 的 "..\\.." 读到 _internal，
+# 于是把这些残缺目录当 namespace 包导入——pandas 启动即 `import pyarrow` 并读
+# pyarrow.__version__，残缺包无 __version__ -> AttributeError，桥接直接崩。
+#
+# 这里只删 pyarrow / pyarrow.libs（应用代码不 import，pandas 缺失 pyarrow 会优雅降级），
+# 不影响主进程；numpy/pandas 的残缺目录不能删（主进程冻结 loader 依赖其磁盘 .pyd），
+# 它们会被 user-site/客户端自带的完整同名包覆盖，桥接不中毒。
+def _sanitize_dist_runtime() -> None:
+    internal = DIST / "qmt_work" / "_internal"
+    for name in ("pyarrow", "pyarrow.libs"):
+        p = internal / name
+        if p.exists():
+            import shutil
+            shutil.rmtree(p, ignore_errors=True)
+            print(f"  [sanitize] 移除残缺命名空间 stub：{p.name}")
+
+
 def main():
     # 控制台开关（可移植）：默认 --noconsole（发布友好，无黑框窗口）；
     # 调试需要看后端 stdout 时设 QMT_BUILD_CONSOLE=1 或传 --console 参数。
@@ -169,6 +194,7 @@ def main():
         print("\n".join((proc.stderr or "").splitlines()[-40:]))
         raise SystemExit(proc.returncode)
     print(proc.stdout[-800:] if proc.stdout else "")
+    _sanitize_dist_runtime()
     print(f"\n完成：{DIST / 'qmt_work' / 'qmt_work.exe'}")
 
 

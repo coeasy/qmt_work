@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
 import { api } from "../api.js";
+import { useServerEvents } from "../hooks/useSystemWS.js";
+import { orderStatus } from "../lib/format.js";
 
 // 算法单（TWAP/VWAP 时间拆单）：借鉴 Rockyzsu/QMT 算法单能力
 export default function Algo() {
@@ -13,7 +15,9 @@ export default function Algo() {
   async function load() {
     try { setJobs(await api.algoList()); } catch (e) { setErr(e.message); }
   }
-  useEffect(() => { load(); const t = setInterval(load, 3000); return () => clearInterval(t); }, []);
+  // P2-2：algo_slice/algo_alert 事件驱动近实时刷新，低频兜底轮询防丢失
+  useEffect(() => { load(); const t = setInterval(load, 30000); return () => clearInterval(t); }, []);
+  useServerEvents(["algo"], () => { load(); });
 
   async function submit() {
     try { await api.algoSubmit(form); setErr(""); load(); }
@@ -25,9 +29,8 @@ export default function Algo() {
 
   const set = (k) => (e) => setForm({ ...form, [k]: e.target.type === "number" ? +e.target.value : e.target.value });
   const statusTag = (s) => {
-    const map = { pending: "warn", running: "run", paused: "warn", done: "ok", canceled: "fail", failed: "fail" };
-    const text = { pending: "排队中", running: "执行中", paused: "已暂停", done: "已完成", canceled: "已取消", failed: "失败" };
-    return <span className={`tag ${map[s] || ""}`}>{text[s] || s}</span>;
+    const m = orderStatus(s);
+    return <span className={`tag ${m.className}`}>{m.label}</span>;
   };
 
   return (
