@@ -37,7 +37,10 @@ class SyncEngine:
         self._quote_bus = quote_bus                      # 可选行情总线（内存/Redis）
         self._latency_stats: dict[str, list[float]] = {} # code -> 最近延迟样本
         self._batch_buf: list[dict] = []                 # 行情微批缓冲（100ms 窗口，C2）
+        # C1/P2-1：market_cache 批量写盘缓冲（(code, dtype, ts, payload_json) 行）
+        self._batch_rows: list[tuple] = []
         self._batch_task: asyncio.Task | None = None
+        self._trade_cbs: set[str] = set()          # 已注册实时成交回调的连接（幂等）
 
     # ---- 订阅聚合（只向活跃券商订阅一次；引用计数零时退订）----
     def client_subscribe(self, client_id: str, codes: list[str]) -> None:
@@ -103,8 +106,10 @@ class SyncEngine:
         if event.get("type") != "quote":
             return
         data = event.get("data") or {}
-        # Schema Guard：缺少必填字段则丢弃（防止脏数据污染缓存/广播）
-        missing = [k for k in self._QUOTE_REQUIRED if data.get(k) in (None, "") or data.get(k) == 0]
+        # Schema Guard：缺少必填字段则丢弃（防止脏数据污染缓存/广播）。
+        # 注意：last==0 是合法的停牌/盘前状态值，不作为丢弃理由（只拦 None/""）。
+        missing = [k for k in self._QUOTE_REQUIRED
+                   if data.get(k) in (None, "") or (k != "last" and data.get(k) == 0)]
         if missing:
             log.debug("quote dropped (schema): %s missing %s", data.get("code"), missing)
             return
@@ -140,13 +145,13 @@ class SyncEngine:
                 self._quote_bus.publish(code, data)
             except Exception as exc:  # noqa: BLE001
                 log.debug("quote_bus publish failed: %s", exc)
-        try:
-            self.db.upsert("market_cache", {
-                "code": code, "dtype": "quote", "ts": data.get("ts", time.strftime("%Y-%m-%dT%H:%M:%S")),
-                "payload_json": json.dumps(data, ensure_ascii=False),
-            })
-        except Exception as exc:
-            log.warning("market_cache write failed: %s", exc)
+        # C1/P2-1：market_cache 写入放进 100ms 微批缓冲，由 _batch_loop 单事务批量落盘，
+        # 不再每 tick 立即 upsert+commit（消除高频订阅多标的时的写盘风暴）。
+        self._batch_rows.append((
+            code, "quote",
+            data.get("ts", time.strftime("%Y-%m-%dT%H:%M:%S")),
+            json.dumps(data, ensure_ascii=False),
+        ))
         # 行情微批聚合：100ms 窗口内批量广播（C2），降低高频帧数
         self._batch_buf.append(data)
 
@@ -284,6 +289,82 @@ class SyncEngine:
                 await self._notify("deal", {"type": "deal_event", "data": d,
                                             "broker": conn.cfg.name})
 
+    def _roll_fp(self) -> None:
+        """交易日滚动：跨日清理订单/成交指纹，防止 order_id 跨日复用误判。"""
+        today = time.strftime("%Y-%m-%d")
+        if self._fp_date != today:
+            self._fp_date = today
+            self._order_fp.clear()
+            self._deal_seen.clear()
+
+    # ---- 阶段 0-A：桥接子进程交易回报实时推送（零轮询延迟）----
+    def register_realtime_trade_handlers(self, conn) -> None:
+        """为连接注册桥接子进程转发的 on_order/on_trade → 泵 → 实时 WS 推送。幂等。
+
+        与 `_push_order_deal_events` 轮询共享 `_order_fp`/`_deal_seen` 指纹——实时事件与
+        轮询 diff 天然互斥（同一 order_id/成交都只推一次），轮询退化为兜底安全网。
+        """
+        b = conn.bridge
+        key = getattr(conn.cfg, "conn_id", "")
+        if b is None or not key or key in self._trade_cbs:
+            return
+        acc_key = conn.cfg.account_id or conn.cfg.conn_id
+        broker = conn.cfg.name or conn.cfg.broker_id or acc_key
+
+        def _on_order_evt(o, _a=acc_key, _br=broker, _b=b):
+            _b.enqueue({"type": "order", "data": o or {}, "account": _a, "broker": _br})
+
+        def _on_deal_evt(t, _a=acc_key, _br=broker, _b=b):
+            _b.enqueue({"type": "deal", "data": t or {}, "account": _a, "broker": _br})
+
+        try:
+            conn.adapter.on_order(_on_order_evt)
+            conn.adapter.on_trade(_on_deal_evt)
+            # partial 对象：同 func+args 判等，ensure_handler 可去重（幂等补注册）
+            from functools import partial
+            b.ensure_handler("order", partial(self._on_realtime_order, acc_key))
+            b.ensure_handler("deal", partial(self._on_realtime_deal, acc_key))
+            self._trade_cbs.add(key)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("realtime trade handlers %s: %s", conn.cfg.conn_id, exc)
+
+    async def _on_realtime_order(self, acc_key: str, event: dict) -> None:
+        """桥接子进程实时报单回报 → 推送前端（与轮询共享指纹去重）。"""
+        data = event.get("data") or {}
+        oid = str(data.get("order_id") or "")
+        if not oid:
+            return
+        st = data.get("status") or data.get("order_status") or ""
+        self._roll_fp()
+        from xtquant_client.order_status import is_terminal
+        fp = self._order_fp.setdefault(acc_key, {})
+        prev = fp.get(oid)
+        if prev is not None and is_terminal(prev):
+            return  # 终态锁：乱序/陈旧回报忽略
+        if prev is None:
+            await self._notify("order", {"type": "order_event", "data": data,
+                                         "broker": event.get("broker", ""), "event": "new"})
+        elif prev != st:
+            await self._notify("order", {"type": "order_event", "data": data,
+                                         "broker": event.get("broker", ""),
+                                         "event": "status", "prev_status": prev})
+        fp[oid] = st
+
+    async def _on_realtime_deal(self, acc_key: str, event: dict) -> None:
+        """桥接子进程实时成交回报 → 推送前端（与轮询共享成交去重键）。"""
+        data = event.get("data") or {}
+        oid = str(data.get("order_id") or "")
+        key = (oid, str(data.get("seq") or data.get("trade_id") or ""),
+               str(data.get("price")), str(data.get("volume")),
+               str(data.get("trade_time") or ""))
+        self._roll_fp()
+        seen = self._deal_seen.setdefault(acc_key, set())
+        if key in seen:
+            return
+        seen.add(key)
+        await self._notify("deal", {"type": "deal_event", "data": data,
+                                    "broker": event.get("broker", "")})
+
     async def stop(self) -> None:
         if self._account_task:
             self._account_task.cancel()
@@ -296,17 +377,39 @@ class SyncEngine:
             self._batch_task = asyncio.create_task(self._batch_loop())
 
     async def _batch_loop(self) -> None:
+        prune_tick = 0
         while True:
             window = 0.1
             if self.runtime_config is not None:
                 window = self.runtime_config.batch_window
             await asyncio.sleep(window)
+            # 取走并清空两个缓冲（广播 + 写盘）
             buf = self._batch_buf
-            if not buf:
-                continue
+            rows = self._batch_rows
             items = list(buf)
             buf.clear()
+            row_items = list(rows)
+            rows.clear()
+            # C1/P2-1：market_cache 单事务批量落盘（一窗口一次 commit）
+            if row_items and self.db is not None:
+                try:
+                    await self.db.aexecutemany_in_txn(
+                        "INSERT OR REPLACE INTO market_cache (code, dtype, ts, payload_json) "
+                        "VALUES (?,?,?,?)", row_items)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("market_cache batch write failed: %s", exc)
+            if not items:
+                continue
             await self._notify("quotes", {"items": items})
+            # C1/P2-1：周期性收敛 market_cache 数据量（约每 100 个窗口≈10s 一次）
+            prune_tick += 1
+            if prune_tick % 100 == 0 and self.db is not None:
+                try:
+                    removed = await self.db.aprune_market_cache(keep=20)
+                    if removed:
+                        log.info("market_cache pruned %d rows", removed)
+                except Exception as exc:  # noqa: BLE001
+                    log.debug("market_cache prune failed: %s", exc)
 
     def on_notify(self, handler) -> None:
         self._notify_handlers.append(handler)
@@ -392,11 +495,19 @@ class WSManager:
         except Exception:
             self.disconnect(cid)
 
-    async def broadcast(self, event_type: str, payload: dict, codes: list[str] | None = None) -> None:
+    async def broadcast(self, event_type, payload: dict | None = None,
+                        codes: list[str] | None = None) -> None:
+        # 兼容两种调用形态（P2-2 事件推送修复）：
+        #   - 引擎 on_event=ws_manager.broadcast 时传单个 dict {"type","data"}；
+        #   - sync/_notify 等传 (event_type, payload[, codes])。
+        if isinstance(event_type, dict):
+            codes = payload
+            payload = event_type.get("data")
+            event_type = event_type.get("type") or "event"
         # 维护最近行情环形缓冲（断线补发窗口，C4）
         if event_type == "quotes":
-            self._push_recent(payload.get("items", []))
-        elif event_type == "quote" and payload.get("code"):
+            self._push_recent(payload.get("items", []) if isinstance(payload, dict) else [])
+        elif event_type == "quote" and isinstance(payload, dict) and payload.get("code"):
             self._push_recent([payload])
         for cid, ws in list(self._sockets.items()):
             send_payload = payload

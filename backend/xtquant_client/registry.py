@@ -12,6 +12,7 @@ from __future__ import annotations 使类型注解惰性求值，
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 
@@ -20,6 +21,8 @@ from .adapters.ptrade import PTradeAdapter
 from .adapters.ths import ThsAdapter
 from .base import BrokerAdapter
 from .xtp import XTPQuantAdapter
+
+log_backend = logging.getLogger("qmt_work.registry")
 
 
 @dataclass
@@ -124,11 +127,31 @@ def list_profiles() -> list[BrokerProfile]:
 
 def create_adapter(broker_id: str, client_path: str, account_id: str,
                    account_type: str = "STOCK", session_id: int = 0,
-                   min_version: str = "") -> BrokerAdapter:
-    """依据券商档案实例化对应适配器（真实实现）。"""
+                   min_version: str = "", client_mode: str = "auto") -> BrokerAdapter:
+    """依据券商档案实例化对应适配器（真实实现）。
+
+    client_mode：客户端连接模式 —— "auto"（自动推断）/ "mini"（极速版 MiniQMT）/
+    "full"（完整版大客户端）。仅对 xtp 系适配器生效：决定 XtQuantTrader 使用
+    userdata_mini（极速）还是 userdata（完整）数据目录；行情侧两种模式都走 58610。
+
+    券商通用化：QMT 客户端由各大券商统一基于迅投 XTQuant 内核白标，**几乎全部券商**
+    都走同一套 xtquant SDK（仅 client_path / account_id 不同）。因此未知 broker_id
+    不再抛错阻断，而是降级到通用迅投(XTP)适配器——不依赖预注册档案，任意券商客户端
+    （国信/广发/华泰/东财/中信…）均可直接接入，前端只需填 client_path + 账号。
+    """
     profile = get_profile(broker_id)
     if profile is None:
-        raise ValueError(f"未知券商：{broker_id}")
+        # 未知券商：合成通用 XTP 档案（XTQuant 全券商同内核），不从预注册注册表读取。
+        if broker_id:
+            log_backend.info("未知券商 %r：降级使用通用迅投(XTQuant)适配器", broker_id)
+        else:
+            log_backend.warning("未提供 broker_id：使用通用迅投(XTQuant)适配器（请检查前端调用）")
+        profile = BrokerProfile(
+            id=broker_id or "generic", name=broker_id or "通用迅投 QMT",
+            adapter="xtp",
+            supported_account_types=["STOCK", "CREDIT", "OPTION", "FUTURES"],
+            sdk_required="xtquant", min_version="迅投 xtquant",
+            note="通用迅投 XTQuant 适配器（全券商统一内核，无需预注册档案）")
     if profile.adapter == "xtp":
         # 计算运行时方案（进程内直连 / 桥接 / 无兼容运行时）
         plan = None
@@ -147,7 +170,8 @@ def create_adapter(broker_id: str, client_path: str, account_id: str,
                     client_path=client_path or profile.default_client_path,
                     account_id=account_id, account_type=account_type,
                     session_id=session_id,
-                    min_version=min_version or profile.min_version)
+                    min_version=min_version or profile.min_version,
+                    client_mode=client_mode or "auto")
             # 主后端 ABI 不兼容：必须走桥接；无兼容运行时则在此给出清晰可操作提示
             plan = require_runtime_or_raise(
                 site, prefer_bridge=True)
@@ -165,12 +189,14 @@ def create_adapter(broker_id: str, client_path: str, account_id: str,
                 client_path=client_path or profile.default_client_path,
                 account_id=account_id, account_type=account_type,
                 session_id=session_id, min_version=min_version or profile.min_version,
-                adapter="xtp", broker_id=broker_id, runtime=plan)
+                adapter="xtp", broker_id=broker_id, runtime=plan,
+                client_mode=client_mode or "auto")
         # 兜底（理论上不可达）
         return XTPQuantAdapter(
             client_path=client_path or profile.default_client_path,
             account_id=account_id, account_type=account_type,
-            session_id=session_id, min_version=min_version or profile.min_version)
+            session_id=session_id, min_version=min_version or profile.min_version,
+            client_mode=client_mode or "auto")
     if profile.adapter == "ths":
         return ThsAdapter()
     if profile.adapter == "ptrade":
@@ -216,9 +242,15 @@ class Registry:
         return len(self._profiles)
 
     def register_profile(self, profile: BrokerProfile) -> str:
-        """热插拔：追加/覆盖一条券商档案（运行时生效并落库）。"""
+        """热插拔：追加/覆盖一条券商档案（运行时生效并落库）。
+
+        写入顺序：先落库、后写内存。若落库失败则抛出异常且内存不脏，避免半注册。
+        """
+        try:
+            self._persist(profile)
+        except Exception:
+            raise
         self._profiles[profile.id] = profile
-        self._persist(profile)
         return profile.id
 
     def unregister_profile(self, broker_id: str) -> None:
@@ -316,19 +348,23 @@ def negotiate_capabilities(broker_id: str, requested: list[str]) -> dict:
 
 def hotplug_profile(payload: dict) -> BrokerProfile:
     """从字典热插拔一条券商档案（运行期新增券商）。"""
+    _SUPPORTED_ADAPTERS = {"xtp", "ths", "ptrade", "juejin"}
+    adapter = (payload.get("adapter") or "xtp").strip().lower()
+    if adapter not in _SUPPORTED_ADAPTERS:
+        raise ValueError(f"未实现的适配器：{adapter!r}（支持 {sorted(_SUPPORTED_ADAPTERS)}）")
     p = BrokerProfile(
         id=str(payload.get("id") or "").strip(),
-        name=payload.get("name", ""), adapter=payload.get("adapter", "xtp"),
-        default_client_path=payload.get("default_client_path", ""),
-        supported_account_types=payload.get("supported_account_types", ["STOCK"]),
-        supported_periods=payload.get("supported_periods",
-            ["1m", "5m", "15m", "30m", "60m", "1d", "1w", "1mon"]),
-        sdk_required=payload.get("sdk_required", ""),
-        min_version=payload.get("min_version", ""),
-        capabilities=payload.get("capabilities",
-            ["quote", "kline", "trade", "account", "positions"]),
-        features=payload.get("features", {}),
-        note=payload.get("note", ""))
+        name=payload.get("name") or "", adapter=adapter,
+        default_client_path=payload.get("default_client_path") or "",
+        supported_account_types=payload.get("supported_account_types") or ["STOCK"],
+        supported_periods=payload.get("supported_periods") or
+            ["1m", "5m", "15m", "30m", "60m", "1d", "1w", "1mon"],
+        sdk_required=payload.get("sdk_required") or "",
+        min_version=payload.get("min_version") or "",
+        capabilities=payload.get("capabilities") or
+            ["quote", "kline", "trade", "account", "positions"],
+        features=payload.get("features") or {},
+        note=payload.get("note") or "")
     if not p.id:
         raise ValueError("broker id 不能为空")
     registry.register_profile(p)

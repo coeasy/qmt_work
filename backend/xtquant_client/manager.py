@@ -5,6 +5,8 @@
 - 对外暴露「当前活跃连接」与「指定连接」的 bridge，供 routes/tools/mcp/sync 使用
 - 未连接任何券商时，`active_bridge()` 返回 None，上层返回明确的 503（不返回假数据）
 """
+import asyncio
+import logging
 import threading
 import time
 import uuid
@@ -16,12 +18,16 @@ from .gateway import XTQuantBridge
 from .registry import create_adapter, get_profile
 
 
+log = logging.getLogger("qmt_work.manager")
+
+
 @dataclass
 class ConnectionConfig:
     conn_id: str = ""
     name: str = ""
     broker_id: str = ""
     client_path: str = ""
+    client_mode: str = "auto"  # auto/mini(极速版)/full(完整版大客户端)
     account_id: str = ""
     account_type: str = "STOCK"
     session_id: int = 0
@@ -52,12 +58,18 @@ class BrokerManager:
         db = get_db()
         rows = db.query("SELECT * FROM broker_connections ORDER BY id")
         for r in rows:
-            cfg = ConnectionConfig(
-                conn_id=r["conn_id"], name=r["name"], broker_id=r["broker_id"],
-                client_path=r["client_path"], account_id=r["account_id"],
-                account_type=r["account_type"], session_id=int(r["session_id"] or 0),
-                min_version=r["min_version"] or "", active=bool(r["active"]))
-            self._build(cfg, connect=False)
+            try:
+                cfg = ConnectionConfig(
+                    conn_id=r.get("conn_id", ""), name=r.get("name", ""), broker_id=r.get("broker_id", ""),
+                    client_path=r.get("client_path", ""), client_mode=r.get("client_mode", "") or "auto",
+                    account_id=r.get("account_id", ""),
+                    account_type=r.get("account_type", "STOCK"), session_id=int(r.get("session_id", 0) or 0),
+                    min_version=r.get("min_version", "") or "", active=bool(r.get("active", False)))
+                if not cfg.conn_id:
+                    continue
+                self._build(cfg, connect=False)
+            except Exception as exc:  # noqa: BLE001  单条损坏行不阻断整体加载
+                log.warning("load_persisted: 跳过损坏记录 %r: %s", r, exc)
         # 注意：这里不自动 start —— 由应用 lifespan 在事件循环上统一启动 active 连接，
         # 避免「load_persisted 一次性 loop 启动 + lifespan 再启动」造成子进程重复拉起。
 
@@ -69,7 +81,8 @@ class BrokerManager:
             prof = get_profile(cfg.broker_id)
             cfg.name = prof.name if prof else cfg.broker_id
         adapter = create_adapter(cfg.broker_id, cfg.client_path, cfg.account_id,
-                                 cfg.account_type, cfg.session_id, cfg.min_version)
+                                 cfg.account_type, cfg.session_id, cfg.min_version,
+                                 cfg.client_mode)
         conn = Connection(cfg=cfg, adapter=adapter, bridge=XTQuantBridge(adapter))
         self._conns[cfg.conn_id] = conn
         if connect:
@@ -84,14 +97,17 @@ class BrokerManager:
         """
         conn = self._conns.get(conn_id)
         if not conn:
+            log.warning("_safe_start: 未知连接 %r", conn_id)
             return
         try:
             conn.adapter.start()  # 幂等：子进程已在运行则复用
             conn.connected = conn.adapter.is_connected()
             if conn.connected and self._active_id is None:
                 self._active_id = conn_id
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
             conn.connected = False
+            conn.last_error = str(exc)[:500]
+            log.error("_safe_start %r 失败: %s", conn_id, exc)
 
     async def ensure_pump(self, conn_id: str) -> None:
         """在（应用主）事件循环上确保连接的行情泵已启动（幂等）。"""
@@ -127,34 +143,35 @@ class BrokerManager:
                 raise RuntimeError(
                     f"客户端路径不存在：{client_path}\n"
                     f"→ 请在「券商连接」页确认路径，"
-                    f"通常为 ...\\客户端根\\userdata_mini 目录。")
+                    f"通常为 ...\\客户端根\\userdata_mini（极速版）或 userdata（完整版）目录。")
             if not probe.get("xtquant_found"):
                 # 进一步：扫描本机是否有运行中的 QMT 客户端，提示用户参考
                 try:
                     cands = discover()
-                    running = [c["root"] for c in cands if c.get("running")]
+                    running = [c.get("root", "") for c in cands if c.get("running")]
                     hint = ""
                     if running:
                         hint = (f"\n→ 已在本机发现运行中的 QMT 客户端：{', '.join(running[:3])}。"
-                                f"请确认「客户端路径」与之一致（注意：应填客户端根下的 userdata_mini）。")
+                                f"请确认「客户端路径」与之一致（极速版填 userdata_mini，"
+                                f"完整版大客户端填 userdata）。")
                     else:
                         hint = "\n→ 未发现运行中的 QMT 客户端；请先启动并登录客户端。"
                     raise RuntimeError(
                         f"在「{client_path}」中未找到 xtquant SDK（xtquant/ 目录）。"
-                        f"→ 请确认 client_path 指向客户端根或 userdata_mini 目录，"
-                        f"而非其他无关目录。{hint}")
+                        f"→ 请确认 client_path 指向客户端根或其数据目录"
+                        f"（极速版 userdata_mini / 完整版 userdata）。{hint}")
                 except RuntimeError:
                     raise
                 except Exception:
                     raise RuntimeError(
                         f"在「{client_path}」中未找到 xtquant SDK（xtquant/ 目录）。"
-                        f"→ 请确认 client_path 指向客户端根或 userdata_mini 目录。")
+                        f"→ 请确认 client_path 指向客户端根或其数据目录"
+                        f"（极速版 userdata_mini / 完整版 userdata）。")
         except RuntimeError:
             # 探测发现的根因已包含可操作指引，直接透出
             raise
-        except Exception:
-            # 探测本身失败不阻断（兼容未来 xtquant 路径变化），由 SDK 报错兜底
-            pass
+        except Exception as exc:  # noqa: BLE001  探测本身失败不阻断，但记录以便排障
+            log.warning("connect 预探测失败（回退到 SDK 报错兜底）: %s", exc)
         conn.adapter.start()
         conn.connected = conn.adapter.is_connected()
         if conn.connected and self._active_id is None:
@@ -177,10 +194,19 @@ class BrokerManager:
             self._persist_active()
         rt = conn.reconnect_task
         if rt is not None:
-            if not rt.done():
-                rt.cancel()
+            try:
+                if isinstance(rt, asyncio.Task):
+                    if not rt.done():
+                        rt.cancel()
+                elif callable(rt):
+                    rt()
+            except Exception:  # noqa: BLE001
+                pass
             conn.reconnect_task = None
-        conn.adapter.close()
+        try:
+            conn.adapter.close()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("disconnect %r close 失败: %s", conn_id, exc)
         conn.connected = False
 
     def remove(self, conn_id: str) -> None:
@@ -200,11 +226,10 @@ class BrokerManager:
             # create_adapter 在 ABI 不兼容且无兼容运行时时会抛 BrokerSDKError；
             # 必须放在 try 内，否则会穿透为 500（此前 3.13 上「No module named ...」 的旧路径）
             tmp = create_adapter(cfg.broker_id, cfg.client_path, cfg.account_id,
-                                 cfg.account_type, cfg.session_id, cfg.min_version)
+                                 cfg.account_type, cfg.session_id, cfg.min_version,
+                                 cfg.client_mode)
             tmp.start()
-            res = tmp.test_connection()
-            tmp.close()
-            return res
+            return tmp.test_connection()
         except Exception as exc:  # noqa: BLE001
             res = {"connected": False, "detail": str(exc)}
             # 附加环境诊断（sdk 发现/导入/目录线索），前端据此给出可操作提示
@@ -217,8 +242,19 @@ class BrokerManager:
                     from xtquant_client.xtp import probe_environment
                     res["probe"] = probe_environment(cfg.client_path)
             except Exception:  # noqa: BLE001
+                log.debug("test_connection 附加诊断失败: probe 不可用")
                 pass
             return res
+        finally:
+            # C17：无论成功/失败都必须释放临时适配器（BridgeAdapter 会 spawn 子进程、
+            # XTPQuantAdapter 会占用交易会话）。原实现仅在成功路径 close()，失败时
+            # 反复点击「测试连接」会把残留子进程/会话越积越多 → 同账号会话被占满、
+            # 后续真实连接报「session 被占用」，表现为「连接不上 QMT」。
+            if tmp is not None:
+                try:
+                    tmp.close()
+                except Exception:  # noqa: BLE001
+                    pass
 
     def set_active(self, conn_id: str) -> None:
         if conn_id not in self._conns:
@@ -257,6 +293,7 @@ class BrokerManager:
                 "conn_id": cid, "name": conn.cfg.name, "broker_id": conn.cfg.broker_id,
                 "broker_name": conn.adapter.broker_name,
                 "account_id": conn.cfg.account_id, "account_type": conn.cfg.account_type,
+                "client_mode": conn.cfg.client_mode or "auto",
                 "connected": conn.connected, "active": (cid == self._active_id),
                 "health_status": conn.health_status,
                 "reconnect_attempts": conn.reconnect_attempts,
@@ -276,14 +313,16 @@ class BrokerManager:
         if existing:
             db.execute(
                 "UPDATE broker_connections SET name=?, broker_id=?, client_path=?, "
-                "account_id=?, account_type=?, session_id=?, min_version=?, active=? WHERE conn_id=?",
-                (cfg.name, cfg.broker_id, cfg.client_path, cfg.account_id,
-                 cfg.account_type, cfg.session_id, cfg.min_version,
+                "client_mode=?, account_id=?, account_type=?, session_id=?, "
+                "min_version=?, active=? WHERE conn_id=?",
+                (cfg.name, cfg.broker_id, cfg.client_path, cfg.client_mode or "auto",
+                 cfg.account_id, cfg.account_type, cfg.session_id, cfg.min_version,
                  1 if cfg.active else 0, cfg.conn_id))
         else:
             db.insert("broker_connections", {
                 "conn_id": cfg.conn_id, "name": cfg.name, "broker_id": cfg.broker_id,
-                "client_path": cfg.client_path, "account_id": cfg.account_id,
+                "client_path": cfg.client_path, "client_mode": cfg.client_mode or "auto",
+                "account_id": cfg.account_id,
                 "account_type": cfg.account_type, "session_id": cfg.session_id,
                 "min_version": cfg.min_version, "active": 1 if cfg.active else 0,
                 "created_at": time.strftime("%Y-%m-%dT%H:%M:%S")})

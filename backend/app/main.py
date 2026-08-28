@@ -289,6 +289,8 @@ def create_app() -> FastAPI:
         for conn in state.broker_manager.all_connections():
             if conn.bridge is not None:
                 conn.bridge.on("quote", _register_quote_handlers)
+                # 阶段 0-A：桥接交易回报实时推送（on_order/on_trade → WS）
+                state.sync_engine.register_realtime_trade_handlers(conn)
         state.sync_engine.start_batch()
         await state.sync_engine.start_account_snapshots(interval=5.0)
         # 3.5 券商连接健康状态机 + 自动重连
@@ -308,13 +310,12 @@ def create_app() -> FastAPI:
                     b = conn.bridge
                     if b is None or not (conn.cfg.active or conn.connected):
                         continue
-                    # C3：运行期新增/手动 connect 的连接补注册行情 handler（幂等去重）。
-                    # 否则新增连接的行情管道永远缺失（原实现只在启动循环注册一次）。
                     if state.sync_engine is not None:
                         try:
                             b.ensure_handler("quote", state.sync_engine.on_event)
+                            state.sync_engine.register_realtime_trade_handlers(conn)
                         except Exception as exc:  # noqa: BLE001
-                            log.warning("quote handler guard %s: %s", conn.cfg.conn_id, exc)
+                            log.warning("handler guard %s: %s", conn.cfg.conn_id, exc)
                     if not b.pump_running():
                         try:
                             b.start_pump_on(loop)
@@ -329,7 +330,8 @@ def create_app() -> FastAPI:
         state.limitup_monitor = LimitUpMonitor(state.broker_manager, state.risk,
                                                state.ws_manager.broadcast, wal=state.wal)
         state.algo_engine = AlgoEngine(state.broker_manager, state.risk,
-                                       state.ws_manager.broadcast, wal=state.wal)
+                                       state.ws_manager.broadcast, wal=state.wal,
+                                       notifier=state.notifier)
         state.condition_engine = ConditionOrderEngine(
             state.broker_manager, state.risk, state.db, state.ws_manager.broadcast,
             wal=state.wal, notifier=state.notifier)
@@ -347,7 +349,7 @@ def create_app() -> FastAPI:
         from gateway.signal_router import SignalRouter
         state.signal_router = SignalRouter(
             state.broker_manager, state.risk, state.db, state.wal,
-            state.notifier, state.ws_manager.broadcast)
+            state.notifier, state.ws_manager.broadcast, runtime_config=state.runtime_config)
         # 4.5 WAL 启动重放：恢复未完成的算法单（F3：按 algo_id 聚合终态，仅重放最终态
         # pending/running 者——原实现逐个 create 记录重放、不查其后是否有 final/cancel，
         # 每次重启都会把历史每个算法单（含已取消/已完成）重新 _run → 大规模重复拆单下单）
@@ -377,17 +379,42 @@ def create_app() -> FastAPI:
             for aid, payload in pending_jobs.items():
                 if payload.get("status", "") not in ("pending", "running"):
                     continue
+                # P0-3：先聚合该 algo 的已发切片量（algo.slice 审计记录里的 volume），
+                # 重放时按「总量 − 已发量」重新提交，避免把已发/已成交的量再次拆单；
+                # 已发量 ≥ 总量则只登记终态不重发（submit 内部短路）。
+                already_sent = _sum_sent_volume(state.db, aid)
                 try:
                     asyncio.create_task(state.algo_engine.submit(
                         payload.get("code", ""), payload.get("direction", "buy"),
                         int(payload.get("volume", 0)), payload.get("algo", "twap"),
                         int(payload.get("duration", 300)), int(payload.get("slices", 5)),
                         payload.get("price_type", "market"),
-                        float(payload.get("limit_price", 0) or 0), payload.get("remark", "")))
+                        float(payload.get("limit_price", 0) or 0), payload.get("remark", ""),
+                        already_sent=already_sent))
                     replayed += 1
                 except Exception as exc:  # noqa: BLE001
                     log.warning("wal replay algo failed: %s", exc)
             log.info("wal algo replay: %d pending job(s) restarted", replayed)
+
+        def _sum_sent_volume(db, algo_id: str) -> int:
+            """聚合某算法单已发切片量：统计 audit_log 中 action='algo.slice' 且 target 以
+            '{algo_id}:' 开头的记录的 params_json.volume 之和（保守口径：按已发量扣减）。"""
+            if db is None:
+                return 0
+            try:
+                rows = db.query(
+                    "SELECT params_json FROM audit_log WHERE action='algo.slice' "
+                    "AND target LIKE ?", (f"{algo_id}:%",))
+            except Exception:  # noqa: BLE001
+                return 0
+            total = 0
+            for r in rows or []:
+                try:
+                    total += int((json.loads(r.get("params_json") or "{}") or {})
+                                 .get("volume") or 0)
+                except (ValueError, TypeError, json.JSONDecodeError):
+                    continue
+            return total
 
         _replay_algos()
         # 4.7 A2 委托对账核销：启动后立即对账一次，并定时巡检
@@ -408,6 +435,25 @@ def create_app() -> FastAPI:
         # 6. P1 模拟盘引擎（基于实时行情盯市，独立于真实券商）
         from paper.paper_engine import PaperEngine
         state.paper_engine = PaperEngine().init(state.db)
+
+        # P1-7：为模拟盘注入「昨收」数据源（取 sync 引擎最新真实行情 preClose），
+        # 支撑模拟盘委托价涨跌停校验；取不到则引擎侧跳过校验并标注 limit_check="skipped"。
+        def _paper_ref_close(code: str):
+            se = state.sync_engine
+            if se is None:
+                return None
+            q = (getattr(se, "latest_quotes", None) or {}).get(code.upper())
+            if not isinstance(q, dict):
+                return None
+            for k in ("preClose", "lastClose", "prevClose"):
+                v = q.get(k)
+                if v:
+                    try:
+                        return float(v)
+                    except (TypeError, ValueError):
+                        pass
+            return None
+        state.paper_engine.set_ref_close_provider(_paper_ref_close)
         log.info("paper trading engine ready")
 
         # 6.5 P0 策略运行容器：把生成的策略当作实盘/模拟机器人运行（进程内异步循环）

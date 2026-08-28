@@ -20,11 +20,12 @@ log = logging.getLogger("qmt_work")
 class AlgoEngine:
     """算法单引擎（TWAP/VWAP，事件循环内执行）。"""
 
-    def __init__(self, manager, risk=None, on_event=None, wal=None):
+    def __init__(self, manager, risk=None, on_event=None, wal=None, notifier=None):
         self._manager = manager
         self._risk = risk
         self._on_event = on_event
         self._wal = wal
+        self._notifier = notifier  # P1-8：欠量完成等告警推送
         self._jobs: dict[str, dict] = {}
         # 阶段 2：任务句柄托管——submit 创建的 _run 任务全部登记，stop() 统一取消清理
         self._tasks: dict[str, asyncio.Task] = {}
@@ -51,7 +52,8 @@ class AlgoEngine:
     async def submit(self, code: str, direction: str, volume: int, algo: str = "twap",
                      duration: int = 300, slices: int = 5, price_type: str = "market",
                      limit_price: float = 0.0, remark: str = "",
-                     visible_pct: float = 10.0, participation_rate: float = 0.1) -> dict:
+                     visible_pct: float = 10.0, participation_rate: float = 0.1,
+                     already_sent: int = 0, conn_id: str = "") -> dict:
         code = (code or "").strip().upper()
         if not code:
             raise ValueError("代码不能为空")
@@ -68,22 +70,37 @@ class AlgoEngine:
         duration = max(10, int(duration))
         visible_pct = max(1.0, min(float(visible_pct), 100.0))
         participation_rate = max(0.01, min(float(participation_rate), 1.0))
+        # P0-3：WAL/审计重放时扣减已发量（保守口径用「已发 volume」，而非 filled），
+        # 避免重启后把已发/已成交的量再次拆单 → 算法单超额下单。
+        remaining = volume - max(0, int(already_sent))
         aid = self._next_id()
         job = {
-            "algo_id": aid, "code": code, "direction": direction, "volume": volume,
-            "algo": algo, "duration": duration, "slices": slices,
+            "algo_id": aid, "code": code, "direction": direction,
+            "volume": remaining, "algo": algo, "duration": duration, "slices": slices,
             "price_type": price_type, "limit_price": limit_price, "remark": remark,
             "visible_pct": visible_pct, "participation_rate": participation_rate,
             "status": "pending", "done": 0, "error": "",
             "slices_done": 0, "created": time.strftime("%H:%M:%S"),
-            "children": deque(maxlen=200),
+            "children": deque(maxlen=200), "conn_id": conn_id,
         }
         self._jobs[aid] = job
+        if remaining <= 0:
+            # 已发量已 ≥ 目标：仅登记终态，绝不重新拆单下发（防超额）。
+            job["status"] = "done"
+            job["done"] = volume
+            job["error"] = "WAL 重放：已发量≥目标量，无需重新下发"
+            self._wal_append("create", aid, job)
+            self._wal_append("final", aid, {"status": "done",
+                                            "done": job["done"],
+                                            "slices_done": job["slices_done"]})
+            return {"algo_id": aid, "status": "done",
+                    "already_sent": already_sent, "remaining": 0}
         self._wal_append("create", aid, job)
         self._tasks[aid] = asyncio.create_task(self._run(aid))  # 阶段 2：任务句柄托管
         return {"algo_id": aid, "status": "pending",
                 "algo": algo, "visible_pct": visible_pct,
-                "participation_rate": participation_rate}
+                "participation_rate": participation_rate,
+                "already_sent": already_sent, "remaining": remaining}
 
     # ---------------- 控制 ----------------
     def pause(self, algo_id: str) -> dict:
@@ -159,7 +176,13 @@ class AlgoEngine:
             elif algo == "pov":
                 await self._run_pov(aid)
             elif algo == "vwap":
-                # VWAP：按成交量分布加权拆单；有真实分时量分布用 profile，否则降级 U 型并标注来源
+                # VWAP：按成交量分布加权拆单。P1-1：_run 启动时经真实分钟线聚合目标时段
+                # 成交量分布生成 volume_profile（接入真实分时量，非启发式）；取数失败保持
+                # 启发式 U 型降级并在 vwap_source 标注。
+                if not job.get("volume_profile"):
+                    prof = await self._build_volume_profile(job)
+                    if prof:
+                        job["volume_profile"] = prof
                 plan, vwap_source = self._plan_vwap(
                     job["volume"], job["slices"], job.get("volume_profile"))
                 job["vwap_source"] = vwap_source
@@ -168,6 +191,10 @@ class AlgoEngine:
                 await self._run_twap(aid)
             if job["status"] not in ("canceled", "done"):
                 job["status"] = "done"
+            # P1-8：终态欠量（done < 目标）→ 推送告警，避免算法单静默欠量。
+            if job["status"] in ("done", "failed") and job["done"] < job["volume"]:
+                gap_v = max(0, job["volume"] - job["done"])
+                self._notify_shortfall(aid, job, gap_v)
             self._wal_append("final", aid, {"status": job["status"],
                                             "done": job["done"],
                                             "slices_done": job["slices_done"]})
@@ -179,6 +206,51 @@ class AlgoEngine:
             job["error"] = str(exc)
             self._wal_append("final", aid, {"status": "failed", "error": str(exc)})
             log.warning("algo %s failed: %s", aid, exc)
+
+    async def _build_volume_profile(self, job: dict) -> list[float] | None:
+        """P1-1：经真实分钟线聚合目标时段成交量分布，生成 volume_profile。
+
+        取最近 N 根 1m K 线的成交量，线性分桶为 slices 份（顺序紧跟盘中时间），
+        供 _plan_vwap 按真实分布加权拆单。取数失败/数据不足返回 None（调用方降级 U 型）。
+        """
+        slices = max(1, int(job.get("slices") or 5))
+        try:
+            from tools import fetch_kline_cached
+            res = await fetch_kline_cached(job["code"], "1m", count=max(slices * 6, 30),
+                                           broker_id=job.get("conn_id") or None)
+            bars = (res or {}).get("bars") or []
+            if len(bars) < slices:
+                return None
+            vols = [max(0.0, float(b.get("volume") or 0.0)) for b in bars]
+            n = len(vols)
+            if sum(vols) <= 0:
+                return None
+            buckets = [0.0] * slices
+            for i, v in enumerate(vols):
+                buckets[min(slices - 1, i * slices // n)] += v
+            if sum(buckets) <= 0:
+                return None
+            return buckets
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _notify_shortfall(self, aid: str, job: dict, gap_v: int) -> None:
+        """P1-8：算法单欠量完成告警（事件 + 可选 notifier）。"""
+        try:
+            self._emit({"type": "algo_alert", "data": {
+                "algo_id": aid, "code": job.get("code"), "direction": job.get("direction"),
+                "target": job.get("volume"), "done": job.get("done"),
+                "gap": gap_v,
+                "message": f"算法单欠量完成：目标 {job.get('volume')}，"
+                           f"实际成交 {job.get('done')}，差 {gap_v} 股"}})
+        except Exception:  # noqa: BLE001
+            pass
+        if self._notifier is not None:
+            try:
+                self._notifier(f"算法单 {aid} 欠量完成：目标 {job.get('volume')}，"
+                               f"实际成交 {job.get('done')}，差 {gap_v} 股")
+            except Exception:  # noqa: BLE001
+                pass
 
     @staticmethod
     def _plan_slices(volume: int, slices: int) -> list[int]:
@@ -245,18 +317,24 @@ class AlgoEngine:
         job = self._jobs[aid]
         if plan is None:
             plan = self._plan_slices(job["volume"], job["slices"])
+        plan = list(plan)
         gap = max(0.5, job["duration"] / max(1, len(plan)))
-        for i, vol in enumerate(plan):
+        for i in range(len(plan)):
             if job["status"] == "canceled":
                 break
             while job["status"] == "paused":
                 await asyncio.sleep(0.5)
             if job["status"] == "canceled":
                 break
+            vol = plan[i]
             if vol <= 0:
                 continue
-            await self._place_slice(aid, i + 1, vol)
+            filled = await self._place_slice(aid, i + 1, vol)
             job["slices_done"] = i + 1
+            # P1-8：本片未完全成交 → 剩余量并入下一片（TWAP 补量），避免静默欠量。
+            unfilled = max(0, int(vol) - int(filled))
+            if unfilled > 0 and i < len(plan) - 1:
+                plan[i + 1] += unfilled
             if i < len(plan) - 1:
                 await asyncio.sleep(gap)
 
@@ -330,8 +408,19 @@ class AlgoEngine:
             return intended
         if not hasattr(b.gateway, "get_orders"):
             return intended  # 适配器未实现委托查询：无法确认，保守降级
+        # P1-8：确认窗口可配置（默认 3s / 5 次），运行时经 runtime_config 热更新。
+        retries = 3
+        window = 1.0
+        try:
+            from app import state as _st
+            if getattr(_st, "runtime_config", None) is not None:
+                window = float(_st.runtime_config.get("algo.confirm_timeout") or 3.0)
+                retries = max(1, int(_st.runtime_config.get("algo.confirm_retries") or 5))
+        except Exception:  # noqa: BLE001
+            retries, window = 3, 1.0
+        per = max(0.05, window / max(1, retries))
         last_filled = 0
-        for _ in range(3):
+        for _ in range(retries):
             try:
                 rows = await b.call(b.gateway.get_orders) or []
             except Exception:  # noqa: BLE001  查询本身失败（非「无成交」）→ 降级全额
@@ -342,12 +431,21 @@ class AlgoEngine:
                                      or o.get("filled_volume") or 0)
                     if last_filled > 0:
                         return last_filled
-            await asyncio.sleep(0.3)
+            await asyncio.sleep(per)
         return last_filled  # 未成交（0）——以真实成交回报为准
 
-    async def _place_slice(self, aid: str, idx: int, vol: int) -> None:
+    async def _place_slice(self, aid: str, idx: int, vol: int) -> int:
+        """下发第 idx 片的量，返回该片实际成交数（filled）。
+
+        P1-8：按作业 conn_id 指定连接（多账户网格下避免用错账户）；缺省回落活跃连接。
+        """
         job = self._jobs[aid]
-        b = self._manager.active_bridge()
+        # P1-8：优先用作业指定连接
+        b = None
+        if job.get("conn_id"):
+            b = self._manager.bridge(job["conn_id"])
+        if b is None:
+            b = self._manager.active_bridge()
         if b is None:
             raise BrokerError("未连接券商客户端")
         price_type = job["price_type"]
@@ -366,23 +464,33 @@ class AlgoEngine:
             res = await state.signal_router.submit(
                 job["code"], job["direction"], vol, price, price_type,
                 source=f"algo_{job['algo']}", remark=job.get("remark", ""),
-                auto_confirm=True)
+                broker_id=job.get("conn_id") or "", auto_confirm=True)
             # 真实成交而非假设全额：查委托确认 filled，冰山/POV 据此推进，避免超额下发
             filled = await self._confirm_fill(b, res.get("order_id"), vol)
+            # P1-8：限价片确认窗口内未成交 → 撤单并把剩余量并入下一片（调用方根据返回推进），
+            # 避免挂单占用资金/额度、静默欠量。
+            if filled <= 0 and price_type == "limit" and res.get("order_id"):
+                try:
+                    if hasattr(b.gateway, "cancel_order"):
+                        await b.call(b.gateway.cancel_order, res["order_id"])
+                except Exception:  # noqa: BLE001
+                    pass
             job["done"] += filled
             child = {"idx": idx, "order_id": res.get("order_id"), "volume": vol,
                      "filled": filled, "price_type": price_type, "price": price,
                      "ts": time.strftime("%H:%M:%S")}
             job["children"].append(child)
             self._emit({"type": "algo_slice", "data": {"algo_id": aid, **child}})
-            from app.state import state
-            if state.db is not None:
+            from app.state import state as _st
+            if _st.db is not None:
                 try:
-                    state.db.audit("algo", "algo.slice", f"{aid}:{job['code']}",
-                                   {"idx": idx, "volume": vol, "filled": filled, "price": price,
-                                    "order_id": res.get("order_id")}, "ok")
+                    _st.db.audit("algo", "algo.slice", f"{aid}:{job['code']}",
+                                 {"idx": idx, "volume": vol, "filled": filled,
+                                  "price": price, "order_id": res.get("order_id"),
+                                  "conn_id": job.get("conn_id") or ""}, "ok")
                 except Exception:  # noqa: BLE001
                     pass
+            return int(filled)
         except BrokerError as exc:
             job["error"] = f"第{idx}片失败：{exc}"
             raise

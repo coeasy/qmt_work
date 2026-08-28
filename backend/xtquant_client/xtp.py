@@ -15,7 +15,8 @@ import sys
 import threading
 from datetime import datetime
 
-from .base import BrokerAdapter, BrokerNotConnectedError, BrokerSDKError
+from .base import (BrokerAdapter, BrokerError, BrokerNotConnectedError,
+                   BrokerSDKError)
 
 log = logging.getLogger("qmt_work")
 
@@ -191,6 +192,20 @@ def _resolve_xtquant_path(client_path: str) -> str | None:
 
 def _load_xtquant_from(site_packages: str) -> None:
     """把客户端自带 xtquant 注入 sys.path / PATH，并验证可导入（失败抛原异常）。"""
+    # 关键顺序：在注入客户端 site-packages 之前，先从「当前运行时」加载并缓存
+    # 科学栈依赖（numpy/pytz/dateutil/pandas...）。
+    # 客户端 site-packages 常捆绑按客户端内嵌 Python 编译的旧版本——numpy 1.19.1
+    # 与桥接运行时 ABI 不兼容，pytz ~2020 用了 Python3.10 已删的 collections.Mapping，
+    # pandas._libs 编译扩展在新解释器上根本加载不了；若让它们抢占 sys.path[0]，
+    # xtdata.get_market_data_ex 内部 `import pandas` -> get_kline/get_market_data 直接崩。
+    # 提前 import 使其进入 sys.modules 缓存，xtdata 后续 `import X` 复用运行时版本，
+    # 客户端捆绑的坏版本被完全屏蔽（桥接跨进程 JSON 序列化，不会把 DataFrame 传回主端，
+    # 因此屏蔽是安全且更优的）。运行时未提供某包时静默跳过，回退客户端自带。
+    for _mod in ("numpy", "pytz", "dateutil", "pandas"):
+        try:
+            __import__(_mod)  # noqa: F401
+        except ImportError:  # noqa: BLE001  运行时缺失时静默，回退客户端自带
+            pass
     if site_packages and site_packages not in sys.path:
         sys.path.insert(0, site_packages)
     # 客户端 bin 目录加入 PATH（xtquant 依赖其下 dll）
@@ -264,8 +279,9 @@ def probe_environment(client_path: str, light: bool = False) -> dict:
                    else "（主后端 ABI 不兼容，将经桥接子进程加载；点击候选后可探测）"))
         else:
             result["xtquant_importable"] = False
-            result["hint"] = ("未找到 xtquant 目录：请确认 client_path 指向 userdata_mini 目录"
-                              "（或其上层为客户端根，含 bin.x64）")
+            result["hint"] = ("未找到 xtquant 目录：请确认 client_path 指向客户端数据目录"
+                              "（极速版 MiniQMT 为 userdata_mini，完整版大客户端为 userdata；"
+                              "或其上层为客户端根，含 bin.x64）")
         return result
     if sp:
         if abi_compatible:
@@ -299,8 +315,9 @@ def probe_environment(client_path: str, light: bool = False) -> dict:
                 f"将尝试通过桥接子进程加载（优先使用系统已安装的 Python 3.11 等；"
                 f"无则需安装 Python {hi//100}.{hi%100} 到 PATH）")
     else:
-        result["hint"] = ("未找到 xtquant 目录：请确认 client_path 指向 userdata_mini 目录"
-                          "（或其上层为客户端根，含 bin.x64）")
+        result["hint"] = ("未找到 xtquant 目录：请确认 client_path 指向客户端数据目录"
+                          "（极速版 MiniQMT 为 userdata_mini，完整版大客户端为 userdata；"
+                          "或其上层为客户端根，含 bin.x64）")
     # P0：ABI 运行时方案（进程内直连 / 桥接子进程）+ 可操作提示
     try:
         from .runtime import host_python_minor, xtp_runtime_plan, discover_system_runtimes
@@ -612,7 +629,9 @@ def _probe_quote_service(client_path: str) -> dict:
         elif "xtitclient" in proc or "xtclient" in proc or "itclient" in proc:
             res["trade_ports"].append(port)
 
-    # 4) 客户端进程检测：大窗口 / 小窗口分别识别（含未监听端口的运行中进程）
+    # 4) 客户端进程检测：大窗口 / 小窗口分别识别（含未监听端口的运行中进程），
+    #    并记录实际启动的 exe 名（供 auto 模式按「用户启动了哪个 exe」判断）。
+    res["running_exes"] = []   # 实际运行的客户端主程序名，如 XtItClient.exe / XtMiniQmt.exe
     try:
         import subprocess
         if os.name == "nt":
@@ -621,6 +640,12 @@ def _probe_quote_service(client_path: str) -> dict:
                 timeout=8, errors="ignore",
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout or ""
             low = out.lower()
+            res["running_exes"] = sorted({
+                ln.split(",")[0].strip('"') for ln in out.splitlines()
+                if any(k in ln.lower() for k in (
+                    "xtitclient", "xtclient", "xtmini",
+                    "xtminiqmt", "miniqmt", "miniquote", "xtminiqt",
+                    "xtquant", "xtmonitor"))})
             res["full_client_running"] = any(
                 exe in low for exe in ("xtitclient.exe", "xtclient.exe"))
             res["mini_client_running"] = any(
@@ -642,6 +667,203 @@ def _probe_quote_service(client_path: str) -> dict:
         else "mini" if res["mini_client_running"] else "none")
     res["quote_service_ok"] = bool(res["quote_ports"])
     return res
+
+
+# 各模式客户端主程序 exe（bin.x64 下按优先级匹配；覆盖各券商白标命名）
+_FULL_EXE_NAMES = ("XtItClient.exe", "XtClient.exe", "XtMini.exe")
+_MINI_EXE_NAMES = ("XtMiniQmt.exe", "MiniQmt.exe", "XtMiniQt.exe")
+_QUOTE_EXE_NAMES = ("miniquote.exe",)
+
+
+def _running_client_exes() -> list:
+    """轻量探测本机正在运行的 QMT 相关进程名（best-effort，失败返回 []）。"""
+    try:
+        import subprocess
+        if os.name != "nt":
+            return []
+        out = subprocess.run(
+            ["tasklist", "/FO", "CSV"], capture_output=True, text=True,
+            timeout=6, errors="ignore",
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout or ""
+        return sorted({
+            ln.split(",")[0].strip('"') for ln in out.splitlines()
+            if any(k in ln.lower() for k in (
+                "xtitclient", "xtclient", "xtmini", "xtminiqmt",
+                "miniqmt", "miniquote", "xtmonitor"))})
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _latest_login_log(trade_dir: str) -> str:
+    """从客户端交易日志中提取最近一次“登录成功”记录（best-effort）。"""
+    try:
+        log_dir = os.path.join(trade_dir, "log")
+        if not os.path.isdir(log_dir):
+            return ""
+        logs = [f for f in os.listdir(log_dir)
+                if f.startswith("XtClient_") and f.endswith(".log")]
+        if not logs:
+            return ""
+        # 优先取“主连接日志”(XtClient_YYYYMMDD.log，纯日期、无附加后缀)，
+        # 避免选中 FormulaOutput / Debug / PerformanceFile / Message 等辅助日志。
+        import re as _re
+        _date = _re.compile(r"^XtClient_\d{8}\.log$").match
+        _pool = [f for f in logs if _date(f)] or logs
+        newest = max(_pool,
+                     key=lambda f: os.path.getmtime(os.path.join(log_dir, f)))
+        data = open(os.path.join(log_dir, newest), "rb").read()
+        txt = data.decode("gb18030", errors="ignore")
+        # 交易登录成功在主日志里的标记词
+        hits = [ln.strip() for ln in txt.splitlines()
+                if ("LoginSuccess" in ln or "登录成功" in ln)][-1:]
+        return f"{newest}: {hits[0][-90:] if hits else '未找到登录成功记录'}"
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _find_client_exe(root: str, names: tuple[str, ...]) -> str | None:
+    """在客户端根（或其 bin.* 子目录）下定位指定 exe（忽略大小写）。"""
+    if not root or not os.path.isdir(root):
+        return None
+    want = {n.lower() for n in names}
+    search_dirs = [root]
+    try:
+        for ent in os.listdir(root):
+            if ent.lower() in ("bin.x64", "bin", "bin32", "bin_x64", "bin_x32"):
+                search_dirs.append(os.path.join(root, ent))
+    except OSError:
+        pass
+    for d in search_dirs:
+        if not os.path.isdir(d):
+            continue
+        try:
+            for ent in os.listdir(d):
+                if ent.lower() in want:
+                    p = os.path.join(d, ent)
+                    if os.path.isfile(p):
+                        return p
+        except OSError:
+            continue
+    return None
+
+
+def launch_client(client_path: str, mode: str = "full") -> dict:
+    """按模式启动 QMT 客户端主程序（GUI，保留窗口）。
+
+    mode：
+      - "full"  -> 完整版大客户端 XtItClient.exe（交易+行情一体，数据目录 userdata）
+      - "mini"  -> 极速版 XtMiniQmt.exe（MiniQMT，数据目录 userdata_mini）
+      - "quote" -> 独立行情小窗口 miniquote.exe（为完整版补齐 58610 行情服务）
+    已运行则不重复启动。返回结构化结果 {launched, already_running, exe, hint}。
+    """
+    names = (_FULL_EXE_NAMES if mode == "full"
+             else _MINI_EXE_NAMES if mode == "mini"
+             else _QUOTE_EXE_NAMES)
+    try:
+        roots = _candidate_roots(client_path or "")
+    except Exception:  # noqa: BLE001
+        roots = []
+    root = roots[0] if roots else (_normalize(client_path) if client_path else "")
+    exe = _find_client_exe(root, names) if root else None
+    if not exe:
+        return {"launched": False, "already_running": False, "exe": "",
+                "hint": f"未在 {root or client_path or '客户端根'} 找到"
+                        f"{'/'.join(names)}（请先安装对应模式的 QMT 客户端）"}
+    # 已运行：直接返回，避免重复拉起多个实例
+    try:
+        probe = _probe_quote_service(client_path)
+        if mode == "full" and probe.get("full_client_running"):
+            return {"launched": False, "already_running": True, "exe": exe,
+                    "hint": f"完整版大客户端已在运行（{probe.get('running_exes')}）"}
+        if mode in ("mini", "quote") and probe.get("mini_client_running"):
+            return {"launched": False, "already_running": True, "exe": exe,
+                    "hint": "极速版/独立行情已在运行"}
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        import subprocess
+        kwargs = {"cwd": os.path.dirname(exe)}
+        if os.name == "nt":
+            kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        subprocess.Popen([exe], **kwargs)  # noqa: S603  GUI 客户端，保留窗口
+    except Exception as exc:  # noqa: BLE001
+        return {"launched": False, "already_running": False, "exe": exe,
+                "hint": f"启动失败：{exc}"}
+    return {"launched": True, "already_running": False, "exe": exe,
+            "hint": f"已启动 {os.path.basename(exe)}，请在弹出的窗口中完成登录后重试连接。"}
+
+
+def _effective_trade_dir(client_path: str, mode: str = "auto") -> tuple[str, str]:
+    """解析 XtQuantTrader 实际使用的数据目录（区分极速版 / 完整版大客户端）。
+
+    迅投 QMT 两种启动模式的数据目录不同：
+      - 极速版（XtMiniQmt / miniquote，MiniQMT）：userdata_mini
+      - 完整版大客户端（XtItClient，普通模式）：userdata
+    行情侧（xtdata，端口 58610）两种模式共用、与此无关；但交易侧 XtQuantTrader
+    必须指向正确的数据目录——这是「完整版大客户端连接不上」的根因之一（配了
+    userdata_mini 而实际跑大客户端，或反之）。
+
+    解析规则：
+      - mode="mini"：强制 <根>/userdata_mini（存在才用，否则原样返回交由上层报错）
+      - mode="full"：强制 <根>/userdata
+      - mode="auto"（默认）：按「实际运行场景 + client_path 后缀 + 目录存在性」推断——
+        1) client_path 已明确带 userdata_mini / userdata 后缀 → 直接按后缀；
+        2) 否则探测本机运行中的客户端（_probe_quote_service 的 client_type）：
+           mini 在跑→极速版、full 在跑→完整版、both→优先极速版（行情+交易一体）；
+        3) 仍不确定 → 按目录存在性：userdata_mini 优先，其次 userdata。
+    返回 (trade_dir, resolved_mode)；找不到任何存在目录时回退原始 client_path
+    （由连接流程给出明确的「目录不存在」错误）。
+    """
+    if not client_path:
+        return client_path, (mode or "auto")
+    try:
+        roots = _candidate_roots(client_path)
+    except Exception:  # noqa: BLE001
+        roots = []
+    base = roots[0] if roots else _normalize(client_path)
+    mini_dir = os.path.join(base, "userdata_mini")
+    full_dir = os.path.join(base, "userdata")
+    has_mini = mini_dir if os.path.isdir(mini_dir) else ""
+    has_full = full_dir if os.path.isdir(full_dir) else ""
+    cp_low = _normalize(client_path).lower()
+    suffix = ""
+    if cp_low.endswith("userdata_mini"):
+        suffix = "mini"
+    elif cp_low.endswith("userdata"):
+        suffix = "full"
+    m = (mode or "auto").lower()
+    if m == "mini":
+        return (has_mini or client_path), "mini"
+    if m == "full":
+        return (has_full or client_path), "full"
+    # auto：后缀优先
+    if suffix == "mini" and has_mini:
+        return has_mini, "mini"
+    if suffix == "full" and has_full:
+        return has_full, "full"
+    # auto：按运行场景推断（纯诊断探测，无副作用）
+    #
+    # 关键：大客户端 XtItClient（userdata）+ 独立行情 miniquote（userdata_mini）可**同时运行**
+    # （client_type="both"，交易 58600 + 行情 58610 双端口就绪）。此时交易侧必须走完整版
+    # userdata 才能读写真实账户/持仓；配成 userdata_mini 会「行情正常但交易取不到数据」。
+    # 因此 both / full 一律优先 userdata（完整版），仅 mini 独跑时才选 userdata_mini。
+    try:
+        probe = _probe_quote_service(client_path)
+        ctype = probe.get("client_type")
+        if ctype in ("full", "both") and has_full:
+            return has_full, "full"
+        if ctype == "mini" and has_mini:
+            return has_mini, "mini"
+        # none：落到目录存在性（下面处理）
+    except Exception:  # noqa: BLE001
+        pass
+    # 目录存在性：完整版 userdata 优先于极速版 userdata_mini
+    # （多数券商默认主数据目录是 userdata；仅 userdata_mini 专属时选它）
+    if has_mini and not has_full:
+        return has_mini, "mini"
+    if has_full:
+        return has_full, "full"
+    return client_path, "auto"
 
 
 
@@ -714,8 +936,11 @@ class XTPQuantAdapter(BrokerAdapter):
     """迅投 XTQuant 真实适配器。"""
 
     def __init__(self, client_path: str, account_id: str, account_type: str = "STOCK",
-                 session_id: int = 0, min_version: str = ""):
+                 session_id: int = 0, min_version: str = "", client_mode: str = "auto"):
         self.client_path = client_path
+        # 客户端连接模式：auto（自动推断）/ mini（极速版 MiniQMT，userdata_mini）/
+        # full（完整版大客户端，userdata）。决定交易侧 XtQuantTrader 使用的数据目录。
+        self._client_mode = (client_mode or "auto").lower()
         self._account_id = account_id
         self._account_type = (account_type or "STOCK").upper()
         self.session_id = int(session_id or 0)
@@ -808,7 +1033,8 @@ class XTPQuantAdapter(BrokerAdapter):
             raise BrokerSDKError(
                 "xtquant",
                 "未找到 xtquant：已自动在客户端目录（bin.x64\\Lib\\site-packages）搜索失败，"
-                "请确认「券商连接」填写的 client_path 是 userdata_mini 目录且客户端已安装登录，"
+                "请确认「券商连接」填写的 client_path 指向客户端数据目录"
+                "（极速版 userdata_mini / 完整版 userdata）且客户端已安装登录，"
                 "或手动 pip install xtquant") from exc
 
         self._xtdata = xtdata
@@ -906,12 +1132,20 @@ class XTPQuantAdapter(BrokerAdapter):
                         steps = (
                             "1) 打开并登录 QMT 客户端（极速/普通模式均可），保持客户端运行；\n"
                             "2) 确认客户端能正常显示行情；\n"
-                            "3) 确认「客户端路径」指向 userdata_mini 目录。")
+                            "3) 确认「客户端路径」与「客户端模式」匹配（极速版 userdata_mini / 完整版 userdata）。")
                 raise BrokerNotConnectedError(
                     f"行情服务连接失败（{scene}，SDK 返回：{xtdata_detail}）。\n"
                     f"请按顺序排查：\n{steps}\n{_probe_diag}")
             self._connected = True
             return
+
+        # 交易数据目录：按客户端模式解析（极速版 userdata_mini / 完整版 userdata）。
+        # 行情侧 xtdata 走固定 58610，与此无关；但 XtQuantTrader 必须指向正确的数据目录，
+        # 否则「完整版大客户端配了 userdata_mini」会连不上交易（反之亦然）。
+        trade_dir, resolved_mode = _effective_trade_dir(self.client_path, self._client_mode)
+        if resolved_mode in ("mini", "full"):
+            log.info("XtQuantTrader 交易目录按客户端模式解析：%s -> %s（模式 %s）",
+                     self.client_path, trade_dir, resolved_mode)
 
         try:
             # session 占用规避：连接失败时递增 session_id 重试（0..5），
@@ -928,7 +1162,7 @@ class XTPQuantAdapter(BrokerAdapter):
             last_err = ""
             for attempt in range(6):
                 sid = self.session_id + attempt
-                t = XtQuantTrader(self.client_path, sid)
+                t = XtQuantTrader(trade_dir, sid)
                 rc = t.start()
                 if rc is not None and rc != 0:
                     last_err = f"start rc={rc}"
@@ -945,14 +1179,25 @@ class XTPQuantAdapter(BrokerAdapter):
                 except Exception:  # noqa: BLE001
                     pass
             if trader is None:
+                _exe_procs = _running_client_exes()
+                _login_log = _latest_login_log(trade_dir)
                 raise BrokerNotConnectedError(
                     f"交易连接失败（已尝试 session_id {self.session_id}~"
-                    f"{self.session_id + 5}，最后 {last_err}）。请按顺序排查：\n"
-                    f"1) 打开并登录 QMT 客户端，保持运行；\n"
-                    f"2) 确认「客户端路径」指向 userdata_mini 目录；\n"
-                    f"3) 关闭占用同一账号/session 的其他程序，或手动指定其他 "
-                    f"session_id；\n"
-                    f"4) 确认该资金账号已在客户端登录且账户类型匹配。")
+                    f"{self.session_id + 5}，最后 {last_err}）。"
+                    f"已按序排查：客户端运行（{_exe_procs or '未检测到'}）、路径"
+                    f"({trade_dir} @{resolved_mode})、session 均已正确，仍被拒绝。\n"
+                    f"### 常见且应优先核对的根因：程序化交易权限\n"
+                    f"若客户端日志出现 `COrderServiceQuantAdaptor::onConnected ... "
+                    f"illegal pid`，说明客户端把本程序判定为非法外部进程并拒绝连接，"
+                    f"通常是【资金账号未开通 QMT 「程序化交易 / 策略交易权限」】。\n"
+                    f"手动在客户端界面可下单、但 API 连不上，几乎都是这个原因。请：\n"
+                    f"  a) 联系开户券商/营业部，为账号 开通「程序化交易 / 策略交易权限」"
+                    f"（仅勾选「基础交易权限」无法使用 XtQuant 外部 API）；\n"
+                    f"  b) 部分券商模拟（仿真）账户可改走【极简模式 MiniQMT】"
+                    f"(userdata_mini) 通道，无需额外权限，可联系券商确认；\n"
+                    f"  c) 若确已开通仍失败，再核对客户端是否以极简模式登录、"
+                    f"客户端路径/模式是否匹配，以及是否存在其他进程占用同一账号/session。"
+                    f"（客户端登录时间 日志 {_login_log}）")
             if self._account_type not in _acc_classes:
                 raise BrokerNotConnectedError(
                     f"该客户端不支持账户类型 {self._account_type}（支持：{sorted(_acc_classes)}）")
@@ -1178,14 +1423,26 @@ class XTPQuantAdapter(BrokerAdapter):
         return diag
 
     def close(self) -> None:
+        had_trader = self._trader is not None
+        trader = self._trader
+        # 阶段 0-A（C10）：先标记断开，再释放 trader 与映射，避免回调/竞态复用已停用句柄。
         self._connected = False
-        # 阶段 0-A（C10）：清空 trader 与映射，避免对已 stop 的 trader 继续调用
+        if trader is not None:
+            try:
+                # 释放交易会话与端口。原实现仅把指针置 None，不调 stop()——
+                # 反复连接/断开会累计残留 session/监听端口，最终同账号会话被占满，
+                # 后续连接报「session 被占用」，表现为「连接不上 QMT」。
+                trader.stop()
+            except Exception:  # noqa: BLE001
+                pass
         with self._map_lock:
             self._seq_to_oid.clear()
             self._oid_to_seq.clear()
             self._pending_resp.clear()
         self._trader = None
         self._acc = None
+        if had_trader:
+            log.info("XTPQuantAdapter closed (session_id=%s)", self.session_id)
 
     def is_connected(self) -> bool:
         return self._connected
@@ -1202,8 +1459,25 @@ class XTPQuantAdapter(BrokerAdapter):
     def get_full_tick(self, codes: list[str]) -> dict:
         if self._xtdata is None:
             raise BrokerSDKError("xtquant", "pip install xtquant")
-        raw = self._xtdata.get_full_tick(list(codes)) or {}
-        return {c: self._norm_quote(c, t) for c, t in raw.items()}
+        try:
+            raw = self._xtdata.get_full_tick(list(codes)) or {}
+        except Exception as exc:  # noqa: BLE001
+            # 行情服务未认证 / 非交易时段 / 客户端未订阅代码时，xtquant 的
+            # get_full_tick 可能抛 JSONDecodeError（内部把错误当响应解析）或
+            # 其它 SDK 异常。此时不应向上抛协议级错误（会被桥接包装成含糊的
+            # "Expecting value: 连接异常"），而应返回空行情，由调用方给出
+            # 「客户端已连但行情未就绪」的明确诊断。
+            log.warning("get_full_tick 异常（cast 未认证/非交易时段?）：%s: %s",
+                        type(exc).__name__, exc)
+            return {}
+        if not isinstance(raw, dict):
+            return {}
+        out = {}
+        for c in list(codes):
+            t = raw.get(c)
+            if t and isinstance(t, dict):
+                out[c] = self._norm_quote(c, t)
+        return out
 
     def _norm_quote(self, code: str, tick: dict) -> dict:
         def _lst(v, i):
@@ -1245,6 +1519,44 @@ class XTPQuantAdapter(BrokerAdapter):
             "exchange": d.get("exchange_id"),
         }
 
+    def _kline_lookback_days(self, period: str, count: int) -> int:
+        """K 线 count 换算成回看日历天数，供下载预热窗口使用（含缓冲）。"""
+        need = {
+            "1m": count // 240, "5m": count // 48, "15m": count // 16,
+            "30m": count // 8, "1h": count // 4, "1d": count,
+            "1w": count * 7, "1mon": count * 30,
+        }.get(period, count * 2)
+        return max(need + 2, 1)
+
+    def _warm_kline_cache(self, code: str, period: str, count: int,
+                          start: str, end: str) -> bool:
+        """本地缓存无数据（行情服务离线/未预热）时用 download_history_data 预热。
+
+        仅在 get_kline 空结果时触发一次：先下载历史数据到本地缓存，主进程随后
+        重查 get_market_data 即可读到。download 每次都会快速增量（本地已有则复用），
+        典型耗时 ~1s，远低于 RPC 超时（30s），不会阻塞。多版本签名容错。
+        """
+        try:
+            from datetime import timedelta
+            fn = self._xtdata.download_history_data
+            if not start:
+                try:
+                    from datetime import datetime
+                    d0 = datetime.now() - timedelta(days=self._kline_lookback_days(period, count))
+                    start = d0.strftime("%Y%m%d")
+                except Exception:  # noqa: BLE001
+                    start = ""
+            # 多签名兼容：download_history_data(stock_code, period, start, end)
+            # 或 download_history_data(stock_list, period, start, end)
+            try:
+                fn(code, period, start or "", end or "")
+            except TypeError:
+                fn([code], period, start or "", end or "")
+            return True
+        except Exception as exc:  # noqa: BLE001
+            log.warning("get_kline 预热下载失败（忽略）：%s", exc)
+            return False
+
     def get_kline(self, code: str, period: str, count: int,
                   start: str = "", end: str = "") -> list[dict]:
         if self._xtdata is None:
@@ -1253,27 +1565,46 @@ class XTPQuantAdapter(BrokerAdapter):
         # 平台展示用 "60m" 只是别名——必须归一化，否则旧版 get_market_data("60m") 失败。
         period = _normalize_kline_period(period)
         field_list = ["open", "high", "low", "close", "volume", "amount"]
-        try:
-            data = self._xtdata.get_market_data(
-                field_list=field_list, stock_list=[code], period=period,
-                start_time=start or "", end_time=end or "", count=int(count),
-                dividend_type="none", fill_data=True)
-        except Exception as exc:  # noqa: BLE001
-            raise BrokerNotConnectedError(f"K 线获取失败：{exc}") from exc
-        df = (data or {}).get(code)
-        if df is None or len(df) == 0:
+
+        def _fetch() -> dict:
+            try:
+                return self._xtdata.get_market_data(
+                    field_list=field_list, stock_list=[code], period=period,
+                    start_time=start or "", end_time=end or "", count=int(count),
+                    dividend_type="none", fill_data=True)
+            except Exception as exc:  # noqa: BLE001
+                raise BrokerNotConnectedError(f"K 线获取失败：{exc}") from exc
+
+        data = _fetch()
+        # 空结果兜底：本地缓存未就绪（行情服务离线 / 从未下载过该标的）时，首次
+        # get_market_data 恒返回空。自动下载预热并重查一次，避免「非交易时段
+        # 查看历史 K 线恒为空」。download 已就绪时增量很快，重查命中缓存。
+        if not isinstance(data, dict) or not data:
+            if self._warm_kline_cache(code, period, int(count), start, end):
+                data = _fetch()
+        if not isinstance(data, dict) or not data:
             return []
+        # 迅投 get_market_data(field_list=..., stock_list=[...]) 返回
+        # {字段名: DataFrame}——每个 DataFrame 的 index=股票代码、columns=日期。
+        # 注意不是 {code: DataFrame}！旧实现按 data.get(code) 解析永远取不到，
+        # 导致 get_kline 恒返回空条（K 线为空的根因，见阶段排查）。
+        df0 = next(iter(data.values()))
+        if df0 is None or len(df0) == 0:
+            return []
+        dates = list(df0.columns)
         out = []
-        for idx, row in df.iterrows():
-            out.append({
-                "time": str(idx)[:19],
-                "open": self._f(row.get("open")),
-                "high": self._f(row.get("high")),
-                "low": self._f(row.get("low")),
-                "close": self._f(row.get("close")),
-                "volume": self._f(row.get("volume")),
-                "amount": self._f(row.get("amount")),
-            })
+        for dt in dates:
+            bar = {"time": str(dt)[:19]}
+            for fld in field_list:
+                sub = data.get(fld)
+                val = None
+                if sub is not None and code in sub.index and dt in sub.columns:
+                    val = self._f(sub.loc[code, dt])
+                    # NaN 归一为 None，避免 JSON 序列化 nan
+                    if val is not None and val != val:
+                        val = None
+                bar[fld] = val
+            out.append(bar)
         return out
 
     @staticmethod
@@ -1507,6 +1838,12 @@ class XTPQuantAdapter(BrokerAdapter):
                     price: float, volume: int, strategy_name: str = "",
                     remark: str = "") -> dict:
         trader, acc = self._require_trader()
+        # 参数防线（纵深防御，风控层可能被旁路/直调 bridge）：
+        # 限价单 price<=0 会以「价格=0」送出成交灾难，必须先拦。
+        if (price_type or "limit") == "limit" and price <= 0:
+            raise BrokerError("限价单必须提供 >0 的委托价")
+        if not (isinstance(volume, int) or float(volume).is_integer()) or volume <= 0:
+            raise BrokerError("委托数量必须为正整数")
         xtc = _ensure_xtconstant()
         # 阶段 0-A（C9）：信用账户裸常量 CREDIT_BUY/CREDIT_SELL 在部分 xtquant 版本
         # 不存在（AttributeError）。用 getattr 兜底，缺失时回退标准买卖。

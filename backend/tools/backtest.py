@@ -222,14 +222,24 @@ def register_backtest_tools(mcp):
 
     @mcp.tool()
     async def compare_backtests(configs: list[dict], broker_id: str = "") -> dict:
-        """多方案横向对比（§4.7）：一组回测配置 -> 指标矩阵并排。"""
+        """多方案横向对比（§4.7）：一组回测配置 -> 指标矩阵并排。
+
+        P2-4：把每个 config 内的成本与撮合参数（commission_rate/stamp_tax/
+        slippage_bps/execution_timing/enforce_limit）透传给回测引擎，保证
+        跨成本方案对比基准一致、不与默认值混淆。
+        """
         rows = []
         for cfg in configs:
             symbol = cfg.get("symbol", "600519.SH")
             kline = await fetch_kline_async(broker_id, symbol, int(cfg.get("count", 250)))
             res = run_backtest_engine(symbol, kline, cfg.get("strategy", "ma_cross"),
                                       cfg.get("params", {"fast": 5, "slow": 20}),
-                                      float(cfg.get("initial_capital", 100_000)))
+                                      float(cfg.get("initial_capital", 100_000)),
+                                      commission_rate=float(cfg.get("commission_rate", 0.0003)),
+                                      stamp_tax=float(cfg.get("stamp_tax", 0.001)),
+                                      slippage_bps=float(cfg.get("slippage_bps", 5.0)),
+                                      execution_timing=cfg.get("execution_timing", "close"),
+                                      enforce_limit=bool(cfg.get("enforce_limit", True)))
             rows.append({"config": cfg, "metrics": res["metrics"]})
         return {"rows": sorted(rows, key=lambda r: r["metrics"].get("sharpe", 0), reverse=True)}
 
@@ -396,10 +406,14 @@ def run_backtest_vectorized(symbol: str, kline: list[dict], strategy: str,
 def run_param_sweep(symbol: str, kline: list[dict], strategy: str,
                     param_grid: dict, initial_capital: float = 100_000.0,
                     commission_rate: float = 0.0003, stamp_tax: float = 0.001,
-                    slippage_bps: float = 5.0) -> dict:
+                    slippage_bps: float = 5.0,
+                    *, execution_timing: str = "close",
+                    enforce_limit: bool = True) -> dict:
     """参数网格扫描（grid search）：穷举参数组合 -> 指标矩阵 -> 按夏普排序选优。
 
     param_grid 形如 {"fast":[5,10,20], "slow":[20,40]}；返回最优组合与全量网格。
+    P2-4：成本与撮合参数透传（execution_timing/enforce_limit 补上），
+    保证扫描全程基准一致。
     """
     if not param_grid:
         raise ValueError("param_grid 不能为空")
@@ -413,7 +427,9 @@ def run_param_sweep(symbol: str, kline: list[dict], strategy: str,
         try:
             res = run_backtest_vectorized(symbol, kline, strategy, params,
                                           initial_capital, commission_rate,
-                                          stamp_tax, slippage_bps)
+                                          stamp_tax, slippage_bps,
+                                          execution_timing=execution_timing,
+                                          enforce_limit=enforce_limit)
         except (BrokerNotConnectedError, ValueError):
             continue
         m = res["metrics"]

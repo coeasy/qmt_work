@@ -161,13 +161,63 @@ def test_submit_risk_reject_returns_false_not_whitewashed():
 
 # ---------------- F13 失败不粉饰 ----------------
 def test_submit_unconnected_returns_false():
-    """未连接券商 → submit 返回 ok=False（reason 引导去连接页），而非伪装成功。"""
+    """未连接券商（live 模式）→ submit 返回 ok=False（reason 引导去连接页），而非伪装成功。
+
+    P0-1 后默认信号模式为安全的 paper（不再默认 live），故此处显式切到 live
+    以验证「live + 未连接券商」必须拒单。
+    """
     risk = RiskManager(max_amount=1_000_000, min_qty=100)
     sr = SignalRouter(FakeManagerDisconnected(), risk, None, None, None, None)
+    sr.mode = "live"
     res = asyncio.run(sr.submit("600000", "buy", 100, 10.0, "limit",
                                 source="test", auto_confirm=True))
     assert res["ok"] is False
-    assert "未连接" in res["reason"]
+
+
+# ---------------- 市价单风控（price_type 感知，修复伪造 100.0 判额） ----------------
+def test_risk_rejects_limit_order_zero_price():
+    """限价单 price<=0 必须被拒（防「限价单以 0 元送出」灾难）。"""
+    risk = RiskManager(max_amount=1_000_000, min_qty=100)
+    ok, reason = risk.check_order("600000", 0, 100, "buy", "limit")
+    assert ok is False
+    assert "限价单必须提供 >0 的委托价" in reason
+
+
+def test_risk_market_order_no_price_is_rejected():
+    """市价单取不到最新价（无法估算金额）时必须拒绝（P0-4/P1-4），
+    不再「跳过金额闸门放行」——避免无价市价单绕过金额/仓位校验。"""
+    grade = RiskManager(max_amount=1_000_000, min_qty=100)   # 无 price_provider
+    ok, reason = grade.check_order("600000", 0, 100, "buy", "market")
+    assert ok is False
+    assert "无法估算金额与仓位" in reason
+
+
+def test_risk_market_order_with_price_enforces_circuit():
+    """市价单有最新价时：金额/熔断等闸门正常生效，不得因市价而绕过。"""
+    grade = RiskManager(max_amount=1_000_000, min_qty=100)
+    grade.set_price_provider(lambda code: 100.0)             # 提供最新价
+    ok, _ = grade.check_order("600000", 0, 100, "buy", "market")
+    assert ok is True
+    grade.trip("熔断测试")
+    ok2, _ = grade.check_order("600000", 0, 100, "buy", "market")
+    assert ok2 is False                                      # 熔断对市价单同样生效
+
+
+def test_risk_market_order_uses_latest_price_for_amount():
+    """市价单用最新价估算金额判 max_amount（provider 提供最新价时金额闸门生效）。"""
+    risk = RiskManager(max_amount=1000, min_qty=100)
+    risk.set_price_provider(lambda code: 100.0)              # 100 股 → 10000 元 > 1000
+    ok, reason = risk.check_order("600000", 0, 100, "buy", "market")
+    assert ok is False
+    assert "amount" in reason
+
+
+def test_risk_market_order_skips_price_deviation():
+    """市价单不校验价格偏离（成交价未知），即便启用 price_deviation_pct。"""
+    risk = RiskManager(max_amount=1_000_000, min_qty=100, price_deviation_pct=0.1)
+    risk.set_price_provider(lambda code: 100.0)
+    ok, reason = risk.check_order("600000", 0, 100, "buy", "market")
+    assert ok is True
 
 
 # ---------------- F6 引擎收敛到统一入口 ----------------

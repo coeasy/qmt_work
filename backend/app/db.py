@@ -151,6 +151,7 @@ CREATE TABLE IF NOT EXISTS broker_connections (
     name TEXT DEFAULT '',
     broker_id TEXT DEFAULT '',
     client_path TEXT DEFAULT '',
+    client_mode TEXT DEFAULT 'auto',
     account_id TEXT DEFAULT '',
     account_type TEXT DEFAULT 'STOCK',
     session_id INTEGER DEFAULT 0,
@@ -383,9 +384,12 @@ _EXTRA_COLUMNS: dict[str, tuple[str, ...]] = {
     "api_keys": ("ip_allow", "expires_at", "grace_until"),
     # audit_log：D4 hash 链防篡改
     "audit_log": ("prev_hash", "hash"),
-    # condition_orders：A3 跨日续作与到期 + 阶段 2 拒单次日重试
+    # broker_connections：客户端模式（auto 自动推断 / mini 极速版 / full 完整版大客户端）
+    "broker_connections": ("client_mode",),
+    # condition_orders：A3 跨日续作与到期 + 阶段 2 拒单次日重试 + P1-5 盘中重试/终态核销
     "condition_orders": ("valid_days", "expire_at", "last_check_date", "expired_at",
-                         "retry_date", "retry_count"),
+                         "retry_date", "retry_count", "intraday_retry", "next_retry_at",
+                         "settle_status"),
 }
 # 参与审计 hash 计算的字段（顺序固定，改动会使旧链失效）
 _AUDIT_HASH_FIELDS = ("actor", "api_key_id", "action", "target",
@@ -544,6 +548,50 @@ class DB:
 
     async def aupsert(self, table: str, data: dict) -> int:
         return await asyncio.to_thread(self.upsert, table, data)
+
+    # ---------------- C1/P2-1：批量事务写入 + market_cache 保留策略 ----------------
+    def executemany_in_txn(self, sql: str, seq) -> None:
+        """单事务批量执行（一条 commit），用于行情写盘微批化，把「每 tick 一 commit」
+        降为「每窗口一 commit」，显著降低高频订阅多标的时的 fsync/QPS 压力。"""
+        with _lock:
+            self._conn.executemany(sql, seq or [])
+            self._conn.commit()
+
+    async def aexecutemany_in_txn(self, sql: str, seq) -> None:
+        """executemany_in_txn 的异步线程池包装（事件循环内调用，避免阻塞）。"""
+        await asyncio.to_thread(self.executemany_in_txn, sql, seq)
+
+    def prune_market_cache(self, keep: int = 20) -> int:
+        """逐 code+dtype 仅保留最近 ``keep`` 个 ts 的行，防止 market_cache 无界增长。
+
+        用 id 倒序取保留集（内部实现保证 id 与插入顺序单调），删除更旧的 tick 行。
+        返回本次清理的行数。
+        """
+        want = int(keep)
+        if want < 1:
+            want = 20
+        removed = 0
+        with _lock:
+            groups = self._conn.execute(
+                "SELECT code, dtype, COUNT(*) FROM market_cache "
+                "GROUP BY code, dtype HAVING COUNT(*) > ?", (want,)).fetchall()
+            for code, dtype, _cnt in groups:
+                keep_ids = [r[0] for r in self._conn.execute(
+                    "SELECT id FROM market_cache WHERE code=? AND dtype=? "
+                    "ORDER BY id DESC LIMIT ?", (code, dtype, want))]
+                if not keep_ids:
+                    continue
+                ph = ",".join("?" * len(keep_ids))
+                cur = self._conn.execute(
+                    f"DELETE FROM market_cache "
+                    f"WHERE code=? AND dtype=? AND id NOT IN ({ph})",
+                    (code, dtype, *keep_ids))
+                removed += int(cur.rowcount or 0)
+            self._conn.commit()
+            return removed
+
+    async def aprune_market_cache(self, keep: int = 20) -> int:
+        return await asyncio.to_thread(self.prune_market_cache, keep)
 
     # ---------------- 阶段 3：一致性备份（sqlite3 backup API） ----------------
     def backup_to(self, dst: Path) -> bool:

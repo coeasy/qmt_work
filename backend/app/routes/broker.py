@@ -3,8 +3,12 @@ from app.routes._common import ok, err, state, BrokerError, ConnectionConfig, ge
 from fastapi import APIRouter
 # --- stdlib imports injected by fix_route_imports ---
 import asyncio
+import logging
 import sys
 import time
+
+
+log = logging.getLogger("qmt_work.broker")
 
 
 
@@ -14,15 +18,91 @@ router = APIRouter()
 async def auto_detect_brokers():
     """自动发现本机 QMT / MiniQMT 客户端（运行中进程 + 安装目录扫描），返回候选列表。
 
-    候选含：客户端根、疑似券商档案、userdata_mini、xtquant 定位与可导入状态；
+    候选含：客户端根、疑似券商档案、userdata_mini、xtquant 定位与可导入状态、
+    **自动发现的资金账号**（从 userdata[(_mini)]/users/<登录>/Config.xml 读取，可免手填）。
     前端据此一键填入「添加券商连接」表单。
     """
-    from xtquant_client.discovery import discover
+    from xtquant_client.discovery import discover, discover_accounts, guess_broker_id_by_name
     try:
         cands = await asyncio.to_thread(discover)
+        for c in cands:
+            try:
+                # 防御性归一化：c["root"] 可能缺失，发现接口也可能非 list
+                scan_path = c.get("client_path") or c.get("root") or ""
+                c["accounts"] = list(discover_accounts(scan_path) or [])
+                if c["accounts"]:
+                    # 取第一个 STOCK 资金账号作为默认补全，供前端「一键填入」
+                    c["default_account_id"] = c["accounts"][0]["account_id"]
+                    c["broker_name"] = c["accounts"][0].get("broker_name") or c.get("broker_name", "")
+                else:
+                    c["default_account_id"] = ""
+
+                # 券商识别（优先级：Config.xml 真实券商名 > 路径猜测 > generic 兜底）。
+                # 路径缩写（gd_qmt）可能指光大或广发，语义有歧义，因此不靠路径猜；
+                # 以 Config.xml 读出的真实券商名为准，识别不到再回退路径猜测/generic。
+                c["broker_id"] = _resolve_broker_id(c)
+                # 通用档案建议用极速版：识别为 generic（含光大/国信等）或无明确券商时，
+                # 完整版大客户端(XtItClient)常对独立外部进程报 'illegal pid' 拒绝接入，
+                # 而极速版 MiniQMT(userdata_mini) 是更稳的程序化通道——优先建议 mini。
+                if c.get("broker_id") == "generic" and c.get("has_userdata_mini"):
+                    c["client_mode"] = "mini"
+                    if not c["client_path"].endswith("userdata_mini"):
+                        c["client_path"] = c.get("client_path_mini") or c["client_path"]
+            except Exception:  # noqa: BLE001
+                c["accounts"] = []
+                c["default_account_id"] = ""
+                if not c.get("broker_id"):
+                    c["broker_id"] = "generic"
     except Exception as exc:  # noqa: BLE001
         return err(500, f"自动探测失败：{exc}")
     return ok({"candidates": cands, "count": len(cands)})
+
+
+def _resolve_broker_id(c: dict) -> str:
+    """候选券商档案 id（优先级：Config.xml 真实券商名 > 路径猜测 > generic）。
+
+    只认「无歧义」的券商名关键词（光大/国信等确认归入 generic 通用迅投档案，
+    广发/银河/国金等归各自档案）。路径缩写（gd=广发/光大）在这里不猜。
+    真实券商名无法确定识别时不覆盖路径猜测，仍为空则归 generic —— 避免把
+    目录明确的候选（如 银河/国金）在无账号时被误降级成 generic。
+    """
+    by_name = guess_broker_id_by_name(c.get("broker_name") or "")
+    if by_name:
+        return by_name
+    return c.get("broker_id") or "generic"
+
+
+def _resolve_account(client_path: str, account_id: str, account_type: str = "STOCK") -> dict:
+    """账号自动补全：account_id 留空时从客户端配置自动发现（依赖不填即可连）。
+
+    返回 {"account_id", "account_type", "discovered": bool, "accounts": [...]}。
+    discovered=True 表示自动发现并补全；accounts 是全部发现的账号供前端展示。
+    """
+    acc_id = (account_id or "").strip()
+    if acc_id:
+        return {"account_id": acc_id, "account_type": account_type or "STOCK",
+                "discovered": False, "accounts": []}
+    try:
+        from xtquant_client.discovery import discover_accounts
+        accounts = discover_accounts(client_path or "")
+    except Exception:  # noqa: BLE001
+        accounts = []
+    if not accounts:
+        return {"account_id": "", "account_type": account_type or "STOCK",
+                "discovered": False, "accounts": []}
+    # 首选与请求 account_type 匹配的账号；匹配不到时返回空（前端提示手动选），
+    # 不静默退回 STOCK —— 避免用户点信用账户实际连到股票账户。
+    target = (account_type or "STOCK").upper()
+    matched = [a for a in accounts
+               if (a.get("account_type") or "STOCK").upper() == target]
+    if not matched:
+        return {"account_id": "", "account_type": target,
+                "discovered": False, "accounts": accounts,
+                "hint": f"未发现 {target} 类型账户，请选择账户类型"}
+    pick = matched[0]
+    return {"account_id": pick["account_id"],
+            "account_type": pick.get("account_type") or "STOCK",
+            "discovered": True, "accounts": accounts}
 
 @router.get("/brokers/runtimes")
 async def broker_runtimes():
@@ -104,11 +184,13 @@ def _runtime_plan_for(client_path: str):
 
 @router.get("/brokers/profiles")
 async def broker_profiles():
+    from xtquant_client.registry import registry, BROKER_PROFILES
+    builtin = {p.id for p in BROKER_PROFILES}
     return ok([{"id": p.id, "name": p.name, "adapter": p.adapter,
                 "supported_account_types": p.supported_account_types,
                 "supported_periods": p.supported_periods,
                 "sdk_required": p.sdk_required, "min_version": p.min_version,
-                "note": p.note} for p in list_profiles()])
+                "note": p.note, "is_custom": p.id not in builtin} for p in registry.list()])
 
 @router.get("/brokers")
 async def list_brokers():
@@ -116,13 +198,25 @@ async def list_brokers():
 
 @router.post("/brokers")
 async def add_broker(body: dict):
+    target = _resolve_account(body.get("client_path", ""), body.get("account_id", ""),
+                              body.get("account_type", "STOCK"))
     broker_id = body.get("broker_id") or ""
-    if not get_profile(broker_id):
-        return err(400, f"未知券商：{broker_id}")
+    # 券商通用化：未知券商放行（create_adapter 会降级到通用迅投 XTP 适配器）
+    if not get_profile(broker_id) and broker_id:
+        from xtquant_client.registry import hotplug_profile
+        try:
+            hotplug_profile({
+                "id": broker_id, "name": agent_broker_name(body, broker_id),
+                "adapter": "xtp",
+                "supported_account_types": ["STOCK", "CREDIT", "OPTION", "FUTURES"],
+                "note": "自动登记：QMT 全券商通用迅投适配器"})
+        except Exception as exc:  # noqa: BLE001
+            log.warning("hotplug 自动登记失败 %r: %s", broker_id, exc)
     cfg = ConnectionConfig(
-        conn_id=body.get("conn_id", ""), name=body.get("name", ""),
+        conn_id=body.get("conn_id", ""), name=body.get("name", "") or agent_broker_name(body, broker_id),
         broker_id=broker_id, client_path=body.get("client_path", ""),
-        account_id=body.get("account_id", ""), account_type=body.get("account_type", "STOCK"),
+        client_mode=body.get("client_mode", "auto") or "auto",
+        account_id=target["account_id"], account_type=target["account_type"],
         session_id=int(body.get("session_id", 0) or 0),
         min_version=body.get("min_version", ""),
         active=bool(body.get("active", False)))
@@ -135,18 +229,66 @@ async def add_broker(body: dict):
     except BrokerError as exc:
         return err(503, str(exc))
     return ok({"conn_id": conn.cfg.conn_id, "name": conn.cfg.name,
-               "connected": conn.connected})
+               "connected": conn.connected,
+               "account_id": conn.cfg.account_id, "account_type": conn.cfg.account_type,
+               "account_discovered": target["discovered"],
+               "accounts": target["accounts"]})
+
+
+def agent_broker_name(body: dict, broker_id: str) -> str:
+    """连接显示名：优先 body.name，其次配置里发现的真实券商名，兜底 broker_id。"""
+    if body.get("name"):
+        return body["name"]
+    try:
+        accounts = _resolve_account(body.get("client_path", ""), "", "STOCK")["accounts"]
+        if accounts and accounts[0].get("broker_name"):
+            return f"{accounts[0]['broker_name']} QMT"
+    except Exception:  # noqa: BLE001
+        pass
+    prof = get_profile(broker_id)
+    if prof is not None:
+        return prof.name
+    # 未知 broker_id：有自定义 id 时保留它（如 auto-detect 返回的 gf/guojin 但 registry 未预注册），
+    # 无自定义 id 时再兜底通用迅投名。
+    if broker_id:
+        return f"{broker_id} QMT"
+    return "通用迅投 QMT"
+
 
 @router.post("/brokers/test")
 async def test_broker(body: dict):
+    target = _resolve_account(body.get("client_path", ""), body.get("account_id", ""),
+                              body.get("account_type", "STOCK"))
     cfg = ConnectionConfig(
         conn_id=body.get("conn_id", ""), broker_id=body.get("broker_id", ""),
-        client_path=body.get("client_path", ""), account_id=body.get("account_id", ""),
-        account_type=body.get("account_type", "STOCK"),
+        client_path=body.get("client_path", ""),
+        client_mode=body.get("client_mode", "auto") or "auto",
+        account_id=target["account_id"], account_type=target["account_type"],
         session_id=int(body.get("session_id", 0) or 0),
         min_version=body.get("min_version", ""))
     # 阶段 0-D（C7）：test_connection 会临时拉起子进程（最坏 90s 超时），须放线程池。
-    return ok(await asyncio.to_thread(state.broker_manager.test_connection, cfg))
+    res = await asyncio.to_thread(state.broker_manager.test_connection, cfg)
+    if isinstance(res, dict):
+        res["account_id"] = target["account_id"]
+        res["account_type"] = target["account_type"]
+        res["account_discovered"] = target["discovered"]
+        res["accounts"] = target["accounts"]
+    return ok(res)
+
+
+@router.post("/brokers/launch")
+async def launch_broker_client(body: dict):
+    """按模式启动 QMT 客户端主程序（full=完整版 XtItClient / mini=极速版 XtMiniQmt /
+    quote=独立行情 miniquote）。GUI 程序立即返回，登录需用户在弹出的窗口中完成。"""
+    from xtquant_client.xtp import launch_client
+    client_path = body.get("client_path") or ""
+    if not client_path:
+        return err(400, "请提供 client_path")
+    mode = body.get("mode", "full") or "full"
+    try:
+        return ok(await asyncio.to_thread(launch_client, client_path, mode))
+    except Exception as exc:  # noqa: BLE001
+        return err(500, f"启动客户端失败：{exc}")
 
 @router.post("/brokers/{conn_id}/connect")
 async def connect_broker(conn_id: str):
@@ -156,15 +298,22 @@ async def connect_broker(conn_id: str):
     except (KeyError, BrokerError) as exc:
         state.db.audit("broker", "broker.connect_failed", conn_id, {}, str(exc))
         return err(503, str(exc))
+    except Exception as exc:  # noqa: BLE001  探测抛 RuntimeError 等也记录
+        state.db.audit("broker", "broker.connect_failed", conn_id, {}, str(exc))
+        return err(503, str(exc))
     state.db.audit("broker", "broker.connect", conn_id,
                    {"connected": res.get("connected")}, "ok")
     return ok(res)
 
 @router.post("/brokers/{conn_id}/disconnect")
 async def disconnect_broker(conn_id: str):
-    state.broker_manager.disconnect(conn_id)
-    state.db.audit("broker", "broker.disconnect", conn_id, {}, "ok")
-    return ok({"disconnected": conn_id})
+    try:
+        state.broker_manager.disconnect(conn_id)
+        state.db.audit("broker", "broker.disconnect", conn_id, {}, "ok")
+        return ok({"disconnected": conn_id})
+    except Exception as exc:  # noqa: BLE001
+        state.db.audit("broker", "broker.disconnect_failed", conn_id, {}, str(exc))
+        return err(500, str(exc))
 
 @router.post("/brokers/{conn_id}/active")
 async def set_active_broker(conn_id: str):
@@ -172,13 +321,20 @@ async def set_active_broker(conn_id: str):
         state.broker_manager.set_active(conn_id)
     except KeyError as exc:
         return err(404, str(exc))
+    except Exception as exc:  # noqa: BLE001
+        return err(500, str(exc))
     state.db.audit("broker", "broker.set_active", conn_id, {}, "ok")
     return ok({"active": conn_id})
 
 @router.delete("/brokers/{conn_id}")
 async def remove_broker(conn_id: str):
-    state.broker_manager.remove(conn_id)
-    return ok({"removed": conn_id})
+    try:
+        state.broker_manager.remove(conn_id)
+        state.db.audit("broker", "broker.remove", conn_id, {}, "ok")
+        return ok({"removed": conn_id})
+    except Exception as exc:  # noqa: BLE001
+        state.db.audit("broker", "broker.remove_failed", conn_id, {}, str(exc))
+        return err(500, str(exc))
 
 @router.get("/brokers/{conn_id}/health")
 async def broker_health(conn_id: str):

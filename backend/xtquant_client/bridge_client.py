@@ -82,8 +82,9 @@ class BridgeAdapter(BrokerAdapter):
                  broker_id: str = "", python_exe: str | None = None,
                  server_module: str = "xtquant_client.bridge_server",
                  prefer_bridge: bool = False, runtime: dict | None = None,
-                 backend_dir: str | None = None):
+                 backend_dir: str | None = None, client_mode: str = "auto"):
         self.client_path = client_path
+        self._client_mode = client_mode or "auto"
         self._account_id = account_id
         self._account_type = (account_type or "STOCK").upper()
         self.session_id = int(session_id or 0)
@@ -107,6 +108,10 @@ class BridgeAdapter(BrokerAdapter):
         self._reader_thread = None
         self._stderr_thread = None
         self._quote_handlers: list = []
+        # 阶段 0-A：交易回报实时回调（子进程转发 on_order/on_trade）。父端用它们把
+        # order/deal 事件送入 XTQuantBridge 泵，成交状态零轮询延迟推送前端。
+        self._order_cb = None
+        self._trade_cb = None
         # 阶段 0-D（C5）：记录已订阅 codes，子进程重启后自动重新下发订阅（行情恢复）
         self._subscribed_codes: set[str] = set()
         # 阶段 1（C12）：quote handler 移出 reader 线程——独立有界事件队列 + 独立线程执行。
@@ -187,7 +192,8 @@ class BridgeAdapter(BrokerAdapter):
                 runtime = require_runtime_or_raise(
                     self._xtquant_site(), prefer_bridge=self._prefer_bridge)
         exe = self._python_exe or runtime["python_exe"]
-        cfg = {"client_path": self.client_path, "account_id": self._account_id,
+        cfg = {"client_path": self.client_path, "client_mode": self._client_mode,
+               "account_id": self._account_id,
                "account_type": self._account_type, "session_id": self.session_id,
                "min_version": self.min_version}
         cmd = [exe, "-m", self._server_module, "--broker", self._broker_id,
@@ -408,6 +414,20 @@ class BridgeAdapter(BrokerAdapter):
                 except Exception:  # noqa: BLE001
                     pass
                 self._quote_dropped += 1
+        elif event == "order":
+            # 阶段 0-A：子进程转发柜台报单回报 → 实时推给父端（成交状态零轮询延迟）。
+            # order/deal 低频，直接在 reader 线程回调即可，无需独立队列。
+            if self._order_cb is not None:
+                try:
+                    self._order_cb(data)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("order cb error: %s", exc)
+        elif event == "deal":
+            if self._trade_cb is not None:
+                try:
+                    self._trade_cb(data)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("trade cb error: %s", exc)
 
     def _rpc(self, method: str, args, timeout: float = 30.0):
         if self._proc is None or self._proc.poll() is not None:
@@ -471,6 +491,14 @@ class BridgeAdapter(BrokerAdapter):
         if codes:
             self._subscribed_codes.update(codes)
         self._rpc("_subscribe_quote", [list(codes)], timeout=15.0)
+
+    def on_order(self, cb) -> None:
+        """注册报单回报回调：子进程转发 on_order 时触发（阶段 0-A 实时推送）。"""
+        self._order_cb = cb
+
+    def on_trade(self, cb) -> None:
+        """注册成交回报回调：子进程转发 on_trade 时触发（阶段 0-A 实时推送）。"""
+        self._trade_cb = cb
 
     def unsubscribe_quote(self, codes: list[str]) -> None:
         """退订：从本端记录中移除并下发子进程（子进程侧 XTP 无对应接口时降级为仅本端）。"""

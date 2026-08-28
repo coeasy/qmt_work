@@ -459,15 +459,30 @@ def test_normalize_kline_period_60m_maps_to_1h():
 
 
 class _FakeKlineDF:
-    """伪 DataFrame：仅实现 get_kline 用到的 iterrows/len（行是 dict）。"""
-    def __init__(self, rows):
-        self._rows = rows
-
-    def iterrows(self):
-        return iter(enumerate(self._rows))
+    """伪 DataFrame：模拟迅投 get_market_data 的 ``{字段: DataFrame}`` 返回格式。
+    每个 DataFrame 的 index=股票代码、columns=日期；``df.loc[code, date]`` 取该字段值。"""
+    def __init__(self, index, columns, data):
+        self.index = list(index)
+        self.columns = list(columns)
+        self._data = data
+        self._loc = _FakeLoc(self)
 
     def __len__(self):
-        return len(self._rows)
+        return len(self.columns)
+
+    @property
+    def loc(self):
+        return self._loc
+
+
+class _FakeLoc:
+    """复刻 pandas ``.loc[code, date]`` 下标访问语义（生产 get_kline 用 ``sub.loc[code, dt]``）。"""
+    def __init__(self, df):
+        self._df = df
+
+    def __getitem__(self, key):
+        code, dt = key
+        return self._df._data.get((code, dt), 0.0)
 
 
 class _FakeKlineSink:
@@ -477,9 +492,15 @@ class _FakeKlineSink:
     def get_market_data(self, **kwargs):
         self.calls.append(kwargs)
         code = kwargs["stock_list"][0]
-        return {code: _FakeKlineDF([{
-            "open": 10.0, "high": 11.0, "low": 9.5, "close": 10.5,
-            "volume": 1000, "amount": 1e6}])}
+        fields = kwargs.get("field_list") or ["open", "high", "low", "close",
+                                              "volume", "amount"]
+        # 需与真实解析一致：dt 为可 str(dt)[:19] 的 datetime；每字段一张 DF
+        #（以其为 columns），index=股票代码，loc[code, dt] 返回对应字段值。
+        from datetime import datetime
+        dt = datetime(2024, 1, 1)
+        vals = {"open": 10.0, "high": 11.0, "low": 9.5, "close": 10.5,
+                "volume": 1000, "amount": 1e6}
+        return {f: _FakeKlineDF([code], [dt], {(code, dt): vals[f]}) for f in fields}
 
 
 def test_get_kline_60m_maps_to_1h():

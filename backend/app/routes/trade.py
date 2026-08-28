@@ -1,8 +1,8 @@
 from app.routes._common import ok, err, state, _need, _call
+from gateway.idempotency import single_flight
 
 from fastapi import APIRouter
 # --- stdlib imports injected by fix_route_imports ---
-
 
 
 router = APIRouter()
@@ -17,6 +17,7 @@ async def trade_order(body: dict):
     volume = int(body.get("volume", 0))
     price = float(body.get("price", 0) or 0)
     price_type = body.get("price_type", "limit")
+    idem = body.get("idempotency_key") or body.get("client_order_id") or ""
     if not code:
         return err(400, "code 必填")
     if direction not in ("buy", "sell"):
@@ -25,17 +26,24 @@ async def trade_order(body: dict):
               "price": price, "price_type": price_type,
               "strategy": body.get("strategy_name", "manual"),
               "remark": body.get("remark", ""), "broker_id": ""}
-    okc, reason = state.risk.check_order(code, price if price > 0 else 100.0, volume, direction)
-    if not okc:
-        state.db.audit("trading", "order.rejected", code, params, reason)
-        return err(400, f"风控拒绝：{reason}")
-    res = await _call(b, b.gateway.place_order, code, direction, price_type,
-                      price, volume, "manual", body.get("remark", ""))
-    if isinstance(res, dict) and res.get("code", 0) != 0:
-        return res
-    state.db.audit("trading", "order.submitted", code, params,
-                   f"order_id={res.get('order_id')}")
-    return ok(res)
+
+    async def _run():
+        okc, reason = state.risk.check_order(code, price, volume, direction, price_type)
+        if not okc:
+            state.db.audit("trading", "order.rejected", code, params, reason)
+            return err(400, f"风控拒绝：{reason}")
+        res = await _call(b, b.gateway.place_order, code, direction, price_type,
+                          price, volume, "manual", body.get("remark", ""))
+        if isinstance(res, dict) and res.get("code", 0) != 0:
+            return res
+        state.db.audit("trading", "order.submitted", code, params,
+                       f"order_id={res.get('order_id')}")
+        return ok(res)
+
+    # 幂等：显式 idempotency_key（前端/重试传）优先；否则按委托内容哈希去重，
+    # 双击/超时重试同参数在 5s 窗口内只下一单，杜绝重复成交。
+    key = idem or f"order:{code}:{direction}:{volume}:{price}:{price_type}"
+    return await single_flight(key, _run, window=5.0)
 
 @router.post("/trade/cancel")
 async def trade_cancel(body: dict):
@@ -98,7 +106,8 @@ async def trade_precheck(body: dict):
         price = float(body.get("price", 0) or 0)
     except (TypeError, ValueError):
         return err(400, "volume/price 必须为数字")
-    allowed, reason = state.risk.precheck_order(code, price, volume, direction)
+    price_type = body.get("price_type", "limit")
+    allowed, reason = state.risk.precheck_order(code, price, volume, direction, price_type)
     return ok({"allowed": allowed, "reason": reason})
 
 

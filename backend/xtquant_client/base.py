@@ -12,6 +12,11 @@
 from abc import ABC, abstractmethod
 
 
+# 行情模式探针标的：覆盖沪深交易所、两地必然有成交的高流动性个股。
+# 不能用指数（指数无 get_full_tick 快照）；用多只个股轮询降低单标的订阅缺失风险。
+_QUOTE_PROBE_CODES = ("000001.SZ", "600519.SH", "600000.SH")
+
+
 class BrokerError(Exception):
     """券商层通用异常。"""
 
@@ -109,8 +114,17 @@ class BrokerAdapter(ABC):
                 return {"connected": True, "broker": self.broker_name,
                         "account_id": self.account_id, "account_type": self.account_type,
                         "assets": cash.get("assets"), "detail": "ok"}
-            # 行情模式：用恒存在的标的验证行情客户端可达
-            self.get_quote("SH000001")
+            # 行情模式：用「恒有实时 tick 的流动性个股」验证行情客户端可达。
+            # 注意：不能用指数（SH000001 等）——指数不产生 get_full_tick 快照，
+            # 用指数探针会把「行情服务其实已连通」误报成「未获取到行情」→ 连接失败。
+            for probe_code in _QUOTE_PROBE_CODES:
+                if self.get_full_tick([probe_code]).get(probe_code):
+                    return {"connected": True, "broker": self.broker_name,
+                            "account_id": None, "account_type": self.account_type,
+                            "tick_probe": probe_code,
+                            "detail": "行情已连通（未配置交易账户，交易/持仓/下单不可用）"}
+            # 全部个股 tick 为空：降级为指数日K（个别极简模式可能仅订阅指数K线）
+            self.get_kline("SH000001", "1d", 5)
             return {"connected": True, "broker": self.broker_name,
                     "account_id": None, "account_type": self.account_type,
                     "detail": "行情已连通（未配置交易账户，交易/持仓/下单不可用）"}
@@ -153,6 +167,13 @@ class BrokerAdapter(ABC):
     @abstractmethod
     def get_stock_list(self, sector: str = "沪深A股") -> list[dict]:
         """板块股票列表 [{code, name}, ...]。"""
+
+    # ---------------- 交易回报回调（可选，实时推送用） ----------------
+    def on_order(self, cb) -> None:
+        """注册报单回报回调。默认 no-op；XTP/Bridge 适配器覆盖实现实时推送。"""
+
+    def on_trade(self, cb) -> None:
+        """注册成交回报回调。默认 no-op；XTP/Bridge 适配器覆盖实现实时推送。"""
 
     def search_stocks(self, keyword: str, limit: int = 20) -> list[dict]:
         """按代码/名称关键字搜索。默认实现：遍历板块后模糊匹配代码；名称匹配由子类增强。"""

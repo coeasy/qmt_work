@@ -57,9 +57,16 @@ def test_profile_required_fields():
 def test_get_profile_unknown_none():
     assert get_profile("__no_such_broker__") is None
 
-def test_create_adapter_unknown_raises():
-    with pytest.raises(ValueError):
-        create_adapter("__no_such_broker__", "", "123", "STOCK")
+def test_create_adapter_unknown_falls_back_generic(tmp_path):
+    """券商通用化：未知券商不再抛错，降级到通用迅投(XTP)适配器。
+
+    全券商 QMT 统一基于迅投 XTQuant 内核，任意券商客户端（国信/华泰/东财…）
+    均可直接接入，无需预注册档案。
+    """
+    from xtquant_client.base import BrokerAdapter
+    adapter = create_adapter("__no_such_broker__", str(tmp_path), "123", "STOCK")
+    assert isinstance(adapter, BrokerAdapter)
+    assert adapter.adapter_id == "xtp"
 
 def test_effective_capabilities_derivation():
     """账户类型 OPTION/CREDIT/FUTURES 应派生出 option/credit/futures 能力。"""
@@ -189,11 +196,19 @@ def test_http_broker_profiles(client):
     ids = {p["id"] for p in data}
     assert "guojin" in ids
 
-def test_http_add_unknown_broker_400(client):
-    """未知券商：业务码 400，但 HTTP 仍为 200（统一响应包约定）。"""
-    r = client.post("/brokers", json={"broker_id": "nope", "client_path": "x"})
+def test_http_add_unknown_broker_registers_generic(client):
+    """券商通用化：未知券商也被接受并登记为通用迅投连接（autoconnect 失败仅 connected=False）。"""
+    r = client.post("/brokers", json={
+        "broker_id": "nope", "client_path": "__not_a_real_path__",
+        "autoconnect": True,
+    })
     assert r.status_code == 200
-    assert r.json()["code"] == 400
+    body = r.json()
+    assert body["code"] == 0
+    assert body["data"]["connected"] in (True, False)
+    # 通用迅投适配器已登记
+    assert any(c["broker_id"] == "nope"
+               for c in client.get("/brokers").json()["data"])
 
 def test_http_add_known_broker_registers(client):
     """已知券商 + autoconnect=false：注册成功并出现在连接列表。"""

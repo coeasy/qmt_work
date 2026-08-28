@@ -211,6 +211,18 @@ def serve_adapter(adapter, stdin=None, stdout=None,
             _write(stdout, {"event": "conn_state",
                             "data": {"connected": bool(value)}})
 
+    # ---- 阶段 0-A：交易回报实时转发（on_order -> order 事件，on_trade -> deal 事件）。
+    # 若无实时回调，父端只能每 ~5s 轮询 get_orders/get_deals 拿状态，成交确认延迟。
+    # XTPQuantAdapter 已实现 on_order/on_trade；其他适配器可能没有，用 getattr 兜底。
+    for _cb_name, _evt_name in (("on_order", "order"), ("on_trade", "deal")):
+        try:
+            _reg = getattr(adapter, _cb_name, None)
+            if callable(_reg):
+                _reg(lambda evt, _en=_evt_name: _write(
+                    stdout, {"event": _en, "data": evt}))
+        except Exception:  # noqa: BLE001 注册失败不影响主流程
+            pass
+
     def _dispatch(req):
         rid = req.get("id")
         method = req.get("method", "")
@@ -363,6 +375,7 @@ def main() -> int:
         cfg.get("account_type", "STOCK"),
         int(cfg.get("session_id", 0) or 0),
         cfg.get("min_version", ""),
+        cfg.get("client_mode", "auto"),
     )
     return serve_adapter(adapter)
 

@@ -43,6 +43,17 @@ class RuntimeConfig:
         # ---- 涨停监控 ----
         "limitup.poll_interval": (0.5, float, 0.1,
                                   "涨停监控轮询 tick 间隔（秒）"),
+        # ---- 信号模式持久化（P0-1）----
+        "signal.mode": ("paper", str, "",
+                        "信号路由模式：live/paper/dry_run（重启后保持，无记录默认 paper 安全模式）"),
+        # ---- 策略运行容器 ----
+        "strategy.inflight_ttl": (2.0, float, 1.0,
+                                  "策略容器在途委托 TTL（倍，相对 interval_seconds）：超时未成交即撤单"),
+        # ---- 算法单成交确认 ----
+        "algo.confirm_timeout": (3.0, float, 0.5,
+                                 "算法单切片成交确认窗口（秒）：超时未确认按 0 成交计"),
+        "algo.confirm_retries": (5, int, 1,
+                                 "算法单切片成交确认重试次数"),
     }
 
     def __init__(self, db=None):

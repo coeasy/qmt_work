@@ -12,13 +12,82 @@
 """
 from __future__ import annotations
 
+import csv
+import json
 import logging
+import os
+import re
 import time
 
 log = logging.getLogger("qmt_work.kline_cache")
 
 _DAILY_PERIODS = ("1d", "1w", "1mon", "1q", "1y", "day", "week", "mon")
 _FIELDS = ("open", "high", "low", "close", "volume", "amount")
+
+
+def _safe_name(s) -> str:
+    """把 code/period 清洗成合法文件名片段（仅保留字母数字 _ . -）。"""
+    return re.sub(r"[^0-9A-Za-z._\-]", "_", str(s)) or "x"
+
+
+def resample_weekly(bars: list[dict]) -> list[dict]:
+    """把日线 K 线聚合为周线（周 一 起 始，ISO 周）。
+
+    聚合规则：open=周首个交易日开盘，high/low=周内最大/最小，close=周最后
+    交易日收盘，volume/amount=周内求和，time=该周最后一个交易日。输入须含
+    非空 time（YYYY-MM-DD[ ...]）。周线数据均来自同一来源的日线，逐 bar 派生，
+    不伪造行情。用于券商原生周线接口（1w）不可用/返回空时的兜底。
+    """
+    import datetime
+    def _d(s):
+        """把 bar 的 time 解析为 date；兼容 YYYYMMDD 与 YYYY-MM-DD[ 时间]。"""
+        t = str(s or "")[:10].strip()
+        if not t:
+            return None
+        for fmt in ("%Y%m%d", "%Y-%m-%d"):
+            try:
+                return datetime.datetime.strptime(t, fmt).date()
+            except ValueError:
+                continue
+        return None
+
+    if not bars or _d(bars[0].get("time")) is None:
+        return []
+    weekly: list[dict] = []
+    for raw in sorted(bars, key=lambda b: str(b.get("time") or "")):
+        d = _d(raw.get("time"))
+        if d is None:
+            continue
+        t = f"{d.year:04d}-{d.month:02d}-{d.day:02d}"
+        iso = d.isocalendar()
+        cur = weekly[-1] if weekly else None
+        if cur is None or (cur["_y"], cur["_w"]) != (iso[0], iso[1]):
+            weekly.append({"_y": iso[0], "_w": iso[1], "time": t,
+                           "open": raw.get("open"), "high": raw.get("high"),
+                           "low": raw.get("low"), "close": raw.get("close"),
+                           "volume": raw.get("volume"), "amount": raw.get("amount")})
+        else:
+            cur["time"] = t
+            cur["close"] = raw.get("close", cur["close"])
+            if raw.get("high") is not None:
+                cur["high"] = raw["high"] if cur["high"] is None else max(cur["high"], raw["high"])
+            if raw.get("low") is not None:
+                cur["low"] = raw["low"] if cur["low"] is None else min(cur["low"], raw["low"])
+            cur["volume"] = (cur.get("volume") or 0) + (raw.get("volume") or 0)
+            cur["amount"] = (cur.get("amount") or 0) + (raw.get("amount") or 0)
+    for w in weekly:
+        w.pop("_y"); w.pop("_w")
+    return weekly
+
+
+def _load_arrow():
+    """惰性加载 pyarrow 引擎（feather 写入/读取用）；缺失返回 (None, None)。"""
+    try:
+        import pyarrow as pa
+        import pyarrow.feather as pf
+        return pa, pf
+    except Exception:  # noqa: BLE001
+        return None, None
 
 
 class KlineCache:
@@ -186,6 +255,103 @@ class KlineCache:
                         "cached_at": await self.alast_fetch(code, period),
                         "note": f"券商取数失败（{exc}），回退到本地历史缓存"}
             raise
+
+    # ---------------- 导出到本地指定目录（CSV/JSON，供离线分析/回测归档） ----------------
+    def _read_all_bars(self, code: str, period: str, count: int = 0) -> list[dict]:
+        """读取某序列全部（或最近 count 根）缓存 K 线，按时间升序。"""
+        if self.db is None:
+            return []
+        count = max(0, int(count or 0))
+        if count > 0:
+            rows = self.db.query(
+                "SELECT dt, open, high, low, close, volume, amount FROM kline_cache "
+                "WHERE code=? AND period=? ORDER BY dt DESC LIMIT ?",
+                (code, period, count))
+            rows.reverse()
+        else:
+            rows = self.db.query(
+                "SELECT dt, open, high, low, close, volume, amount FROM kline_cache "
+                "WHERE code=? AND period=? ORDER BY dt", (code, period))
+        return [{"time": r["dt"], **{f: r[f] for f in _FIELDS}} for r in rows]
+
+    def all_series(self) -> list[dict]:
+        """列出缓存中全部 code×period 序列及行数/最近抓取时间。"""
+        if self.db is None:
+            return []
+        rows = self.db.query(
+            "SELECT code, period, COUNT(1) AS rows, MAX(fetched_at) AS last_fetch "
+            "FROM kline_cache GROUP BY code, period ORDER BY code, period")
+        return [dict(r) for r in rows]
+
+    def export_to(self, code: str, period: str, dest_dir: str,
+                  fmt: str = "csv", count: int = 0) -> dict:
+        """把某序列历史 K 线导出到 dest_dir/{code}_{period}.{csv|json}。
+
+        纯本地缓存读取，无网络（"快速"路径：先把数据备到缓存再调用本方法）。
+        返回 {"code","period","rows","file"}；无数据时 rows=0 且不写文件。
+        """
+        bars = self._read_all_bars(code, period, count)
+        if not bars:
+            return {"code": code, "period": period, "rows": 0, "file": ""}
+        os.makedirs(dest_dir, exist_ok=True)
+        path = self.file_path(code, period, dest_dir, fmt)
+        if fmt == "json":
+            payload = {"code": code, "period": period, "exported_at": time.time(),
+                       "bars": bars}
+            with open(path, "w", encoding="utf-8", newline="") as f:
+                json.dump(payload, f, ensure_ascii=False)
+        elif fmt == "feather":
+            return self._export_feather(code, period, bars, path)
+        else:
+            with open(path, "w", encoding="utf-8", newline="") as f:
+                w = csv.DictWriter(f, fieldnames=["time", *_FIELDS])
+                w.writeheader()
+                for b in bars:
+                    w.writerow(b)
+        return {"code": code, "period": period, "rows": len(bars), "file": path}
+
+    def _export_feather(self, code: str, period: str, bars: list[dict], path: str) -> dict:
+        """用 pyarrow 引擎写 feather（Arrow IPC）。持久化时保留整型时间字段。"""
+        pa, pf = _load_arrow()
+        if pa is None:
+            raise RuntimeError("导出 feather 需要 pyarrow 引擎，请在运行环境安装：pip install pyarrow")
+        cols = ["time", *_FIELDS]
+        table = pa.Table.from_pydict({c: [b.get(c) for b in bars] for c in cols})
+        pf.write_feather(table, path, compression="lz4")
+        return {"code": code, "period": period, "rows": len(bars), "file": path}
+
+    @staticmethod
+    def file_path(code: str, period: str, dest_dir: str, fmt: str = "csv") -> str:
+        """计算导出文件的落盘路径（文件名由 code+period 生成，已做安全清洗）。"""
+        ext = {"csv": "csv", "json": "json", "feather": "feather"}.get(fmt, "csv")
+        return os.path.join(dest_dir, f"{_safe_name(code)}_{_safe_name(period)}.{ext}")
+
+    @staticmethod
+    def read_export(path: str, fmt: str = "csv") -> list[dict]:
+        """读取本地导出文件，返回 K 线 bar 列表（离线/断线时也可用）。"""
+        if not os.path.exists(path):
+            raise FileNotFoundError(path)
+        if fmt == "feather":
+            pa, pf = _load_arrow()
+            if pa is None:
+                raise RuntimeError("读取 feather 需要 pyarrow 引擎，请安装：pip install pyarrow")
+            return list(pf.read_table(path).to_pylist())
+        if fmt == "json":
+            with open(path, "r", encoding="utf-8") as f:
+                return list(json.load(f).get("bars") or [])
+        bars: list[dict] = []
+        with open(path, "r", encoding="utf-8", newline="") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                b = {"time": row.get("time", "")}
+                for k in _FIELDS:
+                    v = row.get(k)
+                    try:
+                        b[k] = None if v in ("", None) else float(v)
+                    except (TypeError, ValueError):
+                        b[k] = None
+                bars.append(b)
+        return bars
 
     # ---------------- 运维 ----------------
     def stats(self) -> dict:
