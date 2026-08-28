@@ -13,6 +13,9 @@ export default [
       "dist",
       "dist-electron",
       "backend",
+      // electron-builder 本地打包产物（本地解包调试/复现用，体积巨大且是 .cjs/.pak）
+      "release",
+      "release*",
       "**/*.min.js",
       // electron 侧为 CommonJS + Node 环境，独立于前端门禁
       "electron/**",

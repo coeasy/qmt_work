@@ -426,3 +426,246 @@ input[type="checkbox"] { width: 15px; height: 15px; cursor: pointer; accent-colo
 .qt-price { font-weight: 600; width: 54px; text-align: right; }
 .qt-vol { width: 46px; text-align: right; color: var(--text-dim); }
 .qt-side { width: 20px; text-align: center; font-size: 10px; }
+
+/* ============================================================
+   通达信式外壳（顶菜单 + 左树 + 中央多标签 + 底部综合栏）
+   ============================================================ */
+.tdx-app {
+  display: flex; flex-direction: column;
+  height: 100vh; width: 100vw; overflow: hidden;
+}
+.tdx-body { flex: 1; display: flex; min-height: 0; }
+.tdx-main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+
+/* ---- 顶菜单 ---- */
+.topbar {
+  display: flex; align-items: center; justify-content: space-between;
+  height: 38px; background: var(--bg-2); border-bottom: 1px solid var(--border);
+  padding: 0 10px; flex-shrink: 0;
+}
+.topbar-left { display: flex; align-items: center; height: 100%; }
+.topbar-brand {
+  font-weight: 700; color: var(--accent); margin-right: 14px;
+  font-size: 14px; letter-spacing: .5px; white-space: nowrap;
+}
+.menu { position: relative; height: 100%; display: flex; align-items: center; }
+.menu-btn {
+  background: transparent; border: none; color: var(--text-dim);
+  font-size: 13px; padding: 0 12px; height: 100%; cursor: pointer;
+  font-family: inherit;
+}
+.menu-btn:hover { background: var(--panel); color: var(--text); }
+.menu-dropdown {
+  position: absolute; top: 100%; left: 0; min-width: 150px; z-index: 50;
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: 0 0 6px 6px; box-shadow: 0 8px 22px rgba(0,0,0,.4);
+  padding: 4px 0;
+}
+.menu-item {
+  padding: 7px 14px; font-size: 13px; color: var(--text-dim); cursor: pointer;
+  white-space: nowrap;
+}
+.menu-item:hover { background: var(--accent); color: #fff; }
+
+.topbar-right { display: flex; align-items: center; min-width: 0; flex: 1; justify-content: flex-end; }
+
+/* ---- 指数跑马灯 ---- */
+/* 跑马灯：两份内容无缝循环（-50% 即一组宽度 → 视觉上无限滚动）。
+   prefers-reduced-motion: 禁用动画，符合无障碍规范。 */
+.ticker { display: flex; overflow: hidden; white-space: nowrap; font-size: 12px; padding-left: 12px; min-width: 0; }
+.ticker-track { display: inline-flex; align-items: baseline; gap: 22px; padding-right: 22px; animation: ticker-scroll 40s linear infinite; will-change: transform; }
+.ticker:hover .ticker-track { animation-play-state: paused; }
+.ticker-group { display: inline-flex; align-items: baseline; gap: 22px; }
+.ticker-item { display: inline-flex; align-items: baseline; gap: 5px; }
+.ticker-name { color: var(--text-dim); }
+.ticker-val { font-family: "Consolas", monospace; color: var(--text); font-weight: 600; }
+@keyframes ticker-scroll {
+  from { transform: translateX(0); }
+  to   { transform: translateX(-50%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ticker-track { animation: none; }
+}
+
+/* ---- 左功能树 ---- */
+.fn-tree {
+  width: 176px; flex-shrink: 0; background: var(--bg-2);
+  border-right: 1px solid var(--border); overflow-y: auto; padding: 6px 0;
+}
+.fn-tree-scroll { display: flex; flex-direction: column; }
+.fn-group { margin-bottom: 2px; }
+.fn-group-title {
+  display: flex; align-items: center; gap: 6px; padding: 7px 12px;
+  font-size: 12px; color: var(--text-dim); cursor: pointer; user-select: none;
+}
+.fn-group-title:hover { background: var(--panel); color: var(--text); }
+.fn-group.collapsed { opacity: .85; }
+.fn-items { padding: 2px 0 4px; }
+.fn-item {
+  padding: 6px 12px 6px 28px; font-size: 13px; color: var(--text-dim);
+  cursor: pointer; white-space: nowrap;
+}
+.fn-item:hover { background: var(--panel); color: var(--text); }
+.fn-item.active { background: var(--accent); color: #fff; }
+.caret { font-size: 10px; }
+
+/* ---- 中央工作区 ---- */
+.workbench { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+.wb-tabs {
+  display: flex; background: var(--bg-2); border-bottom: 1px solid var(--border);
+  overflow-x: auto; flex-shrink: 0; min-height: 34px; align-items: stretch;
+}
+.wb-tab {
+  display: flex; align-items: center; gap: 8px; padding: 0 12px;
+  font-size: 13px; color: var(--text-dim); cursor: pointer;
+  border-right: 1px solid var(--border); white-space: nowrap; user-select: none;
+}
+.wb-tab:hover { background: var(--panel); color: var(--text); }
+.wb-tab.active { background: var(--bg-3); color: var(--text); box-shadow: inset 0 -2px 0 var(--accent); }
+.wb-tab-label { line-height: 34px; }
+.wb-tab-close {
+  font-size: 13px; color: var(--text-dim); border-radius: 3px;
+  width: 16px; height: 16px; display: inline-flex; align-items: center; justify-content: center;
+}
+.wb-tab-close:hover { background: var(--down); color: #fff; }
+.wb-body { flex: 1; min-height: 0; overflow: auto; }
+
+/* ---- 底部综合栏 ---- */
+.dock {
+  height: 200px; flex-shrink: 0; background: var(--bg-2);
+  border-top: 1px solid var(--border); display: flex; flex-direction: column;
+}
+.dock.collapsed { height: 32px; }
+.dock-bar {
+  display: flex; align-items: center; justify-content: space-between;
+  height: 32px; padding: 0 10px; border-bottom: 1px solid var(--border);
+}
+.dock-tabs { display: flex; gap: 4px; }
+.dock-tab {
+  font-size: 12px; color: var(--text-dim); padding: 4px 10px; cursor: pointer;
+  border-radius: 4px;
+}
+.dock-tab:hover { background: var(--panel); color: var(--text); }
+.dock-tab.active { background: var(--accent); color: #fff; }
+.dock-toggle { font-size: 12px; color: var(--text-dim); cursor: pointer; }
+.dock-toggle:hover { color: var(--text); }
+.dock-body { flex: 1; overflow: auto; padding: 8px 10px; }
+.dock-watch-input { display: flex; gap: 6px; margin-bottom: 8px; }
+.dock-watch-input input {
+  flex: 1; max-width: 320px; background: var(--bg-3); border: 1px solid var(--border);
+  color: var(--text); border-radius: 4px; padding: 4px 8px; font-size: 12px;
+}
+.btn-sm {
+  background: var(--accent); border: none; color: #fff; border-radius: 4px;
+  padding: 4px 10px; font-size: 12px; cursor: pointer;
+}
+.dock-watch-list, .dock-sectors { display: flex; flex-wrap: wrap; gap: 6px; }
+.dock-watch-chip, .dock-sector-chip {
+  font-size: 12px; padding: 3px 8px; border-radius: 4px;
+  background: var(--panel); color: var(--text-dim); cursor: pointer; white-space: nowrap;
+}
+.dock-watch-chip:hover, .dock-sector-chip:hover { color: var(--text); border-color: var(--accent); }
+.dock-watch-x { margin-left: 6px; color: var(--text-dim); }
+.dock-watch-x:hover { color: var(--down); }
+.dock-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.dock-table th, .dock-table td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--border); }
+.dock-table th { color: var(--text-dim); font-weight: 600; }
+.dock-log { font-family: "Consolas", monospace; font-size: 11px; }
+.dock-log-line { display: flex; gap: 10px; padding: 1px 0; }
+.dock-log-ts { color: var(--text-dim); width: 70px; }
+.dock-log-type { color: var(--accent-2); }
+.muted { color: var(--text-dim); font-size: 12px; }
+
+/* 拆分视图（行情 + 分析并排） */
+.split-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; height: 100%; }
+
+/* ===== 报价牌 ===== */
+.quote-board { display: flex; flex-direction: column; height: 100%; }
+.qb-header { display: flex; align-items: center; gap: 12px; padding: 8px 12px; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+.qb-board-tabs { display: flex; gap: 4px; }
+.qb-board { padding: 4px 12px; font-size: 13px; color: var(--text-dim); cursor: pointer; border-radius: 4px; }
+.qb-board:hover { background: var(--panel); color: var(--text); }
+.qb-board.active { background: var(--accent); color: #fff; }
+.qb-sector { background: var(--bg-3); color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 3px 8px; font-size: 12px; }
+.qb-count { font-size: 12px; color: var(--text-dim); margin-left: auto; }
+.qb-rank-chips { display: flex; gap: 6px; padding: 6px 12px; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+.qb-chip { font-size: 12px; padding: 3px 10px; border-radius: 4px; background: var(--panel); color: var(--text-dim); cursor: pointer; }
+.qb-chip:hover { color: var(--text); }
+.qb-chip.active { background: var(--accent); color: #fff; }
+
+/* ---- 综合排名多列并排（TDX 80 风格）---- */
+.qb-rank-cols { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; padding: 6px 8px; }
+.qb-rank-col { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; overflow: hidden; min-width: 0; }
+.qb-rank-col-title { padding: 5px 8px; font-weight: 600; color: var(--accent); background: var(--panel-2); border-bottom: 1px solid var(--border); font-size: 12px; }
+.qb-rank-table { width: 100%; border-collapse: collapse; font-size: 11.5px; }
+.qb-rank-table th, .qb-rank-table td { padding: 3px 6px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+.qb-rank-table th.num, .qb-rank-table td.num { text-align: right; font-family: "Consolas", monospace; }
+.qb-rank-table tr:hover { background: var(--panel-2); cursor: pointer; }
+.qb-table-wrap { flex: 1; overflow: auto; }
+.qb-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.qb-table th, .qb-table td { padding: 5px 10px; border-bottom: 1px solid rgba(44,56,80,.3); white-space: nowrap; }
+.qb-table th { position: sticky; top: 0; background: var(--bg-2); color: var(--text-dim); font-weight: 600; cursor: pointer; text-align: left; z-index: 1; }
+.qb-table th.num, .qb-table td.num { text-align: right; font-family: "Consolas", monospace; }
+.qb-table tbody tr { cursor: pointer; }
+.qb-table tbody tr:hover { background: var(--panel); }
+
+/* ===== 个股分析 ===== */
+.stock-analysis { display: flex; flex-direction: column; height: 100%; }
+.sa-toolbar { display: flex; align-items: center; gap: 10px; padding: 8px 12px; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+.sa-input { background: var(--bg-3); border: 1px solid var(--border); color: var(--text); border-radius: 4px; padding: 5px 10px; font-size: 13px; width: 200px; font-family: "Consolas", monospace; }
+.sa-period { background: var(--bg-3); color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 4px 8px; font-size: 12px; }
+.sa-name { font-weight: 700; color: var(--text); font-size: 15px; }
+.sa-price { font-size: 18px; font-weight: 700; font-family: "Consolas", monospace; }
+.sa-chg { font-size: 13px; font-family: "Consolas", monospace; }
+/* ---- Pane 拆分/分屏（通达信式 MDI）---- */
+.pane-root, .pane-split { width: 100%; height: 100%; min-width: 0; min-height: 0; }
+.pane-split { display: flex; gap: 2px; }
+.pane-split-h { flex-direction: row; }
+.pane-split-v { flex-direction: column; }
+.pane-split > .pane-split, .pane-split > .pane-leaf { flex: 1 1 0; min-width: 0; min-height: 0; }
+.pane-leaf { display: flex; flex-direction: column; background: var(--bg-2); border: 1px solid var(--border); border-radius: 4px; overflow: hidden; }
+.pane-leaf.active { border-color: var(--accent); }
+.pane-leaf-bar { display: flex; align-items: center; justify-content: space-between; padding: 3px 6px; background: var(--bg-3); border-bottom: 1px solid var(--border); font-size: 11px; color: var(--text-dim); }
+.pane-leaf.active .pane-leaf-bar { color: var(--text); }
+.pane-leaf-title { font-weight: 600; }
+.pane-leaf-tools { display: inline-flex; gap: 2px; }
+.pane-leaf-tools button { background: transparent; border: 1px solid transparent; color: var(--text-dim); cursor: pointer; padding: 0 5px; border-radius: 3px; line-height: 1.4; }
+.pane-leaf-tools button:hover { color: var(--text); border-color: var(--border); background: var(--panel); }
+.pane-leaf-body { flex: 1 1 0; min-height: 0; overflow: auto; }
+
+.sa-body { flex: 1; min-height: 0; padding: 10px; }
+.sa-chart { min-width: 0; }
+.sa-side { display: flex; flex-direction: column; gap: 10px; min-width: 0; overflow: auto; }
+.sa-f10 { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; transition: box-shadow .25s; }
+.sa-f10.sa-f10-flash { box-shadow: 0 0 0 2px var(--accent), 0 0 16px rgba(79,140,255,.5); }
+.sa-f10-title { font-weight: 600; color: var(--text); margin-bottom: 6px; font-size: 13px; }
+.sa-f10-row { display: flex; gap: 10px; font-size: 12px; padding: 3px 0; }
+.sa-f10-row span { color: var(--text-dim); width: 56px; flex-shrink: 0; }
+.sa-f10-row b { color: var(--text); font-weight: 500; }
+
+/* ===== 命令面板 ===== */
+.cmd-overlay { position: fixed; inset: 0; background: rgba(8,14,26,.55); z-index: 200; display: flex; align-items: flex-start; justify-content: center; padding-top: 12vh; }
+.cmd-panel { width: 540px; max-width: 92vw; background: var(--bg-2); border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 20px 60px rgba(0,0,0,.5); overflow: hidden; }
+.cmd-input { width: 100%; box-sizing: border-box; padding: 12px 14px; font-size: 14px; background: var(--bg-3); color: var(--text); border: none; border-bottom: 1px solid var(--border); outline: none; }
+.cmd-list { max-height: 360px; overflow: auto; }
+.cmd-item { display: flex; align-items: center; justify-content: space-between; padding: 9px 14px; cursor: pointer; font-size: 13px; }
+.cmd-item:hover, .cmd-item.active { background: var(--accent); color: #fff; }
+.cmd-group { font-size: 11px; color: var(--text-dim); }
+.cmd-item.active .cmd-group { color: rgba(255,255,255,.8); }
+.cmd-empty { padding: 14px; color: var(--text-dim); font-size: 13px; }
+.cmd-hint { padding: 8px 14px; font-size: 11px; color: var(--text-dim); border-top: 1px solid var(--border); }
+
+/* ===== 帮助层 ===== */
+.help-panel { width: 620px; max-width: 94vw; background: var(--bg-2); border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 20px 60px rgba(0,0,0,.5); padding: 16px 18px; max-height: 82vh; overflow: auto; }
+.help-title { font-size: 16px; font-weight: 700; color: var(--text); margin-bottom: 12px; }
+.help-section { margin-bottom: 14px; }
+.help-h { font-size: 13px; font-weight: 600; color: var(--accent); margin-bottom: 6px; }
+.help-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.help-table td { padding: 4px 8px; border-bottom: 1px solid rgba(44,56,80,.3); }
+.help-k { color: var(--text); font-family: "Consolas", monospace; white-space: nowrap; width: 160px; }
+.help-groups { display: flex; flex-direction: column; gap: 4px; }
+.help-group { display: flex; gap: 10px; font-size: 12px; align-items: baseline; }
+.help-num { color: var(--accent-2); font-family: "Consolas", monospace; width: 52px; flex-shrink: 0; }
+.help-gname { color: var(--text); font-weight: 600; width: 84px; flex-shrink: 0; }
+.help-items { color: var(--text-dim); }
+
