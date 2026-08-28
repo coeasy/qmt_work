@@ -14,7 +14,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from gateway.risk import RiskManager  # noqa: E402
 from tools.backtest import run_backtest_engine  # noqa: E402
-from tools.condition_order import ConditionOrderEngine  # noqa: E402
+from tools.condition_order import ConditionOrderEngine, _today, _tomorrow  # noqa: E402
 from xtquant_client.xtp import _resolve_xtquant_path  # noqa: E402
 
 
@@ -188,11 +188,13 @@ class _FakeCondManager:
         return self.b
 
 
-def test_condition_reject_goes_retry_queue(monkeypatch):
-    """阶段 2：拒单进次日重试队列，保留 triggered 记录待恢复，达上限才标 failed。"""
+def test_condition_reject_intraday_retry_then_day(monkeypatch):
+    """P1-5：拒单先进当日盘中重试队列（interval 30s，上限 5 次），
+    盘中次数用尽后才转次日重试（retry_count 语义不变）。"""
     from app.state import state
     eng = ConditionOrderEngine(manager=_FakeCondManager(), on_event=lambda _e: None)
     eng._retry_limit = 2
+    eng._intraday_retry_limit = 3   # 缩小便于测试
 
     rejected = {"calls": 0}
 
@@ -205,26 +207,39 @@ def test_condition_reject_goes_retry_queue(monkeypatch):
     try:
         r = eng.submit("600519.SH", "buy", "gte", 10, 100)
         cid = r["id"]
-        # 首次触发：拒单 → 进重试队列，status 保持 triggered，retry_count=1
-        asyncio.run(eng._fire(_FakeCondBridge(), eng._orders[cid], 11.0))
         o = eng._orders[cid]
+        # 首次拒单 → 当日盘中重试：intraday_retry=1，retry_count 不变，next_retry_at 落库
+        asyncio.run(eng._fire(_FakeCondBridge(), o, 11.0))
         assert o["status"] == "triggered"
         assert cid in eng._retry_queue
+        assert o["intraday_retry"] == 1
+        assert o["retry_count"] == 0
+        assert o["next_retry_at"]
+        assert o["retry_date"] == _today()   # 盘中重试仍属当日
+        # 盘中重试至上限（3）
+        asyncio.run(eng._fire(_FakeCondBridge(), o, 11.0, is_retry=True))
+        asyncio.run(eng._fire(_FakeCondBridge(), o, 11.0, is_retry=True))
+        assert o["intraday_retry"] == 3
+        # 盘中次数用尽 → 转次日重试：retry_count 递增、盘中计数重置、retry_date=次日
+        asyncio.run(eng._fire(_FakeCondBridge(), o, 11.0, is_retry=True))
+        assert o["intraday_retry"] == 0
         assert o["retry_count"] == 1
-        assert o["retry_date"]  # 次日重试
-        assert rejected["calls"] == 1
-        # 第二次（达上限）→ 标 failed 并移出队列
-        asyncio.run(eng._fire(_FakeCondBridge(), eng._orders[cid], 11.0, is_retry=True))
-        o = eng._orders[cid]
+        assert o["retry_date"] == _tomorrow()
+        assert not o.get("next_retry_at") or o["intraday_retry"] == 0
+        # 次日重试再被拒 1 次 → 又转下一日；第 2 次跨日过渡即达跨日上限 → failed
+        asyncio.run(eng._fire(_FakeCondBridge(), o, 11.0, is_retry=True))
+        assert o["intraday_retry"] == 1
+        asyncio.run(eng._fire(_FakeCondBridge(), o, 11.0, is_retry=True))
+        asyncio.run(eng._fire(_FakeCondBridge(), o, 11.0, is_retry=True))
+        asyncio.run(eng._fire(_FakeCondBridge(), o, 11.0, is_retry=True))
         assert o["status"] == "failed"
         assert cid not in eng._retry_queue
-        assert rejected["calls"] == 2
     finally:
         state.signal_router = None
 
 
-def test_condition_fire_success_marks_filled(monkeypatch):
-    """阶段 2：下单成功 → status=filled + order_id，且不残留重试队列。"""
+def test_condition_fire_success_marks_submitted(monkeypatch):
+    """P1-5：下单被受理 → status=submitted（仅已受理，未成交不可标 filled）+ order_id。"""
     from app.state import state
     eng = ConditionOrderEngine(manager=_FakeCondManager(), on_event=lambda _e: None)
 
@@ -240,9 +255,81 @@ def test_condition_fire_success_marks_filled(monkeypatch):
         o["status"] = "triggered"   # 模拟已被触发
         asyncio.run(eng._fire(_FakeCondBridge(), o, 11.0))
         o = eng._orders[cid]
-        assert o["status"] == "filled"
+        assert o["status"] == "submitted"
         assert o["order_id"] == "SR-1"
         assert cid not in eng._retry_queue
+    finally:
+        state.signal_router = None
+
+
+class _FakeSettleBridge(_FakeCondBridge):
+    """带当日委托的对账 bridge（P1-5 终态核销）。"""
+
+    def __init__(self, orders=None):
+        self._orders = orders or [{"order_id": "SR-1", "status": "已成", "volume": 100}]
+        self.gateway = self._GW(self)
+
+    class _GW(_FakeCondBridge._GW):
+        def __init__(self, owner):
+            self._owner = owner
+
+        def get_quote(self, code):
+            return {"code": code, "last": 11.0}   # > trigger 10 → 触发成立
+
+        def get_orders(self):
+            return self._owner._orders
+
+    async def call_locked(self, fn, *a, **k):
+        if fn.__name__ == "get_orders":
+            return fn()
+        raise AssertionError(f"意外调用 {fn.__name__}")
+
+
+def test_condition_submitted_settles_to_terminal(monkeypatch):
+    """P1-5：submitted 单经 _settle_submitted 对账，券商侧已到终态 → 回写 filled。"""
+    from app.state import state
+    eng = ConditionOrderEngine(manager=_FakeCondManager(), on_event=lambda _e: None)
+
+    class _FakeRouter:
+        async def submit(self, *a, **k):
+            return {"ok": True, "order_id": "SR-1", "reason": ""}
+
+    state.signal_router = _FakeRouter()
+    try:
+        r = eng.submit("600519.SH", "buy", "gte", 10, 100)
+        cid = r["id"]
+        o = eng._orders[cid]
+        asyncio.run(eng._fire(_FakeCondBridge(), o, 11.0))
+        assert o["status"] == "submitted"
+        # 对账：券商委托里该单已成 → 核销为 filled 并回写 settle_status
+        asyncio.run(eng._settle_submitted(_FakeSettleBridge()))
+        o = eng._orders[cid]
+        assert o["status"] == "filled"
+        assert o["settle_status"] == "filled"
+    finally:
+        state.signal_router = None
+
+
+def test_condition_submitted_active_not_settled(monkeypatch):
+    """P1-5：submitted 单在券商侧仍挂单（pending/partial）时不核销，继续跟踪。"""
+    from app.state import state
+    eng = ConditionOrderEngine(manager=_FakeCondManager(), on_event=lambda _e: None)
+
+    class _FakeRouter:
+        async def submit(self, *a, **k):
+            return {"ok": True, "order_id": "SR-1", "reason": ""}
+
+    state.signal_router = _FakeRouter()
+    try:
+        r = eng.submit("600519.SH", "buy", "gte", 10, 100)
+        cid = r["id"]
+        o = eng._orders[cid]
+        asyncio.run(eng._fire(_FakeCondBridge(), o, 11.0))
+        assert o["status"] == "submitted"
+        b = _FakeSettleBridge(orders=[{"order_id": "SR-1", "status": "已报", "volume": 100}])
+        asyncio.run(eng._settle_submitted(b))
+        # 已报 = pending，仍活跃 → 保持 submitted
+        assert eng._orders[cid]["status"] == "submitted"
     finally:
         state.signal_router = None
 
@@ -365,6 +452,94 @@ def test_single_flight_failure_not_cached():
     r2 = asyncio.run(run())
     assert attempts["n"] == 2
     assert r2["order_id"] == "SF-3"
+
+
+# ---------------- 阶段 0-A：桥接实时订单/成交回报推送（零轮询延迟） ----------------
+def _make_sync_engine():
+    from sync import SyncEngine
+    engine = SyncEngine(None, None)
+    got = []
+    engine.on_notify(lambda etype, payload, codes=None: got.append((etype, payload)))
+    return engine, got
+
+
+def test_realtime_order_dedup_and_terminal_lock():
+    """实时报单回报：同 order 多次回报只推一次 new；终态后乱序回报被终态锁忽略。"""
+    from xtquant_client.order_status import is_terminal  # noqa: F401  确认模块可导入
+    engine, got = _make_sync_engine()
+
+    async def run():
+        await engine._on_realtime_order("acc", {"data": {
+            "order_id": "O1", "status": "submitted"}})
+        await engine._on_realtime_order("acc", {"data": {
+            "order_id": "O1", "status": "submitted"}})   # 同状态重复 → 不再推
+        await engine._on_realtime_order("acc", {"data": {
+            "order_id": "O1", "status": "filled"}})      # 状态迁移 → 推 status
+        await engine._on_realtime_order("acc", {"data": {
+            "order_id": "O1", "status": "submitted"}})   # 已终态（filled）乱序 → 忽略
+
+    asyncio.run(run())
+    orders = [p for e, p in got if e == "order"]
+    assert len(orders) == 2, f"应只推 new + status 两次，实际 {len(orders)}"
+    assert orders[0]["event"] == "new"
+    assert orders[1]["event"] == "status" and orders[1]["prev_status"] == "submitted"
+
+
+def test_realtime_deal_dedup():
+    """实时成交回报：重复回报（同 order_id/price/volume/time）只推一次。"""
+    engine, got = _make_sync_engine()
+
+    async def run():
+        evt = {"data": {"order_id": "D1", "price": 100.0, "volume": 100,
+                        "trade_time": "20260826 10:00:00"}}
+        await engine._on_realtime_deal("acc", evt)
+        await engine._on_realtime_deal("acc", evt)
+        await engine._on_realtime_deal("acc", {"data": {
+            "order_id": "D1", "price": 100.0, "volume": 100,
+            "trade_time": "20260826 10:00:05"}})         # 不同时间 → 新成交
+
+    asyncio.run(run())
+    deals = [p for e, p in got if e == "deal"]
+    assert len(deals) == 2, f"应去重为 2 笔，实际 {len(deals)}"
+
+
+def test_realtime_and_polling_share_fingerprint():
+    """实时事件与轮询 diff 共享指纹：实时已推送的订单，轮询不再重复推送。"""
+    from sync import SyncEngine
+    engine = SyncEngine(None, None)
+    got = []
+    engine.on_notify(lambda etype, payload, codes=None: got.append((etype, payload)))
+
+    class FakeBridge:
+        async def call(self, fn, *a, **k):
+            return None          # 轮询侧置空：模拟实时已覆盖全部状态
+
+    class _Cfg:
+        account_id = ""
+        name = "test"
+        conn_id = "c1"
+
+    class _Adapter:
+        def get_orders(self, *a, **k):
+            return None
+        def get_deals(self, *a, **k):
+            return None
+
+    class _Conn:
+        cfg = _Cfg()
+        bridge = FakeBridge()
+        adapter = _Adapter()
+
+    async def run():
+        await engine._on_realtime_order("acc", {"data": {
+            "order_id": "O9", "status": "filled"}})      # 实时推 new
+        engine._fp_date = time.strftime("%Y-%m-%d")
+        await engine._push_order_deal_events(_Conn(), "acc")  # 轮询：orders 为空
+
+    asyncio.run(run())
+    orders = [p for e, p in got if e == "order"]
+    assert len(orders) == 1                              # 实时一次，轮询零新增无重复
+    assert engine._order_fp["acc"]["O9"] == "filled"
 
 
 # ---------------- TOTP 二次确认（D2） ----------------
@@ -1224,16 +1399,28 @@ def test_db_backup_consistency_api():
 
 # ---------------- P1：本机 QMT 自动发现 ----------------
 def test_discovery_helpers():
-    from xtquant_client.discovery import _root_from_exe, _is_qmt_proc, guess_broker_id
+    from xtquant_client.discovery import (_root_from_exe, _is_qmt_proc, guess_broker_id,
+                                          guess_broker_id_by_name)
     # 由 exe 路径推导客户端根（bin.x64 一级）
     assert os.path.normcase(_root_from_exe(r"P:\stock\gd_qmt\bin.x64\XtMiniQmt.exe")) == \
         os.path.normcase(r"P:\stock\gd_qmt")
     assert _root_from_exe(r"P:\stock\gd_qmt\XtMiniQmt.exe") == r"P:\stock\gd_qmt"
-    # 券商档案猜测
-    assert guess_broker_id(r"P:\stock\gd_qmt") == "gf"      # 广发（gd_qmt）
+    # 券商档案猜测（路径缩写不猜：gd_qmt 可能是光大或广发，不得归 gf）
+    assert guess_broker_id(r"P:\stock\gd_qmt") == ""        # 不再误判为广发
     assert guess_broker_id(r"C:\国金证券QMT交易端") == "guojin"
     assert guess_broker_id(r"C:\银河证券QMT交易端") == "yinhe"
     assert guess_broker_id(r"C:\unknown_x") == ""
+    # 裸「中信」歧义（中信建投/中信证券）：不猜；仅确定全称「中信建投/建投」才归 zxjt
+    assert guess_broker_id(r"C:\中信证券QMT") == ""
+    assert guess_broker_id(r"C:\中信建投QMT交易端") == "zxjt"
+    # 真实券商名优先于路径（name_override）：Config.xml 识别到哪家就用哪家
+    assert guess_broker_id_by_name("集中交易001") == ""     # 光大大账套名，无歧义关键词→不猜
+    assert guess_broker_id_by_name("广发证券") == "gf"
+    assert guess_broker_id_by_name("国金证券") == "guojin"
+    assert guess_broker_id_by_name("光大证券") == "generic"
+    assert guess_broker_id_by_name("国信证券") == "generic"
+    assert guess_broker_id_by_name("中信证券") == ""        # 中信证券 ≠ 中信建投，不猜
+    assert guess_broker_id_by_name("中信建投证券") == "zxjt"
     # 进程判定：QMT 进程识别 + 排除本平台自身
     assert _is_qmt_proc("XtMiniQmt.exe", "") is True
     assert _is_qmt_proc("miniquote.exe", "") is True
@@ -1258,6 +1445,194 @@ def test_discovery_candidate():
         assert c["root"] == d
         # 不存在的根返回 None
         assert _candidate(os.path.join(d, "no_such")) is None
+
+
+def test_discovery_candidate_full_mode():
+    """完整版大客户端（只有 userdata 目录）也能被发现并给出 full 模式建议。"""
+    from xtquant_client.discovery import _candidate
+    with tempfile.TemporaryDirectory() as d:
+        os.makedirs(os.path.join(d, "userdata"))
+        sp = os.path.join(d, "bin.x64", "Lib", "site-packages", "xtquant")
+        os.makedirs(sp)
+        open(os.path.join(sp, "__init__.py"), "w").close()
+        c = _candidate(d, running=True, pid="456", proc="XtItClient.exe")
+        assert c is not None
+        assert c["client_path"] == os.path.join(d, "userdata")
+        assert c["has_userdata"] is True
+        assert c["has_userdata_mini"] is False
+        assert c["client_mode"] == "full"
+        assert c["client_path_full"] == os.path.join(d, "userdata")
+        assert c["client_path_mini"] == ""
+
+
+def test_discovery_candidate_both_dirs_prefer_full():
+    """userdata 与 userdata_mini 并存时，候选默认推荐完整版 userdata/full。"""
+    from xtquant_client.discovery import _candidate
+    with tempfile.TemporaryDirectory() as d:
+        os.makedirs(os.path.join(d, "userdata"))
+        os.makedirs(os.path.join(d, "userdata_mini"))
+        sp = os.path.join(d, "bin.x64", "Lib", "site-packages", "xtquant")
+        os.makedirs(sp)
+        open(os.path.join(sp, "__init__.py"), "w").close()
+        c = _candidate(d)
+        assert c is not None
+        assert c["client_path"] == os.path.join(d, "userdata")
+        assert c["client_mode"] == "full"
+        assert c["has_userdata"] is True and c["has_userdata_mini"] is True
+
+
+def test_discover_accounts_from_config(tmp_path):
+    """从客户端 userdata/users/<登录>/Config.xml 自动发现资金账号（STOCK 优先）。"""
+    from xtquant_client.discovery import discover_accounts, _parse_accounts_from_config
+    # 单元：直接解析 Config.xml 文本（含券商中文名 / 多账户 / broker_type 映射）
+    xml = (
+        '<?xml version="1.0" encoding="utf-8"?>\n'
+        "<Config>\n"
+        "<Accounts>\n"
+        '  <Account account_name="TS账户" broker_id="" broker_type="2"'
+        ' user_id="410001005814" broker_name="国信证券" type="49"/>\n'
+        '  <Account account_name="" broker_id="" broker_type="6"'
+        ' user_id="100010015102" broker_name="国信证券" type="49"/>\n'
+        "</Accounts>\n"
+        "</Config>\n")
+    accts = _parse_accounts_from_config(xml)
+    assert len(accts) == 2
+    by_type = {a["account_type"]: a for a in accts}
+    assert by_type["STOCK"]["account_id"] == "410001005814"
+    assert by_type["CREDIT"]["account_id"] == "100010015102"
+    assert all(a["broker_name"] == "国信证券" for a in accts)
+    # 集成：写入临时 userdata/users/<登录>/Config.xml，验证 discover_accounts 路径扫描
+    min_root = os.path.join(tmp_path, "userdata_mini")
+    user_dir = os.path.join(min_root, "users", "15624979679")
+    os.makedirs(user_dir)
+    with open(os.path.join(user_dir, "Config.xml"), "w", encoding="utf-8") as f:
+        f.write(xml)
+    found = discover_accounts(os.path.join(tmp_path, "userdata_mini"))
+    assert len(found) == 2
+    assert found[0]["account_type"] == "STOCK"          # STOCK 优先排序
+    assert found[0]["account_id"] == "410001005814"
+    assert found[0]["login_account"] == "15624979679"
+    assert found[0]["broker_name"] == "国信证券"
+
+
+def test_discover_accounts_prefers_full_userdata(tmp_path):
+    """完整版 userdata 与极速版 userdata_mini 并存时优先扫描前者。"""
+    from xtquant_client.discovery import discover_accounts
+    full = os.path.join(tmp_path, "userdata")
+    mini = os.path.join(tmp_path, "userdata_mini")
+    os.makedirs(os.path.join(full, "users", "10086"))
+    os.makedirs(os.path.join(mini, "users", "10010"))
+    xml = ('<Config><Accounts><Account broker_type="2" user_id="111111" '
+           'broker_name="测试证券"/></Accounts></Config>')
+    with open(os.path.join(full, "users", "10086", "Config.xml"), "w", encoding="utf-8") as f:
+        f.write(xml)
+    with open(os.path.join(mini, "users", "10010", "Config.xml"), "w", encoding="utf-8") as f:
+        f.write(xml)
+    found = discover_accounts(os.path.join(tmp_path, "userdata"))
+    assert len(found) == 1
+    assert found[0]["login_account"] == "10086"
+    assert found[0]["account_id"] == "111111"
+
+
+def test_effective_trade_dir_modes():
+    """客户端模式 -> 交易数据目录解析（极速版 userdata_mini / 完整版 userdata）。"""
+    from xtquant_client.xtp import _effective_trade_dir
+
+    def nc(p):
+        return os.path.normcase(os.path.normpath(p))
+
+    with tempfile.TemporaryDirectory() as d:
+        mini = nc(os.path.join(d, "userdata_mini"))
+        full = nc(os.path.join(d, "userdata"))
+        os.makedirs(mini)
+        # 仅极速版目录存在：auto 推断 mini；显式 mini/full 各自生效
+        assert nc(_effective_trade_dir(d, "auto")[0]) == mini
+        assert _effective_trade_dir(d, "auto")[1] == "mini"
+        assert nc(_effective_trade_dir(d, "mini")[0]) == mini
+        # 显式 full 但 userdata 不存在 -> 回退原始路径，交由上层报错
+        assert nc(_effective_trade_dir(d, "full")[0]) == nc(d)
+        # 直接填 userdata_mini 后缀
+        assert nc(_effective_trade_dir(os.path.join(d, "userdata_mini"), "auto")[0]) == mini
+
+        # 仅完整版目录存在：auto 推断 full
+        os.makedirs(full)
+        os.rmdir(mini)
+        assert nc(_effective_trade_dir(d, "auto")[0]) == full
+        assert _effective_trade_dir(d, "auto")[1] == "full"
+        # 直接填 userdata 后缀
+        assert nc(_effective_trade_dir(os.path.join(d, "userdata"), "auto")[0]) == full
+
+        # 两者都存在（无运行中客户端，client_type=none）：自动按目录存在性优先完整版
+        # 注：本机可能正运行真实 QMT 客户端（probe 返回 mini/full），会改变 auto 推断；
+        # 这里固定 probe 为 none，只测「目录存在性」这一纯逻辑分支，保证测试确定性。
+        os.makedirs(mini)
+        import xtquant_client.xtp as _xtp_mod
+        orig_probe = _xtp_mod._probe_quote_service
+        _xtp_mod._probe_quote_service = lambda p: {"client_type": "none"}
+        try:
+            assert nc(_effective_trade_dir(d, "auto")[0]) == full
+            assert _effective_trade_dir(d, "auto")[1] == "full"
+            assert nc(_effective_trade_dir(d, "full")[0]) == full
+            assert nc(_effective_trade_dir(d, "mini")[0]) == mini
+        finally:
+            _xtp_mod._probe_quote_service = orig_probe
+
+        # 无任何数据目录：回退原始路径
+        os.rmdir(mini); os.rmdir(full)
+        assert nc(_effective_trade_dir(d, "auto")[0]) == nc(d)
+
+
+def test_effective_trade_dir_empty_path():
+    from xtquant_client.xtp import _effective_trade_dir
+    assert _effective_trade_dir("", "auto") == ("", "auto")
+
+
+def test_get_full_tick_handles_sdk_error():
+    """行情未认证/非交易时段：get_full_tick 不应抛协议级 JSONDecodeError，
+    而应返回空 dict，由上层给出「已连但行情未就绪」诊断。"""
+    from xtquant_client.xtp import XTPQuantAdapter
+    a = XTPQuantAdapter(r"C:\nonexistent", "", client_mode="auto")
+
+    class _FakeXTData:
+        def get_full_tick(self, codes):
+            raise ValueError("Expecting value: line 1 column 1 (char 0)")
+
+    a._xtdata = _FakeXTData()
+    assert a.get_full_tick(["600519.SH"]) == {}
+    assert a.get_full_tick(["600519.SH", "000001.SZ"]) == {}
+    # 非 dict 返回值亦安全
+    class _Bad:
+        def get_full_tick(self, codes):
+            return "not-a-dict"
+    a._xtdata = _Bad()
+    assert a.get_full_tick(["600519.SH"]) == {}
+
+
+def test_find_client_exe_modes():
+    """按模式定位客户端主程序 exe（bin.x64 下，忽略大小写）。"""
+    from xtquant_client.xtp import (_find_client_exe, _MINI_EXE_NAMES,
+                                    _FULL_EXE_NAMES, _QUOTE_EXE_NAMES)
+    with tempfile.TemporaryDirectory() as d:
+        bin64 = os.path.join(d, "bin.x64")
+        os.makedirs(bin64)
+        open(os.path.join(bin64, "XtItClient.exe"), "w").close()
+        open(os.path.join(bin64, "miniquote.exe"), "w").close()
+        assert os.path.basename(_find_client_exe(d, _FULL_EXE_NAMES)) == "XtItClient.exe"
+        assert os.path.basename(_find_client_exe(d, _QUOTE_EXE_NAMES)) == "miniquote.exe"
+        # 极速版未安装 -> 返回 None
+        assert _find_client_exe(d, _MINI_EXE_NAMES) is None
+        # 根不存在 -> None
+        assert _find_client_exe(os.path.join(d, "no_such"), _FULL_EXE_NAMES) is None
+
+
+def test_launch_client_not_found():
+    """未安装对应模式 exe 时 launch_client 返回可操作提示，且不启动任何进程。"""
+    from xtquant_client.xtp import launch_client
+    with tempfile.TemporaryDirectory() as d:
+        r = launch_client(d, "full")
+        assert r["launched"] is False
+        assert r["already_running"] is False
+        assert "未" in r["hint"] or "找不到" in r["hint"] or "找不到" in r.get("hint", "")
 
 
 # ---------------- 桥接事件协议（防「握手失败：None」失真回归）----------------
@@ -1336,6 +1711,161 @@ def test_bridge_server_safe_err_normalizes_void_exception():
     assert out != "None" and "ValueError" in out
     out2 = _safe_err(RuntimeError())
     assert out2 != "" and "RuntimeError" in out2
+
+
+# ---------------- 二轮复查 N1/N2 回归 ----------------
+def _fake_strategy_state(db):
+    """构造 StrategyRuntime 所需的最小 state：db + broker_manager + paper_engine。"""
+    import types
+
+    class _FakeGateway:
+        async def get_quote(self, code):
+            return {"lastPrice": 10.0}
+
+    class _FakeBridge:
+        gateway = _FakeGateway()
+
+        async def call(self, fn, *args):
+            r = fn(*args)
+            if asyncio.iscoroutine(r):
+                return await r
+            return r
+
+    class _FakePaperEngine:
+        """模拟盘引擎桩：记录下单调用，持仓恒空。"""
+        def __init__(self):
+            self.orders = []
+
+        def submit_order(self, code, direction, price, volume,
+                         price_type=None, remark=""):
+            oid = f"p{len(self.orders) + 1}"
+            self.orders.append({"code": code, "direction": direction,
+                                "price": price, "volume": volume,
+                                "order_id": oid})
+            return {"order_id": oid}
+
+        def get_positions(self):
+            return []
+
+    class _FakeBM:
+        def __init__(self, bridge):
+            self._bridge = bridge
+
+        def bridge(self, conn_id=None):
+            return self._bridge
+
+    pe = _FakePaperEngine()
+    st = types.SimpleNamespace(db=db, broker_manager=_FakeBM(_FakeBridge()),
+                               paper_engine=pe)
+    return st, pe
+
+
+def test_strategy_eval_no_code_column_regression():
+    """N1 回归：strategy_runs 表无 code 列，_eval_code 不得向 _set 传 code=…。
+
+    双标的 ma_cross 模拟「一只金叉」：断言评估全程无 error 日志
+    （旧 bug 会刷「评估失败：no such column: code」）且金叉标的产生下单调用。
+    """
+    from tools.strategy_runtime import StrategyRuntime
+
+    db, d = _tmp_db()
+    try:
+        st, pe = _fake_strategy_state(db)
+        rt = StrategyRuntime(st)
+        run = rt.create({
+            "name": "n1-test", "strategy_type": "ma_cross",
+            "codes": ["A.SH", "B.SH"],
+            "params": {"fast": 5, "slow": 20, "volume": 100},
+            "mode": "paper", "interval_seconds": 60,
+        })
+        run_id = run["id"]
+
+        # 金叉序列：最后 1 根跳涨 → prev 双均线粘合、末根快线金叉慢线 → buy。
+        # 另一标的平盘 → hold。长度 ≥ slow+1=21。
+        async def fake_fetch(bridge, code, period, count):
+            closes = [10.0] * 29 + [15.0] if code == "A.SH" else [10.0] * 40
+            return [{"time": f"t{i}", "close": c} for i, c in enumerate(closes)]
+
+        rt._fetch_kline = fake_fetch
+        asyncio.run(rt._eval_once(run_id))
+
+        errs = [m["message"] for m in rt.logs(run_id, 100) if m["level"] == "error"]
+        assert not errs, f"评估不应产生 error 日志：{errs}"
+        assert len(pe.orders) == 1 and pe.orders[0]["code"] == "A.SH", \
+            f"应仅金叉标的 A.SH 下单，实际 {pe.orders}"
+        # _set 成功落库 last_eval_at（证明 UPDATE 不再被缺列异常打断；
+        # last_signal 为最后一只标的的结果，不在此断言）
+        assert rt.get_run(run_id)["last_eval_at"], "last_eval_at 应被 _set 更新"
+    finally:
+        _cleanup(db, d)
+
+
+def test_parse_minutes_shared_formats():
+    """N2 回归：'9:30'/'09:30'/'930' 解析为同一分钟数（字符串比较恒误判的根源）。"""
+    from tools.ashare import parse_minutes
+    assert parse_minutes("9:30") == 570
+    assert parse_minutes("09:30") == 570
+    assert parse_minutes("930") == 570
+    assert parse_minutes("10:00") == 600
+    assert parse_minutes("15:00") == 900
+    assert parse_minutes("10：00") == 600          # 全角冒号
+    assert parse_minutes("2359") == 1439           # 4 位紧凑
+    assert parse_minutes("") is None
+    assert parse_minutes(None) is None
+    assert parse_minutes("abc") is None
+    assert parse_minutes("25:00") is None
+    assert parse_minutes("10:61") is None
+    assert parse_minutes("100") == 60             # 3 位紧凑 HMM = 1:00
+    assert parse_minutes("10:0") == 600           # 缺前导零的分钟也按 10:00 解析
+
+
+def test_limitup_cutoff_minutes_comparison():
+    """N2 回归：cutoff 按整数分钟比较，非法 cutoff 视为不设限（恒在窗口内）。"""
+    from tools.ashare import now_minutes, parse_minutes
+    now_m = now_minutes()
+    assert 0 <= now_m <= 1439
+    # 同一时刻无论带不带前导零，窗口判定结果必须一致
+    assert (now_m <= parse_minutes("9:30")) == (now_m <= parse_minutes("0930"))
+    assert (now_m <= parse_minutes("23:59")) == (now_m <= parse_minutes("2359"))
+    # 非法 cutoff → 不设限（in_window=True 语义，limitup._loop 按此实现）
+    assert parse_minutes("25:00") is None
+
+
+def test_strategy_runtime_uses_shared_minutes():
+    """N2 回归：strategy_runtime 与 limitup 共用 tools.ashare 的同一分钟口径。"""
+    from tools.strategy_runtime import _now_minutes, _parse_minutes
+    from tools.ashare import now_minutes, parse_minutes
+    assert _parse_minutes("9:30") == parse_minutes("9:30") == 570
+    assert _now_minutes() == now_minutes()
+
+
+# ---------------- C4 · P2-4 杂项收口 ----------------
+def test_signal_pending_ttl_prune(monkeypatch):
+    """P2-4：SignalRouter 挂起确认令牌超 TTL 后被 _prune_pending 清理。"""
+    from gateway.signal_router import SignalRouter
+    sr = SignalRouter(None, None, None, None, None, None)
+    sr._pending_ttl = 60.0
+    sr._pending = {"old_tok": {"sig": {}, "ts": time.time() - 120},
+                   "new_tok": {"sig": {}, "ts": time.time()}}
+    sr._prune_pending()
+    assert "old_tok" not in sr._pending
+    assert "new_tok" in sr._pending
+
+
+def test_limit_first_seen_prune_bounded():
+    """P2-4：涨停首见字典有界化——超上限剔除跨日残留。"""
+    from tools.limitup import (_LIMIT_FIRST_SEEN, _LIMIT_SEEN_MAX,
+                               _prune_limit_first_seen)
+    now = 5_000_000.0
+    _LIMIT_FIRST_SEEN.clear()
+    # 填充超过上限的条目，其中一半为过期残留
+    for i in range(_LIMIT_SEEN_MAX + 200):
+        _LIMIT_FIRST_SEEN["k%d" % i] = now if i % 2 else now - 8 * 3600.0
+    assert len(_LIMIT_FIRST_SEEN) > _LIMIT_SEEN_MAX
+    _prune_limit_first_seen(now)
+    assert len(_LIMIT_FIRST_SEEN) <= _LIMIT_SEEN_MAX
+    # 残留（超 6h）已被剔除，仅保留近期条目
+    assert all(now - v <= 6 * 3600.0 for v in _LIMIT_FIRST_SEEN.values())
 
 
 if __name__ == "__main__":

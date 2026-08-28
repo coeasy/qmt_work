@@ -74,6 +74,45 @@ def is_valid_lot(qty: int, lot: int = 100) -> bool:
     return qty is not None and qty > 0 and qty % lot == 0
 
 
+# ---------------- 时:分 比较 ----------------
+def now_minutes() -> int:
+    """当前时刻的「时:分」整数分钟数（距当日 00:00 的分钟数）。
+
+    与 parse_minutes 配套，用于「盘中截止时间」类判定（如涨停打板 cutoff），
+    避免字符串比较（'9:30' 无前导零时恒判超窗/格式漂移）。
+    """
+    import time
+    t = time.localtime()
+    return t.tm_hour * 60 + t.tm_min
+
+
+def parse_minutes(s) -> int | None:
+    """把 '9:30'/'09:30'/'930' 解析为距当日 00:00 的分钟数；非法返回 None。
+
+    兼容：冒号分隔、全角冒号、紧凑格式（0930/930 按 HMM/HHMM 拆读）。是
+    strategy_runtime 与 limitup 共用同一判定口径的唯一入口。
+    """
+    s = str(s or "").strip().replace("：", ":")
+    if not s:
+        return None
+    parts = s.split(":")
+    if len(parts) == 2:
+        try:
+            h, m = int(parts[0]), int(parts[1])
+        except (TypeError, ValueError):
+            return None
+    elif len(parts) == 1 and parts[0].isdigit() and len(parts[0]) in (3, 4):
+        if len(parts[0]) == 3:
+            h, m = int(parts[0][0]), int(parts[0][1:])   # 930 -> 9:30
+        else:
+            h, m = int(parts[0][:2]), int(parts[0][2:])  # 0930 -> 9:30
+    else:
+        return None
+    if h < 0 or h > 23 or m < 0 or m > 59:
+        return None
+    return h * 60 + m
+
+
 # ---------------- T+1 可用量账本 ----------------
 @dataclass
 class T1Ledger:

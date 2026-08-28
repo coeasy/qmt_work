@@ -125,7 +125,11 @@ class LimitUpMonitor:
                 b = self._manager.active_bridge()
                 if b is not None and self._pool:
                     ticks = await b.call(b.gateway.get_full_tick, list(self._pool.keys()))
-                    in_window = datetime.now().strftime("%H:%M") <= self._cfg.get("cutoff", "10:00")
+                    # 时:分 整数分钟比较（兼容 9:30/09:30），避免字符串比较恒误判。
+                    from tools.ashare import now_minutes, parse_minutes
+                    now_m = now_minutes()
+                    cutoff_m = parse_minutes(self._cfg.get("cutoff", "10:00"))
+                    in_window = (cutoff_m is None) or (now_m <= cutoff_m)
                     for code, q in (ticks or {}).items():
                         self._check(code, q, in_window)
             except Exception as exc:  # noqa: BLE001
@@ -270,6 +274,23 @@ def register_limitup_tools(mcp):
 # ---------------- 涨停板（盘口扫描，真实行情） ----------------
 # 记录每只票首次触及涨停的时间（用于展示「涨停时长」）。
 _LIMIT_FIRST_SEEN: dict = {}
+# P2-4：上限与最大滞留时长（防无界增长）。超过上限触发一次整体清理，剔除过夜/失效旧记录。
+_LIMIT_SEEN_MAX = 5000
+_LIMIT_SEEN_TTL = 6 * 3600.0   # 6 小时，超过视为跨日残留
+
+
+def _prune_limit_first_seen(now: float) -> None:
+    """涨停首见字典有界化：超上限时一次性剔除超时残留（P2-4）。
+
+    正常场景下该字典随「非涨停」逐条 pop 自我回收，仅在极端行情/长时段停牌扫描时
+    可能滞留；此处在超过上限时做一次 TTL 清理，保证无界增长不发生。
+    """
+    if len(_LIMIT_FIRST_SEEN) < _LIMIT_SEEN_MAX:
+        return
+    old = [k for k, v in _LIMIT_FIRST_SEEN.items()
+           if now - float(v) > _LIMIT_SEEN_TTL]
+    for k in old:
+        _LIMIT_FIRST_SEEN.pop(k, None)
 
 
 def _limit_factor(code: str, name: str | None = None) -> float:
@@ -311,6 +332,7 @@ async def scan_limit_up(bridge, sector: str = "沪深A股", min_pct: float = 9.5
             ticks.update(sub)
 
     now = time.time()
+    _prune_limit_first_seen(now)   # P2-4：涨停首见字典有界化
     rows: list = []
     for code, q in ticks.items():
         last = q.get("last")

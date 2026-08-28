@@ -26,6 +26,18 @@ def _now() -> str:
     return time.strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _now_minutes() -> int:
+    """当前时刻的「时:分」整数分钟数（距当日 00:00 的分钟数）。"""
+    from tools.ashare import now_minutes
+    return now_minutes()
+
+
+def _parse_minutes(s: str) -> Optional[int]:
+    """把 '9:30'/'09:30'/'930' 解析为距当日 00:00 的分钟数；非法返回 None。P1-2。"""
+    from tools.ashare import parse_minutes
+    return parse_minutes(s)
+
+
 # ---------------- 信号计算（纯函数，复用 strategy_gen 模板逻辑） ----------------
 
 def _ma_signal(closes, fast: int, slow: int):
@@ -134,6 +146,12 @@ class StrategyRuntime:
         self.state = state
         self._tasks: Dict[int, asyncio.Task] = {}
         self._bought: Dict[int, set] = {}   # run_id -> 已买入标的（limitup 去重）
+        # P0-2：在途委托跟踪。run_id -> code -> {order_id, side, ts}
+        # 下单成功后登记；同 code 同向存在在途单则跳过本轮（防状态持续满足重复下单）；
+        # 超过 inflight_ttl 未成交则撤单并清除登记，允许下轮重发。
+        self._inflight: Dict[int, Dict[str, dict]] = {}
+        # 上一轮持仓快照：持仓增加视为在途买单已成交，清除对应在途登记。
+        self._prev_held: Dict[int, Dict[str, float]] = {}
         self._ensure_tables()
 
     # ---------------- 表 ----------------
@@ -252,6 +270,8 @@ class StrategyRuntime:
         task = self._tasks.pop(run_id, None)
         if task is not None and not task.done():
             task.cancel()
+        self._inflight.pop(run_id, None)   # P0-2：停止即清空该 run 在途登记
+        self._prev_held.pop(run_id, None)
         self._db().execute(
             "UPDATE strategy_runs SET status='stopped', last_eval_at=? WHERE id=?",
             (_now(), run_id))
@@ -315,9 +335,21 @@ class StrategyRuntime:
             await self._eval_limitup(run, bridge, codes, params)
             return
 
-        code = codes[0]
+        # P1-3：非 limitup 策略遍历全部标的，每只独立算信号/查持仓/下单；
+        # 单只异常不影响其余标的。
         kp = params.get("kline_period", "1d")
         count = max(int(params.get("slow", 26)) + int(params.get("signal", 9)) + 10, 80)
+        for code in codes:
+            try:
+                await self._eval_code(run, bridge, code, st, params, kp, count)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                self._log(run_id, "error", f"{code} 评估失败：{exc}", "")
+
+    async def _eval_code(self, run, bridge, code, st, params, kp, count) -> None:
+        """对单只标的完成：取 K 线 → 算信号 → 查持仓 → 下单。P1-3 拆分复用。"""
+        run_id = run["id"]
         bars = await self._fetch_kline(bridge, code, kp, count)
         if not bars:
             self._log(run_id, "warn", f"无 {code} 的 {kp} K 线数据（未连接券商或无历史）", "")
@@ -336,6 +368,13 @@ class StrategyRuntime:
             return
 
         held = await self._held_volume(run, code, bridge)
+        # P0-2：持仓增加 → 在途买入已成交，清除对应在途登记，允许后续方向信号重新下单。
+        prev = self._prev_held.get(run_id, {}).get(code, 0.0)
+        if held > prev:
+            self._inflight.get(run_id, {}).pop(code, None)
+        self._prev_held.setdefault(run_id, {})[code] = held
+        # 注意：strategy_runs 表无 code 列（多标的状态存 codes_json），
+        # 不能向 _set 传 code=…（否则 sqlite 报 no such column 且被外层吞掉，下单不执行）。
         self._set(run_id, held_volume=held, last_eval_at=_now(), last_signal=signal)
 
         if signal == "buy" and held <= 0:
@@ -352,9 +391,13 @@ class StrategyRuntime:
         if bridge is None:
             self._log(run_id, "warn", "未连接券商，无法获取逐笔行情", "")
             return
-        cutoff = str(params.get("cutoff", "10:00"))
-        now = time.strftime("%H:%M")
-        if now > cutoff:
+        # P1-2：cutoff 解析为「时:分」整数分钟数比较（兼容 9:30/09:30），
+        # 不再做字符串比较（9:30 无前导零时恒不执行）。
+        now_min = _now_minutes()
+        cutoff_min = _parse_minutes(str(params.get("cutoff", "10:00")))
+        if cutoff_min is None:
+            self._log(run_id, "warn", f"cutoff {params.get('cutoff')} 格式非法，忽略截止时间", "")
+        elif now_min > cutoff_min:
             return
         try:
             ticks = await bridge.call(bridge.gateway.get_full_tick, codes)
@@ -376,8 +419,12 @@ class StrategyRuntime:
                 last = float(last); lc = float(lc)
             except (TypeError, ValueError):
                 continue
-            limit_pct = float(params.get("limit_pct", 0.1))
-            if last >= round(lc * (1 + limit_pct), 2):
+            # P1-2：复用统一涨停判定 tools.limitup._limit_factor（主板10/创业科创20/北交30/ST5），
+            # 不再用固定 limit_pct=0.1——否则 20cm/30cm 标的会被误判为未涨停。
+            from tools.limitup import _limit_factor
+            factor = _limit_factor(code)
+            limit_price = round(lc * (1 + factor), 2)
+            if last >= limit_price:
                 vol = int(params.get("volume", 100))
                 await self._maybe_order(run, code, "buy", last, vol)
                 self._bought.setdefault(run_id, set()).add(code)
@@ -388,10 +435,27 @@ class StrategyRuntime:
         volume = int(volume)
         if volume <= 0 or not price or price <= 0:
             return
+        mode = str(mode).lower()
+
+        # P0-2 前置检查：在途委托跟踪，防"状态持续满足"信号每轮重复下单（超额建仓）。
+        inflight = self._inflight.setdefault(run_id, {})
+        existing = inflight.get(code)
+        if existing is not None and existing.get("side") == direction:
+            if existing.get("order_id"):
+                ttl = self._ttl_seconds(run)
+                if time.time() - float(existing.get("ts") or 0) > ttl:
+                    # 在途单超时未成交 → 撤单并清除，允许本轮重新发起
+                    await self._cancel_inflight(run, code)
+                else:
+                    self._log(run_id, "info",
+                              f"{code} 存在在途{direction}单 {existing['order_id']}，跳过本轮"
+                              f"（防重复下单）", direction)
+                    return
+
         # 阶段 0-B（F8）：mode 不区分大小写（原 "Live"/拼写错误落入 else 既绕过风控又实盘下单）。
         # 全局 signal_mode 是交易主闸门：paper 下任何引擎都不真实下单（安全）。
-        mode = str(mode).lower()
         try:
+            oid = None
             if mode == "paper":
                 pe = self.state.paper_engine
                 if pe is None:
@@ -418,9 +482,44 @@ class StrategyRuntime:
                     return
                 self._log(run_id, "order",
                           f"[实盘] {direction} {code} {volume}@{price:.2f} -> {oid}", direction)
+            # P0-2：下单成功后登记在途（拿不到 order_id 则登记 0 占位，防同向重复发起）。
+            inflight[code] = {"order_id": oid or "", "side": direction, "ts": time.time()}
             self._set(run_id, last_action=f"{direction} {code} {volume}@{price:.2f}")
         except Exception as exc:  # noqa: BLE001
             self._log(run_id, "error", f"{direction} {code} 下单失败：{exc}", direction)
+
+    def _ttl_seconds(self, run) -> float:
+        """在途委托 TTL（秒）：strategy.inflight_ttl（倍）× interval_seconds，默认 2×interval。"""
+        interval = float((run or {}).get("interval_seconds") or 60)
+        mult = 2.0
+        rc = getattr(self.state, "runtime_config", None)
+        if rc is not None:
+            try:
+                mult = float(rc.get("strategy.inflight_ttl") or 2.0)
+            except (TypeError, ValueError):
+                mult = 2.0
+        return max(1.0, interval * mult)
+
+    async def _cancel_inflight(self, run, code) -> None:
+        """撤单并清除在途登记（超时未成交）。清登记放 finally，保证后续不残留占位。"""
+        run_id = run["id"]
+        rec = self._inflight.get(run_id, {}).get(code)
+        oid = (rec or {}).get("order_id") or ""
+        mode = str(run["mode"]).lower()
+        try:
+            if mode == "paper" or not oid:
+                self._log(run_id, "info", f"{code} 在途单{oid or ''}超时撤单（模拟/无ID）", "")
+                return
+            bridge = self.state.broker_manager.bridge(run.get("conn_id") or None)
+            if bridge is None:
+                self._log(run_id, "warn", f"{code} 撤单失败：未连接券商", "")
+                return
+            await bridge.call(bridge.gateway.cancel_order, oid)
+            self._log(run_id, "info", f"{code} 在途单 {oid} 超时撤单", "")
+        except Exception as exc:  # noqa: BLE001
+            self._log(run_id, "warn", f"{code} 撤单失败：{exc}", "")
+        finally:
+            self._inflight.get(run_id, {}).pop(code, None)
 
     # ---------------- 行情/持仓辅助 ----------------
     async def _fetch_kline(self, bridge, code, period, count):
