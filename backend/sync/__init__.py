@@ -138,6 +138,17 @@ class SyncEngine:
                 pass
         if not code:
             return
+        # P3：自动补中文名（来自本地名称缓存，不依赖券商 get_instrument_detail）。
+        # 券商 latest_quotes 通常不含 name 或 name 为空；此处用 eltdx 本地名称缓存兜底，
+        # 使 WS 推送 / latest_quotes / 前端面板均能直接显示中文名。O(1) 字典查找，高频安全。
+        if not data.get("name"):
+            try:
+                from app.datasource.manager import get_hub
+                _nm = get_hub().lookup_name(code)
+                if _nm:
+                    data["name"] = _nm
+            except Exception:  # noqa: BLE001
+                pass
         self.latest_quotes[code] = data
         # 行情总线分发（内存 / Redis 多进程共享）
         if self._quote_bus:

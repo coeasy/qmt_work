@@ -80,6 +80,7 @@ api.connectBroker = (id, { signal } = {}) =>
 api.disconnectBroker = (id) => api.post(`/brokers/${id}/disconnect`);
 api.setActiveBroker = (id) => api.post(`/brokers/${id}/active`);
 api.removeBroker = (id) => api.del(`/brokers/${id}`);
+api.batchRemoveBrokers = (ids) => api.post("/brokers/batch-delete", { ids });
 // ABI 运行时矩阵 / 单连接健康检查（运维排障）
 api.brokerRuntimes = () => api.get("/brokers/runtimes");
 api.brokerHealth = (id) => api.get(`/brokers/${id}/health`);
@@ -111,10 +112,12 @@ api.l2 = (code, count) => api.get("/market/l2", { code, count });
 api.marketKline = (params) => api.get("/market/kline", params);
 // 行情工具：单票实时报价 / 手动抓取落库 / K 线缓存查看与清理
 api.marketQuote = (params) => api.get("/market/quote", params);
+api.marketStockInfo = (params) => api.get("/market/stock-info", params);
 api.marketCrawl = (body) => api.post("/market/crawl", body);
 api.klineCacheStats = () => api.get("/market/kline/cache");
 api.klineCacheClear = (code, period) =>
   api.del(`/market/kline/cache?code=${encodeURIComponent(code || "")}&period=${encodeURIComponent(period || "")}`);
+api.klineSyncStatus = () => api.get("/market/kline/sync-status");
 
 // ---------------- 策略模板库 ----------------
 api.strategyGenerate = (body) => api.post("/strategies/generate", body);
@@ -127,6 +130,7 @@ api.strategyRunGet = (id) => api.get(`/strategies/run/${id}`);
 api.strategyRunStart = (id) => api.post(`/strategies/run/${id}/start`);
 api.strategyRunStop = (id) => api.post(`/strategies/run/${id}/stop`);
 api.strategyRunDelete = (id) => api.del(`/strategies/run/${id}`);
+api.strategyRunBatchDelete = (ids) => api.post("/strategies/run/batch-delete", { ids });
 api.strategyRunLogs = (id, limit) => api.get(`/strategies/run/${id}/logs`, limit ? { limit } : {});
 api.strategyRunPrecheck = (body) => api.post("/strategies/run/precheck", body);
 
@@ -154,9 +158,12 @@ api.createApiKey = (body) => api.post("/api-keys", body);
 api.patchApiKey = (kid, body) => api.patch(`/api-keys/${kid}`, body);
 api.rotateApiKey = (kid) => api.post(`/api-keys/${kid}/rotate`);
 api.deleteApiKey = (kid) => api.del(`/api-keys/${kid}`);
+api.batchDeleteApiKeys = (ids) => api.post("/api-keys/batch-delete", { ids });
+api.cleanUnusedApiKeys = (days) => api.post("/api-keys/clean-unused", { days });
 
 // ---------------- 回测任务删除 ----------------
 api.backtestDeleteJob = (id) => api.del(`/backtest/jobs/${id}`);
+api.backtestBatchDelete = (ids) => api.post("/backtest/jobs/batch-delete", { ids });
 
 // ---------------- 多账户网格 / 批量操作 ----------------
 api.accountGrid = () => api.get("/account/grid");
@@ -212,6 +219,7 @@ api.backtestSweep = (body) => api.post("/backtest/sweep", body);
 api.alertRules = () => api.get("/alerts/rules");
 api.saveAlertRule = (body) => api.post("/alerts/rules", body);
 api.deleteAlertRule = (id) => api.del(`/alerts/rules/${id}`);
+api.batchDeleteAlertRules = (ids) => api.post("/alerts/rules/batch-delete", { ids });
 api.testAlert = (body) => api.post("/alerts/test", body);
 api.alertHistory = (limit) => api.get("/alerts/history", limit ? { limit } : {});
 
@@ -219,6 +227,7 @@ api.alertHistory = (limit) => api.get("/alerts/history", limit ? { limit } : {})
 api.webhookSubscriptions = () => api.get("/webhooks");
 api.webhookCreate = (body) => api.post("/webhooks", body);
 api.webhookDelete = (sid) => api.del(`/webhooks/${sid}`);
+api.webhookBatchDelete = (ids) => api.post("/webhooks/batch-delete", { ids });
 api.webhookTest = (sid) => api.post(`/webhooks/${sid}/test`);
 api.webhookDeliveries = () => api.get("/webhooks/deliveries");
 
@@ -239,21 +248,15 @@ api.targetSync = (body) => api.post("/target-portfolio/sync", body);
 api.targetPlans = () => api.get("/target-portfolio/plans");
 api.targetCreatePlan = (body) => api.post("/target-portfolio/plans", body);
 api.targetDeletePlan = (pid) => api.del(`/target-portfolio/plans/${pid}`);
+api.targetBatchDeletePlans = (ids) => api.post("/target-portfolio/plans/batch-delete", { ids });
 
 // ---------------- 通知 ----------------
 api.notifications = () => api.get("/notifications");
 api.createNotification = (body) => api.post("/notifications", body);
 api.deleteNotification = (nid) => api.del(`/notifications/${nid}`);
+api.batchDeleteNotifications = (ids) => api.post("/notifications/batch-delete", { ids });
 api.testNotification = () => api.post("/notifications/test");
 api.notificationLogs = () => api.get("/notifications/logs");
-
-// ---------------- 阶段 5 Agent（LLM 助手） ----------------
-api.agentStatus = () => api.get("/agent/status");
-api.agentSessions = () => api.get("/agent/sessions");
-api.agentCreateSession = (body) => api.post("/agent/sessions", body);
-api.agentGetSession = (id) => api.get(`/agent/sessions/${id}`);
-api.agentDeleteSession = (id) => api.del(`/agent/sessions/${id}`);
-api.agentChat = (body) => api.post("/agent/chat", body);
 
 // ---------------- 系统状态探针（live/ready/metrics/quote-bus） ----------------
 api.live = () => api.get("/live");

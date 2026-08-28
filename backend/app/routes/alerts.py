@@ -44,6 +44,17 @@ async def delete_alert_rule(rid: int):
     state.db.execute("DELETE FROM alert_rules WHERE id=?", (rid,))
     return ok({"deleted": True})
 
+@router.post("/alerts/rules/batch-delete")
+async def batch_delete_alert_rules(body: dict):
+    if state.db is None:
+        return err(503, "数据库未初始化")
+    ids = [int(x) for x in (body.get("ids") or []) if str(x).isdigit()]
+    if not ids:
+        return err(400, "ids 不能为空")
+    state.db.execute(
+        "DELETE FROM alert_rules WHERE id IN ({})".format(",".join("?" * len(ids))), ids)
+    return ok({"deleted": len(ids)})
+
 @router.post("/alerts/test")
 async def test_alert(body: dict):
     if state.alert_engine is None:

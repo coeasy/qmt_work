@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
 import { api } from "../api.js";
+import { useBatchSelection } from "../hooks/useBatchSelection.js";
+import BatchDeleteBar from "./BatchDeleteBar.jsx";
 
 // 通知渠道配置（P2）：钉钉/企微/飞书/邮件/Webhook，含测试与发送日志。
 const CHANNELS = [
@@ -23,6 +25,8 @@ export default function Notifications() {
   const [params, setParams] = useState({});
   const [testResult, setTestResult] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [batchBusy, setBatchBusy] = useState(false);
+  const bsel = useBatchSelection(list, "id");
 
   async function refresh() {
     try { setList(await api.notifications()); } catch (e) { setErr(e.message); }
@@ -64,6 +68,16 @@ export default function Notifications() {
   async function del(id) {
     setErr("");
     try { await api.deleteNotification(id); await refresh(); } catch (e) { setErr(e.message); }
+  }
+
+  async function batchDelete() {
+    setBatchBusy(true);
+    try {
+      await api.batchDeleteNotifications(bsel.selected);
+      bsel.clear();
+      await refresh();
+    } catch (e) { setErr(e.message); }
+    finally { setBatchBusy(false); }
   }
 
   const ch = CHANNELS.find((x) => x.id === channel);
@@ -113,13 +127,15 @@ export default function Notifications() {
 
         <div className="card">
           <h3>已配置渠道（{list.length}）</h3>
+          <BatchDeleteBar count={bsel.selected.length} onDelete={batchDelete} onClear={bsel.clear} busy={batchBusy} label="渠道" />
           {list.length === 0 && <p className="muted">暂无渠道。</p>}
           <div className="table" style={{ marginTop: 8 }}>
             <table style={{ width: "100%", borderCollapse: "collapse" }}>
-              <thead><tr><th>名称</th><th>渠道</th><th>事件</th><th>状态</th><th>操作</th></tr></thead>
+              <thead><tr><th style={{ width: 32 }}><input type="checkbox" checked={bsel.allSelected} onChange={bsel.toggleAll} /></th><th>名称</th><th>渠道</th><th>事件</th><th>状态</th><th>操作</th></tr></thead>
               <tbody>
                 {list.map((c) => (
                   <tr key={c.id}>
+                    <td><input type="checkbox" checked={bsel.sel.has(c.id)} onChange={() => bsel.toggleOne(c.id)} /></td>
                     <td>{c.name}</td>
                     <td>{c.channel}</td>
                     <td style={{ fontSize: 12 }}>{c.events}</td>

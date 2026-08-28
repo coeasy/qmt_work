@@ -14,7 +14,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from gateway.risk import RiskManager  # noqa: E402
 from tools.backtest import run_backtest_engine  # noqa: E402
-from tools.condition_order import ConditionOrderEngine, _today, _tomorrow  # noqa: E402
+from tools.condition_order import ConditionOrderEngine, _safe_int, _today, _tomorrow  # noqa: E402
 from xtquant_client.xtp import _resolve_xtquant_path  # noqa: E402
 
 
@@ -360,6 +360,34 @@ def test_condition_fire_recheck_keeps_pending(monkeypatch):
         assert cid not in eng._retry_queue
     finally:
         state.signal_router = None
+
+
+def test_condition_safe_int_guards_dirty_counters():
+    """回归（2026-08-28）：历史脏数据把 retry_count/intraday_retry 存为空串 ''，
+    导致条件单重试链路 int('') 抛错并刷 'condition retry ... failed' 告警。
+
+    _safe_int 应对空串/None/非数字返回默认值；空串计数的 triggered 残留经
+    _schedule_retry 应正常推进（走盘中重试）而非崩溃。
+    """
+    assert _safe_int("") == 0
+    assert _safe_int(None) == 0
+    assert _safe_int("abc") == 0
+    assert _safe_int(True) == 0
+    assert _safe_int("42") == 42
+    assert _safe_int(7) == 7
+    # 空串计数的 triggered 残留：_schedule_retry 不抛；空串→0→当日盘中重试
+    eng = ConditionOrderEngine(manager=None)
+    o = {"id": "dirty1", "code": "600519.SH", "retry_count": "", "intraday_retry": "",
+         "retry_date": "", "status": "triggered", "next_retry_at": ""}
+    eng._schedule_retry(o, "r")          # 不抛即通过
+    assert o["intraday_retry"] == 1, "空串计数应被当作 0 后 +1"
+    assert o["retry_date"] == _today()
+    assert eng._retry_queue.get("dirty1") is o
+    # 多次盘中用尽 → 跨日重试，retry_count 空串同样安全 +1（首调1次+盘中满5次=第6次跨日）
+    for _ in range(eng._intraday_retry_limit):
+        eng._schedule_retry(o, f"r{_}")
+    assert o["retry_count"] == 1, "盘中用尽后 retry_count 应由空串安全 +1"
+    assert o["retry_date"] == _tomorrow()
 
 
 # ---------------- 下单幂等 ----------------
@@ -965,6 +993,101 @@ def test_kline_cache_freshness_and_stale():
         _cleanup(db, d)
 
 
+def _kline_years():
+    """返回 (今年, 去年) 字符串，兼容任意运行年份。"""
+    import time as _t
+    y = _t.localtime().tm_year
+    return f"{y}-06-15", f"{y - 1}-12-31"
+
+
+def test_kline_hot_archive_routing_and_rollover():
+    """热/归档按年份路由 + 跨年 rollover（今年入热表，去年以前入归档）。"""
+    from gateway.kline_cache import KlineCache
+    db, d = _tmp_db()
+    try:
+        kc = KlineCache(db)
+        this_y, last_y = _kline_years()
+        bars = [{"time": last_y, "open": 1.0, "close": 1.1},
+                {"time": this_y, "open": 2.0, "close": 2.2}]
+        kc.put("600519.SH", "1d", bars)
+        # 去年落归档、今年落热表
+        assert db.query_one("SELECT COUNT(1) c FROM kline_archive "
+                            "WHERE code='600519.SH'")["c"] == 1
+        assert db.query_one("SELECT COUNT(1) c FROM kline_cache "
+                            "WHERE code='600519.SH'")["c"] == 1
+        # 合并读取=2 根且升序
+        got = kc.get("600519.SH", "1d", 2)
+        assert [b["time"] for b in got] == [last_y, this_y]
+        # rollover 幂等、总数不变
+        pre = kc.count("600519.SH", "1d")
+        assert kc.archive_rollover()["moved"] == 0  # 已路由到位，无旧到新
+        assert kc.count("600519.SH", "1d") == pre
+    finally:
+        _cleanup(db, d)
+
+
+def test_kline_rollover_moves_stale_hot_rows():
+    """今年写入、跨年后已成去年的热表行应被搬入归档。"""
+    from gateway.kline_cache import KlineCache
+    db, d = _tmp_db()
+    try:
+        kc = KlineCache(db)
+        this_y, last_y = _kline_years()
+        # 直接注入：今年热表里残留去年数据（模拟未归档的旧热行）
+        db.executemany_in_txn(
+            "INSERT OR REPLACE INTO kline_cache "
+            "(code,period,dt,open,high,low,close,volume,amount,fetched_at,adjust) "
+            f"VALUES ('600001.SH','1d',?,?,NULL,NULL,NULL,0,0,0,'')",
+            [(dt, 5.0) for dt in (last_y, this_y)])
+        res = kc.archive_rollover()
+        assert res["moved"] == 1
+        assert db.query_one("SELECT COUNT(1) c FROM kline_cache "
+                            "WHERE code='600001.SH'")["c"] == 1
+        assert db.query_one("SELECT COUNT(1) c FROM kline_archive "
+                            "WHERE code='600001.SH'")["c"] == 1
+    finally:
+        _cleanup(db, d)
+
+
+def test_kline_adjust_preserved_on_refetch():
+    """普通抓取回写不覆盖已有复权标记（get_or_fetch 复用现存 adjust）。"""
+    import asyncio as _a
+    from gateway.kline_cache import KlineCache
+    db, d = _tmp_db()
+    try:
+        kc = KlineCache(db)
+        this_y, _ = _kline_years()
+        kc.put("000001.SZ", "1d", [{"time": this_y, "open": 10.0, "close": 10.5}],
+               adjust="qfq")
+
+        async def _fetcher(c, p, n):
+            return [{"time": this_y, "open": 11.0, "high": 11.5, "low": 10.8,
+                     "close": 11.2, "volume": 100, "amount": 1100.0}]
+        _a.run(kc.get_or_fetch("000001.SZ", "1d", 1, _fetcher, force=True))
+        row = db.query_one("SELECT adjust, open FROM kline_cache "
+                           "WHERE code='000001.SZ' AND period='1d'")
+        assert row["adjust"] == "qfq"      # 复权标记未被覆盖
+        assert row["open"] == 11.0         # 数据已刷新
+    finally:
+        _cleanup(db, d)
+
+
+def test_kline_full_read_dedup_and_export_path():
+    """全量读取（count=0）不抛错、不重复时间点；含热表与归档。"""
+    from gateway.kline_cache import KlineCache
+    db, d = _tmp_db()
+    try:
+        kc = KlineCache(db)
+        this_y, last_y = _kline_years()
+        for t in (last_y, this_y):
+            kc.put("300001.SZ", "1d", [{"time": t, "open": 1.0, "close": 1.0}])
+        all_bars = kc._read_all_bars("300001.SZ", "1d", 0)
+        times = [b["time"] for b in all_bars]
+        assert len(times) == len(set(times)) and len(times) >= 2
+    finally:
+        _cleanup(db, d)
+
+
 # ---------------- B2 出站 webhook 签名 / 匹配 ----------------
 def test_webhook_signature_and_match():
     from gateway.webhook_out import WebhookOut
@@ -1319,8 +1442,25 @@ def test_db_indexes_v9():
         for want in ("idx_audit_log_created", "idx_condition_orders_status",
                      "idx_notification_log_created", "idx_account_snapshot_ts",
                      "idx_backtest_jobs_status", "idx_webhook_deliveries_created",
-                     "idx_messages_session", "idx_market_cache_code"):
+                     "idx_market_cache_code"):
             assert want in idx, want
+    finally:
+        _cleanup(db, d)
+
+
+# ---------------- 智能助手移除（迁移 v12）----------------
+def test_db_agent_tables_dropped():
+    """回归（2026-08-28）：移除智能助手后，sessions/messages/llm_config 三张表不应存在
+    （全新库经 v1+v12；旧库经 v12 DROP），其残留索引一并清理。"""
+    db, d = _tmp_db()
+    try:
+        tables = {r[0] for r in db._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        for t in ("sessions", "messages", "llm_config"):
+            assert t not in tables, f"{t} 仍存在（智能助手已移除）"
+        idx = {r[0] for r in db._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index'")}
+        assert "idx_messages_session" not in idx
     finally:
         _cleanup(db, d)
 

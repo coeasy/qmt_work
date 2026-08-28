@@ -298,6 +298,11 @@ FACTORS: Dict[str, dict] = _registry()
 
 # ---------------- 公开 API ----------------
 
+def factor_extra_fields(name: str) -> List[str]:
+    """返回指标额外需要的输入字段（high/low/volume 等），无额外需求时返回空列表。"""
+    return list(_EXTRA_FIELDS.get(name, []))
+
+
 def list_factors() -> List[dict]:
     """返回所有可用指标的描述与默认参数（不含 callable）。"""
     return [{"name": m["name"], "description": m["description"], "params": m["params"]}
@@ -324,7 +329,12 @@ def compute_many(names: List[str], closes: list, **shared) -> Dict[str, Any]:
     """一次计算多个指标（共享 closes 及 high/low/volume 等字段）。"""
     out: Dict[str, Any] = {}
     for name in names:
-        params = {k: v for k, v in shared.items() if k in ("high", "low", "volume")}
+        # 仅注入该因子实际需要的额外序列，避免把 high/low/volume 硬塞给
+        # sma/ema 等单序列因子（否则 lambda v, **p 会把多余字段透传给底层函数报错）
+        params: Dict[str, Any] = {}
+        for fld in factor_extra_fields(name):
+            if fld in shared:
+                params[fld] = shared[fld]
         params.update({k: v for k, v in shared.items()
                        if k in FACTORS.get(name, {}).get("params", {})})
         out[name] = compute_factor(name, closes, **params)

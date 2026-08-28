@@ -47,7 +47,6 @@ python build_exe.py
 | `app/` | config / db / routes / main / state |
 | `xtquant_client/` | BrokerAdapter / Manager / Registry V2 / 桥接 / 各券商适配器 |
 | `mcp_server/` | MCP 工具注册 |
-| `agent/` | LLM Provider 抽象 + Agent 核心 |
 | `gateway/` | 鉴权 / 限流 / 风控 / 审计 / 脱敏 / K 线缓存 / metrics / webhook |
 | `backtest/` | 回测作业队列（含向量化 + 参数扫描） |
 | `paper/` | 模拟盘引擎 |

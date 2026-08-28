@@ -33,6 +33,15 @@ async def cancel_backtest_job(job_id: str):
     ok_flag = state.backtest_queue.cancel(job_id)
     return ok({"cancelled": ok_flag})
 
+@router.post("/backtest/jobs/batch-delete")
+async def batch_delete_backtest_jobs(body: dict):
+    ids = [str(x) for x in (body.get("ids") or []) if x not in (None, "")]
+    if not ids:
+        return err(400, "ids 不能为空")
+    for jid in ids:
+        state.backtest_queue.cancel(jid)
+    return ok({"deleted": len(ids)})
+
 
 @router.post("/backtest/sweep")
 async def create_sweep_job(body: dict):

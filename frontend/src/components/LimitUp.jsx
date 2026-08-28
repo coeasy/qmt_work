@@ -2,6 +2,7 @@ import { useEffect, useState, useRef } from "react";
 import { api } from "../api.js";
 import { useServerEvents } from "../hooks/useSystemWS.js";
 import { fmtAmount, fmtLimitDur } from "../lib/format.js";
+import { quickTradeNavigate } from "../lib/trade.js";
 
 // 涨停板 / 打板助手：
 //  - 涨停板：真实行情扫描板块内涨停（或接近涨停）个股，列出最新数据，点击可快速下单
@@ -19,6 +20,8 @@ export default function LimitUp() {
   const [minPct, setMinPct] = useState(9.5);
   const [boardErr, setBoardErr] = useState("");
   const [loading, setLoading] = useState(false);
+  const [breadth, setBreadth] = useState(null);
+  const [breadthErr, setBreadthErr] = useState("");
   const timer = useRef(null);
 
   async function loadBoard() {
@@ -33,20 +36,29 @@ export default function LimitUp() {
     } catch (e) { setBoardErr(e.message); }
     finally { setLoading(false); }
   }
+  async function loadBreadth() {
+    try {
+      const d = await api.get("/market/breadth");
+      setBreadth(d);
+      setBreadthErr("");
+    } catch (e) { setBreadthErr(e.message); }
+  }
   useEffect(() => {
     if (view !== "board") return;
     loadBoard();
+    loadBreadth();
     // P2-2：低频兜底轮询（≥30s）防事件丢失；近实时刷新由 useServerEvents 的 limitup/quote 事件驱动
-    timer.current = setInterval(loadBoard, 30000);
+    timer.current = setInterval(() => { loadBoard(); loadBreadth(); }, 30000);
     return () => clearInterval(timer.current);
   }, [view, sector, onlyLimit, minPct]);
 
-  function quickTrade(stock) {
-    // 切到「交易」页并把代码 + 涨停价带过去，方便快速下单
-    window.dispatchEvent(new CustomEvent("nav", { detail: "trade" }));
-    setTimeout(() => window.dispatchEvent(new CustomEvent("trade:prefill", {
-      detail: { code: stock.code, price: stock.limit_price },
-    })), 120);
+  function quickTrade(stock, direction) {
+    // 切到「交易」Hub 的手动交易子页，把代码 + 参考价 + 买卖方向带过去快速下单：
+    // 买入优先带涨停价（挂涨停抢封板），卖出优先带最新价（避免用涨停价限卖提交失败）。
+    const price = Number(stock.limit_price) > 0
+      ? (direction === "buy" ? Number(stock.limit_price) : Number(stock.last || stock.limit_price))
+      : (Number(stock.last) || undefined);
+    quickTradeNavigate(stock.code, price, direction);
   }
 
   // ---------- 打板监控（原有） ----------
@@ -63,7 +75,7 @@ export default function LimitUp() {
   }
   useEffect(() => { load(); const t = setInterval(load, 30000); return () => clearInterval(t); }, []);
   // P2-2：limitup/limitup_order 事件驱动近实时刷新（触发/自动买入时立即更新），保留 30s 兜底轮询
-  useServerEvents(["limitup"], () => { loadBoard(); load(); });
+  useServerEvents(["limitup"], () => { loadBoard(); loadBreadth(); load(); });
 
   async function add() {
     const c = code.trim();
@@ -100,7 +112,34 @@ export default function LimitUp() {
 
       {view === "board" ? (
         <div>
-          <p className="page-sub">实时行情扫描板块内涨停（或接近涨停）个股，列出最新盘口数据；点击「交易」可快速带入下单页。</p>
+          <p className="page-sub">实时行情扫描板块内涨停（或接近涨停）个股，列出最新盘口数据；点击「买入/卖出」可带入下单页快速下单。</p>
+
+          <div className="card" style={{ marginBottom: 16 }}>
+            {breadthErr ? (
+              <p className="muted">涨跌停数量暂不可用：{breadthErr}。请到「券商连接」页连接券商后自动恢复。</p>
+            ) : breadth?.overall ? (
+              <>
+                <h3>
+                  大盘涨跌停 {(breadth.overall.limit_up ?? 0)} 涨停 / {(breadth.overall.limit_down ?? 0)} 跌停
+                  <span className="muted" style={{ fontWeight: 400, fontSize: 12 }}> （{(breadth.overall.total ?? 0)} 只 · {breadth.ts}）</span>
+                </h3>
+                <div className="grid grid-4">
+                  <div className="stat-value">{breadth.overall.limit_up ?? 0}<span className="muted" style={{ fontSize: 12 }}> 涨停</span></div>
+                  <div className="stat-value">{breadth.overall.limit_down ?? 0}<span className="muted" style={{ fontSize: 12 }}> 跌停</span></div>
+                  <div className="stat-value up">↑{breadth.overall.up ?? 0}</div>
+                  <div className="stat-value down">↓{breadth.overall.down ?? 0}</div>
+                </div>
+                <BreadthTable data={breadth.boards} kind="board" />
+                <BreadthTable data={breadth.indexes} kind="index" />
+                <p className="muted" style={{ fontSize: 11, marginTop: 6 }}>
+                  涨跌停数量按板块默认幅度估算（ST/新股不识别名称，按代码区间判幅）。
+                </p>
+              </>
+            ) : (
+              <p className="muted">涨跌停数量加载中或当前无数据……</p>
+            )}
+          </div>
+
           <div className="card">
             <div className="row" style={{ flexWrap: "wrap", gap: 8 }}>
               <label>板块</label>
@@ -148,7 +187,10 @@ export default function LimitUp() {
                       <td>{fmtAmount(r.bid_amount)}</td>
                       <td>{fmtAmount(r.amount)}</td>
                       <td>{fmtLimitDur(r.limit_seconds)}</td>
-                      <td><button onClick={() => quickTrade(r)}>交易</button></td>
+                      <td className="row" style={{ gap: 6 }}>
+                        <button className="btn-sm buy" onClick={() => quickTrade(r, "buy")}>买入</button>
+                        <button className="btn-sm sell" onClick={() => quickTrade(r, "sell")}>卖出</button>
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -242,5 +284,27 @@ export default function LimitUp() {
         </div>
       )}
     </div>
+  );
+}
+
+// 板块 / 指数 涨跌停家数小表
+function BreadthTable({ data, kind }) {
+  if (!data || data.length === 0) return null;
+  return (
+    <table style={{ marginTop: 10 }}>
+      <thead>
+        <tr><th>{kind === "board" ? "板块" : "指数"}</th><th>涨停</th><th>跌停</th><th>总数</th></tr>
+      </thead>
+      <tbody>
+        {data.map((b) => (
+          <tr key={b.name}>
+            <td>{b.name}</td>
+            <td className="up">{b.limit_up ?? 0}</td>
+            <td className="down">{b.limit_down ?? 0}</td>
+            <td className="muted">{b.total ?? 0}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
   );
 }

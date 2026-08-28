@@ -85,48 +85,4 @@ def build_mcp(risk) -> FastMCP:
     register_condition_tools(mcp)
     register_position_tools(mcp, risk)
     register_target_portfolio_tools(mcp)
-    register_agent_tools(mcp)
     return mcp
-
-
-def register_agent_tools(mcp):
-    """阶段 5 Agent 工具：对话 + 会话列表（缺 LLM 配置返回明确文本错误，绝不造假）。"""
-    from app.config import settings
-    from app.state import state
-    from agent.core import AgentCore
-    from agent.default_tools import build_default_registry
-    from agent.errors import AgentNotConfigured
-    from agent.providers import build_provider
-
-    def _core_or_err():
-        if not settings.agent_enabled or not settings.agent_api_key:
-            return None, "Agent 未配置：请在「设置」开启 agent_enabled 并配置 LLM API Key。"
-        try:
-            provider = build_provider(settings.agent_provider, settings.agent_api_key,
-                                      settings.agent_model, settings.agent_base_url)
-            return AgentCore(state.db, provider, build_default_registry()), None
-        except AgentNotConfigured as exc:
-            return None, str(exc)
-
-    @mcp.tool()
-    async def agent_chat(message: str, session_id: int = 0, conn_id: str = "") -> dict:
-        """与 qmt_work 智能助手对话（基于真实券商/运行期数据查询工具）。
-
-        - message: 用户问题（必填）
-        - session_id: 历史会话 id（可选，省略则新建）
-        - conn_id: 指定券商连接（可选，省略用活跃连接）
-        """
-        core, err_msg = _core_or_err()
-        if core is None:
-            return {"error": err_msg}
-        result = await core.chat(message, session_id=session_id or None,
-                                 conn_id=conn_id or None)
-        return result
-
-    @mcp.tool()
-    async def agent_sessions() -> dict:
-        """列出 Agent 历史会话。"""
-        core, err_msg = _core_or_err()
-        if core is None:
-            return {"error": err_msg}
-        return {"sessions": core.list_sessions()}

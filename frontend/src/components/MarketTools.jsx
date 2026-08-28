@@ -31,8 +31,14 @@ export default function MarketTools() {
   // 手动抓取
   const [crawlCodes, setCrawlCodes] = useState("600519.SH");
   const [crawlDays, setCrawlDays] = useState(30);
+  const [crawlPeriod, setCrawlPeriod] = useState("1d");
+  const [crawlAdjust, setCrawlAdjust] = useState("");
   const [crawlMsg, setCrawlMsg] = useState(null);
   const [crawlBusy, setCrawlBusy] = useState(false);
+
+  // 定时更新
+  const [sync, setSync] = useState(null);
+  const [syncBusy, setSyncBusy] = useState(false);
 
   async function queryQuote() {
     setQBusy(true); setToast(null); setQuote(null);
@@ -45,8 +51,10 @@ export default function MarketTools() {
 
   async function loadCache() {
     setCBusy(true); setToast(null);
-    try { setCache(await api.klineCacheStats()); }
-    catch (e) { setToast({ ok: false, t: e.message }); }
+    try {
+      setCache(await api.klineCacheStats());
+      setSync(await api.klineSyncStatus());
+    } catch (e) { setToast({ ok: false, t: e.message }); }
     finally { setCBusy(false); }
   }
   async function clearCache() {
@@ -59,12 +67,35 @@ export default function MarketTools() {
     finally { setCBusy(false); }
   }
 
+  // 定时更新开关/时间：写 runtime_config（market.sync.enabled / market.sync.time），热更新
+  async function saveSync(next) {
+    setSyncBusy(true); setToast(null);
+    try {
+      const changed = { ...next };
+      if (changed.enabled === sync.enabled) delete changed.enabled;
+      if (changed.sync_time === sync.sync_time) delete changed.sync_time;
+      if (Object.keys(changed).length) {
+        const map = { enabled: "market.sync.enabled", sync_time: "market.sync.time" };
+        const body = {};
+        for (const k of Object.keys(changed)) body[map[k]] = changed[k];
+        await api.putRuntimeConfig(body);
+      }
+      const s = await api.klineSyncStatus();
+      setSync(s);
+      setToast({ ok: true, t: `定时更新已${s.enabled ? "开启" : "关闭"}${s.enabled ? `，每日 ${s.sync_time} 收盘后刷新` : ""}` });
+    } catch (e) { setToast({ ok: false, t: e.message }); }
+    finally { setSyncBusy(false); }
+  }
+
   async function doCrawl() {
     setCrawlBusy(true); setCrawlMsg(null);
     const codes = crawlCodes.split(/[,，]/).map((s) => s.trim()).filter(Boolean);
     try {
-      const r = await api.marketCrawl({ conn_id: qConn.trim(), codes, days: Number(crawlDays) || 30 });
-      setCrawlMsg({ ok: true, t: `抓取完成：标的 ${r.crawled_codes?.length || 0} 个，落库 ${r.bars_inserted || 0} 根 K 线` });
+      const r = await api.marketCrawl({
+        conn_id: qConn.trim(), codes, days: Number(crawlDays) || 30,
+        period: crawlPeriod, adjust: crawlAdjust,
+      });
+      setCrawlMsg({ ok: true, t: `抓取完成：标的 ${r.crawled_codes?.length || 0} 个，落库 ${r.bars_inserted || 0} 根 K 线（${crawlPeriod}${crawlAdjust ? "/" + crawlAdjust : ""}，写入 kline_cache/kline_archive）` });
     } catch (e) { setCrawlMsg({ ok: false, t: e.message }); }
     finally { setCrawlBusy(false); }
   }
@@ -118,12 +149,24 @@ export default function MarketTools() {
           </div>
           {cache && (
             <div style={{ marginTop: 8, fontSize: 12, lineHeight: 1.8 }}>
-              {Object.entries(cache).map(([k, v]) => (
-                <div key={k} className="row" style={{ justifyContent: "space-between", gap: 8 }}>
-                  <span className="muted">{k}</span>
-                  <span>{typeof v === "object" ? JSON.stringify(v) : String(v)}</span>
+              <CacheStats cache={cache} />
+              <div className="row" style={{ justifyContent: "space-between", gap: 8, borderTop: "1px solid #2a3550", marginTop: 8, paddingTop: 6 }}>
+                <span className="muted">定时更新（每日收盘后刷新今年热数据）</span>
+                {sync && (
+                  <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    <input type="checkbox" checked={!!sync.enabled}
+                           onChange={(e) => saveSync({ enabled: e.target.checked })} disabled={syncBusy} />
+                    <input
+                      style={{ width: 56 }} type="time" value={sync.sync_time}
+                      onBlur={(e) => saveSync({ sync_time: e.target.value })} disabled={syncBusy} />
+                  </label>
+                )}
+              </div>
+              {sync?.last_run && (
+                <div className="muted" style={{ fontSize: 11 }}>
+                  最近运行：{sync.last_run.date}（标的 {sync.last_run.codes}，成功 {sync.last_run.ok} / 失败 {sync.last_run.fail}）
                 </div>
-              ))}
+              )}
             </div>
           )}
         </div>
@@ -137,18 +180,49 @@ export default function MarketTools() {
           </div>
           <div className="row">
             <label style={{ width: 60 }}>天数</label>
-            <input style={{ width: 90 }} value={crawlDays}
+            <input style={{ width: 72 }} value={crawlDays}
                    onChange={(e) => setCrawlDays(e.target.value)} />
+            <select value={crawlPeriod} onChange={(e) => setCrawlPeriod(e.target.value)} style={{ flex: 1 }}>
+              {["1d", "1w", "1mon", "1m", "5m", "15m"].map((p) => (
+                <option key={p} value={p}>{p}</option>
+              ))}
+            </select>
+            <select value={crawlAdjust} onChange={(e) => setCrawlAdjust(e.target.value)} style={{ flex: 1 }}>
+              <option value="">原始</option>
+              <option value="qfq">前复权</option>
+              <option value="hfq">后复权</option>
+            </select>
             <button onClick={doCrawl} disabled={crawlBusy || !crawlCodes.trim()}>
               {crawlBusy ? "抓取中…" : "抓取落库"}
             </button>
           </div>
           <p className="muted" style={{ fontSize: 11, marginTop: 6 }}>
-            经真实券商拉取日线写入本地 market_cache，供离线回测使用。
+            经真实券商拉取 K 线写入本地 kline_cache（今年）/kline_archive（去年以前），供图表与回测使用；后端抓取时优先复用已缓存的复权标记。
           </p>
           {crawlMsg && <div className={`toast ${crawlMsg.ok ? "ok" : "err"}`} style={{ marginTop: 8 }}>{crawlMsg.t}</div>}
         </div>
       </div>
+    </div>
+  );
+}
+
+function CacheStats({ cache }) {
+  if (!cache || typeof cache !== "object") return null;
+  const rows = [
+    ["总行数", cache.rows ?? "—"],
+    ["热表(今年)", cache.hot_rows ?? "—"],
+    ["归档(去年及以前)", cache.archive_rows ?? "—"],
+    ["序列数", cache.series ?? "—"],
+    ["今年分区", cache.current_year ?? "—"],
+    ["命中率", cache.hit_rate != null ? `${(Number(cache.hit_rate) * 100).toFixed(1)}%` : "—"],
+  ];
+  return (
+    <div>
+      {rows.map(([k, v]) => (
+        <div key={k} className="row" style={{ justifyContent: "space-between", gap: 8 }}>
+          <span className="muted">{k}</span><span>{v}</span>
+        </div>
+      ))}
     </div>
   );
 }

@@ -27,6 +27,17 @@ async def delete_notification(nid: int):
     state.notifier.delete_config(nid)
     return ok({"deleted": True})
 
+@router.post("/notifications/batch-delete")
+async def batch_delete_notifications(body: dict):
+    if state.notifier is None:
+        return err(503, "通知中心未初始化")
+    ids = [int(x) for x in (body.get("ids") or []) if str(x).isdigit()]
+    if not ids:
+        return err(400, "ids 不能为空")
+    for nid in ids:
+        state.notifier.delete_config(nid)
+    return ok({"deleted": len(ids)})
+
 @router.post("/notifications/test")
 async def test_notification(body: dict):
     if state.notifier is None:

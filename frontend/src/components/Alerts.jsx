@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
 import { api } from "../api.js";
+import { useBatchSelection } from "../hooks/useBatchSelection.js";
+import BatchDeleteBar from "./BatchDeleteBar.jsx";
 
 /* 告警规则（Alerts）
    创建/编辑/删除告警规则 · 告警历史 · 触发测试
@@ -11,6 +13,8 @@ export default function Alerts() {
   const [rules, setRules] = useState([]);
   const [history, setHistory] = useState([]);
   const [editing, setEditing] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const bsel = useBatchSelection(rules, "id");
 
   const [form, setForm] = useState({
     name: "", enabled: true, event: "*", metric: "",
@@ -51,6 +55,17 @@ export default function Alerts() {
       loadAll();
     } catch (e) { setMsg({ ok: false, t: e.message }); }
     finally { setLoading(false); }
+  }
+
+  async function batchDelete() {
+    setBusy(true);
+    try {
+      await api.batchDeleteAlertRules(bsel.selected);
+      setMsg({ ok: true, t: `已删除 ${bsel.selected.length} 条规则` });
+      bsel.clear();
+      loadAll();
+    } catch (e) { setMsg({ ok: false, t: e.message }); }
+    finally { setBusy(false); }
   }
 
   async function testAlert() {
@@ -131,15 +146,18 @@ export default function Alerts() {
 
       <div className="card" style={{ marginTop: 16 }}>
         <h3 style={{ marginBottom: 12 }}>规则列表</h3>
+        <BatchDeleteBar count={bsel.selected.length} onDelete={batchDelete} onClear={bsel.clear} busy={busy} label="规则" />
         {!rules.length ? <Empty>暂无告警规则</Empty> : (
           <div style={{ overflowX: "auto" }}>
             <table className="table">
               <thead><tr>
+                <th style={{ width: 32 }}><input type="checkbox" checked={bsel.allSelected} onChange={bsel.toggleAll} /></th>
                 <th>ID</th><th>名称</th><th>事件</th><th>条件</th><th>通道</th><th>冷却</th><th>状态</th><th>操作</th>
               </tr></thead>
               <tbody>
                 {rules.map((r) => (
                   <tr key={r.id}>
+                    <td><input type="checkbox" checked={bsel.sel.has(r.id)} onChange={() => bsel.toggleOne(r.id)} /></td>
                     <td>{r.id}</td>
                     <td><strong>{r.name}</strong></td>
                     <td><code>{r.event}</code></td>

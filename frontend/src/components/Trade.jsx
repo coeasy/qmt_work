@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { api } from "../api.js";
 import { useBroker } from "../BrokerContext.jsx";
 import { useServerEvents } from "../hooks/useSystemWS.js";
+import { consumePendingPrefill } from "../lib/trade.js";
 
 // 手动交易面板：下单 / 持仓 / 委托 / 成交 / 条件单 / 目标仓位（全部真实接口，下单过风控）
 export default function Trade() {
@@ -51,7 +52,7 @@ export default function Trade() {
       if (!d.code) return;
       setForm((f) => ({
         ...f, code: d.code,
-        direction: "buy",
+        direction: d.direction || "buy",
         price: d.price ? Number(d.price) : f.price,
         price_type: d.price ? "limit" : f.price_type,
       }));
@@ -61,9 +62,24 @@ export default function Trade() {
     return () => window.removeEventListener("trade:prefill", onPrefill);
   }, []);
 
+  // 若在挂载前就有人调用了 quickTradeNavigate（pending 已写入），立即消费，避免竞态丢单
+  useEffect(() => {
+    const p = consumePendingPrefill();
+    if (p && p.code) {
+      setForm((f) => ({
+        ...f, code: p.code,
+        direction: p.direction || "buy",
+        price: p.price ? Number(p.price) : f.price,
+        price_type: p.price ? "limit" : f.price_type,
+      }));
+      setTab("order");
+    }
+  }, []);
+
   async function submitOrder() {
+    // 订单提交成功/失败都要保留 toast 反馈（此前紧跟 setMsg(null) 把 wrap 的提示立即清掉，
+    // 导致下单始终"无任何反馈"，是交易链路最直接的体验断点）
     await wrap(() => api.tradeOrder(form), `已提交：${form.direction === "buy" ? "买入" : "卖出"} ${form.code} ${form.volume} 股`);
-    setMsg(null);
   }
   async function runPrecheck() {
     setPrecheck({ loading: true });
@@ -76,18 +92,17 @@ export default function Trade() {
     } catch (e) { setPrecheck({ ok: false, reason: e.message }); }
   }
   async function cancelOrder(oid) {
-    await wrap(() => api.tradeCancel(oid), `已撤单：${oid}`); setMsg(null);
+    await wrap(() => api.tradeCancel(oid), `已撤单：${oid}`);
   }
   async function submitCond() {
-    await wrap(() => api.tradeConditionSubmit(condForm), "条件单已提交（达到触发价自动下单）"); setMsg(null);
+    await wrap(() => api.tradeConditionSubmit(condForm), "条件单已提交（达到触发价自动下单）");
   }
   async function cancelCond(cid) {
-    await wrap(() => api.tradeConditionCancel(cid), "条件单已取消"); setMsg(null);
+    await wrap(() => api.tradeConditionCancel(cid), "条件单已取消");
   }
   async function submitTarget() {
     const r = await wrap(() => api.tradeTarget(targetForm), "目标仓位计划已生成");
     if (r && r.action === "trade") setMsg({ ok: true, t: `${r.direction === "buy" ? "买入" : "卖出"} ${r.code} ${r.volume} 股（目标 ${(r.target_pct * 100).toFixed(1)}%）` });
-    setMsg(null);
   }
 
   const set = (obj, fn) => (e) => fn({ ...obj, [e.target.name]: e.target.type === "number" ? +e.target.value : e.target.value });

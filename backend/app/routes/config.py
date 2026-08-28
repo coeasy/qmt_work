@@ -1,50 +1,9 @@
-from app.routes._common import ok, err, state, crypto
+from app.routes._common import ok, err, state
 
 from fastapi import APIRouter
-# --- stdlib imports injected by fix_route_imports ---
-import time
-
 
 
 router = APIRouter()
-
-@router.get("/config/llm")
-async def get_llm_config():
-    row = state.db.query_one("SELECT * FROM llm_config WHERE scope='global' ORDER BY id LIMIT 1")
-    if not row:
-        return ok({"provider": "openai", "base_url": "", "api_key_masked": "",
-                   "model": "", "temperature": 0.2, "configured": False})
-    return ok({"provider": row["provider"], "base_url": row["base_url"],
-               "api_key_masked": crypto.mask_secret(crypto.decrypt_plain(row["api_key_enc"])) if row["api_key_enc"] else "",
-               "model": row["model"], "temperature": row["temperature"], "configured": True})
-
-@router.put("/config/llm")
-async def put_llm_config(body: dict):
-    if not body.get("base_url") or not body.get("model"):
-        return err(400, "base_url 与 model 必填")
-    api_key_enc = crypto.encrypt_plain(body.get("api_key", "")) if body.get("api_key") else ""
-    existing = state.db.query_one("SELECT id FROM llm_config WHERE scope='global' ORDER BY id LIMIT 1")
-    now = time.strftime("%Y-%m-%dT%H:%M:%S")
-    if existing:
-        if api_key_enc:
-            state.db.execute(
-                "UPDATE llm_config SET provider=?, base_url=?, model=?, temperature=?, "
-                "api_key_enc=?, updated_at=? WHERE id=?",
-                (body.get("provider", "openai"), body["base_url"], body["model"],
-                 float(body.get("temperature", 0.2)), api_key_enc, now, existing["id"]))
-        else:
-            state.db.execute(
-                "UPDATE llm_config SET provider=?, base_url=?, model=?, temperature=?, updated_at=? WHERE id=?",
-                (body.get("provider", "openai"), body["base_url"], body["model"],
-                 float(body.get("temperature", 0.2)), now, existing["id"]))
-    else:
-        state.db.insert("llm_config", {
-            "scope": "global", "provider": body.get("provider", "openai"),
-            "base_url": body["base_url"], "api_key_enc": api_key_enc,
-            "model": body["model"], "temperature": float(body.get("temperature", 0.2)),
-            "timeout_ms": 60000, "is_default": 1, "updated_at": now})
-    return ok({"saved": True})
-
 
 # ---------------- 运行时配置中心（引擎级参数热更新，配置灵活化） ----------------
 

@@ -19,3 +19,4 @@ pytest
 # 测试：行情总线 Redis 真路径（fakeredis 替代真实 Redis，无需起服务）
 redis>=5.0
 fakeredis>=2.0
+eltdx>=3.0  # TDX 公共行情补充源（无券商时 fallback：行情/基础数据）；仅限非商业用途

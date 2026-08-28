@@ -80,6 +80,18 @@ async def delete_run(run_id: int):
     rt.delete(run_id)
     return ok({"deleted": True})
 
+@router.post("/strategies/run/batch-delete")
+async def batch_delete_runs(body: dict):
+    rt = _rt()
+    if rt is None:
+        return err(503, _NOT_READY)
+    ids = [int(x) for x in (body.get("ids") or []) if str(x).isdigit()]
+    if not ids:
+        return err(400, "ids 不能为空")
+    for run_id in ids:
+        rt.delete(run_id)
+    return ok({"deleted": len(ids)})
+
 
 @router.get("/strategies/run/{run_id}/logs")
 async def run_logs(run_id: int, limit: int = 100):

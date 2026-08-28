@@ -34,15 +34,6 @@ def check(name, cond, detail=""):
         print(f"  [FAIL] {name}  {detail}")
 
 
-def reset_llm_config():
-    try:
-        c = sqlite3.connect(DB_PATH)
-        c.execute("DELETE FROM llm_config")
-        c.commit(); c.close()
-    except Exception:
-        pass
-
-
 async def get(path):
     import httpx
     async with httpx.AsyncClient(timeout=10) as cli:
@@ -69,10 +60,6 @@ async def delete(path):
     async with httpx.AsyncClient(timeout=10) as cli:
         r = await cli.delete(BASE + path)
         return r.status_code, r.json()
-
-
-def reset_llm():
-    reset_llm_config()
 
 
 async def test_broker_profiles():
@@ -133,35 +120,11 @@ async def test_backtest_no_broker():
               f"{j.get('data')}")
 
 
-async def test_llm_config():
-    reset_llm()
-    code, data = await get("/config/llm")
-    check("LLM 未配置态", data.get("code") == 0 and data["data"]["configured"] is False, str(code))
-    code, data = await put("/config/llm", {
-        "provider": "openai", "base_url": "https://api.openai.com/v1",
-        "model": "gpt-4o", "api_key": "sk-test-1234567890"})
-    check("LLM 配置保存", data.get("code") == 0, str(code))
-    code, data = await get("/config/llm")
-    masked = data["data"].get("api_key_masked", "")
-    check("LLM API Key 脱敏", masked == "sk-********7890", f"masked={masked}")
-
-
 async def test_api_keys():
     code, data = await post("/api-keys", {"name": "test", "scopes": "trade,quote"})
     check("API Key 创建", data.get("code") == 0 and "api_key" in data.get("data", {}), str(code))
     code, data = await get("/api-keys")
     check("API Key 列表", data.get("code") == 0 and len(data.get("data", [])) >= 1, str(code))
-
-
-async def test_agent():
-    reset_llm()
-    import httpx
-    async with httpx.AsyncClient(timeout=15) as cli:
-        async with cli.stream("POST", BASE + "/agent/chat", json={"message": "hi"}) as r:
-            body = ""
-            async for line in r.aiter_lines():
-                body += line
-    check("Agent 未配置 LLM 提示", "Agent 未配置" in body, body[:120])
 
 
 async def test_ws():
@@ -296,9 +259,7 @@ async def main():
     await test_account_no_broker()
     await test_market_crawl_no_broker()
     await test_backtest_no_broker()
-    await test_llm_config()
     await test_api_keys()
-    await test_agent()
     await test_ws()
     await test_ws_reconnect()
     await test_risk_circuit_breaker()

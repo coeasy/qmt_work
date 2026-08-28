@@ -3,6 +3,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useBroker } from "../BrokerContext.jsx";
 import { api } from "../api.js";
+import { useBatchSelection } from "../hooks/useBatchSelection.js";
+import BatchDeleteBar from "./BatchDeleteBar.jsx";
 
 const ACCOUNT_TYPES = ["STOCK", "CREDIT", "OPTION", "FUTURES"];
 
@@ -40,8 +42,16 @@ function probeText(p) {
 }
 
 export default function Brokers() {
-  const { profiles, brokers, activeId, add, connect, disconnect, remove, setActive, test, autoDetect } = useBroker();
+  const { profiles, brokers, activeId, add, connect, disconnect, remove, batchRemove, setActive, test, autoDetect } = useBroker();
   const [brokerId, setBrokerId] = useState("");
+  const [batchBusy, setBatchBusy] = useState(false);
+  const bsel = useBatchSelection(brokers, "conn_id");
+  async function batchDeleteBrokers() {
+    setBatchBusy(true);
+    try { await batchRemove(bsel.selected); bsel.clear(); }
+    catch (e) { setMsg({ ok: false, t: e.message }); }
+    finally { setBatchBusy(false); }
+  }
   const [form, setForm] = useState({
     client_path: "", client_mode: "auto", account_id: "", account_type: "STOCK",
     session_id: "", min_version: "", active: false, autoconnect: true,
@@ -465,14 +475,19 @@ export default function Brokers() {
         {/* 已配置连接列表 */}
         <div className="card">
           <h3>已配置连接（{brokers.length}）</h3>
+          <BatchDeleteBar count={bsel.selected.length} onDelete={batchDeleteBrokers} onClear={bsel.clear} busy={batchBusy} label="连接" />
           {brokers.length === 0 ? (
             <p className="muted">尚无连接。在左侧添加你的第一个券商客户端。</p>
           ) : (
             <table>
-              <thead><tr><th>名称</th><th>账户</th><th>状态</th><th>操作</th></tr></thead>
+              <thead><tr>
+                <th style={{ width: 32 }}><input type="checkbox" checked={bsel.allSelected} onChange={bsel.toggleAll} /></th>
+                <th>名称</th><th>账户</th><th>状态</th><th>操作</th>
+              </tr></thead>
               <tbody>
                 {brokers.map((b) => (
                   <tr key={b.conn_id}>
+                    <td><input type="checkbox" checked={bsel.sel.has(b.conn_id)} onChange={() => bsel.toggleOne(b.conn_id)} /></td>
                     <td>
                       <div>{b.broker_name}</div>
                       <div className="muted" style={{ fontSize: 11 }}>

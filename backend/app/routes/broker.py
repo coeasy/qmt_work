@@ -336,6 +336,21 @@ async def remove_broker(conn_id: str):
         state.db.audit("broker", "broker.remove_failed", conn_id, {}, str(exc))
         return err(500, str(exc))
 
+@router.post("/brokers/batch-delete")
+async def batch_remove_brokers(body: dict):
+    ids = [str(x) for x in (body.get("ids") or []) if x not in (None, "")]
+    if not ids:
+        return err(400, "ids 不能为空")
+    removed = []
+    for conn_id in ids:
+        try:
+            state.broker_manager.remove(conn_id)
+            removed.append(conn_id)
+        except Exception:  # noqa: BLE001
+            continue
+    state.db.audit("broker", "broker.batch_remove", f"#{len(removed)}", {"ids": removed}, "ok")
+    return ok({"removed": removed, "deleted": len(removed)})
+
 @router.get("/brokers/{conn_id}/health")
 async def broker_health(conn_id: str):
     if state.health_monitor is None:

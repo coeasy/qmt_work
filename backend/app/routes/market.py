@@ -7,33 +7,124 @@ import json
 import logging
 import os
 
-log = logging.getLogger("qmt_work.market")
+from app.datasource.board import classify_board
+from app.datasource.manager import get_hub, MarketDataUnavailable
 
+log = logging.getLogger("qmt_work.market")
 
 
 router = APIRouter()
 
+
+@router.get("/market/search")
+async def market_search(q: str, limit: int = 20):
+    """股票搜索：按中文名 / 代码模糊匹配（零网络，基于本地名称缓存）。
+
+    返回 [{"code": "600519.SH", "name": "贵州茅台"}, ...]，最多 limit 条。
+    q 为空时返回空列表。完全离线，不依赖券商连接。
+    """
+    q = (q or "").strip()
+    if not q:
+        return []
+    try:
+        return await get_hub().search_stocks(q, limit)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("股票搜索失败：%s", exc)
+        return []
+
+
 @router.get("/market/quote")
-async def market_quote(code: str, conn_id: str = ""):
-    """实时行情快照（最新价 / 涨跌幅 / 成交量 / 买卖五档）。"""
-    b = _need(conn_id or None)
-    if b is None:
-        return err(503, "未连接任何券商客户端：请到「券商连接」页添加并连接券商。")
-    return await _call(b, b.gateway.get_quote, code)
+async def market_quote(code: str, conn_id: str = "", source: str = "auto"):
+    """实时行情快照（最新价 / 涨跌幅 / 成交量 / 买卖五档 + 合约名称/涨跌停）。
+
+    source:
+      - auto（默认）：券商优先，券商未连接或失败时回退 eltdx(TDX 公共行情)
+      - broker：仅券商
+      - eltdx：仅 TDX 公共行情（无需券商客户端）
+    """
+    try:
+        q = await get_hub().get_quote(code, source=source, conn_id=conn_id or None)
+    except MarketDataUnavailable:
+        if source == "eltdx":
+            return err(503, f"TDX 行情源不可用：{code}（请检查网络或连接券商）")
+        if source == "broker":
+            return err(503, "未连接任何券商客户端：请到「券商连接」页添加并连接券商。")
+        return err(503, "行情获取失败：券商未连接且 TDX 行情源不可用，请连接券商或检查网络。")
+    return q
+
+
+@router.get("/market/stock-info")
+async def market_stock_info(code: str, conn_id: str = "", source: str = "auto"):
+    """股票基本信息：名称 / 板块 / 交易所 / 涨跌停 / 昨收（供右侧面板）。
+
+    source: auto（券商优先，失败回退 eltdx）/ broker / eltdx
+    """
+    board = classify_board(code)
+    info = {
+        "code": code,
+        "name": code,
+        "exchange": board.get("exchange"),
+        "board": board.get("board"),
+        "high_limit": None,
+        "low_limit": None,
+        "pre_close": None,
+        "industry": "",
+        "concepts": [],
+    }
+
+    try:
+        det = await get_hub().get_instrument_detail(code, source=source, conn_id=conn_id or None)
+    except MarketDataUnavailable:
+        # 全部源不可用：板块按代码前缀推断，绝不伪造数值。
+        info["note"] = "未连接券商且 TDX 行情源不可用，板块按代码前缀推断"
+        return ok(info)
+
+    info["name"] = det.get("name") or code
+    info["exchange"] = det.get("exchange") or info["exchange"]
+    info["high_limit"] = det.get("high_limit")
+    info["low_limit"] = det.get("low_limit")
+    info["pre_close"] = det.get("pre_close")
+    info["industry"] = det.get("industry") or ""
+    info["concepts"] = det.get("concepts") or []
+    info["source"] = det.get("source")
+    return ok(info)
+
+@router.get("/market/sources")
+async def market_sources():
+    """列出已注册行情数据源及其可用性（供前端「数据源」选择 / 健康展示）。
+
+    返回 {sources:[name,...], auto_chain:[...], health:{name:{available,note}}, active:当前auto首源}。
+    """
+    m = get_hub()
+    h = await m.health()
+    active = next((n for n in m._auto_chain if h.get(n, {}).get("available")), None)
+    return ok({
+        "sources": m.list_sources(),
+        "auto_chain": m._auto_chain,
+        "health": h,
+        "active": active,
+    })
+
 
 @router.get("/market/kline")
 async def market_kline(code: str, period: str = "1d", count: int = 250,
-                       conn_id: str = "", force: bool = False):
-    """历史 K 线（C1 本地缓存优先；source 标注 cache / broker / cache_stale）。"""
+                       conn_id: str = "", force: bool = False, source: str = "auto",
+                       adj: str = ""):
+    """历史 K 线（C1 本地缓存优先；source: auto=券商优先回退eltdx / broker / eltdx）。
+    adj: ''=不复权 / qfq=前复权 / hfq=后复权。券商 get_kline 不支持复权，显式复权时
+    走 TDX 复权源，避免静默返回原始价误导用户。"""
     from tools import fetch_kline_cached
     try:
         res = await fetch_kline_cached(code, period, count,
-                                       broker_id=conn_id or None, force=force)
+                                       broker_id=conn_id or None, force=force,
+                                       source=source,
+                                       adjust=adj or None)
     except BrokerError as exc:
         return err(503, str(exc))
     return ok({"code": code, "period": period, "count": len(res.get("bars") or []),
                "source": res.get("source"), "cached_at": res.get("cached_at"),
-               "note": res.get("note"), "bars": res.get("bars") or []})
+               "note": res.get("note"), "adjust": adj or "",
+               "bars": res.get("bars") or []})
 
 @router.get("/market/limitup")
 async def market_limitup(sector: str = "沪深A股", min_pct: float = 9.5,
@@ -50,19 +141,54 @@ async def market_limitup(sector: str = "沪深A股", min_pct: float = 9.5,
         return err(503, str(exc))
     return ok({"sector": sector, "count": len(rows), "rows": rows})
 
+@router.get("/market/breadth")
+async def market_breadth():
+    """市场广度统计：全市场/板块/主要指数涨跌停家数。"""
+    b = _need()
+    if b is None:
+        return err(503, "未连接任何券商客户端：请到「券商连接」页添加并连接券商。")
+    try:
+        from tools.limitup import market_breadth as _mb
+        return ok(await _mb(b))
+    except BrokerError as exc:
+        return err(503, str(exc))
+
+
+@router.get("/market/kline/sync-status")
+async def kline_sync_status():
+    """行情缓存定时更新状态（开关/触发时间/最近一次运行），供前端展示与配置。"""
+    ms = getattr(state, "market_sync", None)
+    if ms is None:
+        return ok({"initialized": False})
+    rc = getattr(state, "runtime_config", None)
+    info = {
+        "initialized": True,
+        "enabled": ms.enabled,
+        "sync_time": ms.sync_time,
+        # runtime_config 可写标记（put /config/runtime 用同一 domain key）
+        "keys": {
+            "enabled": "market.sync.enabled",
+            "sync_time": "market.sync.time",
+        },
+        "last_run": getattr(state, "_market_sync_last", None),
+        "config": rc.all().get("market.sync.enabled") if rc else None,
+    }
+    return ok(info)
+
+
 @router.get("/market/kline/cache")
 async def kline_cache_stats():
-    """K 线缓存统计（行数、序列数、命中率）。"""
+    """K 线缓存统计（行数/热表·归档/序列数/命中率）。"""
     if state.kline_cache is None:
         return err(503, "K 线缓存未初始化")
-    return ok(state.kline_cache.stats())
+    return ok(await asyncio.to_thread(state.kline_cache.stats))
 
 @router.delete("/market/kline/cache")
 async def kline_cache_clear(code: str = "", period: str = ""):
     """清理 K 线缓存（可按 code / code+period 精确清理）。"""
     if state.kline_cache is None:
         return err(503, "K 线缓存未初始化")
-    n = state.kline_cache.clear(code=code, period=period)
+    n = await asyncio.to_thread(state.kline_cache.clear, code=code, period=period)
     state.db.audit("admin", "kline_cache.clear", code or "*",
                    {"period": period}, f"deleted={n}")
     return ok({"deleted": n})
@@ -250,19 +376,27 @@ async def crawl_market(body: dict):
         return err(503, "未连接任何券商客户端。")
     codes = body.get("codes", ["600519.SH"])
     days = int(body.get("days", 30))
+    period = str(body.get("period") or "1d")
+    adjust = str(body.get("adjust") or "")
+    cache = getattr(state, "kline_cache", None)
     inserted = 0
     for code in codes:
-        bars = await _call(b, b.gateway.get_kline, code, "1d", days)
+        bars = await _call(b, b.gateway.get_kline, code, period, days)
         if isinstance(bars, dict) and bars.get("code"):
             return bars
-        for bb in bars:
-            try:
-                state.db.upsert("market_cache", {
-                    "code": code, "dtype": "kline", "ts": bb.get("time", ""),
-                    "payload_json": json.dumps(bb, ensure_ascii=False)})
-                inserted += 1
-            except Exception:
-                pass
+        if cache is None:
+            # 无缓存引擎时退化为老逻辑（写入 market_cache 兜底），避免空操作
+            for bb in bars:
+                try:
+                    state.db.upsert("market_cache", {
+                        "code": code, "dtype": "kline", "ts": bb.get("time", ""),
+                        "payload_json": json.dumps(bb, ensure_ascii=False)})
+                    inserted += 1
+                except Exception:
+                    pass
+        else:
+            # 统一经 KlineCache 落库（热/归档分离）：抓取结果直接进入图表/回测查询链路
+            inserted += await cache.aput(code, period, bars, adjust)
     return ok({"crawled_codes": codes, "bars_inserted": inserted})
 
 

@@ -34,6 +34,7 @@ class AppState:
     runtime_config = None    # 运行时配置中心（热更新）
     paper_engine = None      # 模拟盘引擎（P1）
     strategy_runtime = None  # 策略运行容器：在平台内把策略当作实盘/模拟机器人运行（P0）
+    market_sync = None       # 行情缓存定时维护：今年热数据收盘后刷新 + 跨年归档
     started_at: float = 0.0  # 进程启动时间戳（健康检查用）
     latest_quotes: dict = {}
 

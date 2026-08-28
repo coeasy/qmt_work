@@ -49,7 +49,6 @@ PATH_SCOPES = [
     ("/api/v1/wal", "admin"),
     ("/api/v1/metrics", "admin"),
     ("/api/v1/quote-bus", "admin"),
-    ("/api/v1/agent", "admin"),
 ]
 # 公共路径（免鉴权，仅只读信息）：健康检查 / 就绪 / API 文档 / 前端静态页
 PUBLIC_PREFIXES = (
@@ -76,7 +75,7 @@ def scope_for_path(path: str) -> str | None:
 
     阶段 0-E：未匹配的端点返回 UNMATCHED_SCOPE（default-deny）。原实现返回 None，
     而 scope_match(None) 恒 True → 任意有效密钥（如 market 子密钥）即可访问
-    未映射端点（/mcp、/agent 等），存在越权调用下单/管理接口的通道。
+    未映射端点（/mcp 等），存在越权调用下单/管理接口的通道。
     """
     if _is_public_path(path):
         return None
@@ -106,6 +105,9 @@ class ApiKeyStore:
         self._by_hash: dict[str, dict] = {}
         self._lock = threading.Lock()
         self._loaded = False
+        # 使用追踪：节奏写入 DB（避免每个请求都落库）
+        self._usage_dirty: dict[int, tuple[str, int]] = {}
+        self._flusher_started = False
 
     def bind(self, db) -> None:
         self._db = db
@@ -116,13 +118,42 @@ class ApiKeyStore:
         try:
             rows = self._db.query(
                 "SELECT id, key_hash, name, scopes, rate_limit, status, created_at, "
-                "ip_allow, expires_at, grace_until FROM api_keys")
+                "ip_allow, expires_at, grace_until, last_used_at, use_count FROM api_keys")
             with self._lock:
                 self._by_hash = {r["key_hash"]: dict(r) for r in rows}
             self._loaded = True
             log.info("api_keys loaded: %d", len(self._by_hash))
         except Exception as exc:  # noqa: BLE001
             log.warning("api_keys load failed: %s", exc)
+
+    def _ensure_flusher(self) -> None:
+        with self._lock:
+            if self._flusher_started:
+                return
+            self._flusher_started = True
+        threading.Thread(target=self._flush_loop, daemon=True).start()
+
+    def _flush_loop(self) -> None:
+        while True:
+            time.sleep(30)
+            try:
+                self._flush_usage()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _flush_usage(self) -> None:
+        with self._lock:
+            pending = dict(self._usage_dirty)
+            self._usage_dirty.clear()
+        if not pending or self._db is None:
+            return
+        for kid, (iso, cnt) in pending.items():
+            try:
+                self._db.execute(
+                    "UPDATE api_keys SET last_used_at=?, use_count=? WHERE id=?",
+                    (iso, cnt, kid))
+            except Exception:  # noqa: BLE001
+                pass
 
     @staticmethod
     def _is_expired(row: dict) -> bool:
@@ -179,6 +210,13 @@ class ApiKeyStore:
             return None
         if not self._ip_allowed(row, client_ip):
             return None
+        # 使用追踪：内存累计 + 节流落库，供列表展示「最近使用 / 调用次数」判断真实有效性
+        now_iso = datetime.datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+        with self._lock:
+            row["use_count"] = int(row.get("use_count") or 0) + 1
+            row["last_used_at"] = now_iso
+            self._usage_dirty[row["id"]] = (now_iso, row["use_count"])
+        self._ensure_flusher()
         return row
 
     def invalidate(self) -> None:

@@ -1,6 +1,6 @@
 """FastAPI 统一后端入口。
 
-承载：REST 网关 + MCP（Streamable HTTP）+ Agent + 数据同步引擎(WebSocket) + 回测任务队列 + 静态托管。
+承载：REST 网关 + MCP（Streamable HTTP）+ 数据同步引擎(WebSocket) + 回测任务队列 + 静态托管。
 
 券商客户端通过 BrokerManager 统一管理（多券商 / 多账户 / 多客户端版本），全部为真实 SDK 调用，无 mock。
 """
@@ -85,7 +85,6 @@ OPENAPI_TAGS = [
     {"name": "factors", "description": "技术指标/因子库（pandas 向量化）：单/多因子计算、基于真实行情。"},
     {"name": "paper", "description": "模拟盘：基于实时行情的虚拟成交、持仓与盈亏（独立于真实券商）。"},
     {"name": "strategy-market", "description": "策略市场：模板目录、发布、导入导出（zip/json）、安装到 QMT 客户端。"},
-    {"name": "agent", "description": "智能助手（LLM Agent）：基于真实券商/运行期数据的对话与工具调用；缺 LLM 配置即 503 降级。"},
 ]
 
 _TAG_PREFIX = [
@@ -112,7 +111,6 @@ _TAG_PREFIX = [
     ("/api/v1/factors", "factors"),
     ("/api/v1/paper", "paper"),
     ("/api/v1/strategy-market", "strategy-market"),
-    ("/api/v1/agent", "agent"),
 ]
 
 
@@ -462,6 +460,22 @@ def create_app() -> FastAPI:
         restored = state.strategy_runtime.restore()
         log.info("strategy runtime ready: restored %d running instance(s)", restored)
 
+        # 7. 行情缓存定时维护：收盘后刷新今年热数据 + 跨年归档（runtime_config 热控）
+        from gateway.market_sync import MarketSync
+        state.market_sync = MarketSync(state, state.runtime_config)
+        await state.market_sync.start()
+        log.info("market sync ready: enabled=%s sync_time=%s",
+                 state.market_sync.enabled, state.market_sync.sync_time)
+
+        # 8. 多源行情补充源预热：best-effort 后台加载（当前为 eltdx/TDX 公共行情）。
+        # 不阻塞启动；首请求若尚未就绪会自动惰性加载。仅作非商业场景行情补充源。
+        try:
+            from app.datasource.manager import get_hub
+            asyncio.create_task(get_hub().warmup())
+            log.info("行情数据源预热任务已提交（后台）")
+        except Exception as exc:  # noqa: BLE001
+            log.warning("行情数据源预热任务提交失败：%s", exc)
+
         log.info("qmt_work started (real broker mode)")
         try:
             yield
@@ -496,6 +510,8 @@ def create_app() -> FastAPI:
                 await state.limitup_monitor.stop()
             if state.condition_engine:
                 await state.condition_engine.stop()
+            if getattr(state, "market_sync", None) is not None:
+                await state.market_sync.stop()
             if state.order_watchdog:
                 await state.order_watchdog.stop()
             if state.notifier:
@@ -540,7 +556,7 @@ def create_app() -> FastAPI:
             "涨停触发、连接健康、对账结果。断线重连后自动补发最近 30 秒事件窗口。\n\n"
             "### 其他入口\n"
             "- `GET /api/v1/metrics`：Prometheus 文本格式指标\n"
-            "- `POST /mcp`：MCP Streamable HTTP（供 Agent / Claude 等 MCP 客户端接入）\n"
+            "- `POST /mcp`：MCP Streamable HTTP（供 MCP 客户端接入）\n"
         ),
         openapi_tags=OPENAPI_TAGS,
         lifespan=combined_lifespan,
@@ -575,6 +591,17 @@ def create_app() -> FastAPI:
     app.include_router(router)
     _apply_openapi_meta(app)
     app.mount("/mcp", mcp_app, name="mcp")
+
+    # UTF-8 强制声明中间件（P1 修复）：StaticFiles 默认给 .js/.css 返回的
+    # Content-Type 不含 charset，中文 Windows 下浏览器可能以 GBK 解码导致
+    # 全站中文乱码。此处对所有 text/* 响应补上 charset=utf-8。
+    @app.middleware("http")
+    async def utf8_charset_middleware(request, call_next):
+        resp = await call_next(request)
+        ct = resp.headers.get("content-type", "")
+        if ct.startswith("text/") and "charset" not in ct.lower():
+            resp.headers["content-type"] = ct + "; charset=utf-8"
+        return resp
 
     static_dir = BASE_DIR / "static"
     if static_dir.exists():

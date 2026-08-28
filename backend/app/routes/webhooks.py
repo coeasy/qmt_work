@@ -34,6 +34,18 @@ async def delete_webhook(sid: int):
     state.db.audit("admin", "webhook.delete", f"#{sid}", {}, "ok")
     return ok({"deleted": True})
 
+@router.post("/webhooks/batch-delete")
+async def batch_delete_webhooks(body: dict):
+    if state.webhook_out is None:
+        return err(503, "出站 webhook 未初始化")
+    ids = [int(x) for x in (body.get("ids") or []) if str(x).isdigit()]
+    if not ids:
+        return err(400, "ids 不能为空")
+    for sid in ids:
+        state.webhook_out.delete_sub(sid)
+        state.db.audit("admin", "webhook.delete", f"#{sid}", {}, "ok")
+    return ok({"deleted": len(ids)})
+
 @router.post("/webhooks/{sid}/test")
 async def test_webhook(sid: int):
     if state.webhook_out is None:

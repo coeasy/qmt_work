@@ -22,6 +22,25 @@ log = logging.getLogger("qmt_work")
 _TRIGGER_TYPES = ("gte", "lte")
 
 
+def _safe_int(v, default: int = 0) -> int:
+    """把任意值安全转 int：None/空串/非数字 → default。用于屏蔽历史脏数据（DB 里
+    retry_count/intraday_retry 等以空串存储）导致 'invalid literal for int() with base 10'
+    崩溃。condition retry 链路的计数一律经本函数读取。"""
+    if v is None:
+        return default
+    if isinstance(v, bool):
+        return default
+    if isinstance(v, int):
+        return v
+    s = str(v).strip()
+    if not s:
+        return default
+    try:
+        return int(s)
+    except (TypeError, ValueError):
+        return default
+
+
 def _today() -> str:
     return time.strftime("%Y-%m-%d")
 
@@ -109,9 +128,12 @@ class ConditionOrderEngine:
                     continue
                 self._orders[d["id"]] = d
                 if d.get("status") == "triggered":
-                    # 上次触发未完成 → 进次日重试队列
-                    d.setdefault("retry_count", 0)
-                    d.setdefault("retry_date", _tomorrow())
+                    # 上次触发未完成 → 进次日重试队列。显式归一化来自 DB 的空串计数
+                    # （历史脏数据以 '' 存储），屏蔽 setdefault 对「已存在空串 key」不生效的坑。
+                    d["retry_count"] = _safe_int(d.get("retry_count", 0))
+                    d["intraday_retry"] = _safe_int(d.get("intraday_retry", 0))
+                    if not d.get("retry_date"):
+                        d["retry_date"] = _tomorrow()
                     self._retry_queue[d["id"]] = d
             if rows:
                 log.info("condition orders restored: %d (retry-queued: %d, expired-on-startup: %d)",
@@ -421,7 +443,7 @@ class ConditionOrderEngine:
           上限 ``_retry_limit``（3）；
         - 达跨日上限则标 ``failed`` 不再重试。
         """
-        intraday = int(o.get("intraday_retry", 0))
+        intraday = _safe_int(o.get("intraday_retry", 0))
         o["remark"] = reason
         if intraday < self._intraday_retry_limit:
             o["intraday_retry"] = intraday + 1
@@ -433,7 +455,7 @@ class ConditionOrderEngine:
             log.info("condition %s 当日盘中重试(%d/%d，%ds后): %s",
                      o["id"], intraday + 1, self._intraday_retry_limit,
                      self._intraday_interval, reason)
-        elif int(o.get("retry_count", 0)) + 1 >= self._retry_limit:
+        elif _safe_int(o.get("retry_count", 0)) + 1 >= self._retry_limit:
             o["status"] = "failed"
             self._retry_queue.pop(o["id"], None)
             log.warning("condition %s 达跨日重试上限(%d)，标记 failed: %s",
@@ -441,7 +463,7 @@ class ConditionOrderEngine:
         else:
             # 当日盘中 5 次用尽 → 转次日重试，重置盘中计数
             o["intraday_retry"] = 0
-            o["retry_count"] = int(o.get("retry_count", 0)) + 1
+            o["retry_count"] = _safe_int(o.get("retry_count", 0)) + 1
             o["next_retry_at"] = ""
             o["status"] = "triggered"
             o["retry_date"] = _tomorrow()      # 次日重试

@@ -34,24 +34,6 @@ CREATE TABLE IF NOT EXISTS api_keys (
     status TEXT DEFAULT 'active',
     created_at TEXT NOT NULL
 );
--- 会话持久化表：sessions / messages 已由 backend/agent/（AgentCore）读写（会话列表与历史）。
--- llm_config 仍为预留（当前未直接读写，供后续 Agent 配置持久化使用）。
--- 切勿删除，否则 Agent 会话持久化需重新建表；亦切勿在其它模块误用。
-CREATE TABLE IF NOT EXISTS sessions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER,
-    title TEXT DEFAULT '',
-    llm_config_snapshot TEXT DEFAULT '',
-    created_at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS messages (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id INTEGER,
-    role TEXT NOT NULL,
-    content TEXT DEFAULT '',
-    tool_calls_json TEXT DEFAULT '',
-    created_at TEXT NOT NULL
-);
 CREATE TABLE IF NOT EXISTS backtests (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER,
@@ -320,7 +302,6 @@ CREATE INDEX IF NOT EXISTS idx_backtest_jobs_status ON backtest_jobs(status, cre
 CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_created ON webhook_deliveries(created_at);
 CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_status ON webhook_deliveries(status);
 CREATE INDEX IF NOT EXISTS idx_condition_orders_status ON condition_orders(status);
-CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
 CREATE INDEX IF NOT EXISTS idx_paper_orders_code ON paper_orders(code);
 CREATE INDEX IF NOT EXISTS idx_target_portfolios_status ON target_portfolios(status);
 CREATE INDEX IF NOT EXISTS idx_market_cache_code ON market_cache(code, dtype);
@@ -376,12 +357,49 @@ CREATE TABLE IF NOT EXISTS broker_profiles (
 );
 CREATE INDEX IF NOT EXISTS idx_broker_profiles_custom ON broker_profiles(is_custom);
 """),
+    (12, """
+-- 移除智能助手（Agent）：原会话/消息/LLM 配置表现已废弃，1 会话落盘不再使用。
+-- 已迁移旧库（schema_migrations 已达 v11）不含本迁移产生的表，故 DROP 幂等安全；
+-- 全新库也不再创建这三张表（v1 已移除建表语句）。
+DROP TABLE IF EXISTS messages;
+DROP TABLE IF EXISTS sessions;
+DROP TABLE IF EXISTS llm_config;
+"""),
+    (13, """
+-- API Key 使用追踪：记录最近使用时间与累计调用次数，便于识别失效/残留在列表展示真实有效性。
+ALTER TABLE api_keys ADD COLUMN last_used_at TEXT DEFAULT '';
+ALTER TABLE api_keys ADD COLUMN use_count INTEGER DEFAULT 0;
+"""),
+    (14, """
+-- 行情数据 热/归档 分离：
+--   kline_cache   = 今年数据（热表，由同步任务定时更新）
+--   kline_archive = 今年以前的历史数据（独立归档存储，降低热表体积、加速今年查询）
+--   adjust       = 复权标记预留列（''=券商原始值，qfq/hfq 供后续支持前复权/后复权）
+-- 把现有库中早于本年的历史 K 线迁移进归档表，保证热表仅剩今年数据、不丢失历史。
+CREATE TABLE IF NOT EXISTS kline_archive (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    code TEXT NOT NULL,
+    period TEXT NOT NULL DEFAULT '1d',
+    dt TEXT NOT NULL,
+    open REAL, high REAL, low REAL, close REAL,
+    volume REAL, amount REAL,
+    fetched_at REAL DEFAULT 0,
+    adjust TEXT DEFAULT '',
+    UNIQUE(code, period, dt)
+);
+CREATE INDEX IF NOT EXISTS idx_kline_archive_lookup ON kline_archive(code, period, dt);
+ALTER TABLE kline_cache ADD COLUMN adjust TEXT DEFAULT '';
+INSERT OR REPLACE INTO kline_archive (code,period,dt,open,high,low,close,volume,amount,fetched_at)
+SELECT code,period,dt,open,high,low,close,volume,amount,fetched_at
+FROM kline_cache WHERE dt < (strftime('%Y','now') || '-01-01');
+DELETE FROM kline_cache WHERE dt < (strftime('%Y','now') || '-01-01');
+"""),
 ]
 
 # 表 -> 向后兼容扩展字段（幂等补列，TEXT DEFAULT ''）
 _EXTRA_COLUMNS: dict[str, tuple[str, ...]] = {
-    # api_keys：IP 白名单 / 过期 / 轮换宽限
-    "api_keys": ("ip_allow", "expires_at", "grace_until"),
+    # api_keys：IP 白名单 / 过期 / 轮换宽限 / 使用追踪
+    "api_keys": ("ip_allow", "expires_at", "grace_until", "last_used_at", "use_count"),
     # audit_log：D4 hash 链防篡改
     "audit_log": ("prev_hash", "hash"),
     # broker_connections：客户端模式（auto 自动推断 / mini 极速版 / full 完整版大客户端）
@@ -390,6 +408,8 @@ _EXTRA_COLUMNS: dict[str, tuple[str, ...]] = {
     "condition_orders": ("valid_days", "expire_at", "last_check_date", "expired_at",
                          "retry_date", "retry_count", "intraday_retry", "next_retry_at",
                          "settle_status"),
+    # kline_cache：复权标记预留列（''=券商原始值）
+    "kline_cache": ("adjust",),
 }
 # 参与审计 hash 计算的字段（顺序固定，改动会使旧链失效）
 _AUDIT_HASH_FIELDS = ("actor", "api_key_id", "action", "target",

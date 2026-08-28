@@ -391,3 +391,126 @@ async def scan_limit_up(bridge, sector: str = "沪深A股", min_pct: float = 9.5
     else:
         rows.sort(key=lambda x: x["change_pct"], reverse=True)
     return rows[: int(limit)]
+
+
+# ---------------- 大盘/指数 涨跌停家数统计（真实行情广度） ----------------
+_INDEXES = ("上证50", "沪深300", "中证500", "中证1000")
+
+
+def _board_of(code: str) -> str:
+    """按代码前缀归类板块（用于广度展示）。"""
+    c = (code or "").upper()
+    if c.startswith("30"):
+        return "创业板"
+    if c.startswith("68"):
+        return "科创板"
+    if c.startswith("8") or c.startswith("4") or c.startswith("92"):
+        return "北交所"
+    return "沪深主板"
+
+
+async def _fetch_full_ticks(bridge, codes: list[str]) -> dict:
+    """分块拉取全市场快照。"""
+    CHUNK = 300
+    ticks: dict = {}
+    for i in range(0, len(codes), CHUNK):
+        sub = await bridge.call(bridge.gateway.get_full_tick, codes[i:i + CHUNK]) or {}
+        if sub:
+            ticks.update(sub)
+    return ticks
+
+
+async def market_breadth(bridge, index_codes: list[str] | None = None) -> dict:
+    """扫描全市场实时行情，统计大盘/板块/指数 涨跌停家数（含上涨/下跌/平盘）。
+
+    - 大盘：沪深京 A 股全市场占比
+    - 板块：沪深主板 / 创业板 / 科创板 / 北交所
+    - 指数：上证50 / 沪深300 / 中证500 / 中证1000（可选，传 index_codes 复用）
+    index_codes: {name: [codes]}，缺省时按需拉取各指数成分。
+    """
+    if bridge is None:
+        raise BrokerError("未连接任何券商客户端")
+    g = bridge.gateway
+    codes = await bridge.call(g.get_sector_stocks, "沪深京A股") or []
+    if not codes:
+        codes = await bridge.call(g.get_sector_stocks, "沪深A股") or []
+    if not codes:
+        return {"overall": None, "boards": [], "indexes": [], "ts": None}
+
+    ticks = await _fetch_full_ticks(bridge, codes)
+
+    overall = {"total": 0, "up": 0, "down": 0, "flat": 0,
+               "limit_up": 0, "limit_down": 0}
+    boards: dict[str, dict] = {}
+    idx_ticks: dict[str, set] = {}     # 各指数成分集合（在快照内的代码）
+    idx_stats: dict[str, dict] = {}
+
+    if index_codes:
+        for name, lst in index_codes.items():
+            idx_ticks[name] = {c for c in lst if c in ticks}
+    else:
+        for name in _INDEXES:
+            try:
+                lst = await bridge.call(g.get_sector_stocks, name) or []
+            except Exception:  # noqa: BLE001
+                lst = []
+            idx_ticks[name] = {c for c in lst if c in ticks}
+
+    for name, members in idx_ticks.items():
+        idx_stats[name] = {"limit_up": 0, "limit_down": 0, "total": len(members)}
+
+    for code, q in ticks.items():
+        last = q.get("last")
+        lc = q.get("lastClose")
+        if not last or not lc:
+            continue
+        try:
+            last_f = float(last); lc_f = float(lc)
+        except (TypeError, ValueError):
+            continue
+        if lc_f <= 0:
+            continue
+        pct = (last_f - lc_f) / lc_f * 100.0
+        overall["total"] += 1
+        if pct > 0.0001:
+            overall["up"] += 1
+        elif pct < -0.0001:
+            overall["down"] += 1
+        else:
+            overall["flat"] += 1
+        board = _board_of(code)
+        cb = boards.setdefault(board, {"name": board, "total": 0, "up": 0, "down": 0,
+                                       "limit_up": 0, "limit_down": 0})
+        cb["total"] += 1
+        if pct > 0.0001:
+            cb["up"] += 1
+        else:
+            cb["down"] += 1 if pct < -0.0001 else 0
+
+        factor = _limit_factor(code)
+        limit_up = round(lc_f * (1 + factor), 2)
+        limit_down = round(lc_f * (1 - factor), 2)
+        if last_f >= limit_up - 0.01:
+            overall["limit_up"] += 1
+            cb["limit_up"] += 1
+        if last_f <= limit_down + 0.01:
+            overall["limit_down"] += 1
+            cb["limit_down"] += 1
+        for name in _INDEXES:
+            st = idx_stats.get(name)
+            if st is None or code not in idx_ticks.get(name, ()):
+                continue
+            if last_f >= limit_up - 0.01:
+                st["limit_up"] += 1
+            if last_f <= limit_down + 0.01:
+                st["limit_down"] += 1
+
+    return {
+        "overall": overall,
+        "boards": list(boards.values()),
+        "indexes": [{"name": name, "limit_up": idx_stats[name]["limit_up"],
+                     "limit_down": idx_stats[name]["limit_down"],
+                     "total": idx_stats[name]["total"]}
+                    for name in _INDEXES if name in idx_stats],
+        "ts": time.strftime("%H:%M:%S"),
+    }

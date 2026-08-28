@@ -39,5 +39,13 @@ async def target_portfolio_delete(pid: int):
     TargetPortfolioEngine(state.broker_manager, state.signal_router, state.db).delete_plan(pid)
     return ok({"deleted": True})
 
-
-# ---------------- Agent 对话（SSE 流式） ----------------
+@router.post("/target-portfolio/plans/batch-delete")
+async def target_portfolio_batch_delete(body: dict):
+    from tools.target_portfolio import TargetPortfolioEngine
+    ids = [int(x) for x in (body.get("ids") or []) if str(x).isdigit()]
+    if not ids:
+        return err(400, "ids 不能为空")
+    eng = TargetPortfolioEngine(state.broker_manager, state.signal_router, state.db)
+    for pid in ids:
+        eng.delete_plan(pid)
+    return ok({"deleted": len(ids)})

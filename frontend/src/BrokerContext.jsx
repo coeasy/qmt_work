@@ -61,6 +61,11 @@ export function BrokerProvider({ children }) {
     await refresh();
   }, [refresh]);
 
+  const batchRemove = useCallback(async (ids) => {
+    await api.batchRemoveBrokers(ids);
+    await refresh();
+  }, [refresh]);
+
   const test = useCallback((cfg) => api.testBroker(cfg), []);
 
   const autoDetect = useCallback(() => api.autoDetectBrokers(), []);
@@ -77,7 +82,7 @@ export function BrokerProvider({ children }) {
   return (
     <BrokerCtx.Provider value={{
       profiles, brokers, activeId, activeBroker, connectedCount, ready,
-      refresh, setActive, connect, disconnect, remove, test, add, autoDetect,
+      refresh, setActive, connect, disconnect, remove, batchRemove, test, add, autoDetect,
     }}>
       {children}
     </BrokerCtx.Provider>

@@ -1,16 +1,18 @@
 import { useEffect, useState } from "react";
 import { api, getApiKey, setApiKey } from "../api.js";
+import { useBatchSelection } from "../hooks/useBatchSelection.js";
+import BatchDeleteBar from "./BatchDeleteBar.jsx";
 import { useBroker } from "../BrokerContext.jsx";
 
 export default function Settings() {
   const { brokers, connectedCount, activeBroker } = useBroker();
-  const [cfg, setCfg] = useState({ provider: "openai", base_url: "", api_key: "", model: "", temperature: 0.2 });
-  const [masked, setMasked] = useState("");
   const [keys, setKeys] = useState([]);
   const [newKey, setNewKey] = useState("");
   const [msg, setMsg] = useState(null);
   const [apiKeyLocal, setApiKeyLocal] = useState(getApiKey());
   const isElectron = typeof window !== "undefined" && !!window.electronAPI;
+  const [batchBusy, setBatchBusy] = useState(false);
+  const bsel = useBatchSelection(keys, "id");
   const [autoLaunch, setAutoLaunch] = useState(null);
   const [riskCfg, setRiskCfg] = useState(null);
   const [runtimeCfg, setRuntimeCfg] = useState(null);
@@ -86,28 +88,12 @@ export default function Settings() {
 
   async function load() {
     try {
-      const c = await api.get("/config/llm");
-      setCfg((p) => ({ ...p, provider: c.provider, base_url: c.base_url, model: c.model, temperature: c.temperature }));
-      setMasked(c.configured ? c.api_key_masked : "（未配置）");
-    } catch (e) { setMsg({ ok: false, t: e.message }); }
-    try {
       // 守护：/api-keys 可能是分页结构 {items:[...]} 或其他；统一为数组
       const r = await api.get("/api-keys");
       setKeys(Array.isArray(r) ? r : (Array.isArray(r?.items) ? r.items : (Array.isArray(r?.keys) ? r.keys : [])));
     } catch {}
   }
   useEffect(() => { load(); }, []);
-
-  async function saveLLM() {
-    setMsg(null);
-    try {
-      // 仅当用户填写了 api_key 才覆盖；留空则保留已存密钥
-      await api.put("/config/llm", { ...cfg, api_key: cfg.api_key || "" });
-      setMsg({ ok: true, t: "模型供应商已保存" });
-      setCfg((p) => ({ ...p, api_key: "" }));
-      load();
-    } catch (e) { setMsg({ ok: false, t: e.message }); }
-  }
 
   async function createKey() {
     try {
@@ -127,6 +113,30 @@ export default function Settings() {
     if (!window.confirm(`确认删除 API Key #${kid}？删除后该密钥立即失效，且无法恢复。`)) return;
     try { await api.deleteApiKey(kid); setMsg({ ok: true, t: `已删除 #${kid}` }); load(); }
     catch (e) { setMsg({ ok: false, t: e.message }); }
+  }
+  async function batchDeleteKeys() {
+    setBatchBusy(true);
+    try {
+      await api.batchDeleteApiKeys(bsel.selected);
+      setMsg({ ok: true, t: `已删除 ${bsel.selected.length} 个 API Key` });
+      bsel.clear(); load();
+    } catch (e) { setMsg({ ok: false, t: e.message }); }
+    finally { setBatchBusy(false); }
+  }
+  const [cleanBusy, setCleanBusy] = useState(false);
+  async function cleanUnused() {
+    const days = window.prompt("删除超过多少天未使用的密钥（默认 30）？此操作不可恢复。", "30");
+    if (!days) return;
+    const n = parseInt(days, 10);
+    if (!n || n < 1) { setMsg({ ok: false, t: "天数无效" }); return; }
+    if (!window.confirm(`确认清理超过 ${n} 天未使用的 API Key？`)) return;
+    setCleanBusy(true);
+    try {
+      const r = await api.cleanUnusedApiKeys(n);
+      setMsg({ ok: true, t: `已清理 ${r.deleted} 个未使用 Key` });
+      load();
+    } catch (e) { setMsg({ ok: false, t: e.message }); }
+    finally { setCleanBusy(false); }
   }
   async function toggleStatus(k) {
     const next = k.status === "active" ? "disabled" : "active";
@@ -150,7 +160,7 @@ export default function Settings() {
   return (
     <div>
       <h2 className="page-title">设置</h2>
-      <p className="page-sub">模型供应商（任意 OpenAI 兼容 / Anthropic 接口，可留空用默认）与第三方 API Key</p>
+      <p className="page-sub">第三方 API Key（供外部服务接入）与我方运行参数管理</p>
       {msg && <div className={`toast ${msg.ok ? "ok" : "err"}`}>{msg.t}</div>}
 
       <div className="card" style={{ marginBottom: 16 }}>
@@ -297,42 +307,34 @@ export default function Settings() {
         </div>
       )}
 
-      <div className="grid grid-2">
-        <div className="card">
-          <h3>模型供应商</h3>
-          <label>供应商类型</label>
-          <select value={cfg.provider} onChange={(e) => setCfg({ ...cfg, provider: e.target.value })}>
-            <option value="openai">OpenAI 兼容</option>
-            <option value="anthropic">Anthropic</option>
-          </select>
-          <label>Base URL</label>
-          <input value={cfg.base_url} placeholder="https://api.deepseek.com/v1" onChange={(e) => setCfg({ ...cfg, base_url: e.target.value })} />
-          <label>API Key {masked && <span className="muted">（当前：{masked}）</span>}</label>
-          <input type="password" value={cfg.api_key} placeholder="留空则不修改已存密钥" onChange={(e) => setCfg({ ...cfg, api_key: e.target.value })} />
-          <label>模型</label>
-          <input value={cfg.model} placeholder="deepseek-chat" onChange={(e) => setCfg({ ...cfg, model: e.target.value })} />
-          <label>温度</label>
-          <input type="number" step="0.1" min="0" max="2" value={cfg.temperature} onChange={(e) => setCfg({ ...cfg, temperature: parseFloat(e.target.value) })} />
-          <div className="btn-row"><button onClick={saveLLM}>保存</button></div>
-        </div>
-
-        <div className="card">
-          <h3>第三方 API Key（列表 / 创建 / 轮换 / 停用 / 删除）</h3>
+      <div className="card">
+        <h3>第三方 API Key（列表 / 创建 / 轮换 / 停用 / 删除）</h3>
           <div className="row">
             <input style={{ flex: 1 }} value={newKey} placeholder="名称" onChange={(e) => setNewKey(e.target.value)} />
             <button onClick={createKey}>生成</button>
             <span className="muted">创建 / 轮换后仅显示一次完整密钥，请妥善保存</span>
           </div>
+          <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+            <BatchDeleteBar count={bsel.selected.length} onDelete={batchDeleteKeys} onClear={bsel.clear} busy={batchBusy} label="Key" />
+            <button className="ghost" disabled={cleanBusy} onClick={cleanUnused}>清理未使用</button>
+          </div>
           <table style={{ marginTop: 12 }}>
-            <thead><tr><th>前缀</th><th>名称</th><th>范围</th><th>状态</th><th>过期</th><th>操作</th></tr></thead>
+            <thead><tr>
+              <th style={{ width: 32 }}><input type="checkbox" checked={bsel.allSelected} onChange={bsel.toggleAll} /></th>
+              <th>前缀</th><th>名称</th><th>范围</th><th>状态</th><th>过期</th><th>最近使用</th><th>操作</th>
+            </tr></thead>
             <tbody>
               {keys.map((k) => (
                 <tr key={k.id}>
+                  <td><input type="checkbox" checked={bsel.sel.has(k.id)} onChange={() => bsel.toggleOne(k.id)} /></td>
                   <td className="code">{k.key_prefix}</td>
                   <td>{k.name}</td>
                   <td className="muted" style={{ fontSize: 11 }}>{k.scopes || "—"}</td>
                   <td><span className={`tag ${k.status === "active" ? "ok" : "fail"}`}>{k.status}</span></td>
                   <td className="muted" style={{ fontSize: 11 }}>{k.expires_at || "—"}</td>
+                  <td className="muted" style={{ fontSize: 11 }}>
+                    {k.last_used_at ? `${k.last_used_at} · ${k.use_count ?? 0}次` : <span className="down">从未使用</span>}
+                  </td>
                   <td className="row" style={{ gap: 6 }}>
                     <button className="ghost" onClick={() => rotateKey(k.id)}>轮换</button>
                     <button className="ghost" onClick={() => toggleStatus(k)}>
@@ -342,11 +344,10 @@ export default function Settings() {
                   </td>
                 </tr>
               ))}
-              {keys.length === 0 && <tr><td colSpan={6} className="muted">暂无 Key</td></tr>}
+              {keys.length === 0 && <tr><td colSpan={8} className="muted">暂无 Key</td></tr>}
             </tbody>
           </table>
         </div>
-      </div>
     </div>
   );
 }

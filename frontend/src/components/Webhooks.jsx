@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
 import { api } from "../api.js";
+import { useBatchSelection } from "../hooks/useBatchSelection.js";
+import BatchDeleteBar from "./BatchDeleteBar.jsx";
 
 /* 出站 Webhook（B2）
    HMAC-SHA256 签名 + 指数退避重试
@@ -11,6 +13,8 @@ export default function Webhooks() {
   const [loading, setLoading] = useState(false);
   const [subs, setSubs] = useState([]);
   const [deliveries, setDeliveries] = useState([]);
+  const [batchBusy, setBatchBusy] = useState(false);
+  const bsel = useBatchSelection(subs, "id");
 
   const [form, setForm] = useState({
     url: "", events: "order,deal,account,risk", secret: "",
@@ -46,6 +50,17 @@ export default function Webhooks() {
       loadAll();
     } catch (e) { setMsg({ ok: false, t: e.message }); }
     finally { setLoading(false); }
+  }
+
+  async function batchDelete() {
+    setBatchBusy(true);
+    try {
+      await api.webhookBatchDelete(bsel.selected);
+      setMsg({ ok: true, t: `已删除 ${bsel.selected.length} 个订阅` });
+      bsel.clear();
+      loadAll();
+    } catch (e) { setMsg({ ok: false, t: e.message }); }
+    finally { setBatchBusy(false); }
   }
 
   async function testWebhook(sid) {
@@ -101,15 +116,18 @@ export default function Webhooks() {
 
       <div className="card" style={{ marginTop: 16 }}>
         <h3 style={{ marginBottom: 12 }}>订阅列表</h3>
+        <BatchDeleteBar count={bsel.selected.length} onDelete={batchDelete} onClear={bsel.clear} busy={batchBusy} label="订阅" />
         {!subs.length ? <Empty>暂无订阅</Empty> : (
           <div style={{ overflowX: "auto" }}>
             <table className="table">
               <thead><tr>
+                <th style={{ width: 32 }}><input type="checkbox" checked={bsel.allSelected} onChange={bsel.toggleAll} /></th>
                 <th>ID</th><th>URL</th><th>事件</th><th>签名</th><th>退避</th><th>状态</th><th>上次送达</th><th>操作</th>
               </tr></thead>
               <tbody>
                 {subs.map((s) => (
                   <tr key={s.id}>
+                    <td><input type="checkbox" checked={bsel.sel.has(s.id)} onChange={() => bsel.toggleOne(s.id)} /></td>
                     <td>{s.id}</td>
                     <td style={{ fontSize: 12, maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis" }}>{s.url}</td>
                     <td><code>{Array.isArray(s.events) ? s.events.join(", ") : String(s.events)}</code></td>

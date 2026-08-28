@@ -7,8 +7,7 @@ import Hub from "./components/Hub.jsx";
 // 默认页（仪表盘）急切加载保证首屏；其余页面按需懒加载（P1 前端性能：分包 + 路由级代码分割）
 import Dashboard from "./components/Dashboard.jsx";
 
-const Quote = lazy(() => import("./components/Quote.jsx"));
-const Kline = lazy(() => import("./components/Kline.jsx"));
+const MarketData = lazy(() => import("./components/MarketData.jsx"));
 const MarketTools = lazy(() => import("./components/MarketTools.jsx"));
 const Trade = lazy(() => import("./components/Trade.jsx"));
 const LimitUp = lazy(() => import("./components/LimitUp.jsx"));
@@ -23,7 +22,6 @@ const Alerts = lazy(() => import("./components/Alerts.jsx"));
 const Webhooks = lazy(() => import("./components/Webhooks.jsx"));
 const Signal = lazy(() => import("./components/Signal.jsx"));
 const Reconcile = lazy(() => import("./components/Reconcile.jsx"));
-const Agent = lazy(() => import("./components/Agent.jsx"));
 const TargetPortfolio = lazy(() => import("./components/TargetPortfolio.jsx"));
 const Rebalance = lazy(() => import("./components/Rebalance.jsx"));
 const Strategies = lazy(() => import("./components/Strategies.jsx"));
@@ -40,12 +38,11 @@ const SystemStatus = lazy(() => import("./components/SystemStatus.jsx"));
    通过 nav 事件硬引用它们。brokers → 账户与连接 Hub 且默认显示「连接管理」。 */
 const NAV = [
   { key: "dashboard", label: "仪表盘", group: "总览", comp: Dashboard },
-  { key: "quote", label: "实时行情", group: "行情", comp: Quote },
-  { key: "kline", label: "K 线", group: "行情", comp: Kline },
+  { key: "quote", label: "行情数据", group: "行情", comp: MarketData },
   { key: "markettools", label: "行情工具", group: "行情", comp: MarketTools },
 
   { key: "trade", label: "交易", group: "交易", comp: () => (
-    <Hub tabs={[
+    <Hub hubKey="trade" tabs={[
       { key: "trade", label: "手动交易", comp: Trade },
       { key: "limitup", label: "涨停监控", comp: LimitUp },
       { key: "algo", label: "算法交易", comp: Algo },
@@ -99,11 +96,6 @@ const NAV = [
   ) },
 
   { key: "reconcile", label: "对账核销", group: "运维", comp: Reconcile },
-  { key: "agent", label: "智能助手", group: "智能", comp: () => (
-    <Hub tabs={[
-      { key: "agent", label: "助手对话", comp: Agent },
-    ]} />
-  ) },
   { key: "settings", label: "设置", group: "系统", comp: Settings },
 ];
 

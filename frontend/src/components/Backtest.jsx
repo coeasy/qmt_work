@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import { api } from "../api.js";
 import { useBroker } from "../BrokerContext.jsx";
+import { useBatchSelection } from "../hooks/useBatchSelection.js";
+import BatchDeleteBar from "./BatchDeleteBar.jsx";
 import Chart from "./Chart.jsx";
 
 const KINDS = {
@@ -19,7 +21,9 @@ export default function Backtest() {
   const [jobs, setJobs] = useState([]);
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
+  const [batchBusy, setBatchBusy] = useState(false);
   const [cost, setCost] = useState({ commission_rate: 0.0003, stamp_tax: 0.001, slippage_bps: 5 });
+  const bsel = useBatchSelection(jobs, "id");
 
   /* 参数扫描（sweep）专用 */
   const [sweepParams, setSweepParams] = useState("ma_window:5,10,20|ma_fast:5,10|ma_slow:15,20,30");
@@ -87,6 +91,17 @@ export default function Backtest() {
       setErr("");
       await refreshJobs();
     } catch (e) { setErr(e.message); }
+  }
+
+  async function batchDelete() {
+    setBatchBusy(true);
+    try {
+      await api.backtestBatchDelete(bsel.selected);
+      setErr("");
+      bsel.clear();
+      await refreshJobs();
+    } catch (e) { setErr(e.message); }
+    finally { setBatchBusy(false); }
   }
 
   function equityOption() {
@@ -281,16 +296,22 @@ export default function Backtest() {
 
       <div className="card" style={{ marginTop: 16 }}>
         <h3>历史任务</h3>
+        <BatchDeleteBar count={bsel.selected.length} onDelete={batchDelete} onClear={bsel.clear} busy={batchBusy} label="任务" />
         <table>
-          <thead><tr><th>ID</th><th>类型</th><th>状态</th><th>进度</th><th>创建时间</th><th>操作</th></tr></thead>
+          <thead><tr>
+            <th style={{ width: 32 }}><input type="checkbox" checked={bsel.allSelected} onChange={bsel.toggleAll} /></th>
+            <th>ID</th><th>类型</th><th>状态</th><th>进度</th><th>创建时间</th><th>操作</th>
+          </tr></thead>
           <tbody>
             {jobs.map((j) => (
-              <tr key={j.id}><td>{j.id.slice(0, 8)}</td><td>{j.kind}</td>
+              <tr key={j.id}>
+                <td><input type="checkbox" checked={bsel.sel.has(j.id)} onChange={() => bsel.toggleOne(j.id)} /></td>
+                <td>{j.id.slice(0, 8)}</td><td>{j.kind}</td>
                 <td><span className={`tag ${j.status === "done" ? "ok" : j.status === "failed" ? "fail" : "run"}`}>{j.status}</span></td>
                 <td>{Math.round((j.progress || 0) * 100)}%</td><td>{j.created_at}</td>
                 <td><button className="danger" onClick={() => deleteJob(j.id)}>删除</button></td></tr>
             ))}
-            {jobs.length === 0 && <tr><td colSpan={6} className="muted">暂无任务</td></tr>}
+            {jobs.length === 0 && <tr><td colSpan={7} className="muted">暂无任务</td></tr>}
           </tbody>
         </table>
       </div>

@@ -25,6 +25,9 @@ qmt_work_config.json
 backend/.qmt_work.port
 # 运行期测试端口文件（探针排错产物，不入库）
 .test_port.txt
+# 运行期端口发现文件（多 db 目录实例各自生成，不入库）
+backend/.qmt_run_port
+backend/.qmt_run_port2
 # 行情导出目录（POST /api/v1/market/kline/sync 产物，不入库）
 kline_data/
 kline_sync/

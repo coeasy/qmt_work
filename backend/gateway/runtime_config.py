@@ -54,6 +54,13 @@ class RuntimeConfig:
                                  "算法单切片成交确认窗口（秒）：超时未确认按 0 成交计"),
         "algo.confirm_retries": (5, int, 1,
                                  "算法单切片成交确认重试次数"),
+        # ---- 行情缓存定时维护（今年热数据收盘后刷新 + 跨年归档）----
+        "market.sync.enabled": (False, bool, False,
+                                "是否启用行情缓存定时更新（收盘后刷新今年热数据）"),
+        "market.sync.time": ("16:00", str, "",
+                             "每日刷新触发时间 HH:MM（收盘后，默认 16:00）"),
+        "market.sync.interval": (60.0, float, 10.0,
+                                 "定时更新检查循环间隔（秒），热更新生效"),
     }
 
     def __init__(self, db=None):

@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
 import { api } from "../api.js";
+import { useBatchSelection } from "../hooks/useBatchSelection.js";
+import BatchDeleteBar from "./BatchDeleteBar.jsx";
 
 // 策略运行容器（P0）：在平台内把生成的策略当作实盘/模拟机器人运行。
 // 复用与模板生成一致的信号逻辑（ma_cross/macd/rsi/limitup），真实行情 + 真实/模拟下单。
@@ -92,6 +94,8 @@ export default function StrategyRunner({ prefill }) {
   const [loadId, setLoadId] = useState("");
   const [loaded, setLoaded] = useState(null);
   const [loadErr, setLoadErr] = useState("");
+  const [batchBusy, setBatchBusy] = useState(false);
+  const bsel = useBatchSelection(runs, "id");
 
   async function loadById() {
     if (!loadId.trim()) return;
@@ -159,6 +163,15 @@ export default function StrategyRunner({ prefill }) {
     setErr("");
     try { await api.strategyRunDelete(id); await refresh(); }
     catch (e) { setErr(e.message); }
+  }
+  async function batchDelete() {
+    setBatchBusy(true);
+    try {
+      await api.strategyRunBatchDelete(bsel.selected);
+      bsel.clear();
+      await refresh();
+    } catch (e) { setErr(e.message); }
+    finally { setBatchBusy(false); }
   }
   async function toggleLogs(id) {
     if (openLog === id) { setOpenLog(null); return; }
@@ -233,6 +246,7 @@ export default function StrategyRunner({ prefill }) {
 
         <div className="card">
           <h3>运行实例（{runs.length}）</h3>
+          <BatchDeleteBar count={bsel.selected.length} onDelete={batchDelete} onClear={bsel.clear} busy={batchBusy} label="实例" />
           <div className="row" style={{ marginBottom: 8 }}>
             <label style={{ width: 90 }}>按 ID 加载</label>
             <input style={{ width: 110 }} placeholder="实例 ID"
@@ -258,6 +272,7 @@ export default function StrategyRunner({ prefill }) {
             <table style={{ width: "100%", borderCollapse: "collapse" }}>
               <thead>
                 <tr>
+                  <th style={{ width: 32 }}><input type="checkbox" checked={bsel.allSelected} onChange={bsel.toggleAll} /></th>
                   <th>ID</th><th>名称</th><th>类型</th><th>模式</th>
                   <th>状态</th><th>信号</th><th>动作</th><th>操作</th>
                 </tr>
@@ -265,6 +280,7 @@ export default function StrategyRunner({ prefill }) {
               <tbody>
                 {runs.map((r) => (
                   <tr key={r.id}>
+                    <td><input type="checkbox" checked={bsel.sel.has(r.id)} onChange={() => bsel.toggleOne(r.id)} /></td>
                     <td>{r.id}</td>
                     <td>{r.name}</td>
                     <td>{r.strategy_type}</td>

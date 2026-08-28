@@ -12,7 +12,8 @@ from fastapi import APIRouter
 from typing import Any, Dict
 
 from tools import fetch_kline_cached
-from tools.factors import compute_factor, compute_many, list_factors, from_kline
+from tools.factors import (compute_factor, compute_many, list_factors, from_kline,
+                           factor_extra_fields)
 from xtquant_client.base import BrokerError
 
 router = APIRouter()
@@ -101,10 +102,11 @@ async def post_from_kline(body: Dict[str, Any]):
     out: Dict[str, Any] = {}
     for name in names:
         fp = dict(params)
-        # 把对应额外序列注入 params
-        for fld in ("high", "low", "volume"):
+        # 仅注入该指标实际需要的额外序列，避免 high/low/volume
+        # 透传给 sma/ema 等单序列指标导致 TypeError
+        for fld in factor_extra_fields(name):
             if fld in shared:
-                fp.setdefault(fld, shared[fld])
+                fp[fld] = shared[fld]
         try:
             out[name] = compute_factor(name, close, **fp)
         except ValueError as exc:

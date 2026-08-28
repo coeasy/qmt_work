@@ -1482,6 +1482,16 @@ class XTPQuantAdapter(BrokerAdapter):
     def _norm_quote(self, code: str, tick: dict) -> dict:
         def _lst(v, i):
             return v[i] if isinstance(v, (list, tuple)) and len(v) > i else (v if not isinstance(v, (list, tuple)) else None)
+        # 五档买卖盘：xtquant get_full_tick 的 bidPrice/askPrice/bidVolume/askVolume
+        # 均为长度 5 的数组（买一~买五 / 卖一~卖五）。归一化为 bids/asks 数组供前端展示。
+        bid_prices = _dget(tick, "bidPrice", "bid_price") or []
+        ask_prices = _dget(tick, "askPrice", "ask_price") or []
+        bid_vols = _dget(tick, "bidVolume", "bid_volume") or []
+        ask_vols = _dget(tick, "askVolume", "ask_volume") or []
+        bids = [{"price": _lst(bid_prices, i), "volume": _lst(bid_vols, i)}
+                for i in range(5)]
+        asks = [{"price": _lst(ask_prices, i), "volume": _lst(ask_vols, i)}
+                for i in range(5)]
         # 键名兼容：tick 快照用 CamelCase（lastPrice/lastClose/bidPrice），K 线 bar 用
         # 小写（close/open/high/low/volume/amount）。last 缺失用 close 兜底（K 线 bar
         # 无最新价字段）、lastClose 缺失用 preClose/pre_close 兜底，避免旧版 K 线订阅
@@ -1499,6 +1509,8 @@ class XTPQuantAdapter(BrokerAdapter):
             "ask": _lst(_dget(tick, "askPrice", "ask_price"), 0),
             "bid_vol": _lst(_dget(tick, "bidVolume", "bid_volume"), 0),
             "ask_vol": _lst(_dget(tick, "askVolume", "ask_volume"), 0),
+            "bids": bids,
+            "asks": asks,
             "ts": datetime.now().isoformat(timespec="seconds"),
         }
 

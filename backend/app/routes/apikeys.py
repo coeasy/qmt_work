@@ -15,7 +15,7 @@ async def list_api_keys():
     from gateway.apikey import ApiKeyStore
     rows = state.db.query(
         "SELECT id, name, scopes, rate_limit, status, created_at, "
-        "ip_allow, expires_at, grace_until, "
+        "ip_allow, expires_at, grace_until, last_used_at, use_count, "
         "substr(key_hash,1,8) AS key_prefix FROM api_keys ORDER BY id")
     for r in rows:
         if ApiKeyStore._is_expired(r):
@@ -72,6 +72,18 @@ async def delete_api_key(kid: int):
     state.db.audit("admin", "api_key.delete", f"#{kid}", {}, "ok")
     return ok({"deleted": True})
 
+@router.post("/api-keys/batch-delete")
+async def batch_delete_api_keys(body: dict):
+    ids = [int(x) for x in (body.get("ids") or []) if str(x).isdigit()]
+    if not ids:
+        return err(400, "ids 不能为空")
+    for kid in ids:
+        state.db.execute("DELETE FROM api_keys WHERE id=?", (kid,))
+    if state.apikey_store:
+        state.apikey_store.invalidate()
+    state.db.audit("admin", "api_key.batch_delete", f"#{len(ids)}", {"ids": ids}, "ok")
+    return ok({"deleted": len(ids)})
+
 @router.post("/api-keys/{kid}/rotate")
 async def rotate_api_key(kid: int):
     """轮换密钥：生成新密钥立即生效，旧密钥立即失效；grace_until 记录宽限标记（7天）。"""
@@ -90,6 +102,32 @@ async def rotate_api_key(kid: int):
     state.db.audit("admin", "api_key.rotate", f"#{kid}", {"grace_until": grace}, "ok")
     return ok({"id": kid, "api_key": raw, "grace_until": grace,
                "note": "旧密钥已立即失效；grace_until 为轮换宽限标记"})
+
+
+@router.post("/api-keys/clean-unused")
+async def clean_unused_api_keys(body: dict):
+    """清理无效密钥：删除超过 X 天未使用的密钥，默认 30 天。"""
+    days = int(body.get("days") or 30)
+    if days < 1:
+        return err(400, "days 至少为 1")
+    from datetime import datetime, timedelta
+    cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%S")
+    # 注意：last_used_at 为空视为"从未使用"，也满足"从未使用>days天"条件
+    # 保留 active 且：(last_used_at 为空且 created_at < cutoff) OR last_used_at < cutoff
+    deleted = 0
+    rows = state.db.query(
+        "SELECT id, last_used_at, created_at FROM api_keys "
+        "WHERE status='active' AND (last_used_at < ? OR last_used_at = '' OR last_used_at IS NULL)",
+        (cutoff,))
+    ids_to_del = [r["id"] for r in rows]
+    if ids_to_del:
+        place = ",".join("?" * len(ids_to_del))
+        deleted = len(ids_to_del)
+        state.db.execute(f"DELETE FROM api_keys WHERE id IN ({place})", tuple(ids_to_del))
+    if state.apikey_store:
+        state.apikey_store.invalidate()
+    state.db.audit("admin", "api_key.clean", "", {"days": days, "deleted": deleted}, "ok")
+    return ok({"deleted": deleted, "cutoff": cutoff})
 
 
 # ---------------- 通知配置 ----------------

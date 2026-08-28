@@ -21,8 +21,13 @@ async def account_status(conn_id: str = ""):
     if isinstance(pos, dict) and pos.get("code"):
         return pos
     pos_value = sum(p.get("market_value", 0.0) for p in pos)
+    # 券商 total_asset（assets）已包含持仓市值；若无 total_asset（为 0/空）才退化为现金+持仓市值，
+    # 避免持仓市值被重复相加导致总资产虚高。
+    assets = float(cash.get("assets", 0.0) or 0.0)
+    if assets <= 0:
+        assets = float(cash.get("cash", 0.0) or 0.0) + pos_value
     return ok({"connected": b.gateway.is_connected(),
-               "assets": round((cash.get("assets", 0.0) or 0.0) + pos_value, 2),
+               "assets": round(assets, 2),
                "cash": cash.get("cash", 0.0), "position_count": len(pos),
                "positions": pos})
 

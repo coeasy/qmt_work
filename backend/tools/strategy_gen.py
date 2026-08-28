@@ -10,7 +10,7 @@ log = logging.getLogger("qmt_work")
 
 _TEMPLATES = {
     "ma_cross": """# -*- coding: utf-8 -*-
-# 双均线金叉/死叉策略（由 QMT Agent 平台生成）
+# 双均线金叉/死叉策略（由 QMT 平台生成）
 import numpy as np
 from xtquant.xttype import StockAccount
 from xtquant.xttrader import XtQuantTrader
@@ -49,7 +49,7 @@ def on_bar(datas):
                                    xtconstant.FIX_PRICE, closes[-1], p.volume, 'ma_cross', '')
 """,
     "macd": """# -*- coding: utf-8 -*-
-# MACD 金叉/死叉策略（由 QMT Agent 平台生成）
+# MACD 金叉/死叉策略（由 QMT 平台生成）
 import numpy as np
 from xtquant.xttype import StockAccount
 from xtquant.xttrader import XtQuantTrader
@@ -96,7 +96,7 @@ def on_bar(datas):
                                    xtconstant.FIX_PRICE, closes[-1], p.volume, 'macd', '')
 """,
     "rsi": """# -*- coding: utf-8 -*-
-# RSI 超买超卖策略（由 QMT Agent 平台生成）
+# RSI 超买超卖策略（由 QMT 平台生成）
 import numpy as np
 from xtquant.xttype import StockAccount
 from xtquant.xttrader import XtQuantTrader

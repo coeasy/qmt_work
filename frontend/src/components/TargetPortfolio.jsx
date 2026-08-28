@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
 import { api } from "../api.js";
+import { useBatchSelection } from "../hooks/useBatchSelection.js";
+import BatchDeleteBar from "./BatchDeleteBar.jsx";
 
 /* 目标持仓差量同步
    保存/删除持仓计划 · 按计划执行差量同步
@@ -13,6 +15,8 @@ export default function TargetPortfolio() {
   const [syncMode, setSyncMode] = useState("weight");
   const [dryRun, setDryRun] = useState(true);
   const [totalCapital, setTotalCapital] = useState("");
+  const [batchBusy, setBatchBusy] = useState(false);
+  const bsel = useBatchSelection(plans, "id");
 
   /* 新建计划 */
   const [planName, setPlanName] = useState("");
@@ -46,6 +50,18 @@ export default function TargetPortfolio() {
       loadPlans();
     } catch (e) { setMsg({ ok: false, t: e.message }); }
     finally { setLoading(false); }
+  }
+
+  async function batchDelete() {
+    setBatchBusy(true);
+    try {
+      await api.targetBatchDeletePlans(bsel.selected);
+      setMsg({ ok: true, t: `已删除 ${bsel.selected.length} 个计划` });
+      if (bsel.sel.has(selectedPlan)) setSelectedPlan(null);
+      bsel.clear();
+      loadPlans();
+    } catch (e) { setMsg({ ok: false, t: e.message }); }
+    finally { setBatchBusy(false); }
   }
 
   async function syncPortfolio() {
@@ -92,13 +108,18 @@ export default function TargetPortfolio() {
 
       <div className="card" style={{ marginTop: 16 }}>
         <h3 style={{ marginBottom: 12 }}>持仓计划列表</h3>
+        <BatchDeleteBar count={bsel.selected.length} onDelete={batchDelete} onClear={bsel.clear} busy={batchBusy} label="计划" />
         {!plans.length ? <Empty>暂无持仓计划</Empty> : (
           <div style={{ overflowX: "auto" }}>
             <table className="table">
-              <thead><tr><th>ID</th><th>名称</th><th>目标权重</th><th>操作</th></tr></thead>
+              <thead><tr>
+                <th style={{ width: 32 }}><input type="checkbox" checked={bsel.allSelected} onChange={bsel.toggleAll} /></th>
+                <th>ID</th><th>名称</th><th>目标权重</th><th>操作</th>
+              </tr></thead>
               <tbody>
                 {plans.map((p) => (
                   <tr key={p.id} className={selectedPlan === p.id ? "selected" : ""}>
+                    <td onClick={(e) => e.stopPropagation()}><input type="checkbox" checked={bsel.sel.has(p.id)} onChange={() => bsel.toggleOne(p.id)} /></td>
                     <td>{p.id}</td>
                     <td><strong>{p.name}</strong></td>
                     <td style={{ fontSize: 11, color: "#9bb" }}>

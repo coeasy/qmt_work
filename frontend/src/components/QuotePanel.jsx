@@ -1,0 +1,160 @@
+import { useMemo } from "react";
+
+/* 通达信风格右侧报价面板 */
+export default function QuotePanel({ tick, stockInfo, code, bars }) {
+  const lastBar = bars?.[bars.length - 1];
+  const preClose = lastBar ? Number(lastBar.close)
+    : (tick?.preClose != null ? Number(tick.preClose)
+      : (tick?.lastClose != null ? Number(tick.lastClose) : null));
+  const last = tick?.last != null ? Number(tick.last)
+    : (lastBar ? Number(lastBar.close) : null);
+  const open = tick?.open != null ? Number(tick.open) : null;
+  const high = tick?.high != null ? Number(tick.high) : null;
+  const low = tick?.low != null ? Number(tick.low) : null;
+
+  const changeAmt = last != null && preClose != null ? last - preClose : null;
+  const changePct = changeAmt != null && preClose != null && preClose !== 0
+    ? (changeAmt / preClose) * 100 : null;
+
+  const cls = changePct != null ? (changePct >= 0 ? "up" : "down") : "";
+
+  // 五档买卖盘（真实数组：买一~买五 / 卖一~卖五）
+  const bids = tick?.bids || [];
+  const asks = tick?.asks || [];
+  const hasBook = bids.length > 0 || asks.length > 0;
+
+  // 基本信息
+  const name = stockInfo?.name || tick?.name || code;
+  const board = stockInfo?.board || tick?.board || "—";
+  const exchange = stockInfo?.exchange || tick?.exchange || "—";
+  const industry = stockInfo?.industry || tick?.industry || "";
+  const concepts = stockInfo?.concepts || tick?.concepts || [];
+  // 数据来源标识：stock-info 优先（名称/行业/涨跌停来源），回退实时 tick
+  const srcRaw = stockInfo?.source || tick?.source || "";
+  const SRC_LABEL = { eltdx: "TDX行情", broker: "券商", cache: "本地缓存" };
+  const srcLabel = SRC_LABEL[srcRaw] || "—";
+  const srcKey = srcRaw || "unknown";
+  const highLimit = stockInfo?.high_limit != null ? Number(stockInfo.high_limit)
+    : (tick?.high_limit != null ? Number(tick.high_limit) : null);
+  const lowLimit = stockInfo?.low_limit != null ? Number(stockInfo.low_limit)
+    : (tick?.low_limit != null ? Number(tick.low_limit) : null);
+
+  // 逐笔成交
+  const trades = tick?.trades || [];
+
+  function fmtAmount(v) {
+    if (v == null) return "—";
+    const n = Number(v);
+    if (n >= 1e8) return (n / 1e8).toFixed(2) + "亿";
+    if (n >= 1e4) return (n / 1e4).toFixed(0) + "万";
+    return n.toFixed(2);
+  }
+
+  // 五档行（卖五→卖一，买一→买五）
+  const bookRows = useMemo(() => {
+    const rows = [];
+    for (let i = 4; i >= 0; i--) {
+      rows.push({ side: "ask", level: i + 1, price: asks[i]?.price, volume: asks[i]?.volume });
+    }
+    for (let i = 0; i < 5; i++) {
+      rows.push({ side: "bid", level: i + 1, price: bids[i]?.price, volume: bids[i]?.volume });
+    }
+    return rows;
+  }, [bids, asks]);
+
+  return (
+    <div className="quote-panel">
+      {/* 头部：名称 + 代码 + 板块 + 数据来源 */}
+      <div className="qp-header">
+        <div className="qp-name-block">
+          <span className="qp-name">{name || "—"}</span>
+          <span className="qp-code">{code || "—"}</span>
+        </div>
+        <div className="qp-header-tags">
+          <span className="qp-board" title="所属板块">{board}</span>
+          <span className={`qp-source source-${srcKey}`} title="数据来源（TDX行情 / 券商 / 本地缓存）">
+            {srcLabel}
+          </span>
+        </div>
+      </div>
+
+      {/* 最新价 + 涨跌幅 */}
+      <div className="qp-price-row">
+        <span className={`qp-price ${cls}`}>{last != null ? last.toFixed(2) : "—"}</span>
+        <div className="qp-change">
+          <span className={cls}>{changeAmt != null ? (changeAmt >= 0 ? "+" : "") + changeAmt.toFixed(2) : "—"}</span>
+          <span className={cls}>{changePct != null ? (changePct >= 0 ? "+" : "") + changePct.toFixed(2) + "%" : "—"}</span>
+        </div>
+      </div>
+
+      {/* 基本信息 */}
+      <div className="qp-section-title">基本信息</div>
+      <div className="qp-stats">
+        <div className="qp-stat-row"><span className="qp-label">交易所</span><span>{exchange}</span></div>
+        <div className="qp-stat-row"><span className="qp-label">板块</span><span>{board}</span></div>
+        <div className="qp-stat-row"><span className="qp-label">行业</span><span className="up-accent">{industry || "—"}</span></div>
+        <div className="qp-stat-row"><span className="qp-label">今开</span><span>{open != null ? open.toFixed(2) : "—"}</span></div>
+        <div className="qp-stat-row"><span className="qp-label">最高</span><span className="up">{high != null ? high.toFixed(2) : "—"}</span></div>
+        <div className="qp-stat-row"><span className="qp-label">最低</span><span className="down">{low != null ? low.toFixed(2) : "—"}</span></div>
+        <div className="qp-stat-row"><span className="qp-label">昨收</span><span>{preClose != null ? preClose.toFixed(2) : "—"}</span></div>
+        <div className="qp-stat-row"><span className="qp-label">涨停</span><span className="up">{highLimit != null ? highLimit.toFixed(2) : "—"}</span></div>
+        <div className="qp-stat-row"><span className="qp-label">跌停</span><span className="down">{lowLimit != null ? lowLimit.toFixed(2) : "—"}</span></div>
+        <div className="qp-stat-row"><span className="qp-label">成交量</span><span>{tick?.volume != null ? Number(tick.volume).toLocaleString() : "—"}</span></div>
+        <div className="qp-stat-row"><span className="qp-label">成交额</span><span>{fmtAmount(tick?.amount)}</span></div>
+      </div>
+
+      {/* 概念题材（通达信题材，来自 eltdx F10） */}
+      {concepts.length > 0 && (
+        <>
+          <div className="qp-section-title">概念题材</div>
+          <div className="qp-concepts">
+            {concepts.map((c, i) => (
+              <span key={i} className="qp-concept-tag">{c}</span>
+            ))}
+          </div>
+        </>
+      )}
+
+      {/* 五档买卖盘 */}
+      <div className="qp-section-title">五档买卖盘</div>
+      {hasBook ? (
+        <table className="qp-book-table">
+          <tbody>
+            {bookRows.map((r, idx) => (
+              <tr key={idx} className={r.side === "ask" ? "qa-ask-row" : "qa-bid-row"}>
+                <td className={`qa-side ${r.side === "ask" ? "down" : "up"}`}>
+                  {r.side === "ask" ? "卖" : "买"}{r.level}
+                </td>
+                <td className="qa-price">
+                  {r.price != null ? Number(r.price).toFixed(2) : "—"}
+                </td>
+                <td className="qa-vol">
+                  {r.volume != null ? Number(r.volume).toLocaleString() : "—"}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      ) : (
+        <div className="qp-book-empty">暂无五档数据（未连接券商或无实时盘口）</div>
+      )}
+
+      {/* 逐笔成交 */}
+      <div className="qp-section-title">逐笔成交</div>
+      <div className="qp-trades">
+        {trades.length > 0 ? (
+          trades.slice(-12).map((t, i) => (
+            <div key={i} className={`qp-trade-row ${t.side === "buy" ? "up" : t.side === "sell" ? "down" : ""}`}>
+              <span className="qt-time">{t.time || t.ts || ""}</span>
+              <span className="qt-price">{t.price != null ? Number(t.price).toFixed(2) : "—"}</span>
+              <span className="qt-vol">{t.volume != null ? t.volume : "—"}</span>
+              <span className="qt-side">{t.side === "buy" ? "买" : t.side === "sell" ? "卖" : "—"}</span>
+            </div>
+          ))
+        ) : (
+          <p className="muted" style={{ fontSize: 11, padding: "6px 0" }}>暂无逐笔数据</p>
+        )}
+      </div>
+    </div>
+  );
+}
