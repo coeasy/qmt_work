@@ -90,7 +90,7 @@ if !errorlevel! equ 0 (
 
 REM ---- auto-update URL ----
 if "%QMT_UPDATE_URL%"=="" (
-    set "QMT_UPDATE_URL=https://github.com/qmt-work/qmt_work/releases/download"
+    set "QMT_UPDATE_URL=https://github.com/coeasy/qmt_work/releases/download"
     echo [warn] QMT_UPDATE_URL not set, using default.
 )
 set "QMT_UPDATE_URL=!QMT_UPDATE_URL!"

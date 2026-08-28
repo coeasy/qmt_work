@@ -40,7 +40,9 @@ nsis:
   shortcutName: qmt_work
   artifactName: ${productName}-Setup-${version}.${ext}
 publish:
-  - provider: generic
-    # 支持未设置环境变量时使用默认更新地址（electron-builder 的 :- 默认值语法），
-    # 使 npm run dist:portable 开箱可用；设置 QMT_UPDATE_URL 仍可覆盖。
-    url: ${env.QMT_UPDATE_URL:-https://github.com/qmt-work/qmt_work/releases/download}
+  # GitHub Releases 自动更新源（electron-updater 据此拉取 latest.yml + 安装包）。
+  # -p always 时 electron-builder 自动把产物上传到对应 Release。
+  # 注意：App 内自动更新仅对【公开】仓库默认可用；私有仓库需换自建更新服务器。
+  - provider: github
+    owner: coeasy
+    repo: qmt_work

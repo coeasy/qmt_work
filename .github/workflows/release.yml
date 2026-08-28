@@ -1,0 +1,72 @@
+name: Release build
+
+# 在 GitHub Releases 页面"发布"时自动构建 Windows 桌面客户端，并上传安装包/便携包到该 Release。
+# 触发方式见 https://github.com/coeasy/qmt_work/releases/new
+#
+# 注意事项：
+# - 构建需要 Windows runner（后端是 PyInstaller 打的 Windows exe，electron-builder --win 亦然）。
+# - Release 的 tag 必须与 frontend/package.json 的 version 一致（electron-builder 用 package.json
+#   version 命名产物并生成 latest.yml；tag 不一致会导致 electron-updater 找不到对应安装包）。
+# - App 内自动更新（electron-updater 拉 latest.yml）仅对【公开】仓库默认可用；
+#   私有仓库请改用自建更新服务器或在 electron-builder.yml 配 publish 源。
+# - 代码签名可选：设置 CSC_LINK + CSC_KEY_PASSWORD 后自动签名，避免 SmartScreen 告警。
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+# GITHUB_TOKEN 需要 release 写权限才能上传资产
+permissions:
+  contents: write
+
+concurrency:
+  group: release-build
+  cancel-in-progress: false
+
+jobs:
+  build-client:
+    name: Build desktop client (win-x64)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # ---- Step 1: 前端构建（vite 产物 → backend/static）----
+      - name: Install frontend deps
+        working-directory: frontend
+        run: npm ci
+
+      - name: Build frontend
+        working-directory: frontend
+        run: npm run build
+
+      # ---- Step 2: 后端 EXE（PyInstaller onedir → backend/dist/qmt_work/qmt_work.exe）----
+      - name: Install backend deps + PyInstaller
+        working-directory: backend
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      - name: Build backend EXE
+        working-directory: backend
+        run: python build_exe.py
+
+      # ---- Step 3: Electron 桌面壳打包并上传到 Release assets ----
+      # provider: github 会在 Release 上生成 latest.yml，供 electron-updater 自动更新。
+      - name: Electron build & publish to release
+        working-directory: frontend
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npx electron-builder --win -p always

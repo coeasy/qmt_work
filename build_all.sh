@@ -75,7 +75,7 @@ detect_running "electron.exe" "桌面壳实例"
 
 # ---- 自动更新地址：未配置时用 GitHub Releases 占位 ----
 if [[ -z "${QMT_UPDATE_URL:-}" ]]; then
-    export QMT_UPDATE_URL="https://github.com/qmt-work/qmt_work/releases/download"
+    export QMT_UPDATE_URL="https://github.com/coeasy/qmt_work/releases/download"
     warn "QMT_UPDATE_URL 未设置，使用默认: $QMT_UPDATE_URL"
     warn "请按实际仓库地址设置环境变量 QMT_UPDATE_URL 后重新构建。"
 fi
