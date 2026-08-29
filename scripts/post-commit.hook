@@ -1,0 +1,18 @@
+#!/bin/sh
+# 提交后自动构建桌面客户端（后台执行，不阻塞 git commit）。
+# 不想自动构建时：QMT_NO_AUTOBUILD=1 git commit ...
+if [ "$QMT_NO_AUTOBUILD" = "1" ]; then
+  exit 0
+fi
+
+ROOT="$(git rev-parse --show-toplevel)"
+cd "$ROOT" || exit 0
+
+# 用 PowerShell 跑一键打包脚本，输出到 .client_build.log，后台执行。
+if command -v pwsh >/dev/null 2>&1; then
+  pwsh -NoProfile -File scripts/build-client.ps1 -Target dir > .client_build.log 2>&1 &
+  echo "[git] 已在后台触发客户端构建（scripts/build-client.ps1 -Target dir）；日志见 .client_build.log"
+else
+  echo "[git] 未找到 pwsh，跳过自动构建。可手动运行 scripts/build-client.ps1"
+fi
+exit 0

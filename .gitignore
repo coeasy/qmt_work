@@ -60,3 +60,15 @@ docs/基于deepseek-harness的客户端重构方案.md
 docs/竞品对比与优化改进方案.md
 docs/二轮复查与优化改进计划（2026-08-27）.md
 docs/功能层问题与改进优化方案（2026-08-26审计版）.md
+
+# ---------- D1 工程卫生（2026-08-29 全链路计划） ----------
+frontend/release*/
+frontend/vite.config.js.timestamp-*.mjs
+.test_port.txt
+r4_git_status.txt
+_tmp_test/
+_scratch_decode.py
+# 一次性 / 孤立渲染探针（已被 frontend/tests/render_smoke_market.mjs 取代）
+frontend/render_smoke.mjs
+/tests/
+frontend/tests/render_smoke_v3.mjs
