@@ -5,7 +5,9 @@ import { useServerEvents } from "../hooks/useSystemWS.js";
 import { consumePendingPrefill } from "../lib/trade.js";
 
 // 手动交易面板：下单 / 持仓 / 委托 / 成交 / 条件单 / 目标仓位（全部真实接口，下单过风控）
-export default function Trade() {
+// v3：支持叶子 params 直达预填（navTo("trade", {params}) 协议通道），
+//     旧 trade:prefill 事件与 pending 消费兜底保留，双通道互不冲突。
+export default function Trade({ params } = {}) {
   const { activeId, activeBroker } = useBroker();
   const [tab, setTab] = useState("order");
   const [err, setErr] = useState("");
@@ -75,6 +77,19 @@ export default function Trade() {
       setTab("order");
     }
   }, []);
+
+  // v3 通道：叶子 params 直达预填（打开/激活 trade tab 时生效一次）
+  useEffect(() => {
+    if (!params || !params.code) return;
+    setForm((f) => ({
+      ...f, code: params.code,
+      direction: params.direction || "buy",
+      price: params.price ? Number(params.price) : f.price,
+      price_type: params.price ? "limit" : f.price_type,
+    }));
+    setTab("order");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [params && params.code, params && params.price]);
 
   async function submitOrder() {
     // 订单提交成功/失败都要保留 toast 反馈（此前紧跟 setMsg(null) 把 wrap 的提示立即清掉，

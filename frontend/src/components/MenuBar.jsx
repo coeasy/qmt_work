@@ -9,8 +9,8 @@ import { PAGES } from "../pagesRegistry.jsx";
 // 9 个主菜单（按 TDX 习惯顺序）：系统 / 行情 / 分析 / 交易 / 策略 / 组合 / 研究 / 信号 / 账户 / 运维
 const MENUS = [
   { label: "系统", keys: ["dashboard", "settings", "sysstatus"] },
-  { label: "行情", keys: ["quote", "markettools", "reference"] },
-  { label: "分析", keys: ["stock", "factor"] },
+  { label: "行情", keys: ["quote", "boards", "etfs", "quoteboard", "markettools", "reference"] },
+  { label: "分析", keys: ["quote", "boards", "factors"] },
   { label: "交易", keys: ["trade", "limitup", "algo", "paper"] },
   { label: "策略", keys: ["strategies", "strmarket", "target", "rebalance"] },
   { label: "研究", keys: ["backtest", "factors", "research"] },

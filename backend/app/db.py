@@ -394,6 +394,23 @@ SELECT code,period,dt,open,high,low,close,volume,amount,fetched_at
 FROM kline_cache WHERE dt < (strftime('%Y','now') || '-01-01');
 DELETE FROM kline_cache WHERE dt < (strftime('%Y','now') || '-01-01');
 """),
+    (15, """
+-- G3 资金流落库与回放：盘后/盘中定时采集个股资金流快照，支持历史回看。
+-- net = outside - inside（主动买卖净额，外盘-内盘，真实口径，est=false）。
+-- 同一 code 多次采集按 ts 追加（不 UNIQUE），回放按时间区间取序列。
+CREATE TABLE IF NOT EXISTS moneyflow_cache (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    code TEXT NOT NULL,
+    name TEXT DEFAULT '',
+    ts TEXT NOT NULL,
+    inside REAL,
+    outside REAL,
+    net REAL,
+    volume_ratio REAL,
+    source TEXT DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_moneyflow_cache_lookup ON moneyflow_cache(code, ts);
+"""),
 ]
 
 # 表 -> 向后兼容扩展字段（幂等补列，TEXT DEFAULT ''）

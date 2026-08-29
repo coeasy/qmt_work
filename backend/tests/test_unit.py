@@ -1037,7 +1037,7 @@ def test_kline_rollover_moves_stale_hot_rows():
         db.executemany_in_txn(
             "INSERT OR REPLACE INTO kline_cache "
             "(code,period,dt,open,high,low,close,volume,amount,fetched_at,adjust) "
-            f"VALUES ('600001.SH','1d',?,?,NULL,NULL,NULL,0,0,0,'')",
+            "VALUES ('600001.SH','1d',?,?,NULL,NULL,NULL,0,0,0,'')",
             [(dt, 5.0) for dt in (last_y, this_y)])
         res = kc.archive_rollover()
         assert res["moved"] == 1

@@ -147,10 +147,15 @@ def test_compute_many_endpoint():
     assert "sma" in data and "ema" in data
 
 
-def test_from_kline_no_broker_returns_503():
-    # 未连接券商，fetch_kline_cached 会抛 BrokerNotConnectedError -> 503
+def test_from_kline_without_broker_contract():
+    # 未连接券商时的行为契约：eltdx 公共源接入后，无券商也可经公共源取 K 线
+    # （code=0）；仅当公共源也不可用时才 503。两种均为合法结局，绝不伪造数据。
     r = client.post("/factors/from-kline",
                     json={"symbol": "600519.SH", "names": ["sma"]})
     assert r.status_code == 200
     body = r.json()
-    assert body["code"] == 503
+    assert body["code"] in (0, 503)
+    if body["code"] == 0:
+        data = body["data"] or {}
+        # 成功路径必须带真实来源标注
+        assert data.get("source") or data.get("items")

@@ -61,6 +61,14 @@ class RuntimeConfig:
                              "每日刷新触发时间 HH:MM（收盘后，默认 16:00）"),
         "market.sync.interval": (60.0, float, 10.0,
                                  "定时更新检查循环间隔（秒），热更新生效"),
+        # ---- 指数清单（R8/B4 配置化：改顶部指数条无需改代码重发版）----
+        "market.indices.list": ("", str, "",
+                                "顶部指数条清单（逗号分隔 QMT 代码，如 000001.SH,399001.SZ；"
+                                "留空用内置默认 8 只）"),
+        # ---- 资金流观测池（C2：G3 自动采集范围可配置）----
+        "market.moneyflow.watchlist": ("", str, "",
+                                       "资金流自动采集观测池（逗号分隔 QMT 代码；"
+                                       "留空用内置 15 只蓝筹）"),
     }
 
     def __init__(self, db=None):

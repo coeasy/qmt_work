@@ -1,9 +1,19 @@
-// 状态条（TDX 风格 status bar，28px 高）：券商连接状态 / 切换 / 快捷入口。
+// 状态条（TDX 风格 status bar，28px 高）：券商连接状态 / 行情 WS 状态 / 切换 / 快捷入口。
 // 全部内容单行排布，避免换行。
 import { useBroker } from "../BrokerContext.jsx";
+import { useQuoteHub } from "../lib/quoteHub.jsx";
+
+const WS_LABEL = {
+  connected: { txt: "行情实时", cls: "ok" },
+  connecting: { txt: "行情连接中", cls: "warn" },
+  reconnecting: { txt: "行情重连中", cls: "warn" },
+  offline: { txt: "行情离线", cls: "fail" },
+};
 
 export default function BrokerBar() {
   const { brokers, activeId, activeBroker, connectedCount, setActive } = useBroker();
+  const hub = useQuoteHub();
+  const ws = WS_LABEL[hub.state] || WS_LABEL.offline;
   const nav = (k) => window.dispatchEvent(new CustomEvent("nav", { detail: k }));
 
   return (
@@ -31,6 +41,15 @@ export default function BrokerBar() {
           </select>
         )}
         {connectedCount > 1 && <span className="status-meta">在线 {connectedCount}</span>}
+      </div>
+
+      <span className="status-sep" />
+
+      {/* 全局行情 WS 状态（v3 QuoteHub 单连接）：全站常驻可见，不再只藏在行情页 */}
+      <div className="status-section" title={`行情 WebSocket：${ws.txt}（订阅 ${hub.declared} 只）`}>
+        <span className={`status-dot ${ws.cls}`} aria-hidden="true" />
+        <span className="status-text">{ws.txt}</span>
+        {hub.declared > 0 && <span className="status-meta">订阅 {hub.declared}</span>}
       </div>
 
       <span className="status-sep" />

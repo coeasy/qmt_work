@@ -66,6 +66,8 @@ def _resolve_broker_id(c: dict) -> str:
     真实券商名无法确定识别时不覆盖路径猜测，仍为空则归 generic —— 避免把
     目录明确的候选（如 银河/国金）在无账号时被误降级成 generic。
     """
+    # 局部导入：guess_broker_id_by_name 原在端点函数内导入，模块级函数取不到（F821）
+    from xtquant_client.discovery import guess_broker_id_by_name
     by_name = guess_broker_id_by_name(c.get("broker_name") or "")
     if by_name:
         return by_name

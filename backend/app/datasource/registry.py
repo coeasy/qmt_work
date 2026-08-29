@@ -22,6 +22,11 @@ from typing import Optional
 
 from app.datasource.base import DataSource
 from app.datasource.board import classify_board, limit_ratio
+from app.datasource.periods import (
+    UnknownPeriodError,
+    adjust_allowed_periods,
+    normalize_period,
+)
 from xtquant_client.base import BrokerError
 
 log = __import__("logging").getLogger("qmt_work.datasource.registry")
@@ -299,8 +304,13 @@ class DataSourceManager:
 
         复权（qfq/hfq）券商不支持，自动改走支持复权的补充源（eltdx）。
         """
-        adj_periods = ("1d", "day", "1w", "week", "1mon", "mon", "month")
-        if adjust in ("qfq", "hfq") and period.lower() in adj_periods:
+        # 周期判定引用契约常量（第三份硬编码已消除）。
+        # 注意：旧常量不含 canonical "1mo"，导致月线+qfq 时不会改走支持复权的补充源。
+        try:
+            _canon = normalize_period(period)
+        except UnknownPeriodError:
+            _canon = None
+        if adjust in ("qfq", "hfq") and _canon in adjust_allowed_periods():
             for name in self._auto_chain:
                 if name == "broker":
                     continue
@@ -336,6 +346,106 @@ class DataSourceManager:
             if bars is not None:
                 return bars, name
         return None, None
+
+    # ---------- 当日分时（仅补充源提供；券商 SDK 无分时接口） ----------
+    async def get_minutes(self, code: str, trading_date: Optional[str] = None,
+                          source: str = "auto") -> Optional[dict]:
+        """当日分时曲线（价格+均价+分钟量）。按 auto 链遍历补充源（跳过券商），
+        全部无数据返回 None。"""
+        for name in self._auto_chain:
+            if name == "broker":
+                continue
+            if source not in ("auto", name):
+                continue
+            src = self._plugins.get(name)
+            if src is None or not hasattr(src, "get_minutes"):
+                continue
+            res = await self._call_source(name, src.get_minutes(code, trading_date))
+            if res and res.get("points"):
+                return res
+        return None
+
+    # ---------- 指数 / 板块 / ETF / 资金流（东财对标能力，仅补充源提供） ----------
+    def _sup_chain(self, source: str = "auto") -> list:
+        """按 source 解析补充源候选链（P1-7：source 参数必须真正生效）。
+
+        - "broker"：返回空链 → 方法返回 None，绝不悄悄回退 TDX 公共行情，
+          否则「仅券商」的降级语义失效，用户会误以为看的是券商数据。
+        - 具体源名（如 eltdx）：只用该源。
+        - "auto"/空：按 _auto_chain 顺序回退（跳过券商）。
+        """
+        want = (source or "auto").lower().strip()
+        if want == "broker":
+            return []
+        if want in ("", "auto"):
+            return [n for n in self._auto_chain if n != "broker"]
+        return [want]
+
+    async def _first_supported(self, method: str, *args, source: str = "auto",
+                               **kwargs):
+        """按 source 解析的链找到第一个实现该方法的补充源并返回 (结果, 源名)。"""
+        for name in self._sup_chain(source):
+            src = self._plugins.get(name)
+            if src is None or not hasattr(src, method):
+                continue
+            res = await self._call_source(name, getattr(src, method)(*args, **kwargs))
+            if res:
+                return res, name
+        return None, None
+
+    async def get_boards(self, kind: str = "industry", sort_by: str = "pct",
+                         limit: int = 50, source: str = "auto") -> tuple[Optional[list], Optional[str]]:
+        """板块指数榜单（真实板块指数快照）。返回 (rows, source_name)。"""
+        return await self._first_supported("get_boards", kind, sort_by, limit, source=source)
+
+    async def get_board_constituents(self, code: str, limit: int = 50, page: int = 0,
+                                     source: str = "auto") -> tuple[Optional[dict], Optional[str]]:
+        """板块成分股。返回 ({code,total,items,page,has_more}, source_name)。"""
+        return await self._first_supported("get_board_constituents", code, limit, page, source=source)
+
+    async def get_board_kline(self, code: str, period: str = "1d", count: int = 60,
+                              source: str = "auto") -> tuple[Optional[list], Optional[str]]:
+        """板块 / 指数 K 线（kind='index'）。"""
+        return await self._first_supported("get_board_kline", code, period, count, source=source)
+
+    async def search_boards(self, name: str, limit: int = 8,
+                            source: str = "auto") -> tuple[Optional[list], Optional[str]]:
+        """板块名称→代码匹配（深链稳化）。返回 (rows, source_name)。"""
+        return await self._first_supported("search_boards", name, limit, source=source)
+
+    async def get_etf_list(self, limit: int = 0,
+                           source: str = "auto") -> tuple[Optional[list], Optional[str]]:
+        """ETF 清单（代码 + 名称）。limit<=0 返回全量，避免整段截断。"""
+        return await self._first_supported("get_etf_list", limit, source=source)
+
+    async def get_moneyflow(self, code: str,
+                            source: str = "auto") -> tuple[Optional[dict], Optional[str]]:
+        """个股资金流（真实内外盘口径）。"""
+        return await self._first_supported("get_moneyflow", code, source=source)
+
+    async def get_share_capital(self, codes: list,
+                                source: str = "auto") -> tuple[dict, Optional[str]]:
+        """流通股本（换手率分母）。无数据返回空 dict（调用方显式降级）。"""
+        for name in self._sup_chain(source):
+            src = self._plugins.get(name)
+            if src is None or not hasattr(src, "get_share_capital"):
+                continue
+            res = await self._call_source(name, src.get_share_capital(codes))
+            if res:
+                return res, name
+        return {}, None
+
+    async def get_price_limits(self, codes: list,
+                               source: str = "auto") -> tuple[dict, Optional[str]]:
+        """涨跌停价。无数据返回空 dict。"""
+        for name in self._sup_chain(source):
+            src = self._plugins.get(name)
+            if src is None or not hasattr(src, "get_price_limits"):
+                continue
+            res = await self._call_source(name, src.get_price_limits(codes))
+            if res:
+                return res, name
+        return {}, None
 
     # ---------- 全市场股票列表（名称来源） ----------
     async def get_stock_list(self, source: str = "auto",

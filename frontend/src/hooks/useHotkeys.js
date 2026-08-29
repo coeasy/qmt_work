@@ -6,6 +6,7 @@
 //  - F3 上证指数 / F4 深证成指 / F5 分时↔K线 / F6 自选股 / F10 F10 资料 / F12 交易
 import { useEffect } from "react";
 import { PAGE_TREE } from "../pagesRegistry.jsx";
+import { navTo, navToQuote } from "../lib/nav.js";
 
 export function useHotkeys() {
   useEffect(() => {
@@ -18,6 +19,11 @@ export function useHotkeys() {
       if (mod && (e.key === "k" || e.key === "K")) {
         e.preventDefault();
         window.dispatchEvent(new CustomEvent("cmd:toggle"));
+        return;
+      }
+      if (mod && (e.key === "b" || e.key === "B")) {
+        e.preventDefault();
+        window.dispatchEvent(new CustomEvent("tree:toggle"));
         return;
       }
       if (e.key === "Escape") {
@@ -44,14 +50,13 @@ export function useHotkeys() {
       }
       if (k === "F3") {
         e.preventDefault();
-        try { sessionStorage.setItem("qmt_work.code", "000001.SH"); } catch {}
-        window.dispatchEvent(new CustomEvent("nav", { detail: "stock" }));
+        // v3：nav 协议携带参数直达（旧版写 sessionStorage，行情 tab 已开时点了没反应）
+        navToQuote("000001.SH");
         return;
       }
       if (k === "F4") {
         e.preventDefault();
-        try { sessionStorage.setItem("qmt_work.code", "399001.SZ"); } catch {}
-        window.dispatchEvent(new CustomEvent("nav", { detail: "stock" }));
+        navToQuote("399001.SZ");
         return;
       }
       if (k === "F5") {

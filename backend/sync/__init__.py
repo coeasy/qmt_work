@@ -426,6 +426,11 @@ class SyncEngine:
         self._notify_handlers.append(handler)
 
 
+# 服务端主动心跳间隔（秒）。需小于常见代理的读超时（Nginx proxy_read_timeout 默认 60s），
+# 否则静默期一长，代理会单方面切断连接，而客户端与服务端都收不到任何通知。
+HEARTBEAT_INTERVAL_SEC = 20
+
+
 class WSManager:
     """WebSocket 连接管理：账户/行情/告警三通道广播。"""
 
@@ -434,6 +439,7 @@ class WSManager:
         self._sockets: dict[str, WebSocket] = {}
         self._seq: dict[str, int] = {}
         self._recent: deque = deque(maxlen=3000)   # 最近行情环形缓冲（断线补发窗口，C4）
+        self._hb_tasks: dict[str, asyncio.Task] = {}  # 服务端主动心跳任务（B1）
         # 阶段 1（C20）：cid 单调自增，绝不复用——断连重连后若用 len(sockets)+1，
         # 会生成重复 cid 覆盖现有 socket，导致订阅/退订/清理全错位
         self._next_cid = 0
@@ -445,7 +451,35 @@ class WSManager:
         self._sockets[cid] = ws
         self._seq[cid] = 0
         await self.send_full_snapshot(cid)
+        # 服务端主动心跳（B1）：保持代理层连接活跃，并让客户端能检出「半死连接」。
+        # 客户端 ping→pong 只能证明上行链路活着；若服务端下行静默，中间代理
+        # 到时间照样切断，双方都无感知。此处由服务端下行定时帧兜底。
+        try:
+            self._hb_tasks[cid] = asyncio.create_task(self._heartbeat_loop(cid))
+        except RuntimeError:
+            pass  # 无事件循环（测试环境）时降级为不主动心跳
         return cid
+
+    async def _heartbeat_loop(self, cid: str) -> None:
+        """每 HEARTBEAT_INTERVAL_SEC 秒向该客户端推一帧 heartbeat。"""
+        try:
+            while True:
+                await asyncio.sleep(HEARTBEAT_INTERVAL_SEC)
+                ws = self._sockets.get(cid)
+                if ws is None:
+                    return
+                try:
+                    await ws.send_text(json.dumps({
+                        "type": "heartbeat",
+                        "seq": self._bump(cid),
+                        "ts": time.time(),
+                        "clients": len(self._sockets),
+                    }))
+                except Exception:
+                    self.disconnect(cid)
+                    return
+        except asyncio.CancelledError:
+            return
 
     def _push_recent(self, items: list[dict]) -> None:
         now = time.time()
@@ -483,6 +517,10 @@ class WSManager:
             self.disconnect(cid)
 
     def disconnect(self, cid: str) -> None:
+        # 先停心跳任务，避免在已失效的 socket 上继续 send（会再次触发 disconnect 递归）
+        task = self._hb_tasks.pop(cid, None)
+        if task is not None:
+            task.cancel()
         self._sockets.pop(cid, None)
         self.engine.client_unsubscribe(cid, list(self.engine._client_subscriptions.get(cid, set())))
 

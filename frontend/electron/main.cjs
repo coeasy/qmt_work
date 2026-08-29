@@ -7,7 +7,7 @@ const path = require("path");
 const fs = require("fs");
 const http = require("http");
 
-const DEFAULT_PORT = 21117;
+const DEFAULT_PORT = 21118; // 与 backend/run.py 的默认起始端口保持一致
 const HEALTH = `/api/docs`;
 let backend = null;
 let win = null;
@@ -33,8 +33,11 @@ function backendEntry() {
     const exe = path.join(process.resourcesPath, "backend", "qmt_work", "qmt_work.exe");
     return { cmd: exe, args: [] };
   }
-  // 开发态：用系统 python 跑 run.py
-  return { cmd: "python", args: [path.join(__dirname, "..", "..", "backend", "run.py")] };
+  // 开发态：优先使用仓库自带 Python 运行时（backend/runtimes/cp311/python.exe），
+  // 避免依赖系统 python / Windows Store 占位符导致启动失败。
+  const runtimePy = path.join(__dirname, "..", "..", "backend", "runtimes", "cp311", "python.exe");
+  const cmd = fs.existsSync(runtimePy) ? runtimePy : "python";
+  return { cmd, args: [path.join(__dirname, "..", "..", "backend", "run.py")] };
 }
 
 function startBackend() {

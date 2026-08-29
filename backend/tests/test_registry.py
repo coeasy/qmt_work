@@ -130,7 +130,6 @@ def test_discovery_recognizes_uf_procs():
 def test_xtp_resolves_uf_layout():
     """阶段 5 修复：xtp._XTQUANT_REL 包含恒生 UF 定制版常见嵌入位（client/uf/app/inner）。"""
     from xtquant_client.xtp import _XTQUANT_REL
-    rel_strs = "\\".join(p.replace("\\", "/") for p in _XTQUANT_REL)
     # 至少包含 client/python/Lib/site-packages 与 uf/Lib/site-packages
     assert any("client" in p and "python" in p and "site-packages" in p for p in _XTQUANT_REL), \
         f"缺少 client/python 路径: {_XTQUANT_REL}"

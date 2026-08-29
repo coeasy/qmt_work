@@ -1,29 +1,47 @@
 // 报价牌 / 综合排名（通达信式核心窗口）：板块、自选股、综合排名；
-// 可排序表格 + 实时刷新（从服务端缓存/批量快照拉取，WS 增量更新）。
-import { useEffect, useMemo, useRef, useState } from "react";
+// 可排序表格 + 实时刷新（REST 批量快照首屏 + QuoteHub 全局单连接 WS 增量）。
+import { useEffect, useMemo, useState } from "react";
 import { api } from "../api.js";
+import { navToQuote } from "../lib/nav.js";
+import { useQuotes } from "../lib/quoteHub.jsx";
 
 const WATCH_KEY = "qmt_work.watchlist.v1";
 
-function wsUrl() {
-  const proto = location.protocol === "https:" ? "wss" : "ws";
-  return `${proto}://${location.host}/api/v1/ws`;
-}
-
-// 列定义：k 用于排序取值；num 为数值列
+// 列定义：k 用于排序取值；num 为数值列；kind 决定渲染样式
+//   - pct：整格红/绿底白字（TDX 经典涨跌幅格）+ 箭头
+//   - price/amount：方向着色字
+//   - src：数据源小徽标
 const COLS = [
-  { k: "code", label: "代码", num: false },
-  { k: "name", label: "名称", num: false },
-  { k: "last", label: "最新", num: true, fmt: (v) => (v == null ? "—" : Number(v).toFixed(2)) },
-  { k: "pct", label: "涨跌幅%", num: true, cls: (v) => (v == null ? "" : v >= 0 ? "up" : "down"),
-    fmt: (v) => (v == null ? "—" : (v >= 0 ? "+" : "") + v.toFixed(2)) },
-  { k: "chg", label: "涨跌额", num: true, cls: (v) => (v == null ? "" : v >= 0 ? "up" : "down"),
+  { k: "code", label: "代码", num: false, kind: "code" },
+  { k: "name", label: "名称", num: false, kind: "name" },
+  { k: "last", label: "最新", num: true, kind: "price",
+    fmt: (v) => (v == null ? "—" : Number(v).toFixed(2)) },
+  { k: "pct", label: "涨跌幅", num: true, kind: "pct",
+    fmt: (v) => (v == null ? "—" : (v >= 0 ? "▲ " : "▼ ") + (v >= 0 ? "+" : "") + Number(v).toFixed(2) + "%") },
+  { k: "chg", label: "涨跌额", num: true, kind: "price",
     fmt: (v) => (v == null ? "—" : (v >= 0 ? "+" : "") + Number(v).toFixed(2)) },
-  { k: "amp", label: "振幅%", num: true, fmt: (v) => (v == null ? "—" : Number(v).toFixed(2)) },
-  { k: "amount", label: "成交额", num: true, fmt: (v) => (v == null ? "—" : fmtAmount(v)) },
-  { k: "volume", label: "成交量", num: true, fmt: (v) => (v == null ? "—" : fmtAmount(v)) },
-  { k: "source", label: "源", num: false, fmt: (v) => (v || "—") },
+  { k: "amp", label: "振幅%", num: true, kind: "plain",
+    fmt: (v) => (v == null ? "—" : Number(v).toFixed(2)) },
+  { k: "amount", label: "成交额", num: true, kind: "plain",
+    fmt: (v) => (v == null ? "—" : fmtAmount(v)) },
+  { k: "volume", label: "成交量", num: true, kind: "plain",
+    fmt: (v) => (v == null ? "—" : fmtAmount(v)) },
+  { k: "source", label: "源", num: false, kind: "src", fmt: (v) => v || "—" },
 ];
+
+const SRC_SHORT = { eltdx: "TDX", broker: "券商", cache: "缓存" };
+function cellClass(c, v) {
+  if (c.kind === "price" || c.kind === "pct") {
+    if (v == null) return "";
+    return v >= 0 ? "up" : "down";
+  }
+  return "";
+}
+function cellHtmlClass(c, v) {
+  // 涨跌幅格：自身带方向底色（与字体红绿相反，DOM 类不冲突，用专用类）
+  if (c.kind === "pct") return v == null ? "" : (v >= 0 ? "qb-pct up" : "qb-pct down");
+  return "";
+}
 
 function fmtAmount(n) {
   if (n == null) return "—";
@@ -56,7 +74,6 @@ export default function QuoteBoard() {
   const [rows, setRows] = useState({}); // code -> derived
   const [sort, setSort] = useState({ k: "pct", dir: -1 });
   const [loading, setLoading] = useState(false);
-  const wsRef = useRef(null);
 
   // F6：外部事件切到指定视图
   useEffect(() => {
@@ -98,7 +115,8 @@ export default function QuoteBoard() {
     return () => { canceled = true; };
   }, [board, sector, sectors]);
 
-  // 批量快照 + WS 增量
+  // 批量快照首屏 + QuoteHub 全局单连接增量（替代自建裸 WS：无重连、绕过多路复用的历史问题）
+  const { quotes } = useQuotes(codes);
   useEffect(() => {
     if (!codes.length) { setRows({}); return; }
     let stopped = false;
@@ -108,22 +126,22 @@ export default function QuoteBoard() {
       (r.items || []).forEach((q) => { m[q.code] = derive(q); });
       setRows(m);
     }).catch(() => {});
-
-    const ws = new WebSocket(wsUrl());
-    wsRef.current = ws;
-    ws.onopen = () => { try { ws.send(JSON.stringify({ action: "subscribe", codes })); } catch {} };
-    ws.onmessage = (e) => {
-      let msg; try { msg = JSON.parse(e.data); } catch { return; }
-      const take = (it) => {
-        if (it && codes.includes(it.code)) setRows((prev) => ({ ...prev, [it.code]: derive(it) }));
-      };
-      if (msg.type === "quotes" && Array.isArray(msg.data?.items)) msg.data.items.forEach(take);
-      else if (msg.type === "quotes_replay" && Array.isArray(msg.data?.items)) msg.data.items.forEach(take);
-      else if (msg.type === "quote") take(msg.data);
-    };
-    ws.onerror = () => { try { ws.close(); } catch {} };
-    return () => { stopped = true; try { ws.close(); } catch {} wsRef.current = null; };
+    return () => { stopped = true; };
   }, [codes]);
+
+  // WS tick → 就地更新对应行（快照里没有的 code 忽略）
+  useEffect(() => {
+    setRows((prev) => {
+      let changed = false;
+      const next = { ...prev };
+      for (const c of codes) {
+        const q = quotes[c];
+        if (q) { next[c] = derive(q); changed = true; }
+      }
+      return changed ? next : prev;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [quotes]);
 
   const sorted = useMemo(() => {
     const arr = Object.values(rows);
@@ -140,17 +158,10 @@ export default function QuoteBoard() {
   const setSortKey = (k) => setSort((s) => (s.k === k ? { k, dir: -s.dir } : { k, dir: k === "code" || k === "name" ? 1 : -1 }));
 
   const openStock = (code) => {
-    try { sessionStorage.setItem("qmt_work.code", code); } catch {}
-    window.dispatchEvent(new CustomEvent("nav", { detail: "stock" }));
+    // v3：nav 协议带参直达（多实例行情 tab 各看各的票，不再写 sessionStorage）
+    navToQuote(code);
   };
 
-  const RANK_CHIPS = [
-    { k: "pct", label: "涨幅榜" }, { k: "pct", dir: 1, label: "跌幅榜" },
-    { k: "amp", label: "振幅榜" }, { k: "amount", label: "成交额榜" },
-    { k: "volume", label: "成交量榜" },
-  ];
-
-  // 综合排名：TDX 80 风格——3 列并排（涨幅 / 振幅 / 成交额），各取 top N
   const RANK_COLS = [
     { k: "pct", dir: -1, title: "涨幅榜" },
     { k: "amp", dir: -1, title: "振幅榜" },
@@ -183,15 +194,6 @@ export default function QuoteBoard() {
         )}
         <span className="qb-count">{codes.length} 只 · {loading ? "加载中…" : "实时"}</span>
       </div>
-
-      {board === "rank" && (
-        <div className="qb-rank-chips">
-          {RANK_CHIPS.map((c, i) => (
-            <span key={i} className={`qb-chip ${sort.k === c.k && (c.dir ? sort.dir === c.dir : true) ? "active" : ""}`}
-              onClick={() => setSort({ k: c.k, dir: c.dir || -1 })}>{c.label}</span>
-          ))}
-        </div>
-      )}
 
       {board === "rank" && (
         <div className="qb-rank-cols">
@@ -243,7 +245,18 @@ export default function QuoteBoard() {
             ) : sorted.map((r) => (
               <tr key={r.code} onClick={() => openStock(r.code)}>
                 {COLS.map((c) => (
-                  <td key={c.k} className={`${c.num ? "num" : ""} ${c.cls ? c.cls(r[c.k]) : ""}`}>{c.fmt ? c.fmt(r[c.k]) : r[c.k]}</td>
+                  c.kind === "src" ? (
+                    <td key={c.k} className="qb-src">
+                      <span className={`qb-src-tag ${r[c.k] ? `src-${r[c.k]}` : ""}`}>
+                        {SRC_SHORT[r[c.k]] || "—"}
+                      </span>
+                    </td>
+                  ) : (
+                    <td key={c.k}
+                      className={`${c.num ? "num" : ""} ${cellClass(c, r[c.k])} ${cellHtmlClass(c, r[c.k])}`}>
+                      {c.fmt ? c.fmt(r[c.k]) : r[c.k]}
+                    </td>
+                  )
                 ))}
               </tr>
             ))}

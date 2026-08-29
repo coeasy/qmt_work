@@ -23,6 +23,20 @@ export default [
   },
   js.configs.recommended,
   {
+    // 根目录 Node 冒烟脚本（render_smoke.mjs 等）：Node 环境 +
+    // page.evaluate 回调内的浏览器全局（真实浏览器上下文，属合法使用）。
+    // 保留 no-undef 门禁：仅声明合法全局，不放松规则。
+    files: ["**/*.mjs"],
+    languageOptions: {
+      ecmaVersion: 2022,
+      sourceType: "module",
+      globals: {
+        ...globals.node,
+        ...globals.browser,
+      },
+    },
+  },
+  {
     files: ["src/**/*.{js,jsx}", "vite.config.js", "vitest.config.js", "eslint.config.js"],
     languageOptions: {
       ecmaVersion: 2022,

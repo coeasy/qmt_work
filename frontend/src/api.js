@@ -19,13 +19,13 @@ function _authHeaders(extra = {}) {
   return extra;
 }
 
-async function _req(method, path, { params, body, signal, timeoutMs } = {}) {
+async function _req(method, path, { params, body, signal, timeoutMs, _retried } = {}) {
   const url = new URL(BASE + path, window.location.origin);
   if (params) Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v));
   // 阶段 5 关键修复：实现 signal + timeoutMs 真正生效（否则取消按钮无效、连接超时无意义）。
-  // 双轨：外部 signal（用户点取消）+ 内部 timer（默认 35s 后端兜底），任一触发立即中断 fetch。
-  // 此前 _req 解构丢弃 signal，传给 fetch 时也未带 signal，30s spinner 死转、按钮按了无反应
-  // 就是这个 bug 直接导致。
+  // 双轨：外部 signal（用户点取消）+ 内部 timer，任一触发立即中断 fetch。
+  // 链路强化：默认 15s 超时（未显式指定时），避免无超时请求永久挂起。
+  const effTimeout = timeoutMs !== undefined ? timeoutMs : 15000;
   const ctrl = new AbortController();
   let timer = null;
   const onAbort = () => ctrl.abort();
@@ -33,10 +33,10 @@ async function _req(method, path, { params, body, signal, timeoutMs } = {}) {
     if (signal.aborted) ctrl.abort();
     else signal.addEventListener("abort", onAbort, { once: true });
   }
-  if (timeoutMs && timeoutMs > 0) {
+  if (effTimeout && effTimeout > 0) {
     timer = setTimeout(() => {
-      try { ctrl.abort(new Error(`请求超时（${timeoutMs}ms）`)); } catch { ctrl.abort(); }
-    }, timeoutMs);
+      try { ctrl.abort(new Error(`请求超时（${effTimeout}ms）`)); } catch { ctrl.abort(); }
+    }, effTimeout);
   }
   let r;
   try {
@@ -47,13 +47,19 @@ async function _req(method, path, { params, body, signal, timeoutMs } = {}) {
       body: body ? JSON.stringify(body) : undefined,
     });
   } catch (e) {
-    // abort 异常转成友好错误（区分"主动取消"和"真超时"）
-    const aborted = signal && signal.aborted;
-    throw new Error(aborted ? "已取消请求" : (e && e.message) || "网络请求失败");
-  } finally {
     if (timer) clearTimeout(timer);
     if (signal) signal.removeEventListener("abort", onAbort);
+    const aborted = signal && signal.aborted;
+    if (aborted) throw new Error("已取消请求");
+    // GET 幂等请求：网络层失败（断网/超时/DNS）自动重试一次（业务码错误不重试）。
+    if (method === "GET" && !_retried) {
+      await new Promise((res) => setTimeout(res, 400));
+      return _req(method, path, { params, body, signal, timeoutMs, _retried: true });
+    }
+    throw new Error((e && e.message) || "网络请求失败");
   }
+  if (timer) clearTimeout(timer);
+  if (signal) signal.removeEventListener("abort", onAbort);
   const j = await r.json().catch(() => ({}));
   if (j.code !== 0) throw new Error(j.message || `HTTP ${r.status}`);
   return j.data;
@@ -110,14 +116,46 @@ api.sectorStocks = (sector) => api.get("/reference/sector-stocks", { sector });
 api.financial = (code) => api.get("/reference/financial", { code });
 api.l2 = (code, count) => api.get("/market/l2", { code, count });
 api.marketKline = (params) => api.get("/market/kline", params);
+api.marketMinutes = (params) => api.get("/market/minutes", params);
+// 周期契约清单（契约驱动 UI）：前端周期条据此渲染，不支持的周期置灰并显示原因，
+// 杜绝「点了月线实际出日线」这类前后端枚举漂移导致的静默错误。
+api.marketPeriods = () => api.get("/market/periods");
 // 行情工具：单票实时报价 / 手动抓取落库 / K 线缓存查看与清理
 api.marketQuote = (params) => api.get("/market/quote", params);
+api.marketQuotes = (body) => api.post("/market/quotes", body);
 api.marketStockInfo = (params) => api.get("/market/stock-info", params);
 api.marketCrawl = (body) => api.post("/market/crawl", body);
 api.klineCacheStats = () => api.get("/market/kline/cache");
 api.klineCacheClear = (code, period) =>
   api.del(`/market/kline/cache?code=${encodeURIComponent(code || "")}&period=${encodeURIComponent(period || "")}`);
 api.klineSyncStatus = () => api.get("/market/kline/sync-status");
+
+// ---------------- 多维行情：指数 / 板块 / ETF / 资金流（东财对标，阶段 E/F/G/H） ----------------
+// 主要指数聚合快照（顶部指数条 / 指数分析）
+api.marketIndices = (params) => api.get("/market/indices", params);
+// 板块榜单（真实板块指数 881/880 快照）：kind=industry|concept|stat，sort_by=pct|amount
+api.marketBoards = (params) => api.get("/market/boards", params);
+// 板块成分股（f10 实时涨跌幅/价格）
+api.marketBoardConstituents = (params) => api.get("/market/board/constituents", params);
+// 板块名称→代码精确匹配（个股页概念/行业深链稳化，避免 name.includes 误匹配/静默失败）
+api.marketBoardLookup = (params) => api.get("/market/board/lookup", params);
+// 板块/指数 K 线（kind=index）
+api.marketBoardKline = (params) => api.get("/market/board/kline", params);
+// ETF 全市场清单（代码段 51/56/58/15/16）；with_quote=true 附带实时快照
+api.marketEtfs = (params) => api.get("/market/etfs", params);
+// 个股资金流（真实内外盘口径）：inside/outside/net/strength/volume_ratio
+api.marketMoneyflow = (params) => api.get("/market/moneyflow", params);
+// 批量流通股本 + 涨跌停价（换手率与涨跌停展示的真实口径来源）
+api.marketCapital = (params) => api.get("/market/capital", params);
+// E3 市场概览：统计类板块真实家数 + 主要指数 + 宽度趋势
+api.marketOverview = (params) => api.get("/market/overview", params);
+// F4 板块轮动矩阵：topN 板块近 N 日每日%chg
+api.marketRotation = (params) => api.get("/market/rotation", params);
+// G2 板块资金流：成分股当日主力净流入聚合
+api.boardMoneyflow = (params) => api.get("/market/board/moneyflow", params);
+// G3 资金流落库快照 / 回放
+api.moneyflowSnapshot = (body) => api.post("/market/moneyflow/snapshot", body);
+api.moneyflowReplay = (params) => api.get("/market/moneyflow/replay", params);
 
 // ---------------- 策略模板库 ----------------
 api.strategyGenerate = (body) => api.post("/strategies/generate", body);

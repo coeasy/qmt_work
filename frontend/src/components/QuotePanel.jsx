@@ -50,17 +50,31 @@ export default function QuotePanel({ tick, stockInfo, code, bars }) {
     return n.toFixed(2);
   }
 
-  // 五档行（卖五→卖一，买一→买五）
+  // 五档行（卖五→卖一，买一→买五），附量能配比（比例色块用）
   const bookRows = useMemo(() => {
-    const rows = [];
-    for (let i = 4; i >= 0; i--) {
-      rows.push({ side: "ask", level: i + 1, price: asks[i]?.price, volume: asks[i]?.volume });
-    }
-    for (let i = 0; i < 5; i++) {
-      rows.push({ side: "bid", level: i + 1, price: bids[i]?.price, volume: bids[i]?.volume });
-    }
-    return rows;
-  }, [bids, asks]);
+    const asksArr = asks.map((a, i) => ({ side: "ask", level: i + 1, price: a.price, volume: a.volume }));
+    const bidsArr = bids.map((b, i) => ({ side: "bid", level: i + 1, price: b.price, volume: b.volume }));
+    return {
+      asks: asksArr,
+      bids: bidsArr,
+      rows: [...[...asksArr].reverse() /* 卖五→卖一 */, ...bidsArr],
+      maxAskVol: Math.max(1, ...asksArr.map((a) => Number(a.volume) || 0)),
+      maxBidVol: Math.max(1, ...bidsArr.map((b) => Number(b.volume) || 0)),
+    };
+  }, [asks, bids]);
+
+  // 委比/委差（通达信口径，由五档派生）：委差=委买总量-委卖总量；委比=差/和×100%
+  const sumBuyVol = useMemo(() => bids.reduce((s, b) => s + (Number(b.volume) || 0), 0), [bids]);
+  const sumSellVol = useMemo(() => asks.reduce((s, a) => s + (Number(a.volume) || 0), 0), [asks]);
+  const weichah = sumBuyVol - sumSellVol;                                   // 委差（手）
+  const weibi = (sumBuyVol + sumSellVol) > 0
+    ? (weichah / (sumBuyVol + sumSellVol)) * 100 : null;                    // 委比（%）
+  const inside = tick?.inside != null ? Number(tick.inside) : null;         // 内盘（手）
+  const outside = tick?.outside != null ? Number(tick.outside) : null;     // 外盘（手）
+  const currentHand = tick?.current_hand != null ? Number(tick.current_hand) : null; // 现量
+  const fmtHands = (v) => v == null ? "—" : (v >= 1e4 ? (v / 1e4).toFixed(1) + "万" : v.toLocaleString());
+
+  const { rows: bookRowsList, maxAskVol, maxBidVol } = bookRows;
 
   return (
     <div className="quote-panel">
@@ -101,6 +115,17 @@ export default function QuotePanel({ tick, stockInfo, code, bars }) {
         <div className="qp-stat-row"><span className="qp-label">跌停</span><span className="down">{lowLimit != null ? lowLimit.toFixed(2) : "—"}</span></div>
         <div className="qp-stat-row"><span className="qp-label">成交量</span><span>{tick?.volume != null ? Number(tick.volume).toLocaleString() : "—"}</span></div>
         <div className="qp-stat-row"><span className="qp-label">成交额</span><span>{fmtAmount(tick?.amount)}</span></div>
+        <div className="qp-stat-row"><span className="qp-label">现量</span><span>{currentHand != null ? currentHand.toLocaleString() : "—"}</span></div>
+        <div className="qp-stat-row"><span className="qp-label">内盘</span><span className="down">{fmtHands(inside)}</span></div>
+        <div className="qp-stat-row"><span className="qp-label">外盘</span><span className="up">{fmtHands(outside)}</span></div>
+        <div className="qp-stat-row"><span className="qp-label">委比</span>
+          <span className={weibi == null ? "" : weibi >= 0 ? "up" : "down"}>
+            {weibi == null ? "—" : (weibi >= 0 ? "+" : "") + weibi.toFixed(2) + "%"}
+          </span></div>
+        <div className="qp-stat-row"><span className="qp-label">委差</span>
+          <span className={weichah == null ? "" : weichah >= 0 ? "up" : "down"}>
+            {weichah == null ? "—" : fmtHands(weichah)}
+          </span></div>
       </div>
 
       {/* 概念题材（通达信题材，来自 eltdx F10） */}
@@ -120,19 +145,25 @@ export default function QuotePanel({ tick, stockInfo, code, bars }) {
       {hasBook ? (
         <table className="qp-book-table">
           <tbody>
-            {bookRows.map((r, idx) => (
-              <tr key={idx} className={r.side === "ask" ? "qa-ask-row" : "qa-bid-row"}>
-                <td className={`qa-side ${r.side === "ask" ? "down" : "up"}`}>
-                  {r.side === "ask" ? "卖" : "买"}{r.level}
-                </td>
-                <td className="qa-price">
-                  {r.price != null ? Number(r.price).toFixed(2) : "—"}
-                </td>
-                <td className="qa-vol">
-                  {r.volume != null ? Number(r.volume).toLocaleString() : "—"}
-                </td>
-              </tr>
-            ))}
+            {bookRowsList.map((r, idx) => {
+              // 量能配比：该档量占本侧五档最大量的百分比
+              const maxVol = r.side === "ask" ? maxAskVol : maxBidVol;
+              const pct = r.volume != null ? Math.min(100, (Number(r.volume) / maxVol) * 100) : 0;
+              return (
+                <tr key={idx} className={`${r.side === "ask" ? "qa-ask-row" : "qa-bid-row"}`}>
+                  <td className={`qa-side ${r.side === "ask" ? "down" : "up"}`}>
+                    {r.side === "ask" ? "卖" : "买"}{r.level}
+                  </td>
+                  <td className={`qa-price ${r.side === "ask" ? "down" : "up"}`}>
+                    {r.price != null ? Number(r.price).toFixed(2) : "—"}
+                  </td>
+                  <td className="qa-volwrap">
+                    <span className="qa-volbar" style={{ width: `${pct}%`, background: r.side === "ask" ? "rgba(25,195,125,.28)" : "rgba(255,77,79,.28)" }} aria-hidden="true" />
+                    <span className="qa-vol">{r.volume != null ? Number(r.volume).toLocaleString() : "—"}</span>
+                  </td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       ) : (

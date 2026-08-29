@@ -471,10 +471,17 @@ def create_app() -> FastAPI:
         # 不阻塞启动；首请求若尚未就绪会自动惰性加载。仅作非商业场景行情补充源。
         try:
             from app.datasource.manager import get_hub
-            asyncio.create_task(get_hub().warmup())
+            asyncio.create_task(get_hub().warmup_all())
             log.info("行情数据源预热任务已提交（后台）")
         except Exception as exc:  # noqa: BLE001
             log.warning("行情数据源预热任务提交失败：%s", exc)
+
+        # G3 资金流自动采集（交易时段每 5 分钟落库，供盘后回放）。
+        try:
+            from app.routes.market import start_moneyflow_collector
+            start_moneyflow_collector()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("资金流自动采集启动失败：%s", exc)
 
         log.info("qmt_work started (real broker mode)")
         try:
@@ -590,6 +597,25 @@ def create_app() -> FastAPI:
 
     app.include_router(router)
     _apply_openapi_meta(app)
+
+    @app.post("/api/v1/scheduler/shutdown")
+    async def _desktop_shutdown():
+        # 桌面壳优雅停机：先停行情同步引擎并断开券商连接；
+        # 失败不影响 Electron 的进程树强杀兜底（main.cjs killBackendTree）。
+        try:
+            se = getattr(state, "sync_engine", None)
+            if se and hasattr(se, "stop"):
+                await se.stop()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("sync stop on shutdown failed: %s", exc)
+        try:
+            bm = getattr(state, "broker_manager", None)
+            if bm and hasattr(bm, "disconnect_all"):
+                bm.disconnect_all()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("broker disconnect on shutdown failed: %s", exc)
+        return {"ok": True, "shutting_down": True}
+
     app.mount("/mcp", mcp_app, name="mcp")
 
     # UTF-8 强制声明中间件（P1 修复）：StaticFiles 默认给 .js/.css 返回的
@@ -605,6 +631,18 @@ def create_app() -> FastAPI:
 
     static_dir = BASE_DIR / "static"
     if static_dir.exists():
+        # index.html 必须走 no-cache：StaticFiles(html=True) 默认不发缓存头，浏览器会缓存
+        # 旧 index.html → 引用旧构建的 JS hash → 前端重新构建后用户刷新仍加载旧代码，
+        # 表现为「修复不生效 / 问题依然存在」。带 hash 的 /assets/* 资源可长缓存。
+        from fastapi.responses import FileResponse
+
+        @app.get("/", include_in_schema=False)
+        async def _index():
+            return FileResponse(
+                str(static_dir / "index.html"),
+                headers={"Cache-Control": "no-cache, must-revalidate"},
+            )
+
         app.mount("/", StaticFiles(directory=str(static_dir), html=True), name="static")
 
     return app
