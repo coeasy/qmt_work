@@ -5,6 +5,7 @@
 """
 from app.datasource.base import DataSource
 from app.datasource.board import classify_board, limit_ratio
+from app.datasource.local_store import LocalStore, get_store
 from app.datasource.models import (
     Bar,
     BoardItem,
@@ -31,4 +32,6 @@ __all__ = [
     "Quote", "QuoteLevel", "Bar", "InstrumentInfo", "StockInfo",
     "BoardItem", "EtfInfo", "BoardKline", "Moneyflow", "MoneyflowPoint",
     "DataResult",
+    # G1-4 本地数据仓
+    "LocalStore", "get_store",
 ]

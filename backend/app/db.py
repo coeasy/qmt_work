@@ -411,6 +411,44 @@ CREATE TABLE IF NOT EXISTS moneyflow_cache (
 );
 CREATE INDEX IF NOT EXISTS idx_moneyflow_cache_lookup ON moneyflow_cache(code, ts);
 """),
+    (16, """
+-- G1-4 本地数据仓（本地主源，供离线查询 / 全市场选股 / 降级兜底）：
+-- 远程源失败时降级查询并标 stale=True（降级≠造假），G7 选股走本地向量化。
+-- 与 kline_cache 的关系：kline_cache 是券商直连的**展示 TTL 缓存**（近年数据、
+-- 复权未入唯一键）；local_bars 是**离线仓库**（复权维度入主键、可全市场增量同步、
+-- 可配置磁盘策略），两条线解耦，避免改动热路径。
+CREATE TABLE IF NOT EXISTS local_bars (
+    code TEXT NOT NULL,
+    period TEXT NOT NULL DEFAULT '1d',
+    adjust TEXT NOT NULL DEFAULT '',
+    dt TEXT NOT NULL,
+    open REAL, high REAL, low REAL, close REAL,
+    volume REAL, amount REAL,
+    fetched_at TEXT DEFAULT '',
+    PRIMARY KEY (code, period, adjust, dt)
+);
+CREATE INDEX IF NOT EXISTS idx_local_bars_lookup
+    ON local_bars(code, period, adjust, dt);
+CREATE TABLE IF NOT EXISTS local_stock_list (
+    code TEXT PRIMARY KEY,
+    name TEXT DEFAULT '',
+    category TEXT DEFAULT '',
+    updated_at TEXT DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS local_boards (
+    kind TEXT NOT NULL,
+    code TEXT NOT NULL,
+    name TEXT DEFAULT '',
+    last REAL, change_pct REAL, amount REAL,
+    updated_at TEXT DEFAULT '',
+    PRIMARY KEY (kind, code)
+);
+CREATE TABLE IF NOT EXISTS local_sync_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT DEFAULT '',
+    updated_at TEXT DEFAULT ''
+);
+"""),
 ]
 
 # 表 -> 向后兼容扩展字段（幂等补列，TEXT DEFAULT ''）
@@ -536,6 +574,14 @@ class DB:
             cur = self._conn.execute(sql, params)
             self._conn.commit()
             return cur
+
+    def executemany(self, sql: str, seq: list[tuple]) -> None:
+        """批量写（同锁 + 单事务提交），供本地数据仓等批量导入场景使用。"""
+        if not seq:
+            return
+        with _lock:
+            self._conn.executemany(sql, seq)
+            self._conn.commit()
 
     def query(self, sql: str, params: tuple = ()) -> list[dict]:
         with _lock:
