@@ -10,6 +10,7 @@ router = APIRouter()
 
 @router.post("/target-portfolio/sync")
 async def target_portfolio_sync(body: dict):
+    """创建/提交target-portfolio / sync（POST /target-portfolio/sync）。"""
     from tools.target_portfolio import TargetPortfolioEngine
     engine = TargetPortfolioEngine(state.broker_manager, state.signal_router, state.db)
     res = await engine.sync(
@@ -24,11 +25,13 @@ async def target_portfolio_sync(body: dict):
 
 @router.get("/target-portfolio/plans")
 async def target_portfolio_list():
+    """获取target-portfolio / plans（GET /target-portfolio/plans）。"""
     from tools.target_portfolio import TargetPortfolioEngine
     return ok(TargetPortfolioEngine(state.broker_manager, state.signal_router, state.db).list_plans())
 
 @router.post("/target-portfolio/plans")
 async def target_portfolio_save(body: dict):
+    """创建/提交target-portfolio / plans（POST /target-portfolio/plans）。"""
     from tools.target_portfolio import TargetPortfolioEngine
     nid = TargetPortfolioEngine(state.broker_manager, state.signal_router, state.db).save_plan(
         body.get("name", ""), body.get("weights", {}))
@@ -36,12 +39,14 @@ async def target_portfolio_save(body: dict):
 
 @router.delete("/target-portfolio/plans/{pid}")
 async def target_portfolio_delete(pid: int):
+    """删除target-portfolio / plans（DELETE /target-portfolio/plans/{pid}）。"""
     from tools.target_portfolio import TargetPortfolioEngine
     TargetPortfolioEngine(state.broker_manager, state.signal_router, state.db).delete_plan(pid)
     return ok({"deleted": True})
 
 @router.post("/target-portfolio/plans/batch-delete")
 async def target_portfolio_batch_delete(body: dict):
+    """创建/提交target-portfolio / plans / batch-delete（POST /target-portfolio/plans/batch-delete）。"""
     from tools.target_portfolio import TargetPortfolioEngine
     ids = [int(x) for x in (body.get("ids") or []) if str(x).isdigit()]
     if not ids:

@@ -21,12 +21,14 @@ async def reconcile_now(body: dict | None = None):
 
 @router.get("/reconcile/last", tags=["reconcile"], summary="最近一次对账结果")
 async def reconcile_last():
+    """获取reconcile / last（GET /reconcile/last）。"""
     if state.reconciler is None:
         return err(503, "对账器未初始化")
     return ok(state.reconciler.last_result or {"checked": 0})
 
 @router.get("/wal/stats", tags=["reconcile"], summary="WAL 统计与轮转状态")
 async def wal_stats():
+    """获取wal / stats（GET /wal/stats）。"""
     if state.wal is None:
         return err(503, "WAL 未初始化")
     p = Path(state.wal.path)
@@ -47,6 +49,7 @@ async def wal_stats():
 
 @router.post("/wal/checkpoint", tags=["reconcile"], summary="手动触发 WAL 归档轮转")
 async def wal_checkpoint():
+    """创建/提交wal / checkpoint（POST /wal/checkpoint）。"""
     if state.wal is None:
         return err(503, "WAL 未初始化")
     try:

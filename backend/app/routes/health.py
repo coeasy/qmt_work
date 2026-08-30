@@ -12,6 +12,7 @@ router = APIRouter()
 
 @router.get("/health")
 async def health_check():
+    """获取health（GET /health）。"""
     import time as _t
     db_ok = state.db is not None
     brokers = []

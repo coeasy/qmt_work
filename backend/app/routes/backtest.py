@@ -10,6 +10,7 @@ router = APIRouter()
 
 @router.post("/backtest/jobs")
 async def create_backtest_job(body: dict):
+    """创建/提交backtest / jobs（POST /backtest/jobs）。"""
     kind = body.get("kind", "backtest")
     if kind not in ("backtest", "compare", "sensitivity", "sweep"):
         return err(400, f"unknown kind: {kind}")
@@ -18,11 +19,13 @@ async def create_backtest_job(body: dict):
 
 @router.get("/backtest/jobs")
 async def list_backtest_jobs():
+    """获取backtest / jobs（GET /backtest/jobs）。"""
     jobs = state.db.query("SELECT * FROM backtest_jobs ORDER BY created_at DESC LIMIT 50")
     return ok(jobs)
 
 @router.get("/backtest/jobs/{job_id}")
 async def get_backtest_job(job_id: str):
+    """获取backtest / jobs（GET /backtest/jobs/{job_id}）。"""
     job = state.backtest_queue.get(job_id)
     if not job:
         row = state.db.query_one("SELECT * FROM backtest_jobs WHERE id=?", (job_id,))
@@ -31,11 +34,13 @@ async def get_backtest_job(job_id: str):
 
 @router.delete("/backtest/jobs/{job_id}")
 async def cancel_backtest_job(job_id: str):
+    """删除backtest / jobs（DELETE /backtest/jobs/{job_id}）。"""
     ok_flag = state.backtest_queue.cancel(job_id)
     return ok({"cancelled": ok_flag})
 
 @router.post("/backtest/jobs/batch-delete")
 async def batch_delete_backtest_jobs(body: dict):
+    """创建/提交backtest / jobs / batch-delete（POST /backtest/jobs/batch-delete）。"""
     ids = [str(x) for x in (body.get("ids") or []) if x not in (None, "")]
     if not ids:
         return err(400, "ids 不能为空")

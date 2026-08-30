@@ -9,6 +9,7 @@ router = APIRouter()
 
 @router.get("/alerts/rules")
 async def list_alert_rules():
+    """获取alerts / rules（GET /alerts/rules）。"""
     if state.db is None:
         return err(503, "数据库未初始化")
     rows = state.db.query("SELECT * FROM alert_rules ORDER BY id")
@@ -16,6 +17,7 @@ async def list_alert_rules():
 
 @router.post("/alerts/rules")
 async def save_alert_rule(body: dict):
+    """创建/提交alerts / rules（POST /alerts/rules）。"""
     if state.db is None:
         return err(503, "数据库未初始化")
     payload = {
@@ -42,11 +44,13 @@ async def save_alert_rule(body: dict):
 
 @router.delete("/alerts/rules/{rid}")
 async def delete_alert_rule(rid: int):
+    """删除alerts / rules（DELETE /alerts/rules/{rid}）。"""
     state.db.execute("DELETE FROM alert_rules WHERE id=?", (rid,))
     return ok({"deleted": True})
 
 @router.post("/alerts/rules/batch-delete")
 async def batch_delete_alert_rules(body: dict):
+    """创建/提交alerts / rules / batch-delete（POST /alerts/rules/batch-delete）。"""
     if state.db is None:
         return err(503, "数据库未初始化")
     ids = [int(x) for x in (body.get("ids") or []) if str(x).isdigit()]
@@ -58,6 +62,7 @@ async def batch_delete_alert_rules(body: dict):
 
 @router.post("/alerts/test")
 async def test_alert(body: dict):
+    """创建/提交alerts / test（POST /alerts/test）。"""
     if state.alert_engine is None:
         return err(503, "告警引擎未初始化")
     event = body.get("event", "system.test")
@@ -66,6 +71,7 @@ async def test_alert(body: dict):
 
 @router.get("/alerts/history")
 async def alert_history(limit: int = 50):
+    """获取alerts / history（GET /alerts/history）。"""
     if state.db is None:
         return err(503, "数据库未初始化")
     rows = state.db.query("SELECT * FROM alerts_history ORDER BY id DESC LIMIT ?", (limit,))

@@ -90,6 +90,7 @@ async def paper_account():
 
 @router.get("/paper/positions")
 async def paper_positions():
+    """获取paper / positions（GET /paper/positions）。"""
     e = _engine()
     if e is None:
         return err(503, _NOT_READY)
@@ -98,6 +99,7 @@ async def paper_positions():
 
 @router.get("/paper/trades")
 async def paper_trades(limit: int = 50):
+    """获取paper / trades（GET /paper/trades）。"""
     e = _engine()
     if e is None:
         return err(503, _NOT_READY)
@@ -106,6 +108,7 @@ async def paper_trades(limit: int = 50):
 
 @router.get("/paper/metrics")
 async def paper_metrics():
+    """获取paper / metrics（GET /paper/metrics）。"""
     e = _engine()
     if e is None:
         return err(503, _NOT_READY)

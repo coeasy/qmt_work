@@ -10,12 +10,14 @@ router = APIRouter()
 
 @router.get("/signal/mode")
 async def get_signal_mode():
+    """获取signal / mode（GET /signal/mode）。"""
     if state.signal_router is None:
         return err(503, "信号路由未初始化")
     return ok({"mode": state.signal_router.mode})
 
 @router.post("/signal/mode")
 async def set_signal_mode(body: dict):
+    """创建/提交signal / mode（POST /signal/mode）。"""
     if state.signal_router is None:
         return err(503, "信号路由未初始化")
     try:
@@ -27,6 +29,7 @@ async def set_signal_mode(body: dict):
 
 @router.post("/signal/submit")
 async def signal_submit(body: dict):
+    """创建/提交signal / submit（POST /signal/submit）。"""
     if state.signal_router is None:
         return err(503, "信号路由未初始化")
     from gateway.signal_router import Signal

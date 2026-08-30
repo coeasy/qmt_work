@@ -22,6 +22,7 @@ async def prometheus_metrics():
 
 @router.get("/quote-bus/stats")
 async def quote_bus_stats():
+    """获取quote-bus / stats（GET /quote-bus/stats）。"""
     out = {"bus": state.quote_bus.stats() if state.quote_bus else {"mode": "none"}}
     if state.sync_engine:
         out["latency"] = state.sync_engine.latency_stats()

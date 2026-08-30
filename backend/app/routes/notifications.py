@@ -10,12 +10,14 @@ router = APIRouter()
 
 @router.get("/notifications")
 async def list_notifications():
+    """获取notifications（GET /notifications）。"""
     if state.notifier is None:
         return err(503, "通知中心未初始化")
     return ok(state.notifier.list_configs())
 
 @router.post("/notifications")
 async def save_notification(body: dict):
+    """创建/提交notifications（POST /notifications）。"""
     if state.notifier is None:
         return err(503, "通知中心未初始化")
     nid = state.notifier.save_config(body)
@@ -25,6 +27,7 @@ async def save_notification(body: dict):
 
 @router.delete("/notifications/{nid}")
 async def delete_notification(nid: int):
+    """删除notifications（DELETE /notifications/{nid}）。"""
     if state.notifier is None:
         return err(503, "通知中心未初始化")
     state.notifier.delete_config(nid)
@@ -32,6 +35,7 @@ async def delete_notification(nid: int):
 
 @router.post("/notifications/batch-delete")
 async def batch_delete_notifications(body: dict):
+    """创建/提交notifications / batch-delete（POST /notifications/batch-delete）。"""
     if state.notifier is None:
         return err(503, "通知中心未初始化")
     ids = [int(x) for x in (body.get("ids") or []) if str(x).isdigit()]
@@ -43,6 +47,7 @@ async def batch_delete_notifications(body: dict):
 
 @router.post("/notifications/test")
 async def test_notification(body: dict):
+    """创建/提交notifications / test（POST /notifications/test）。"""
     if state.notifier is None:
         return err(503, "通知中心未初始化")
     cfg = body.get("config", {})
@@ -64,6 +69,7 @@ async def test_notification(body: dict):
 
 @router.get("/notifications/logs")
 async def notification_logs(limit: int = 50):
+    """获取notifications / logs（GET /notifications/logs）。"""
     if state.notifier is None:
         return err(503, "通知中心未初始化")
     return ok(state.notifier.recent_logs(limit))

@@ -1185,6 +1185,7 @@ async def kline_sync(body: dict):
 
 @router.post("/market/crawl")
 async def crawl_market(body: dict):
+    """创建/提交market / crawl（POST /market/crawl）。"""
     b = _need(body.get("conn_id") or None)
     if b is None:
         return err(503, "未连接任何券商客户端。")
@@ -1218,6 +1219,7 @@ async def crawl_market(body: dict):
 
 @router.get("/market/l2")
 async def market_l2(code: str, count: int = 100):
+    """获取market / l2（GET /market/l2）。"""
     b = _need()
     if b is None:
         return err(503, "未连接任何券商客户端：请到「券商连接」页添加并连接券商。")

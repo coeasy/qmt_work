@@ -10,6 +10,7 @@ router = APIRouter()
 
 @router.post("/trade/order")
 async def trade_order(body: dict):
+    """创建/提交trade / order（POST /trade/order）。"""
     b = _need()
     if b is None:
         return err(503, "未连接任何券商客户端：请到「券商连接」页添加并连接券商。")
@@ -48,6 +49,7 @@ async def trade_order(body: dict):
 
 @router.post("/trade/cancel")
 async def trade_cancel(body: dict):
+    """创建/提交trade / cancel（POST /trade/cancel）。"""
     b = _need()
     if b is None:
         return err(503, "未连接任何券商客户端：请到「券商连接」页添加并连接券商。")
@@ -60,6 +62,7 @@ async def trade_cancel(body: dict):
 
 @router.get("/trade/positions")
 async def trade_positions(symbol: str = ""):
+    """获取trade / positions（GET /trade/positions）。"""
     b = _need()
     if b is None:
         return err(503, "未连接任何券商客户端：请到「券商连接」页添加并连接券商。")
@@ -67,6 +70,7 @@ async def trade_positions(symbol: str = ""):
 
 @router.get("/trade/orders")
 async def trade_orders():
+    """获取trade / orders（GET /trade/orders）。"""
     b = _need()
     if b is None:
         return err(503, "未连接任何券商客户端：请到「券商连接」页添加并连接券商。")
@@ -74,6 +78,7 @@ async def trade_orders():
 
 @router.get("/trade/deals")
 async def trade_deals():
+    """获取trade / deals（GET /trade/deals）。"""
     b = _need()
     if b is None:
         return err(503, "未连接任何券商客户端：请到「券商连接」页添加并连接券商。")
@@ -81,6 +86,7 @@ async def trade_deals():
 
 @router.post("/trade/target")
 async def trade_target(body: dict):
+    """创建/提交trade / target（POST /trade/target）。"""
     b = _need()
     if b is None:
         return err(503, "未连接任何券商客户端：请到「券商连接」页添加并连接券商。")
@@ -114,6 +120,7 @@ async def trade_precheck(body: dict):
 
 @router.get("/trade/conditions")
 async def trade_conditions():
+    """获取trade / conditions（GET /trade/conditions）。"""
     e = state.condition_engine
     if e is None:
         return err(503, "条件单引擎未初始化")
@@ -121,6 +128,7 @@ async def trade_conditions():
 
 @router.post("/trade/conditions")
 async def trade_condition_submit(body: dict):
+    """创建/提交trade / conditions（POST /trade/conditions）。"""
     e = state.condition_engine
     if e is None:
         return err(503, "条件单引擎未初始化")
@@ -138,6 +146,7 @@ async def trade_condition_submit(body: dict):
 
 @router.post("/trade/conditions/{cid}/cancel")
 async def trade_condition_cancel(cid: str):
+    """创建/提交trade / conditions / cancel（POST /trade/conditions/{cid}/cancel）。"""
     e = state.condition_engine
     if e is None:
         return err(503, "条件单引擎未初始化")

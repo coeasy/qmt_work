@@ -10,6 +10,7 @@ router = APIRouter()
 
 @router.get("/account/status")
 async def account_status(conn_id: str = ""):
+    """获取account / status（GET /account/status）。"""
     b = _need(conn_id or None)
     if b is None:
         return err(503, "未连接任何券商客户端：请到「券商连接」页添加并连接券商。")

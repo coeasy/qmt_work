@@ -25,6 +25,7 @@ _NOT_READY = "策略运行容器未初始化"
 
 @router.get("/strategies/run")
 async def list_runs():
+    """获取strategies / run（GET /strategies/run）。"""
     rt = _rt()
     if rt is None:
         return err(503, _NOT_READY)
@@ -33,6 +34,7 @@ async def list_runs():
 
 @router.post("/strategies/run")
 async def create_run(body: dict):
+    """创建/提交strategies / run（POST /strategies/run）。"""
     rt = _rt()
     if rt is None:
         return err(503, _NOT_READY)
@@ -44,6 +46,7 @@ async def create_run(body: dict):
 
 @router.get("/strategies/run/{run_id}")
 async def get_run(run_id: int):
+    """获取strategies / run（GET /strategies/run/{run_id}）。"""
     rt = _rt()
     if rt is None:
         return err(503, _NOT_READY)
@@ -55,6 +58,7 @@ async def get_run(run_id: int):
 
 @router.post("/strategies/run/{run_id}/start")
 async def start_run(run_id: int):
+    """创建/提交strategies / run / start（POST /strategies/run/{run_id}/start）。"""
     rt = _rt()
     if rt is None:
         return err(503, _NOT_READY)
@@ -66,6 +70,7 @@ async def start_run(run_id: int):
 
 @router.post("/strategies/run/{run_id}/stop")
 async def stop_run(run_id: int):
+    """创建/提交strategies / run / stop（POST /strategies/run/{run_id}/stop）。"""
     rt = _rt()
     if rt is None:
         return err(503, _NOT_READY)
@@ -74,6 +79,7 @@ async def stop_run(run_id: int):
 
 @router.delete("/strategies/run/{run_id}")
 async def delete_run(run_id: int):
+    """删除strategies / run（DELETE /strategies/run/{run_id}）。"""
     rt = _rt()
     if rt is None:
         return err(503, _NOT_READY)
@@ -82,6 +88,7 @@ async def delete_run(run_id: int):
 
 @router.post("/strategies/run/batch-delete")
 async def batch_delete_runs(body: dict):
+    """创建/提交strategies / run / batch-delete（POST /strategies/run/batch-delete）。"""
     rt = _rt()
     if rt is None:
         return err(503, _NOT_READY)
@@ -95,6 +102,7 @@ async def batch_delete_runs(body: dict):
 
 @router.get("/strategies/run/{run_id}/logs")
 async def run_logs(run_id: int, limit: int = 100):
+    """获取strategies / run / logs（GET /strategies/run/{run_id}/logs）。"""
     rt = _rt()
     if rt is None:
         return err(503, _NOT_READY)

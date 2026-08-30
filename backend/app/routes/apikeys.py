@@ -11,6 +11,7 @@ router = APIRouter()
 
 @router.get("/api-keys")
 async def list_api_keys():
+    """获取api-keys（GET /api-keys）。"""
     from gateway.apikey import ApiKeyStore
     rows = state.db.query(
         "SELECT id, name, scopes, rate_limit, status, created_at, "
@@ -23,6 +24,7 @@ async def list_api_keys():
 
 @router.post("/api-keys")
 async def create_api_key(body: dict):
+    """创建/提交api-keys（POST /api-keys）。"""
     raw = f"qmt-{uuid.uuid4().hex[:24]}"
     kid = state.db.insert("api_keys", {
         "key_hash": hashlib.sha256(raw.encode()).hexdigest(),
@@ -46,6 +48,7 @@ async def create_api_key(body: dict):
 
 @router.patch("/api-keys/{kid}")
 async def update_api_key(kid: int, body: dict):
+    """更新api-keys（PATCH /api-keys/{kid}）。"""
     row = state.db.query_one("SELECT id FROM api_keys WHERE id=?", (kid,))
     if not row:
         return err(404, "密钥不存在")
@@ -65,6 +68,7 @@ async def update_api_key(kid: int, body: dict):
 
 @router.delete("/api-keys/{kid}")
 async def delete_api_key(kid: int):
+    """删除api-keys（DELETE /api-keys/{kid}）。"""
     state.db.execute("DELETE FROM api_keys WHERE id=?", (kid,))
     if state.apikey_store:
         state.apikey_store.invalidate()
@@ -73,6 +77,7 @@ async def delete_api_key(kid: int):
 
 @router.post("/api-keys/batch-delete")
 async def batch_delete_api_keys(body: dict):
+    """创建/提交api-keys / batch-delete（POST /api-keys/batch-delete）。"""
     ids = [int(x) for x in (body.get("ids") or []) if str(x).isdigit()]
     if not ids:
         return err(400, "ids 不能为空")

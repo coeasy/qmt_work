@@ -4,6 +4,7 @@ import { useServerEvents } from "../hooks/useSystemWS.js";
 import { useActiveInterval } from "../hooks/useActiveInterval.js";
 import { fmtAmount, fmtLimitDur } from "../lib/format.js";
 import { quickTradeNavigate } from "../lib/trade.js";
+import { peek as hubPeek, subscribe as hubSubscribe } from "../lib/dataHub.js";
 import ConfirmTradeModal from "./ui/ConfirmTradeModal.jsx";
 import usePersistentState from "../lib/usePersistentState.js";
 
@@ -39,10 +40,15 @@ export default function LimitUp() {
     finally { setLoading(false); }
   }
   async function loadBreadth() {
+    // T23：涨跌停家数（breadth）经 dataHub 总线（策略表 ttl 缓存 + 合并），
+    // 与其它行情页复用同一份缓存，避免重复请求；已有快照秒回，无则拉取
     try {
-      const d = await api.get("/market/breadth");
-      setBreadth(d);
-      setBreadthErr("");
+      const snap = hubPeek("market:breadth");
+      if (snap && snap.data) { setBreadth(snap.data); setBreadthErr(""); return; }
+      hubSubscribe("market:breadth", () => api.get("/market/breadth"), (r) => {
+        if (r && r.data) { setBreadth(r.data); setBreadthErr(""); }
+        else if (r && r.error) setBreadthErr(r.error.message || "涨跌停数据获取失败");
+      });
     } catch (e) { setBreadthErr(e.message); }
   }
   // G5：仅在「涨停板」视图下轮询，且后台 Tab 停表（delay=0 + immediate:false = 完全静默）

@@ -185,6 +185,7 @@ def _runtime_plan_for(client_path: str):
 
 @router.get("/brokers/profiles")
 async def broker_profiles():
+    """获取brokers / profiles（GET /brokers/profiles）。"""
     from xtquant_client.registry import BROKER_PROFILES, registry
     builtin = {p.id for p in BROKER_PROFILES}
     return ok([{"id": p.id, "name": p.name, "adapter": p.adapter,
@@ -195,10 +196,12 @@ async def broker_profiles():
 
 @router.get("/brokers")
 async def list_brokers():
+    """获取brokers（GET /brokers）。"""
     return ok(state.broker_manager.status_list())
 
 @router.post("/brokers")
 async def add_broker(body: dict):
+    """创建/提交brokers（POST /brokers）。"""
     target = _resolve_account(body.get("client_path", ""), body.get("account_id", ""),
                               body.get("account_type", "STOCK"))
     broker_id = body.get("broker_id") or ""
@@ -258,6 +261,7 @@ def agent_broker_name(body: dict, broker_id: str) -> str:
 
 @router.post("/brokers/test")
 async def test_broker(body: dict):
+    """创建/提交brokers / test（POST /brokers/test）。"""
     target = _resolve_account(body.get("client_path", ""), body.get("account_id", ""),
                               body.get("account_type", "STOCK"))
     cfg = ConnectionConfig(
@@ -293,6 +297,7 @@ async def launch_broker_client(body: dict):
 
 @router.post("/brokers/{conn_id}/connect")
 async def connect_broker(conn_id: str):
+    """创建/提交brokers / connect（POST /brokers/{conn_id}/connect）。"""
     try:
         # 阶段 0-D（C7）：connect 同步 start() + test_connection()（最坏 90s），放线程池。
         res = await asyncio.to_thread(state.broker_manager.connect, conn_id)
@@ -308,6 +313,7 @@ async def connect_broker(conn_id: str):
 
 @router.post("/brokers/{conn_id}/disconnect")
 async def disconnect_broker(conn_id: str):
+    """创建/提交brokers / disconnect（POST /brokers/{conn_id}/disconnect）。"""
     try:
         state.broker_manager.disconnect(conn_id)
         state.db.audit("broker", "broker.disconnect", conn_id, {}, "ok")
@@ -318,6 +324,7 @@ async def disconnect_broker(conn_id: str):
 
 @router.post("/brokers/{conn_id}/active")
 async def set_active_broker(conn_id: str):
+    """创建/提交brokers / active（POST /brokers/{conn_id}/active）。"""
     try:
         state.broker_manager.set_active(conn_id)
     except KeyError as exc:
@@ -329,6 +336,7 @@ async def set_active_broker(conn_id: str):
 
 @router.delete("/brokers/{conn_id}")
 async def remove_broker(conn_id: str):
+    """删除brokers（DELETE /brokers/{conn_id}）。"""
     try:
         state.broker_manager.remove(conn_id)
         state.db.audit("broker", "broker.remove", conn_id, {}, "ok")
@@ -339,6 +347,7 @@ async def remove_broker(conn_id: str):
 
 @router.post("/brokers/batch-delete")
 async def batch_remove_brokers(body: dict):
+    """创建/提交brokers / batch-delete（POST /brokers/batch-delete）。"""
     ids = [str(x) for x in (body.get("ids") or []) if x not in (None, "")]
     if not ids:
         return err(400, "ids 不能为空")
@@ -354,6 +363,7 @@ async def batch_remove_brokers(body: dict):
 
 @router.get("/brokers/{conn_id}/health")
 async def broker_health(conn_id: str):
+    """获取brokers / health（GET /brokers/{conn_id}/health）。"""
     if state.health_monitor is None:
         return err(503, "连接健康监控未初始化")
     s = state.health_monitor.status(conn_id)

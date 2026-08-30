@@ -10,6 +10,7 @@ router = APIRouter()
 
 @router.post("/sync/subscribe")
 async def sync_subscribe(body: dict):
+    """创建/提交sync / subscribe（POST /sync/subscribe）。"""
     codes = body.get("codes", [])
     if codes:
         state.sync_engine.client_subscribe("api", codes)
