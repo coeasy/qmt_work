@@ -5,13 +5,30 @@
 """
 from app.datasource.base import DataSource
 from app.datasource.board import classify_board, limit_ratio
+from app.datasource.models import (
+    Bar,
+    BoardItem,
+    BoardKline,
+    EtfInfo,
+    InstrumentInfo,
+    Moneyflow,
+    MoneyflowPoint,
+    Quote,
+    QuoteLevel,
+    StockInfo,
+)
 from app.datasource.registry import (
     DataSourceManager, DataSourceUnavailable, get_manager,
     get_hub, MarketDataHub, MarketDataUnavailable,
 )
+from app.datasource.result import DataResult
 
 __all__ = [
     "DataSource", "classify_board", "limit_ratio",
     "DataSourceManager", "DataSourceUnavailable", "get_manager",
     "get_hub", "MarketDataHub", "MarketDataUnavailable",
+    # G1 统一数据契约
+    "Quote", "QuoteLevel", "Bar", "InstrumentInfo", "StockInfo",
+    "BoardItem", "EtfInfo", "BoardKline", "Moneyflow", "MoneyflowPoint",
+    "DataResult",
 ]
