@@ -15,8 +15,7 @@ import sys
 import threading
 from datetime import datetime
 
-from .base import (BrokerAdapter, BrokerError, BrokerNotConnectedError,
-                   BrokerSDKError)
+from .base import BrokerAdapter, BrokerError, BrokerNotConnectedError, BrokerSDKError
 
 log = logging.getLogger("qmt_work")
 
@@ -255,10 +254,13 @@ def probe_environment(client_path: str, light: bool = False) -> dict:
     result["xtquant_found"] = bool(sp)
     # 导入 ABI 探测函数（进程内直连 / 桥接 判定用）；容错以避免运行时异常
     try:
-        from .runtime import host_python_minor, detect_xtquant_abis
+        from .runtime import detect_xtquant_abis, host_python_minor
     except Exception:  # noqa: BLE001
-        host_python_minor = lambda: sys.version_info[0] * 100 + sys.version_info[1]
-        detect_xtquant_abis = lambda sp: []
+        def host_python_minor() -> int:
+            return sys.version_info[0] * 100 + sys.version_info[1]
+
+        def detect_xtquant_abis(_sp) -> list:  # noqa: E741 - _sp 仅占位
+            return []
     # 先判定 broker 的 ABI 变体，再决定「进程内直连」还是「桥接」（避免 3.13 上
     # 直接 import xtquant.xtdata 触发 No module named 'xtquant.IPythonApiClient' 误报）
     broker_abis = detect_xtquant_abis(sp) if sp else []
@@ -320,7 +322,7 @@ def probe_environment(client_path: str, light: bool = False) -> dict:
                           "或其上层为客户端根，含 bin.x64）")
     # P0：ABI 运行时方案（进程内直连 / 桥接子进程）+ 可操作提示
     try:
-        from .runtime import host_python_minor, xtp_runtime_plan, discover_system_runtimes
+        from .runtime import discover_system_runtimes, host_python_minor, xtp_runtime_plan
         result["host_python"] = sys.version.split()[0]
         result["host_abi"] = host_python_minor()
         plan = xtp_runtime_plan(client_path)
@@ -378,11 +380,11 @@ def _load_trader_api() -> tuple:
     if _TRADER_API_CACHE:
         return _TRADER_API_CACHE["class"], _TRADER_API_CACHE["accounts"]
     try:
-        from xtquant.xt_trader import XtQuantTrader  # 新版
         import xtquant.xt_trader as _acc_mod
+        from xtquant.xt_trader import XtQuantTrader  # 新版
     except ImportError:
-        from xtquant.xttrader import XtQuantTrader  # 旧版
         import xtquant.xttype as _acc_mod
+        from xtquant.xttrader import XtQuantTrader  # 旧版
     accounts: dict = {}
     for _name, _key in (("StockAccount", "STOCK"), ("CreditAccount", "CREDIT"),
                         ("OptionAccount", "OPTION"), ("FutureAccount", "FUTURES")):

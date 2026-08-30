@@ -11,7 +11,6 @@
 """
 from abc import ABC, abstractmethod
 
-
 # 行情模式探针标的：覆盖沪深交易所、两地必然有成交的高流动性个股。
 # 不能用指数（指数无 get_full_tick 快照）；用多只个股轮询降低单标的订阅缺失风险。
 _QUOTE_PROBE_CODES = ("000001.SZ", "600519.SH", "600000.SH")
@@ -169,11 +168,13 @@ class BrokerAdapter(ABC):
         """板块股票列表 [{code, name}, ...]。"""
 
     # ---------------- 交易回报回调（可选，实时推送用） ----------------
-    def on_order(self, cb) -> None:
+    def on_order(self, cb) -> None:  # noqa: B027 —— 有意留空的 no-op 钩子
         """注册报单回报回调。默认 no-op；XTP/Bridge 适配器覆盖实现实时推送。"""
+        return None
 
-    def on_trade(self, cb) -> None:
+    def on_trade(self, cb) -> None:  # noqa: B027 —— 有意留空的 no-op 钩子
         """注册成交回报回调。默认 no-op；XTP/Bridge 适配器覆盖实现实时推送。"""
+        return None
 
     def search_stocks(self, keyword: str, limit: int = 20) -> list[dict]:
         """按代码/名称关键字搜索。默认实现：遍历板块后模糊匹配代码；名称匹配由子类增强。"""

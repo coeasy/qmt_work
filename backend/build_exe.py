@@ -187,7 +187,7 @@ def main():
     print(">>>", " ".join(cmd))
     # capture_output=True + 失败时打印：CREATE_NO_WINDOW 会把子进程 stdout/stderr 丢弃，
     # PyInstaller 报错时只看到 wrapper 的 CalledProcessError，真实原因被吞掉。
-    proc = subprocess.run(cmd, cwd=str(ROOT), check=False, env=clean_env,
+    proc = subprocess.run(cmd, cwd=str(ROOT), check=False, env=clean_env,  # noqa: S603 —— 固定构建命令列表，非用户输入
                           capture_output=True, text=True,
                           encoding="utf-8", errors="replace",
                           creationflags=CREATE_NO_WINDOW)

@@ -1,6 +1,3 @@
-from app.routes._common import ok, err, state, _need, _call, BrokerError
-
-from fastapi import APIRouter
 # --- stdlib imports injected by fix_route_imports ---
 import asyncio
 import json
@@ -9,10 +6,13 @@ import os
 import time
 from datetime import datetime
 
-from app.datasource.board import classify_board
-from app.datasource.manager import get_hub, MarketDataUnavailable
-from app.db import get_db
+from fastapi import APIRouter
 from pydantic import BaseModel
+
+from app.datasource.board import classify_board
+from app.datasource.manager import MarketDataUnavailable, get_hub
+from app.db import get_db
+from app.routes._common import BrokerError, _call, _need, err, ok, state
 
 log = logging.getLogger("qmt_work.market")
 
@@ -112,7 +112,7 @@ async def market_quotes(body: dict):
             except Exception:  # noqa: BLE001
                 return None
         res = await asyncio.gather(*[_fill(c) for c in missing])
-        for c, q in zip(missing, res):
+        for _c, q in zip(missing, res):
             if q and isinstance(q, dict):
                 items.append(q)
     return ok({"items": items, "served": len(items), "requested": len(codes)})
@@ -1143,10 +1143,10 @@ async def kline_sync(body: dict):
     if limit > 0:
         codes = codes[:limit]
 
-    from tools import fetch_kline_cached
     from gateway.kline_cache import resample_weekly
+    from tools import fetch_kline_cached
     files, errors = [], []
-    for idx, code in enumerate(codes, 1):
+    for code in codes:
         _need_daily = any(p in ("1w", "week") for p in periods)
         daily_bars: list[dict] = []
         try:

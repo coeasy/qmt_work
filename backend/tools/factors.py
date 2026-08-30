@@ -132,13 +132,13 @@ def _bollinger(values, period: int = 20, num_std: float = 2.0):
 
 def _atr(high, low, close, period: int = 14):
     h = _to_pd_series(high)
-    l = _to_pd_series(low)
+    lo = _to_pd_series(low)
     c = _to_pd_series(close)
     prev_close = c.shift(1)
     tr = pd.concat([
-        (h - l).abs(),
+        (h - lo).abs(),
         (h - prev_close).abs(),
-        (l - prev_close).abs(),
+        (lo - prev_close).abs(),
     ], axis=1).max(axis=1)
     atr = tr.ewm(alpha=1 / period, adjust=False).mean()
     return _nan_to_none(atr.tolist())
@@ -146,16 +146,16 @@ def _atr(high, low, close, period: int = 14):
 
 def _adx(high, low, close, period: int = 14):
     h = _to_pd_series(high)
-    l = _to_pd_series(low)
+    lo = _to_pd_series(low)
     c = _to_pd_series(close)
     up = h.diff()
-    down = -l.diff()
+    down = -lo.diff()
     plus_dm = ((up > down) & (up > 0)) * up
     minus_dm = ((down > up) & (down > 0)) * down
     tr = pd.concat([
-        (h - l).abs(),
+        (h - lo).abs(),
         (h - c.shift(1)).abs(),
-        (l - c.shift(1)).abs(),
+        (lo - c.shift(1)).abs(),
     ], axis=1).max(axis=1)
     atr = tr.ewm(alpha=1 / period, adjust=False).mean()
     plus_di = 100 * (plus_dm.ewm(alpha=1 / period, adjust=False).mean() / atr.replace(0, math.nan))
@@ -171,9 +171,9 @@ def _adx(high, low, close, period: int = 14):
 
 def _cci(high, low, close, period: int = 20):
     h = _to_pd_series(high)
-    l = _to_pd_series(low)
+    lo = _to_pd_series(low)
     c = _to_pd_series(close)
-    tp = (h + l + c) / 3
+    tp = (h + lo + c) / 3
     ma = tp.rolling(period, min_periods=period).mean()
     md = tp.rolling(period, min_periods=period).apply(lambda x: float(np.abs(x - x.mean()).mean()), raw=True) \
         if np is not None else tp.rolling(period, min_periods=period).apply(
@@ -184,10 +184,10 @@ def _cci(high, low, close, period: int = 20):
 
 def _kdj(high, low, close, n: int = 9, m1: int = 3, m2: int = 3):
     h = _to_pd_series(high)
-    l = _to_pd_series(low)
+    lo = _to_pd_series(low)
     c = _to_pd_series(close)
     hh = h.rolling(n, min_periods=n).max()
-    ll = l.rolling(n, min_periods=n).min()
+    ll = lo.rolling(n, min_periods=n).min()
     rsv = (c - ll) / (hh - ll).replace(0, math.nan) * 100
     rsv = rsv.fillna(50)
     k = rsv.ewm(alpha=1 / m1, adjust=False).mean()

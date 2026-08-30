@@ -6,6 +6,7 @@
 所有数据来自券商真实账户/成交/行情，无假数据。
 """
 from app.db import get_db
+
 from . import get_bridge
 
 
@@ -28,8 +29,8 @@ def register_analysis_tools(mcp):
             vwap = (bar.get("amount") or 0) / bar["volume"] if bar.get("volume") else None
             open_p = bar.get("open") or 0
             close_p = bar.get("close") or 0
-            def bps(ref):
-                return round((price - ref) / ref * 1e4, 2) if ref else None
+            def bps(ref, _price=price):
+                return round((_price - ref) / ref * 1e4, 2) if ref else None
             rows.append({
                 "time": d.get("time"), "side": d.get("direction"), "price": price,
                 "slippage_open_bps": bps(open_p),

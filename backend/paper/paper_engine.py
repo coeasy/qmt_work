@@ -204,7 +204,7 @@ class PaperEngine:
             price = float(price)
             volume = float(volume)
         except (TypeError, ValueError):
-            raise ValueError("price/volume 必须是数字")
+            raise ValueError("price/volume 必须是数字") from None
         if volume <= 0:
             raise ValueError("volume 必须大于 0")
         if price <= 0:

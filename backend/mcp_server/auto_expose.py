@@ -58,7 +58,7 @@ def _make_tool_func(endpoint, cap, name: str):
     )
     ns: dict = {"_ENDPOINT": endpoint}
     try:
-        exec(compile(src, f"<auto_tool:{name}>", "exec"), ns)
+        exec(compile(src, f"<auto_tool:{name}>", "exec"), ns)  # noqa: S102 —— 编译自注册表元数据，非用户输入
     except SyntaxError as exc:  # noqa: BLE001
         raise RuntimeError(f"生成自动 tool 失败 {name}: {exc}\n{src}") from exc
     func = ns[name]

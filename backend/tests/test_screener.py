@@ -11,8 +11,8 @@ from app.screener.engine import list_saved_boards, save_as_board, scan
 
 @pytest.fixture()
 def store(tmp_path):
-    from app.db import DB
     from app.datasource.local_store import LocalStore
+    from app.db import DB
     db = DB(tmp_path / "test_screen.db")
     st = LocalStore(db)
     # 三只确定性标的：UP 单边上涨 / DOWN 单边下跌 / FLAT 横盘（time 递增唯一，
@@ -83,8 +83,6 @@ def test_nested_and_or(store):
 
 def test_window_null_no_match(store):
     """窗口处为 null（数据不足）→ 不命中，绝不估算。"""
-    cond = {"indicator": {"name": "roc", "params": {"win": 12}, "output": "roc",
-                          "op": "gt", "value": -99999}}
     # window=0 → roc[0] 为 null → 不命中
     cond0 = {"indicator": {"name": "roc", "params": {"win": 12}, "output": "roc",
                            "op": "gt", "value": -99999, "window": 0}}
@@ -126,8 +124,8 @@ def test_scan_limit(store):
 
 
 def test_scan_empty_warehouse(tmp_path):
-    from app.db import DB
     from app.datasource.local_store import LocalStore
+    from app.db import DB
     db = DB(tmp_path / "empty.db")
     st = LocalStore(db)
     with pytest.raises(RuntimeError):

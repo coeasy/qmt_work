@@ -7,9 +7,11 @@
 """
 import math
 
-from .matching import MatchingConfig, simulate as match_simulate
-from .metrics import compute_metrics
 from xtquant_client.base import BrokerNotConnectedError
+
+from .matching import MatchingConfig
+from .matching import simulate as match_simulate
+from .metrics import compute_metrics
 
 
 # ---------------- 指标 ----------------
@@ -344,7 +346,8 @@ def register_backtest_tools(mcp):
 # ============================================================================
 # P1 向量化回测引擎 + 参数扫描（grid search）
 # ============================================================================
-import itertools
+import itertools  # noqa: E402 —— 文件中部引入（模块级说明段之后，约定保留）
+
 try:
     import numpy as np
 except ImportError:  # pragma: no cover

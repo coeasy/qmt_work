@@ -384,7 +384,7 @@ if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except KeyboardInterrupt:
-        raise SystemExit(0)
+        raise SystemExit(0) from None
     except Exception:  # noqa: BLE001
         traceback.print_exc()
-        raise SystemExit(2)
+        raise SystemExit(2) from None

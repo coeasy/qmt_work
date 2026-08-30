@@ -55,6 +55,14 @@ jobs:
       - name: Reconcile numbers (tests / components vs docs)
         run: python ../scripts/ci_reconcile.py
 
+      # G12-6 门禁补齐：许可扫描（G0-4）/ 能力漂移（G3-5）/ 前端 className 差集（G11-6）
+      - name: License gate (AGPL/GPL zero-tolerance)
+        run: python scripts/check_licenses.py
+      - name: Capability drift gate (REST agent-visible -> MCP tool)
+        run: python scripts/check_capability_drift.py
+      - name: Frontend className diff gate
+        run: python scripts/check_frontend_classnames.py
+
   lint:
     name: Lint (ruff — real-bug gate)
     runs-on: ubuntu-latest

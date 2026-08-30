@@ -13,10 +13,10 @@ import uuid
 from dataclasses import dataclass, field
 
 from app.db import get_db
+
 from .base import BrokerAdapter
 from .gateway import XTQuantBridge
 from .registry import create_adapter, get_profile
-
 
 log = logging.getLogger("qmt_work.manager")
 
@@ -134,8 +134,8 @@ class BrokerManager:
         # 仍报"未登录"——根因是 client_path 填错或 client_path 指向 userdata_mini
         # 但 xtquant 在子目录。先用 discovery 做一次轻量探测，把根因提前给到用户。
         try:
-            from .xtp import probe_environment
             from .discovery import discover
+            from .xtp import probe_environment
             client_path = conn.cfg.client_path or ""
             probe = probe_environment(client_path, light=True)
             # 路径不存在 / xtquant 未定位：提前抛错（带结构化诊断），避免 SDK 在子进程内阻塞
@@ -166,7 +166,7 @@ class BrokerManager:
                     raise RuntimeError(
                         f"在「{client_path}」中未找到 xtquant SDK（xtquant/ 目录）。"
                         f"→ 请确认 client_path 指向客户端根或其数据目录"
-                        f"（极速版 userdata_mini / 完整版 userdata）。")
+                        f"（极速版 userdata_mini / 完整版 userdata）。") from None
         except RuntimeError:
             # 探测发现的根因已包含可操作指引，直接透出
             raise

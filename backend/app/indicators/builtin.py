@@ -76,11 +76,11 @@ def macd(closes: Sequence) -> dict:
 def kdj(highs: Sequence, lows: Sequence, closes: Sequence, n: int = 9) -> dict:
     """KDJ：RSV 用窗口极值（向量化），k/d 递推初值 50，j=3k-2d（语义同前端 calcKDJ）。"""
     h = _as_float(highs)
-    l = _as_float(lows)
+    low_arr = _as_float(lows)
     c = _as_float(closes)
     m = c.shape[0]
     hn = _rolling_extreme(h, n, "max")
-    ln = _rolling_extreme(l, n, "min")
+    ln = _rolling_extreme(low_arr, n, "min")
     k = np.full(m, np.nan)
     d = np.full(m, np.nan)
     j = np.full(m, np.nan)
@@ -139,13 +139,13 @@ def boll(closes: Sequence, n: int = 20, m: float = 2.0) -> dict:
 def wr(highs: Sequence, lows: Sequence, closes: Sequence, n: int = 14) -> np.ndarray:
     """威廉指标（负刻度）：(hn-c)/(hn-ln)×(-100)，hn==ln→50；窗口不足 None（语义同前端 calcWR）。"""
     h = _as_float(highs)
-    l = _as_float(lows)
+    low_arr = _as_float(lows)
     c = _as_float(closes)
     m = c.shape[0]
     out = np.full(m, np.nan)
     if m >= n and n > 0:
         hn = _rolling_extreme(h, n, "max")
-        ln = _rolling_extreme(l, n, "min")
+        ln = _rolling_extreme(low_arr, n, "min")
         tail = np.s_[n - 1:]
         hi, lo, cc = hn[tail], ln[tail], c[tail]
         vals = np.where(hi == lo, 50.0, (hi - cc) / (hi - lo) * (-100.0))
@@ -188,20 +188,20 @@ def _wilders_smooth(series: np.ndarray, period: int) -> np.ndarray:
 
 def atr(close, high, low, period: int = 14) -> np.ndarray:
     """平均真实波幅（Wilder 平滑）；TR 窗口不足 → NaN。"""
-    h, l, c = _as_float(high), _as_float(low), _as_float(close)
-    return _wilders_smooth(_true_range(h, l, c), period)
+    h, lo, c = _as_float(high), _as_float(low), _as_float(close)
+    return _wilders_smooth(_true_range(h, lo, c), period)
 
 
 def adx(close, high, low, period: int = 14) -> np.ndarray:
     """平均趋向指数：±DM/TR Wilder 平滑 → ±DI → DX → ADX（2*period-1 起有值）。"""
-    c, h, l = _as_float(close), _as_float(high), _as_float(low)
+    c, h, lo = _as_float(close), _as_float(high), _as_float(low)
     n = c.shape[0]
     out = np.full(n, np.nan)
     if n < 2 * period:
         return out
-    tr = _true_range(h, l, c)
+    tr = _true_range(h, lo, c)
     up = np.diff(h)                    # 长度 n-1，对应 i=1..n-1
-    dn = np.diff(l)                    # low[i]-low[i-1]
+    dn = np.diff(lo)                    # low[i]-low[i-1]
     plus_dm = np.where((up > 0) & (up > -dn), up, 0.0)
     minus_dm = np.where((-dn > 0) & (-dn > up), -dn, 0.0)
     # 对齐长度 n：索引 0 无意义
@@ -223,8 +223,8 @@ def adx(close, high, low, period: int = 14) -> np.ndarray:
 
 def cci(close, high, low, period: int = 20) -> np.ndarray:
     """顺势指标：CCI = (tp - MA(tp)) / (0.015 * 平均绝对偏差)。"""
-    c, h, l = _as_float(close), _as_float(high), _as_float(low)
-    tp = (h + l + c) / 3.0
+    c, h, lo = _as_float(close), _as_float(high), _as_float(low)
+    tp = (h + lo + c) / 3.0
     m = tp.shape[0]
     out = np.full(m, np.nan)
     if m >= period and period > 0:

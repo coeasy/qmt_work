@@ -1,11 +1,10 @@
-from app.routes._common import ok, err, state, _need, _call, BrokerError
-
-from fastapi import APIRouter
 # --- stdlib imports injected by fix_route_imports ---
 import asyncio
 import time
 
+from fastapi import APIRouter
 
+from app.routes._common import BrokerError, _call, _need, err, ok, state
 
 router = APIRouter()
 
@@ -111,8 +110,8 @@ async def account_slippage(code: str = "600519.SH", conn_id: str = ""):
             continue
         price = d.get("price") or 0
         vwap = (bar.get("amount") or 0) / bar["volume"] if bar.get("volume") else None
-        def bps(ref):
-            return round((price - ref) / ref * 1e4, 2) if ref else None
+        def bps(ref, _price=price):
+            return round((_price - ref) / ref * 1e4, 2) if ref else None
         rows.append({"time": d.get("time"), "side": d.get("direction"), "price": price,
                      "slippage_open_bps": bps(bar.get("open") or 0),
                      "slippage_close_bps": bps(bar.get("close") or 0),
