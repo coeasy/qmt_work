@@ -21,6 +21,8 @@ import { useKline, useFundamentals, formatPct, preCloseOf, applyTickToBars } fro
 import { useQuotes } from "../lib/quoteHub.jsx";
 import ErrorBoundary from "./ErrorBoundary.jsx";
 import { useActiveInterval } from "../hooks/useActiveInterval.js";
+import { PALETTE, changeColor, SUB_LINE_COLORS, MAIN_LINE_COLORS } from "../lib/chartPalette.js";
+
 // G2-3：指标单一真源——前端不再自带指标计算，统一消费后端引擎
 import { fetchIndicator, indicatorKey } from "../lib/indicators.js";
 // G4 数据面：资金流/股本 topic 总线
@@ -65,7 +67,7 @@ const SUB_INDICATORS = [
   { v: "none", label: "无" },
 ];
 const MA_PERIODS = [5, 10, 20, 60];
-const MA_COLORS = ["#ffffff", "#fdbb30", "#9b7bd8", "#91cc75"]; // 白/黄/紫/绿
+const MA_COLORS = PALETTE.line; // 白/黄/紫/绿（chartPalette 单一真源）
 const SRC_LABEL = {
   eltdx: "通达信(TDX)行情",
   broker: "券商",
@@ -318,7 +320,7 @@ export default function MarketData({ params, leafId, tabId, dispatch } = {}) {
       tooltip: { trigger: "axis" },
       series: [{
         name: "净流入(手)", type: "line", data: rows.map((r) => Number(r.net)), showSymbol: false,
-        lineStyle: { width: 1.5, color: rows[rows.length - 1].net >= 0 ? "#ef4d56" : "#29c08a" },
+        lineStyle: { width: 1.5, color: rows[rows.length - 1].net >= 0 ? PALETTE.up : PALETTE.down },
         areaStyle: { color: "rgba(79,140,255,.10)" },
       }],
     };
@@ -564,7 +566,7 @@ export default function MarketData({ params, leafId, tabId, dispatch } = {}) {
     // 分钟量配色：相对前一分钟涨红跌绿（TDX 分时量柱同款）
     const volData = pts.map((p, i) => {
       const prev = i > 0 ? priceArr[i - 1] : (preC != null ? preC : priceArr[i]);
-      return { value: Number(p.volume) || 0, itemStyle: { color: priceArr[i] >= prev ? "#ef4d56" : "#29c08a" } };
+      return { value: Number(p.volume) || 0, itemStyle: { color: priceArr[i] >= prev ? PALETTE.up : PALETTE.down } };
     });
     // 价格域：曲线 + 均价 + 昨收，上下留 8% 缓冲
     let lo = Math.min(...priceArr, ...priceData.filter((v) => v != null), preC ?? Infinity);
@@ -576,7 +578,7 @@ export default function MarketData({ params, leafId, tabId, dispatch } = {}) {
     // 右侧涨跌%轴：与价格轴同域换算（TDX 双轴同款）
     const toPct = (v) => preC ? ((v - preC) / preC) * 100 : 0;
     const upNow = (priceArr[priceArr.length - 1] ?? preC ?? 0) >= (preC ?? 0);
-    const lineColor = upNow ? "#ef4d56" : "#29c08a";
+    const lineColor = upNow ? PALETTE.up : PALETTE.down;
     return {
       animation: false,
       backgroundColor: "transparent",
@@ -620,7 +622,7 @@ export default function MarketData({ params, leafId, tabId, dispatch } = {}) {
             data: [{ yAxis: preC, label: { formatter: `昨收 ${preC.toFixed(2)}`, color: "#8aa0c0", fontSize: 10 } }] } : undefined,
         },
         { name: "均价", type: "line", data: priceData, smooth: false, showSymbol: false,
-          lineStyle: { width: 1, color: "#fdbb30" } },
+          lineStyle: { width: 1, color: PALETTE.warn } },
         // B2：源层个股/板块 K 线 volume 均为 volume_lots（手），图例带单位防误读
         { name: "分钟量(手)", type: "bar", xAxisIndex: 1, yAxisIndex: 2, data: volData },
       ],
@@ -635,7 +637,7 @@ export default function MarketData({ params, leafId, tabId, dispatch } = {}) {
     const times = bars.map((b) => toDate(b.time || b.date));
     const candle = bars.map((b) => [Number(b.open), Number(b.close), Number(b.low), Number(b.high)]);
     const vols = bars.map((b) => Number(b.volume) || 0);
-    const volColors = bars.map((b) => Number(b.close) >= Number(b.open) ? "#ef4d56" : "#29c08a");
+    const volColors = bars.map((b) => Number(b.close) >= Number(b.open) ? PALETTE.up : PALETTE.down);
 
     const opt = {
       backgroundColor: "transparent",
@@ -662,7 +664,7 @@ export default function MarketData({ params, leafId, tabId, dispatch } = {}) {
       splitLine: { lineStyle: { color: "#1a2233", type: "dashed" } } };
     opt.series.push({
       name: "K线", type: "candlestick", data: candle,
-      itemStyle: { color: "#ef4d56", color0: "#29c08a", borderColor: "#ef4d56", borderColor0: "#29c08a" },
+      itemStyle: { color: PALETTE.up, color0: PALETTE.down, borderColor: PALETTE.up, borderColor0: PALETTE.down },
     });
 
     if (mainInd === "ma") {
@@ -676,9 +678,9 @@ export default function MarketData({ params, leafId, tabId, dispatch } = {}) {
       const b = indData[indicatorKey("boll", {})] || {};
       opt.legend.data.push("BOLL-UP", "BOLL-MID", "BOLL-LOW");
       opt.series.push(
-        { name: "BOLL-UP", type: "line", data: b.upper || [], symbol: "none", lineStyle: { width: 1, color: "#c23531" } },
-        { name: "BOLL-MID", type: "line", data: b.mid || [], symbol: "none", lineStyle: { width: 1, color: "#91cc75" } },
-        { name: "BOLL-LOW", type: "line", data: b.lower || [], symbol: "none", lineStyle: { width: 1, color: "#c23531" } },
+        { name: "BOLL-UP", type: "line", data: b.upper || [], symbol: "none", lineStyle: { width: 1, color: PALETTE.danger } },
+        { name: "BOLL-MID", type: "line", data: b.mid || [], symbol: "none", lineStyle: { width: 1, color: PALETTE.accent2 } },
+        { name: "BOLL-LOW", type: "line", data: b.lower || [], symbol: "none", lineStyle: { width: 1, color: PALETTE.danger } },
       );
     }
 
@@ -707,10 +709,10 @@ export default function MarketData({ params, leafId, tabId, dispatch } = {}) {
       opt.legend.data.push("DIF", "DEA", "MACD");
       const mBar = m.bar || [];
       opt.series.push(
-        { name: "DIF", type: "line", xAxisIndex: 2, yAxisIndex: 2, data: m.dif || [], symbol: "none", lineStyle: { width: 1, color: "#ffffff" } },
-        { name: "DEA", type: "line", xAxisIndex: 2, yAxisIndex: 2, data: m.dea || [], symbol: "none", lineStyle: { width: 1, color: "#fdbb30" } },
+        { name: "DIF", type: "line", xAxisIndex: 2, yAxisIndex: 2, data: m.dif || [], symbol: "none", lineStyle: { width: 1, color: PALETTE.text } },
+        { name: "DEA", type: "line", xAxisIndex: 2, yAxisIndex: 2, data: m.dea || [], symbol: "none", lineStyle: { width: 1, color: PALETTE.warn } },
         { name: "MACD", type: "bar", xAxisIndex: 2, yAxisIndex: 2, data: mBar,
-          itemStyle: (p) => ({ color: (mBar[p.dataIndex] || 0) >= 0 ? "#ef4d56" : "#29c08a" }) },
+          itemStyle: (p) => ({ color: (mBar[p.dataIndex] || 0) >= 0 ? PALETTE.up : PALETTE.down }) },
       );
     } else if (subInd === "kdj") {
       const k = indData[indicatorKey("kdj", {})] || {};
@@ -723,9 +725,9 @@ export default function MarketData({ params, leafId, tabId, dispatch } = {}) {
         axisLabel: { show: false }, axisTick: { show: false }, splitLine: { show: false } };
       opt.legend.data.push("K", "D", "J");
       opt.series.push(
-        { name: "K", type: "line", xAxisIndex: 2, yAxisIndex: 2, data: k.k || [], symbol: "none", lineStyle: { width: 1, color: "#ef4d56" } },
-        { name: "D", type: "line", xAxisIndex: 2, yAxisIndex: 2, data: k.d || [], symbol: "none", lineStyle: { width: 1, color: "#fdbb30" } },
-        { name: "J", type: "line", xAxisIndex: 2, yAxisIndex: 2, data: k.j || [], symbol: "none", lineStyle: { width: 1, color: "#4f8cff" } },
+        { name: "K", type: "line", xAxisIndex: 2, yAxisIndex: 2, data: k.k || [], symbol: "none", lineStyle: { width: 1, color: PALETTE.up } },
+        { name: "D", type: "line", xAxisIndex: 2, yAxisIndex: 2, data: k.d || [], symbol: "none", lineStyle: { width: 1, color: PALETTE.warn } },
+        { name: "J", type: "line", xAxisIndex: 2, yAxisIndex: 2, data: k.j || [], symbol: "none", lineStyle: { width: 1, color: PALETTE.accent } },
       );
     } else if (subInd === "rsi") {
       const r6 = (indData[indicatorKey("rsi", { win: 6 })] || {}).rsi || [];
@@ -739,8 +741,8 @@ export default function MarketData({ params, leafId, tabId, dispatch } = {}) {
         axisLabel: { show: false }, axisTick: { show: false }, splitLine: { show: false } };
       opt.legend.data.push("RSI6", "RSI12");
       opt.series.push(
-        { name: "RSI6", type: "line", xAxisIndex: 2, yAxisIndex: 2, data: r6, symbol: "none", lineStyle: { width: 1, color: "#ef4d56" } },
-        { name: "RSI12", type: "line", xAxisIndex: 2, yAxisIndex: 2, data: r12, symbol: "none", lineStyle: { width: 1, color: "#4f8cff" } },
+        { name: "RSI6", type: "line", xAxisIndex: 2, yAxisIndex: 2, data: r6, symbol: "none", lineStyle: { width: 1, color: PALETTE.up } },
+        { name: "RSI12", type: "line", xAxisIndex: 2, yAxisIndex: 2, data: r12, symbol: "none", lineStyle: { width: 1, color: PALETTE.accent } },
       );
     } else if (subInd === "wr") {
       const w = (indData[indicatorKey("wr", {})] || {}).wr || [];
@@ -753,7 +755,7 @@ export default function MarketData({ params, leafId, tabId, dispatch } = {}) {
         axisTick: { show: false }, splitLine: { show: false } };
       opt.legend.data.push("WR");
       opt.series.push({ name: "WR", type: "line", xAxisIndex: 2, yAxisIndex: 2, data: w,
-        symbol: "none", lineStyle: { width: 1, color: "#91cc75" } });
+        symbol: "none", lineStyle: { width: 1, color: PALETTE.accent2 } });
     }
 
     /* ---------- G9：缩放平移（TDX 标配体验） ----------
@@ -771,10 +773,10 @@ export default function MarketData({ params, leafId, tabId, dispatch } = {}) {
       { type: "slider", xAxisIndex: zoomAxes, start: startPct, end: 100, minValueSpan: 20,
         bottom: 4, height: 16, borderColor: "#2c3850",
         fillerColor: "rgba(79,140,255,.12)",
-        handleStyle: { color: "#4f8cff", borderColor: "#4f8cff" },
+        handleStyle: { color: PALETTE.accent, borderColor: PALETTE.accent },
         moveHandleStyle: { color: "#3a4a66" },
         dataBackground: { lineStyle: { color: "#3a4a66" }, areaStyle: { color: "rgba(58,74,102,.35)" } },
-        selectedDataBackground: { lineStyle: { color: "#4f8cff" }, areaStyle: { color: "rgba(79,140,255,.25)" } },
+        selectedDataBackground: { lineStyle: { color: PALETTE.accent }, areaStyle: { color: "rgba(79,140,255,.25)" } },
         textStyle: { color: "#5a6a82", fontSize: 9 } },
     ];
     // G9-2 画线：水平线 graphic 元素（y 为点击时 convertToPixel 像素；缩放后位置近似）
@@ -782,7 +784,7 @@ export default function MarketData({ params, leafId, tabId, dispatch } = {}) {
       opt.graphic = drawings.map((d) => ({
         type: "line",
         shape: { x1: 0, y1: d.y, x2: 10000, y2: d.y },
-        style: { stroke: "#fdbb30", lineWidth: 1, lineDash: [4, 4], opacity: 0.8 },
+        style: { stroke: PALETTE.warn, lineWidth: 1, lineDash: [4, 4], opacity: 0.8 },
       }));
     }
     return opt;

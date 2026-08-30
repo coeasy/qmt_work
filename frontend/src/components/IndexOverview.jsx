@@ -5,6 +5,7 @@ import { useEffect, useMemo, useState } from "react";
 import { api } from "../api.js";
 import { subscribe, invalidate } from "../lib/dataHub.js";
 import Chart from "./Chart.jsx";
+import { PALETTE } from "../lib/chartPalette.js";
 import { formatPct, formatAmount } from "../hooks/useMarket.js";
 import { navToQuote } from "../lib/nav.js";
 
@@ -40,8 +41,8 @@ export default function IndexOverview() {
     return {
       animation: false,
       grid: { left: 50, right: 14, top: 16, bottom: 24 },
-      xAxis: { type: "category", data: s.map((x) => x.date), axisLabel: { color: "#5a6a82", fontSize: 10 }, axisLine: { lineStyle: { color: "#3a4a66" } } },
-      yAxis: { scale: true, splitLine: { lineStyle: { color: "rgba(58,74,102,.3)" } }, axisLabel: { color: "#5a6a82", fontSize: 10 } },
+      xAxis: { type: "category", data: s.map((x) => x.date), axisLabel: { color: PALETTE.textDim, fontSize: 10 }, axisLine: { lineStyle: { color: PALETTE.axis } } },
+      yAxis: { scale: true, splitLine: { lineStyle: { color: PALETTE.split } }, axisLabel: { color: PALETTE.textDim, fontSize: 10 } },
       tooltip: { trigger: "axis" },
       series: [{
         name: "涨跌家数", type: "line", data: s.map((x) => x.value), showSymbol: false,

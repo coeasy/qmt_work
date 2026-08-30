@@ -7,6 +7,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api.js";
 import Chart from "./Chart.jsx";
+import { PALETTE } from "../lib/chartPalette.js";
 import { formatPct, formatAmount } from "../hooks/useMarket.js";
 import { navToQuote } from "../lib/nav.js";
 import { useQuotes } from "../lib/quoteHub.jsx";
@@ -171,7 +172,7 @@ export default function Boards({ params } = {}) {
     // B2：源层板块 K 线 volume 即 volume_lots（手），补成交量子图并带单位图例/tooltip，
     // 与 MarketData 个股 K 线同口径，避免把「手」误读为「股/万元」。
     const vols = bars.map((b) => Number(b.volume) || 0);
-    const volColors = bars.map((b) => Number(b.close) >= Number(b.open) ? "#ef4d56" : "#29c08a");
+    const volColors = bars.map((b) => Number(b.close) >= Number(b.open) ? PALETTE.up : PALETTE.down);
     return {
       animation: false,
       tooltip: { trigger: "axis" },
@@ -181,18 +182,18 @@ export default function Boards({ params } = {}) {
         { left: 56, right: 12, top: "78%", height: "16%" },
       ],
       xAxis: [
-        { type: "category", data: dates, boundaryGap: true, axisLine: { lineStyle: { color: "#3a4a66" } },
+        { type: "category", data: dates, boundaryGap: true, axisLine: { lineStyle: { color: PALETTE.axis } },
           axisLabel: { show: false }, splitLine: { show: false }, axisTick: { show: false } },
-        { type: "category", gridIndex: 1, data: dates, boundaryGap: true, axisLine: { lineStyle: { color: "#3a4a66" } },
+        { type: "category", gridIndex: 1, data: dates, boundaryGap: true, axisLine: { lineStyle: { color: PALETTE.axis } },
           axisLabel: { color: "#5a6a82", fontSize: 10 }, splitLine: { show: false }, axisTick: { show: false } },
       ],
       yAxis: [
-        { scale: true, splitLine: { lineStyle: { color: "rgba(58,74,102,.3)" } }, axisLabel: { color: "#5a6a82", fontSize: 10 } },
+        { scale: true, splitLine: { lineStyle: { color: PALETTE.split } }, axisLabel: { color: PALETTE.textDim, fontSize: 10 } },
         { gridIndex: 1, scale: true, splitNumber: 2, axisLabel: { show: false }, axisTick: { show: false }, splitLine: { show: false } },
       ],
       series: [
         { name: "板块指数", type: "line", data: closes, showSymbol: false,
-          lineStyle: { width: 1.5, color: closes[closes.length - 1] >= closes[0] ? "#ef4d56" : "#29c08a" },
+          lineStyle: { width: 1.5, color: closes[closes.length - 1] >= closes[0] ? PALETTE.up : PALETTE.down },
           areaStyle: { color: "rgba(79,140,255,.10)" } },
         { name: "成交量(手)", type: "bar", xAxisIndex: 1, yAxisIndex: 1, data: vols,
           itemStyle: (p) => ({ color: volColors[p.dataIndex] }) },

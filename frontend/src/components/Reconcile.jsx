@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
 import { api } from "../api.js";
+import EmptyState from "./ui/EmptyState.jsx";
+import { useActiveInterval } from "../hooks/useActiveInterval.js";
 
 /* 对账核销 + WAL
    委托对账核销（比对 WAL 与券商当日委托/成交）
@@ -14,6 +16,7 @@ export default function Reconcile() {
   const [walStats, setWalStats] = useState(null);
 
   useEffect(() => { loadAll(); }, []);
+  useActiveInterval(loadAll, 30000);   // T15 WAL 统计近实时
 
   async function loadAll() {
     api.reconcileLast().then(setLastResult).catch(() => setLastResult(null));
@@ -59,12 +62,12 @@ export default function Reconcile() {
 
       <div className="card" style={{ marginTop: 16 }}>
         <h3 style={{ marginBottom: 12 }}>最近一次对账结果</h3>
-        {lastResult ? <KVList data={lastResult} /> : <Empty>暂无对账记录</Empty>}
+        {lastResult ? <KVList data={lastResult} /> : <EmptyState title="暂无对账记录" />}
       </div>
 
       <div className="card" style={{ marginTop: 16 }}>
         <h3 style={{ marginBottom: 12 }}>WAL 统计</h3>
-        {walStats ? <KVList data={walStats} /> : <Empty>WAL 未初始化</Empty>}
+        {walStats ? <KVList data={walStats} /> : <EmptyState title="WAL 未初始化" />}
       </div>
     </div>
   );
@@ -84,8 +87,4 @@ function KVList({ data }) {
       </tbody>
     </table>
   );
-}
-
-function Empty({ children }) {
-  return <div style={{ padding: "24px", textAlign: "center", color: "#556" }}>{children}</div>;
 }

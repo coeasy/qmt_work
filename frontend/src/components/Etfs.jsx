@@ -11,6 +11,7 @@ import { api } from "../api.js";
 import { useQuotes } from "../lib/quoteHub.jsx";
 import { subscribe, invalidate } from "../lib/dataHub.js";
 import Chart from "./Chart.jsx";
+import { PALETTE } from "../lib/chartPalette.js";
 import { formatPct, formatAmount } from "../hooks/useMarket.js";
 import { navTo, navToQuote } from "../lib/nav.js";
 
@@ -143,12 +144,12 @@ export default function Etfs() {
     return {
       animation: false,
       grid: { left: 52, right: 12, top: 12, bottom: 22 },
-      xAxis: { type: "category", data: dates, axisLabel: { color: "#5a6a82", fontSize: 10 }, axisLine: { lineStyle: { color: "#3a4a66" } } },
-      yAxis: { scale: true, splitLine: { lineStyle: { color: "rgba(58,74,102,.3)" } }, axisLabel: { color: "#5a6a82", fontSize: 10 } },
+      xAxis: { type: "category", data: dates, axisLabel: { color: PALETTE.textDim, fontSize: 10 }, axisLine: { lineStyle: { color: PALETTE.axis } } },
+      yAxis: { scale: true, splitLine: { lineStyle: { color: PALETTE.split } }, axisLabel: { color: PALETTE.textDim, fontSize: 10 } },
       tooltip: { trigger: "axis" },
       series: [{
         name: "ETF", type: "line", data: closes, showSymbol: false,
-        lineStyle: { width: 1.5, color: closes[closes.length - 1] >= closes[0] ? "#ef4d56" : "#29c08a" },
+        lineStyle: { width: 1.5, color: closes[closes.length - 1] >= closes[0] ? PALETTE.up : PALETTE.down },
         areaStyle: { color: "rgba(79,140,255,.10)" },
       }],
     };

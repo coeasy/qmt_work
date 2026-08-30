@@ -6,7 +6,7 @@ import { api } from "../api.js";
 
 /* ============== 字段规整 ============== */
 // 兼容旧字段 side → direction，volume 强制整数（手），price 保留 2 位小数
-function normalizeOrderPayload(p) {
+export function normalizeOrderPayload(p) {
   if (!p || typeof p !== "object") throw new Error("委托参数为空");
   const code = String(p.code || "").trim().toUpperCase();
   if (!code) throw new Error("代码不能为空");
@@ -38,12 +38,12 @@ function normalizeOrderPayload(p) {
 // 这里做业务化映射：风控 / 余额 / 权限 / 重复单 / 网络。
 export function explainTradeError(msg) {
   const s = String(msg || "");
-  if (/未连接|券商客户端/.test(s)) return "未连接券商：请到「券商连接」添加并连接券商";
+  if (/未连接|券商客户端|handshake|not connected|disconnect/i.test(s)) return "未连接券商：请到「券商连接」添加并连接券商";
   if (/风控拒绝/.test(s)) return s.replace(/^.*?风控拒绝：/, "风控拦截：");
-  if (/资金|余额|可用/.test(s)) return "可用资金不足：" + s;
-  if (/持仓|可卖|数量/.test(s)) return "可卖持仓不足：" + s;
-  if (/权限|拒绝|illegal/.test(s)) return "券商拒绝（账号/客户端权限）：" + s;
-  if (/限价|涨停|跌停|price/.test(s)) return "价格越界（可能触发涨跌停）：" + s;
+  if (/资金|余额|可用|insufficient/i.test(s)) return "可用资金不足：" + s;
+  if (/持仓|可卖|数量|position/i.test(s)) return "可卖持仓不足：" + s;
+  if (/权限|拒绝|illegal|permission/i.test(s)) return "券商拒绝（账号/客户端权限）：" + s;
+  if (/限价|涨停|跌停|price|limit/i.test(s)) return "价格越界（可能触发涨跌停）：" + s;
   return s || "委托失败";
 }
 

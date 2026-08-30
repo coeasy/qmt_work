@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
 import { api } from "../api.js";
+import EmptyState from "./ui/EmptyState.jsx";
+import { useActiveInterval } from "../hooks/useActiveInterval.js";
 
 /* 模拟盘（P1）
    虚拟撮合，实时真实行情 mark-to-market。验证策略后再实盘。
@@ -39,6 +41,7 @@ export default function Paper() {
   };
 
   useEffect(() => { loadAll(); }, []);
+  useActiveInterval(loadAll, 30000);   // T15 模拟盘近实时
 
   async function submitOrder() {
     setLoading(true); setMsg(null);
@@ -143,13 +146,13 @@ export default function Paper() {
 
       {tab === "account" && (
         <div className="card">
-          {account ? <KVList data={account} /> : <Empty>暂无账户数据</Empty>}
+          {account ? <KVList data={account} /> : <EmptyState title="暂无账户数据" />}
         </div>
       )}
 
       {tab === "metrics" && (
         <div className="card">
-          {metrics ? <KVList data={metrics} /> : <Empty>暂无指标数据</Empty>}
+          {metrics ? <KVList data={metrics} /> : <EmptyState title="暂无指标数据" />}
         </div>
       )}
     </div>
@@ -158,7 +161,7 @@ export default function Paper() {
 
 function DataTable({ positions, trades }) {
   const rows = positions || trades || [];
-  if (!rows.length) return <Empty>暂无数据</Empty>;
+  if (!rows.length) return <EmptyState title="暂无数据" />;
   const first = rows[0];
   const headers = Object.keys(first);
   return (
@@ -199,8 +202,4 @@ function KVList({ data }) {
       </tbody>
     </table>
   );
-}
-
-function Empty({ children }) {
-  return <div style={{ padding: "32px 24px", textAlign: "center", color: "#556" }}>{children}</div>;
 }

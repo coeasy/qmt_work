@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "../api.js";
+import EmptyState from "./ui/EmptyState.jsx";
 
 /* 策略市场（P1）
    DB 目录 + zip/json 导入导出，吸收 Rockyzsu/QMT 范式。
@@ -137,7 +138,7 @@ export default function StrategyMarket() {
 
       {tab === "catalog" && (
         <div className="card">
-          {!catalog.length ? <Empty>暂无策略</Empty> : (
+          {!catalog.length ? <EmptyState title="暂无策略" /> : (
             <div className="strategy-grid">
               {catalog.map((s, i) => (
                 <div key={i} className="strategy-card">
@@ -212,8 +213,4 @@ export default function StrategyMarket() {
       )}
     </div>
   );
-}
-
-function Empty({ children }) {
-  return <div style={{ padding: "32px 24px", textAlign: "center", color: "#556" }}>{children}</div>;
 }

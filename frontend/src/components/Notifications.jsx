@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { api } from "../api.js";
 import { useBatchSelection } from "../hooks/useBatchSelection.js";
 import BatchDeleteBar from "./BatchDeleteBar.jsx";
+import { useActiveInterval } from "../hooks/useActiveInterval.js";
 
 // 通知渠道配置（P2）：钉钉/企微/飞书/邮件/Webhook，含测试与发送日志。
 const CHANNELS = [
@@ -35,6 +36,7 @@ export default function Notifications() {
     try { setLogs(await api.notificationLogs()); } catch (e) { setErr(e.message); }
   }
   useEffect(() => { refresh(); refreshLogs(); /* eslint-disable */ }, []);
+  useActiveInterval(() => { refresh(); refreshLogs(); }, 60000);   // T15 长 tab 增量刷新
 
   function onChannel(c) {
     setChannel(c);

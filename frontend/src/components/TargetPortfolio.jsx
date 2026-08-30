@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { api } from "../api.js";
 import { useBatchSelection } from "../hooks/useBatchSelection.js";
 import BatchDeleteBar from "./BatchDeleteBar.jsx";
+import EmptyState from "./ui/EmptyState.jsx";
 
 /* 目标持仓差量同步
    保存/删除持仓计划 · 按计划执行差量同步
@@ -109,7 +110,7 @@ export default function TargetPortfolio() {
       <div className="card" style={{ marginTop: 16 }}>
         <h3 style={{ marginBottom: 12 }}>持仓计划列表</h3>
         <BatchDeleteBar count={bsel.selected.length} onDelete={batchDelete} onClear={bsel.clear} busy={batchBusy} label="计划" />
-        {!plans.length ? <Empty>暂无持仓计划</Empty> : (
+        {!plans.length ? <EmptyState title="暂无持仓计划" /> : (
           <div style={{ overflowX: "auto" }}>
             <table className="table">
               <thead><tr>
@@ -168,8 +169,4 @@ export default function TargetPortfolio() {
       </div>
     </div>
   );
-}
-
-function Empty({ children }) {
-  return <div style={{ padding: "24px", textAlign: "center", color: "#556" }}>{children}</div>;
 }

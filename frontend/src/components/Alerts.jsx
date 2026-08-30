@@ -2,6 +2,8 @@ import { useEffect, useState } from "react";
 import { api } from "../api.js";
 import { useBatchSelection } from "../hooks/useBatchSelection.js";
 import BatchDeleteBar from "./BatchDeleteBar.jsx";
+import EmptyState from "./ui/EmptyState.jsx";
+import { useActiveInterval } from "../hooks/useActiveInterval.js";
 
 /* 告警规则（Alerts）
    创建/编辑/删除告警规则 · 告警历史 · 触发测试
@@ -22,6 +24,7 @@ export default function Alerts() {
   });
 
   useEffect(() => { loadAll(); }, []);
+  useActiveInterval(loadAll, 15000);   // T15 告警近实时（创建/触发）
 
   async function loadAll() {
     api.alertRules().then(setRules).catch(() => setRules([]));
@@ -147,7 +150,7 @@ export default function Alerts() {
       <div className="card" style={{ marginTop: 16 }}>
         <h3 style={{ marginBottom: 12 }}>规则列表</h3>
         <BatchDeleteBar count={bsel.selected.length} onDelete={batchDelete} onClear={bsel.clear} busy={busy} label="规则" />
-        {!rules.length ? <Empty>暂无告警规则</Empty> : (
+        {!rules.length ? <EmptyState title="暂无告警规则" /> : (
           <div style={{ overflowX: "auto" }}>
             <table className="table">
               <thead><tr>
@@ -179,7 +182,7 @@ export default function Alerts() {
 
       <div className="card" style={{ marginTop: 16 }}>
         <h3 style={{ marginBottom: 12 }}>告警历史</h3>
-        {!history.length ? <Empty>暂无历史告警</Empty> : (
+        {!history.length ? <EmptyState title="暂无历史告警" /> : (
           <div style={{ overflowX: "auto" }}>
             <table className="table">
               <thead><tr><th>ID</th><th>时间</th><th>事件</th><th>规则</th><th>通道</th><th>状态</th></tr></thead>
@@ -201,8 +204,4 @@ export default function Alerts() {
       </div>
     </div>
   );
-}
-
-function Empty({ children }) {
-  return <div style={{ padding: "24px", textAlign: "center", color: "#556" }}>{children}</div>;
 }

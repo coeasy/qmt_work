@@ -17,6 +17,14 @@
   --down-soft: rgba(25, 195, 125, .05);
   --up-bar: rgba(255, 77, 79, .28);
   --down-bar: rgba(25, 195, 125, .28);
+  /* T16 尺寸令牌：按钮/圆角/行高统一档位 */
+  --btn-h-sm: 24px;
+  --btn-h-md: 30px;
+  --btn-h-lg: 36px;
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --row-h: 30px;
 }
 
 * { box-sizing: border-box; }
@@ -74,7 +82,7 @@ input, select, textarea {
 }
 input:focus, select:focus, textarea:focus { outline: none; border-color: var(--accent); }
 button {
-  background: var(--accent); color: #fff; border: none; border-radius: 7px;
+  background: var(--accent); color: #fff; border: none; border-radius: var(--radius-md, 6px);
   padding: 9px 16px; font-size: 13px; cursor: pointer; font-family: inherit;
 }
 button:hover { filter: brightness(1.08); }
@@ -84,7 +92,7 @@ button.ghost { background: transparent; border: 1px solid var(--border); color: 
 
 /* 表格 */
 table { width: 100%; border-collapse: collapse; font-size: 13px; }
-th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); }
+th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--border); }
 th { color: var(--text-dim); font-weight: 600; }
 tr:hover td { background: rgba(255,255,255,.02); }
 
@@ -176,7 +184,7 @@ code { background: var(--bg-2); border: 1px solid var(--border); border-radius: 
 .btn-group .active { background: var(--accent); color: #fff; border-color: var(--accent); }
 
 /* 小型 / 主操作 / 危险按钮 */
-.btn-sm { padding: 6px 12px; font-size: 12px; border-radius: 6px; }
+.btn-sm { padding: 6px 12px; font-size: 12px; border-radius: var(--radius-sm, 4px); }
 .btn-primary { background: var(--accent); color: #fff; padding: 9px 18px; }
 .btn-danger { background: var(--danger); color: #fff; }
 .btn-danger-sm { background: var(--danger); color: #fff; padding: 6px 12px; font-size: 12px; border-radius: 6px; }
@@ -841,7 +849,7 @@ input[type="checkbox"] { width: 15px; height: 15px; cursor: pointer; accent-colo
 .dock-watch-x { margin-left: 6px; color: var(--text-dim); }
 .dock-watch-x:hover { color: var(--down); }
 .dock-table { width: 100%; border-collapse: collapse; font-size: 12px; }
-.dock-table th, .dock-table td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--border); }
+.dock-table th, .dock-table td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--border); }
 .dock-table th { color: var(--text-dim); font-weight: 600; }
 .dock-log { font-family: "Consolas", monospace; font-size: 11px; }
 .dock-log-line { display: flex; gap: 10px; padding: 1px 0; }

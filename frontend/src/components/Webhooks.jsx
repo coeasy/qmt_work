@@ -2,6 +2,8 @@ import { useEffect, useState } from "react";
 import { api } from "../api.js";
 import { useBatchSelection } from "../hooks/useBatchSelection.js";
 import BatchDeleteBar from "./BatchDeleteBar.jsx";
+import EmptyState from "./ui/EmptyState.jsx";
+import { useActiveInterval } from "../hooks/useActiveInterval.js";
 
 /* 出站 Webhook（B2）
    HMAC-SHA256 签名 + 指数退避重试
@@ -22,6 +24,7 @@ export default function Webhooks() {
   });
 
   useEffect(() => { loadAll(); }, []);
+  useActiveInterval(loadAll, 60000);   // T15 送达状态近实时
 
   async function loadAll() {
     api.webhookSubscriptions().then(setSubs).catch(() => setSubs([]));
@@ -117,7 +120,7 @@ export default function Webhooks() {
       <div className="card" style={{ marginTop: 16 }}>
         <h3 style={{ marginBottom: 12 }}>订阅列表</h3>
         <BatchDeleteBar count={bsel.selected.length} onDelete={batchDelete} onClear={bsel.clear} busy={batchBusy} label="订阅" />
-        {!subs.length ? <Empty>暂无订阅</Empty> : (
+        {!subs.length ? <EmptyState title="暂无订阅" /> : (
           <div style={{ overflowX: "auto" }}>
             <table className="table">
               <thead><tr>
@@ -149,7 +152,7 @@ export default function Webhooks() {
 
       <div className="card" style={{ marginTop: 16 }}>
         <h3 style={{ marginBottom: 12 }}>送达记录</h3>
-        {!deliveries.length ? <Empty>暂无送达记录</Empty> : (
+        {!deliveries.length ? <EmptyState title="暂无送达记录" /> : (
           <div style={{ overflowX: "auto" }}>
             <table className="table">
               <thead><tr><th>ID</th><th>时间</th><th>事件</th><th>URL</th><th>重试次数</th><th>状态</th></tr></thead>
@@ -171,8 +174,4 @@ export default function Webhooks() {
       </div>
     </div>
   );
-}
-
-function Empty({ children }) {
-  return <div style={{ padding: "24px", textAlign: "center", color: "#556" }}>{children}</div>;
 }

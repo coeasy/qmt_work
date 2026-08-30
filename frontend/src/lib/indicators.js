@@ -37,16 +37,24 @@ export async function fetchIndicator(name, opts = {}) {
 
 /**
  * 批量取多个指标（并行 + 结果按名索引）。
- * @returns {Promise<Record<string, object|null>>} key 为 `${name}:${JSON.stringify(params)}`
+ * @returns {Promise<Record<string, object|null>>} key 与 fetchIndicator 缓存键一致
  */
 export async function fetchIndicators(list) {
   const rows = await Promise.all(list.map(([name, params]) =>
     fetchIndicator(name, params).then((o) => [name, params, o])));
   const map = {};
-  rows.forEach(([name, params, o]) => { map[_key(name, params)] = o; });
+  rows.forEach(([name, params, o]) => { map[indicatorKey(name, params)] = o; });
   return map;
 }
 
-export function indicatorKey(name, params = {}) {
-  return _key(name, params);
+// T9 修复：indicatorKey 与 fetchIndicator 内部缓存键归一化（默认 period/count/adj），
+// 否则 fetchIndicators 的 map 键与 fetchIndicator 缓存键不一致 → 同数据两套键。
+export function indicatorKey(name, opts = {}) {
+  const { code, period = "1d", count = 250, adj = "", ...params } = opts;
+  return _key(name, { code, period, count, adj, ...params });
+}
+
+// 仅供测试：清空模块级缓存（vitest 隔离）
+export function _resetIndicatorCache() {
+  _cache.clear();
 }
