@@ -85,9 +85,9 @@ class Quote(_AliasModel):
 class Bar(_AliasModel):
     """单根 K 线（对齐 `eltdx_source.get_kline` 与 `xtp` 历史 K 线）。
 
-    ``volume`` 单位随源：券商直连为「股」，eltdx 为「手」。归一化到「股」属于
-    消费层契约（见 niuniu 项目的 FallbackRealtimeSource 经验），本模型不臆造单位，
-    仅如实承载源值，由消费方按源声明转换。
+    契约：``volume`` 统一为「股」——eltdx 源在适配层已把「手」×100 归一
+    （对齐 niuniu 项目 FallbackRealtimeSource 的 volume 契约经验），券商直连天然
+    为「股」；``volume_unit`` 记录真实来源单位（"shares" 为归一后，始终 shares）。
     """
 
     time: str
@@ -97,6 +97,7 @@ class Bar(_AliasModel):
     close: float
     volume: Optional[float] = None
     amount: Optional[float] = None
+    volume_unit: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------

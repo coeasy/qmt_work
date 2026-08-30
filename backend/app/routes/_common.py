@@ -22,6 +22,19 @@ def err(code: int, message: str, extra=None) -> dict:
     return {"code": code, "message": message, "data": extra if extra is not None else None}
 
 
+def audit_log(actor: str, action: str, target: str, params: dict | None = None,
+              result: str = "ok", ip: str = "") -> None:
+    """统一写审计（T10）：D4 hash 链 + E4 脱敏，DB 未就绪时静默跳过（绝不阻断业务）。
+
+    供所有写域端点调用：``audit_log("api", "screen.save_board", body.get("name", ""), body)``。
+    """
+    try:
+        state.db.audit(actor, action, target, params or {}, result, ip)
+    except Exception:  # noqa: BLE001
+        # 审计失败不阻断业务路径（仅丢一条审计记录，可观测性降级）
+        pass
+
+
 def _need(conn_id: str | None = None):
     """取指定/活跃 bridge；无连接返回 None（调用方返回 503）。"""
     return state.broker_manager.bridge(conn_id)

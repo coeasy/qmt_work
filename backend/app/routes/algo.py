@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-from app.routes._common import err, ok, state
+from app.routes._common import audit_log, err, ok, state
 
 # --- stdlib imports injected by fix_route_imports ---
 
@@ -14,6 +14,8 @@ async def algo_submit(body: dict):
     if e is None:
         return err(503, "算法单引擎未初始化")
     try:
+        audit_log("api", "algo_submit", body.get('symbol',''), body)
+
         return ok(await e.submit(
             body.get("code", ""), body.get("direction", "buy"),
             int(body.get("volume", 0)), str(body.get("algo", "twap")),

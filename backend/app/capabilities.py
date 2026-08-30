@@ -146,6 +146,7 @@ def _tool_name_of(path: str, method: str) -> str:
     for p in ("/api/v1", "/api"):
         if seg.startswith(p):
             seg = seg[len(p):]
+            break
     seg = re.sub(r"\{(\w+)\}", r"by_\1", seg)   # /x/{id} → /x/by_id
     slug = seg.strip("/").replace("/", "_").replace("-", "_")
     return f"{method.lower()}_{slug}" if slug else f"{method.lower()}_root"

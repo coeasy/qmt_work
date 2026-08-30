@@ -231,5 +231,61 @@ def screen_runner(params: dict) -> Runner:
     return _run
 
 
-__all__ = ["JobRuntime", "JobSpec", "get_runtime", "sync_runner", "screen_runner",
+def backtest_runner(params: dict) -> Runner:
+    """回测任务（params: {symbol, strategy, params, initial_capital, count,
+    broker_id, commission_rate, stamp_tax, slippage_bps}）。
+
+    复用 backtest 包的真实引擎（fetch_kline_async_meta + run_backtest_engine），
+    依赖主进程内券商连接 → 在事件循环内执行（与 BacktestQueue 同约束）。
+    """
+
+    async def _run(job: dict) -> dict:
+        from tools.backtest import (
+            fetch_kline_async_meta,
+            run_backtest_engine,
+        )
+
+        symbol = str(params.get("symbol") or "600519.SH")
+        strategy = str(params.get("strategy") or "ma_cross")
+        pr = params.get("params") or {"fast": 5, "slow": 20}
+        capital = float(params.get("initial_capital") or 100_000)
+        count = int(params.get("count") or 250)
+        broker_id = str(params.get("broker_id") or "")
+        cost = {
+            "commission_rate": float(params.get("commission_rate") or 0.0003),
+            "stamp_tax": float(params.get("stamp_tax") or 0.001),
+            "slippage_bps": float(params.get("slippage_bps") or 5.0),
+        }
+        job["report"](10, "拉取真实历史 K 线")
+        kline, meta = await fetch_kline_async_meta(broker_id, symbol, count)
+        job["report"](40, "运行回测引擎")
+        res = await asyncio.to_thread(
+            run_backtest_engine, symbol, kline, strategy, pr, capital,
+            cost["commission_rate"], cost["stamp_tax"], cost["slippage_bps"],
+            data_meta=meta)
+        job["report"](90, "结果落库")
+        import json
+        import time as _time
+
+        from app.db import get_db
+
+        db = get_db()
+        bid = db.insert("backtests", {
+            "user_id": 1, "symbol": symbol, "start": params.get("start", ""),
+            "end": params.get("end", ""), "strategy": strategy,
+            "params_json": json.dumps(pr, ensure_ascii=False),
+            "initial_capital": capital,
+            "metrics_json": json.dumps(res.get("metrics", {}), ensure_ascii=False),
+            "trades_json": json.dumps(res.get("trades", []), ensure_ascii=False),
+            "report_path": "", "created_at": _time.strftime("%Y-%m-%dT%H:%M:%S"),
+        })
+        res["id"] = bid
+        job["report"](100, "完成")
+        return res
+
+    return _run
+
+
+__all__ = ["JobRuntime", "JobSpec", "get_runtime",
+           "sync_runner", "screen_runner", "backtest_runner",
            "QUOTA", "GLOBAL_MAX"]

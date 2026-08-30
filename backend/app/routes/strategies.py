@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-from app.routes._common import err, ok
+from app.routes._common import audit_log, err, ok
 
 # --- stdlib imports injected by fix_route_imports ---
 
@@ -12,6 +12,8 @@ router = APIRouter()
 async def strategies_generate(body: dict):
     from tools.strategy_gen import generate_strategy
     try:
+        audit_log("api", "strategies_generate", "gen", body)
+
         return ok(generate_strategy(
             body.get("strategy_type") or body.get("strategy", ""), body.get("code", "600519.SH"),
             body.get("client_path", ""), body.get("account_id", ""),
@@ -23,6 +25,8 @@ async def strategies_generate(body: dict):
 async def strategies_save(body: dict):
     from tools.strategy_gen import save_qmt_strategy
     try:
+        audit_log("api", "strategies_save", body.get('name',''), body)
+
         return ok(save_qmt_strategy(body.get("filename", "strategy.py"),
                                     body.get("content", ""),
                                     body.get("client_path", "")))

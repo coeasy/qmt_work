@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-from app.routes._common import _call, _need, err, ok
+from app.routes._common import _call, _need, audit_log, err, ok
 
 # --- stdlib imports injected by fix_route_imports ---
 
@@ -65,6 +65,8 @@ async def rebalance(body: dict):
             else:
                 orders.append({"code": code, "direction": direction, "volume": volume, "price": last})
             remaining -= lot
+    audit_log("api", "rebalance", body.get('target',''), body)
+
     return ok({"orders": orders, "generated": len([o for o in orders if "direction" in o])})
 
 

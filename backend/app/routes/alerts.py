@@ -3,7 +3,7 @@ import time
 
 from fastapi import APIRouter
 
-from app.routes._common import err, ok, state
+from app.routes._common import audit_log, err, ok, state
 
 router = APIRouter()
 
@@ -36,6 +36,8 @@ async def save_alert_rule(body: dict):
         rid = int(body["id"])
     else:
         rid = state.db.insert("alert_rules", payload)
+    audit_log("api", "save_alert_rule", body.get('name',''), body)
+
     return ok({"id": rid})
 
 @router.delete("/alerts/rules/{rid}")

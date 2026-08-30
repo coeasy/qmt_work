@@ -516,10 +516,16 @@ class EltdxSource(DataSource):
                 for b in bl:
                     t = getattr(b, "time", None)
                     ts = t.strftime("%Y%m%d") if hasattr(t, "strftime") else str(t)
+                    raw_vol = getattr(b, "volume_lots", None)
                     out.append({
                         "time": ts,
                         "open": b.open, "high": b.high, "low": b.low,
-                        "close": b.close, "volume": b.volume_lots, "amount": b.amount,
+                        "close": b.close,
+                        # T6 单位归一：eltdx K 线 volume 为「手」，统一 ×100 为「股」
+                        # （对齐 volume 契约单一真源；券商直连天然为股，无需处理）
+                        "volume": (raw_vol * 100) if raw_vol is not None else None,
+                        "volume_unit": "shares",
+                        "amount": b.amount,
                     })
                 return out
             return self._use_client(_inner)
@@ -827,13 +833,16 @@ class EltdxSource(DataSource):
                 for b in bl:
                     t = getattr(b, "time", None)
                     ts = t.strftime("%Y%m%d") if hasattr(t, "strftime") else str(t)
+                    raw_vol = getattr(b, "volume_lots", None)
                     out.append({
                         "time": ts,
                         "open": getattr(b, "open", None),
                         "high": getattr(b, "high", None),
                         "low": getattr(b, "low", None),
                         "close": getattr(b, "close", None),
-                        "volume": getattr(b, "volume_lots", None),
+                        # T6 单位归一：手 → 股（契约单一真源，见 Bar.volume_unit）
+                        "volume": (raw_vol * 100) if raw_vol is not None else None,
+                        "volume_unit": "shares",
                     })
                 return out
             return self._use_client(_inner)

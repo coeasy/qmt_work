@@ -11,7 +11,7 @@ from typing import Any, Dict
 
 from fastapi import APIRouter
 
-from app.routes._common import err, ok
+from app.routes._common import audit_log, err, ok
 from tools import fetch_kline_cached
 from tools.factors import compute_factor, compute_many, factor_extra_fields, from_kline, list_factors
 from xtquant_client.base import BrokerError
@@ -42,6 +42,8 @@ async def post_compute(body: Dict[str, Any]):
         result = compute_factor(name, values, **params)
     except ValueError as exc:
         return err(400, str(exc))
+    audit_log("api", "post_compute", "compute", body)
+
     return ok({"name": name, "values": result})
 
 
@@ -63,6 +65,8 @@ async def post_compute_many(body: Dict[str, Any]):
         results = compute_many(names, values, **params)
     except ValueError as exc:
         return err(400, str(exc))
+    audit_log("api", "post_compute_many", "compute_many", body)
+
     return ok(results)
 
 
@@ -111,5 +115,7 @@ async def post_from_kline(body: Dict[str, Any]):
             out[name] = compute_factor(name, close, **fp)
         except ValueError as exc:
             return err(400, str(exc))
+    audit_log("api", "post_from_kline", "from_kline", body)
+
     return ok({"symbol": symbol, "period": period, "count": len(bars),
                "source": res.get("source"), "values": out})

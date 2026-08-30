@@ -14,7 +14,7 @@ from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Request
 
-from app.routes._common import err, ok
+from app.routes._common import audit_log, err, ok
 from app.screener.engine import list_saved_boards, save_as_board, scan
 
 router = APIRouter()
@@ -74,13 +74,19 @@ async def market_screen_boards_save(body: Dict[str, Any]):
         saved = save_as_board(None, name, conditions, results)
     except ValueError as exc:
         return err(400, str(exc))
+    audit_log("api", "market_screen_boards_save", name or "", body)
+
     return ok(saved)
 
 
 @router.get("/market/screen/boards")
 async def market_screen_boards_list():
     """列出已保存的动态板块（名称 + 成员数）。"""
-    return ok({"items": list_saved_boards(), "count": len(list_saved_boards())})
+    try:
+        items = list_saved_boards()
+    except RuntimeError as exc:
+        return err(503, str(exc))          # 本地仓未初始化 → 业务 503，绝不裸抛
+    return ok({"items": items, "count": len(items)})
 
 
 @router.post("/market/screen/nl")

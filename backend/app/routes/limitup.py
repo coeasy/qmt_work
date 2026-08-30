@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-from app.routes._common import err, ok, state
+from app.routes._common import audit_log, err, ok, state
 
 # --- stdlib imports injected by fix_route_imports ---
 
@@ -19,6 +19,8 @@ async def limitup_pool_add(body: dict):
     if m is None:
         return err(503, "涨停监控未初始化")
     try:
+        audit_log("api", "limitup_pool_add", body.get('code',''), body)
+
         return ok(m.add(body.get("code", "")))
     except ValueError as exc:
         return err(400, str(exc))
@@ -37,6 +39,8 @@ async def limitup_start(body: dict):
     if m is None:
         return err(503, "涨停监控未初始化")
     try:
+        audit_log("api", "limitup_start", "start", body)
+
         return ok(await m.start({
             "limit_pct": float(body.get("limit_pct", 0.1)),
             "cutoff": str(body.get("cutoff", "10:00")),

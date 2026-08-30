@@ -13,7 +13,7 @@ from fastapi import APIRouter
 
 from app.analysis.portfolio import Position, aggregate
 from app.export import to_csv, to_excel, to_json
-from app.routes._common import err, ok
+from app.routes._common import audit_log, err, ok
 
 router = APIRouter()
 
@@ -61,6 +61,8 @@ async def market_export(body: Dict[str, Any]):
     safe_name = re.sub(r"[^\w\-.]", "_", str(body.get("filename") or "export")) or "export"
     try:
         if fmt == "csv":
+            audit_log("api", "market_export", body.get('format',''), body)
+
             return ok({"format": "csv", "content": to_csv(rows, columns),
                        "filename": f"{safe_name}.csv", "count": len(rows)})
         if fmt == "json":
@@ -105,4 +107,6 @@ async def market_analysis_run(body: Dict[str, Any]):
         return err(404, str(exc))
     except (ValueError, TypeError) as exc:
         return err(400, str(exc))
+    audit_log("api", "market_analysis_run", body.get('name',''), body)
+
     return ok(out)

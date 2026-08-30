@@ -4,7 +4,7 @@ import tempfile
 
 from fastapi import APIRouter
 
-from app.routes._common import err, ok
+from app.routes._common import audit_log, err, ok
 from tools import strategy_market as sm
 
 router = APIRouter()
@@ -39,6 +39,8 @@ async def market_publish(body: dict):
             body.get("strategy_id", ""),
             {k: body.get(k) for k in ("title", "author", "description", "type", "tags", "id")},
             body.get("content", ""))
+        audit_log("api", "market_publish", body.get('name',''), body)
+
         return ok(rec)
     except RuntimeError as exc:
         return err(503, str(exc))
@@ -51,6 +53,8 @@ async def market_install(body: dict):
     if not client_path:
         return err(400, "client_path 不能为空")
     try:
+        audit_log("api", "market_install", body.get('id',''), body)
+
         return ok(sm.install_from_market(body.get("id", ""), client_path))
     except ValueError as exc:
         return err(404, str(exc))
@@ -63,6 +67,8 @@ async def market_export(body: dict):
     out_path = body.get("path") or os.path.join(
         tempfile.gettempdir(), f"strategy_bundle_{os.getpid()}.zip")
     try:
+        audit_log("api", "market_export", "export", body)
+
         return ok(sm.export_bundle(ids, out_path))
     except RuntimeError as exc:
         return err(503, str(exc))
@@ -75,6 +81,8 @@ async def market_import(body: dict):
     if not path or not os.path.isfile(path):
         return err(400, f"bundle 不存在：{path}")
     try:
+        audit_log("api", "market_import", "import", body)
+
         return ok(sm.import_bundle(path))
     except (ValueError, RuntimeError) as exc:
         return err(400, str(exc))

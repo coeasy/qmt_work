@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-from app.routes._common import err, ok, state
+from app.routes._common import audit_log, err, ok, state
 
 # --- stdlib imports injected by fix_route_imports ---
 
@@ -19,6 +19,8 @@ async def save_notification(body: dict):
     if state.notifier is None:
         return err(503, "通知中心未初始化")
     nid = state.notifier.save_config(body)
+    audit_log("api", "save_notification", body.get('name',''), body)
+
     return ok({"id": nid})
 
 @router.delete("/notifications/{nid}")
