@@ -38,6 +38,18 @@ _TOPIC_POLICIES = {
         "ttl_ms": 300000, "min_interval_ms": 30000, "coalesce_within_ms": 2000,
         "priority": "low", "stale_ok": True,
     },
+    "market:indices": {
+        "ttl_ms": 15000, "min_interval_ms": 5000, "coalesce_within_ms": 1000,
+        "priority": "medium", "stale_ok": True,
+    },
+    "market:moneyflow": {
+        "ttl_ms": 30000, "min_interval_ms": 8000, "coalesce_within_ms": 1000,
+        "priority": "medium", "stale_ok": True,
+    },
+    "market:capital": {
+        "ttl_ms": 300000, "min_interval_ms": 30000, "coalesce_within_ms": 2000,
+        "priority": "low", "stale_ok": True,
+    },
     "runtime:jobs": {
         "ttl_ms": 2000, "min_interval_ms": 800, "coalesce_within_ms": 500,
         "priority": "high", "stale_ok": True,

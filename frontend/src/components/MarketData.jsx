@@ -23,6 +23,8 @@ import ErrorBoundary from "./ErrorBoundary.jsx";
 import { useActiveInterval } from "../hooks/useActiveInterval.js";
 // G2-3：指标单一真源——前端不再自带指标计算，统一消费后端引擎
 import { fetchIndicator, indicatorKey } from "../lib/indicators.js";
+// G4 数据面：资金流/股本 topic 总线
+import { subscribe as hubSubscribe, invalidate } from "../lib/dataHub.js";
 // 金额格式化直接引唯一实现（不再经 useMarket 别名中转，链路更短更明确）
 import { fmtAmount } from "../lib/format.js";
 
@@ -267,19 +269,27 @@ export default function MarketData({ params, leafId, tabId, dispatch } = {}) {
   const [mfErr, setMfErr] = useState("");
   const [cap, setCap] = useState(null);        // /market/capital：shares + limits
   const [mfRefresh, setMfRefresh] = useState(0);
+  // G4 数据面：资金流/股本走 topic 总线（切回已看代码秒出快照，同页不重复请求）
   useEffect(() => {
     if (!code) return;
-    let alive = true;
     setMf(null); setMfErr(""); setCap(null);
-    api.marketMoneyflow({ code })
-      .then((r) => { if (alive) { setMf(r); setMfErr(""); } })
-      .catch((e) => { if (alive) setMfErr(e.message || "资金流暂不可用"); });
-    api.marketCapital({ codes: code })
-      .then((r) => { if (alive) setCap(r); })
-      .catch(() => { /* 股本/涨跌停缺失 → 摘要卡显「—」 */ });
-    return () => { alive = false; };
+    const unsub1 = hubSubscribe(`market:moneyflow:${code}`, async () => {
+      const r = await api.marketMoneyflow({ code });
+      return r;
+    }, ({ data, error }) => {
+      if (data) { setMf(data); setMfErr(""); }
+      else if (error) setMfErr(error.message || "资金流暂不可用");
+    });
+    const unsub2 = hubSubscribe(`market:capital:${code}`, async () => {
+      const r = await api.marketCapital({ codes: code });
+      return r;
+    }, ({ data }) => { if (data) setCap(data); });   // 股本/涨跌停缺失 → 摘要卡显「—」
+    return () => { unsub1(); unsub2(); };
   }, [code, mfRefresh]);
-  const refreshMf = useCallback(() => setMfRefresh(Date.now()), []);
+  const refreshMf = useCallback(() => {
+    if (code) { invalidate(`market:moneyflow:${code}`); invalidate(`market:capital:${code}`); }
+    setMfRefresh(Date.now());
+  }, [code]);
 
   /* ---------- C2：资金流日内回放（G3 落库观测的快照序列） ----------
    * 打开「多维摘要」抽屉时拉一次（不轮询）；无快照显「暂无快照」引导，

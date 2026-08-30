@@ -2,6 +2,7 @@
 // 数据：/market/rotation（真实 TDX 板块指数，零 mock）。
 import { useEffect, useState } from "react";
 import { api } from "../api.js";
+import { subscribe, invalidate } from "../lib/dataHub.js";
 import { formatPct } from "../hooks/useMarket.js";
 
 // 涨跌幅 → 背景色（红涨绿跌，CN 惯例；强度随绝对值 0~5% 线性，封顶饱和）。
@@ -20,15 +21,26 @@ export default function Rotation() {
   const [meta, setMeta] = useState(null);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState("");
+  const [refreshKey, setRefreshKey] = useState(0);
 
-  const load = () => {
+  // G4 数据面：market:rotation 策略驱动缓存/节流；手动刷新 = invalidate + 重订阅
+  useEffect(() => {
     setLoading(true); setErr("");
-    api.marketRotation({ days, kind, top_n: topN })
-      .then((r) => { setRows(r.boards || []); setMeta(r); })
-      .catch((e) => { setRows([]); setErr(e.message || "板块轮动获取失败"); })
-      .finally(() => setLoading(false));
+    const unsub = subscribe(`market:rotation:${days}:${kind}:${topN}`, async () => {
+      const r = await api.marketRotation({ days, kind, top_n: topN });
+      return r;
+    }, ({ data, error }) => {
+      if (data) { setRows(data.boards || []); setMeta(data); }
+      else if (error) { setRows([]); setErr(error.message || "板块轮动获取失败"); }
+      setLoading(false);
+    });
+    return unsub;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [days, kind, topN, refreshKey]);
+  const load = () => {
+    invalidate(`market:rotation:${days}:${kind}:${topN}`);
+    setRefreshKey(Date.now());
   };
-  useEffect(() => { load(); /* eslint-disable-line react-hooks/exhaustive-deps */ }, []);
 
   const dayCount = meta?.days || days;
 

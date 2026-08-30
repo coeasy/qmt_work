@@ -82,7 +82,11 @@ def test_datahub_policies_route():
     res = asyncio.run(datahub_policies())
     assert res["code"] == 0
     topics = res["data"]["topics"]
-    assert "market:boards" in topics
+    # G4 试点页覆盖：boards/etfs/indices/rotation/kline/quote/indicators + 次级
+    for prefix in ("market:boards", "market:etfs", "market:indices", "market:rotation",
+                   "market:kline", "market:quote", "market:indicators",
+                   "market:moneyflow", "market:capital"):
+        assert prefix in topics, f"缺少策略前缀 {prefix}"
     p = topics["market:boards"]
     for key in ("ttl_ms", "min_interval_ms", "coalesce_within_ms", "priority", "stale_ok"):
         assert key in p

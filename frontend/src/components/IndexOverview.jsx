@@ -3,6 +3,7 @@
 // 数据：/market/overview（真实 TDX 公共行情，零 mock；聚合不可得时显「—」）。
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../api.js";
+import { subscribe, invalidate } from "../lib/dataHub.js";
 import Chart from "./Chart.jsx";
 import { formatPct, formatAmount } from "../hooks/useMarket.js";
 import { navToQuote } from "../lib/nav.js";
@@ -15,14 +16,23 @@ export default function IndexOverview() {
   const [err, setErr] = useState("");
   // C1：数据源切换（auto/broker/eltdx）
   const [srcSel, setSrcSel] = useState("auto");
+  const [refreshKey, setRefreshKey] = useState(0);
 
   useEffect(() => {
     setLoading(true); setErr("");
-    api.marketOverview({ source: srcSel })
-      .then((r) => setData(r))
-      .catch((e) => setErr(e.message || "市场概览获取失败"))
-      .finally(() => setLoading(false));
-  }, [srcSel]);
+    // G4 数据面：market:indices 策略驱动缓存/节流（跨页切回秒出快照）
+    const unsub = subscribe(`market:indices:overview:${srcSel}`, async () => {
+      const r = await api.marketOverview({ source: srcSel });
+      return r;
+    }, ({ data: d, error }) => {
+      if (d) setData(d);
+      else if (error) setErr(error.message || "市场概览获取失败");
+      setLoading(false);
+    });
+    return unsub;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [srcSel, refreshKey]);
+  const refresh = () => { invalidate(`market:indices:overview:${srcSel}`); setRefreshKey(Date.now()); };
 
   const trendOption = useMemo(() => {
     const s = data?.breadth_trend?.series || [];

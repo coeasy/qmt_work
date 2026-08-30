@@ -9,6 +9,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api.js";
 import { useQuotes } from "../lib/quoteHub.jsx";
+import { subscribe, invalidate } from "../lib/dataHub.js";
 import Chart from "./Chart.jsx";
 import { formatPct, formatAmount } from "../hooks/useMarket.js";
 import { navTo, navToQuote } from "../lib/nav.js";
@@ -49,18 +50,28 @@ export default function Etfs() {
   const srcRef = useRef(srcSel);
   srcRef.current = srcSel;
 
+  const [refreshKey, setRefreshKey] = useState(0);
   const load = () => {
     setLoading(true); setErr("");
-    // P0-1：首屏只拉清单（limit=0 全量，后端 5min TTL 缓存），不请求全量快照。
-    api.marketEtfs({ limit: 0, with_quote: false, source: srcRef.current })
-      .then((r) => {
-        setRows(r.items || []); setSource(r.source || "");
-        setPage(0);
-      })
-      .catch((e) => { setRows([]); setErr(e.message || "ETF 清单获取失败"); })
-      .finally(() => setLoading(false));
+    // G4 数据面：手动刷新 = invalidate（清快照）+ 重订阅（策略表驱动节流）
+    invalidate("market:etfs:list");
+    setRefreshKey(Date.now());
   };
-  useEffect(() => { load(); }, [srcSel]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    setLoading(true); setErr("");
+    const unsub = subscribe("market:etfs:list", async () => {
+      // P0-1：首屏只拉清单（limit=0 全量，后端 5min TTL 缓存），不请求全量快照。
+      const r = await api.marketEtfs({ limit: 0, with_quote: false, source: srcRef.current });
+      setSource(r.source || "");
+      return r.items || [];
+    }, ({ data, error }) => {
+      if (data) { setRows(data); setPage(0); }
+      else if (error) { setRows([]); setErr(error.message || "ETF 清单获取失败"); }
+      setLoading(false);
+    });
+    return unsub;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [srcSel, refreshKey]);
 
   /* ---------- 多维过滤 + 排序 + 分页 ---------- */
   const filtered = useMemo(() => {
