@@ -218,12 +218,21 @@ async def market_kline(code: str, period: str = "1d", count: int = 250,
     except BrokerError as exc:
         return err(503, str(exc))
     bars = res.get("bars") or []
-    # 彻底无源返回：券商 + eltdx(TDX) 均无数据时才报错，避免前端把「行情不可用」误当空表。
+    # 彻底无源返回：券商 + eltdx(TDX) 均无数据时，G1-6 先试本地数据仓兜底
+    # （stale 明示、as_of 标数据截至时间、降级≠造假）；本地也无数据才 503。
     if not bars and not res.get("source"):
-        return err(503, f"K 线获取失败：{code} 券商不可用且 TDX 行情源亦无数据，请连接券商或检查网络。")
+        from app.datasource.degrade import envelope, local_bars
+        dres = local_bars(code, period=period, adjust=adj or "")
+        if dres is not None:
+            return ok(envelope(
+                {"code": code, "period": period, "count": len(dres.results),
+                 "cached_at": None, "note": None, "adjust": adj or "",
+                 "bars": dres.results}, dres))
+        return err(503, f"K 线获取失败：{code} 券商不可用、TDX 行情源无数据且本地数据仓为空，请连接券商或检查网络。")
     return ok({"code": code, "period": period, "count": len(bars),
                "source": res.get("source"), "cached_at": res.get("cached_at"),
                "note": res.get("note"), "adjust": adj or "",
+               "stale": False,
                "bars": bars})
 
 @router.get("/market/minutes")

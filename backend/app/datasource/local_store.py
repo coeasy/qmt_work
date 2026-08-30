@@ -172,6 +172,16 @@ class LocalStore:
         rows = self._db.query("SELECT value FROM local_sync_meta WHERE key=?", (key,))
         return rows[0]["value"] if rows else default
 
+    def last_updated(self, table: str, where: str = "",
+                     params: tuple = ()) -> Optional[str]:
+        """表内最新 updated_at（G1-6 降级 as_of 的行级兜底：无同步元数据时，
+        用数据实际落库时间标「数据截至」，保证 stale 必有 as_of——降级≠造假）。"""
+        sql = f"SELECT MAX(updated_at) AS m FROM {table}"
+        if where:
+            sql += f" WHERE {where}"
+        rows = self._db.query(sql, params)
+        return rows[0]["m"] if rows and rows[0]["m"] else None
+
     # ------------------------------------------------------------------
     # 运维
     # ------------------------------------------------------------------
