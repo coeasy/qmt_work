@@ -195,8 +195,15 @@ def _iter_routes(obj, prefix: str = ""):
         elif getattr(route, "routes", None) and not hasattr(route, "endpoint"):
             yield from _iter_routes(route, prefix)
         else:
-            p = (prefix + getattr(route, "path", "")).replace("//", "/")
-            yield p, route
+            rp = getattr(route, "path", "") or ""
+            # newer FastAPI 将 include_router 的子路由扁平化为纯 APIRoute，
+            # 其 path 已含完整前缀（如 /api/v1/brokers/auto-detect），
+            # 此时不可再叠加聚合前缀，否则会产生 /api/v1/api/v1/ 的双前缀。
+            if prefix and rp.startswith(prefix):
+                p = rp
+            else:
+                p = prefix + rp
+            yield p.replace("//", "/"), route
 
 
 def _route_endpoints():

@@ -9,6 +9,7 @@ export default defineConfig({
   plugins: [react()],
   test: {
     environment: "node",
+    setupFiles: ["./vitest.setup.js"],
     include: [
       "src/lib/__tests__/**/*.test.js",
       // hook 测试含 JSX，必须用 .jsx 后缀（plugin-react 只对 jsx/tsx 生效）

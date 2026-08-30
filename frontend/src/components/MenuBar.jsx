@@ -4,6 +4,7 @@
 // - 鼠标 hover 打开，离开 200ms 延迟关闭（避免移到 dropdown 时闪烁）
 import { useState, useRef, useEffect } from "react";
 import Ticker from "./Ticker.jsx";
+import GlobalSearch from "./GlobalSearch.jsx";
 import { PAGES } from "../pagesRegistry.jsx";
 import { t } from "../lib/i18n.js";
 
@@ -39,6 +40,8 @@ export default function MenuBar() {
     <div className="topbar">
       <div className="topbar-left">
         <span className="topbar-brand" title="qmt_work 量化平台">qmt_work</span>
+        <span className="topbar-sep" aria-hidden="true" />
+        <GlobalSearch />
         <span className="topbar-sep" aria-hidden="true" />
         {MENUS.map((m, i) => (
           <div

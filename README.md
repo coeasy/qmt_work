@@ -22,16 +22,13 @@
 | 算法交易 | TWAP / VWAP 拆单，暂停/恢复/取消 |
 | 策略模板 | ma_cross/macd/rsi/limitup 模板生成，写入 QMT 客户端 |
 | 策略市场 | DB 目录 + zip/json 导入导出 |
-| 定时任务 | cron/周期任务 + 可选 Redis 锁分布式调度 |
-| 可观测性 | Prometheus 指标 + 链路追踪 + 运行时画像 |
-| 注册表 V2 | 能力协商（negotiate）+ 热插拔券商（hotplug），纯配置化 |
+| 可观测性 | Prometheus 指标 + 统一能力自描述（/capabilities，纯配置化） |
 | 告警规则 | 自定义条件告警 + 自动匹配事件 + 历史告警记录 |
 | 出站 Webhook | HMAC-SHA256 签名 + 指数退避重试，事件自动分发 |
 | 外部信号 | 信号路由（live/dry-run/paused）+ webhook 入站 + HMAC 签名校验 + 二次确认 |
 | 对账核销 | 委托对账核销 + WAL 统计/归档/轮转 |
 | 目标持仓 | 差量同步（dry-run/实盘），按股数/金额/比例模式 |
 | 风控/审计 | 日级风控（金额/亏损/次数）+ 订单超时撤单 + 审计 hash 链 |
-| LLM Agent | 可插拔 Provider（OpenAI/Anthropic 兼容），AES-256-GCM 加密密钥 |
 
 ---
 
@@ -82,7 +79,7 @@ npm run dev          # 代理 /api /ws /mcp 到后端
 ### 冒烟测试
 
 ```bash
-python tests/smoke2.py    # 22 项全链路 → PASS
+python tests/smoke2.py    # 全链路 → PASS
 ```
 
 ---
@@ -152,7 +149,7 @@ build_all.bat          # Windows CMD
 
 ### 端口锁定（多实例防冲突）
 
-后端将实际监听端口持久化到 `data/.qmt_work.port`，下次启动优先复用该端口（仍被占用才 +1），避免多实例部署时端口漂移与冲突。桌面壳通过 `QMT_PORT_FILE` 读取实际端口连接。
+后端将实际监听端口持久化到 `data/.qmt_work.port`，下次启动优先复用该端口（仍被占用才 +1），避免多实例部署时端口漂移与冲突。桌面壳通过 `QMT_PORT_FILE` 读取实际端口连接。默认端口为 `21118`（被占用时平滑 +1）。
 
 ### 日志聚合与告警
 
@@ -217,14 +214,13 @@ http://127.0.0.1:21118/mcp
 qmt_work/
 ├─ backend/              # FastAPI 统一后端
 │  ├─ run.py            # 启动入口（端口自动扫描 + 单实例锁）
-│  ├─ app/              # config / db / routes / main / state
-│  ├─ xtquant_client/   # BrokerAdapter / Manager / Registry V2 / 桥接
+│  ├─ app/              # config / db / routes / main / state / datasource / screener / indicators
+│  ├─ xtquant_client/   # BrokerAdapter / Manager / 桥接子进程
 │  ├─ mcp_server/       # MCP 工具注册
-│  ├─ agent/            # LLM Provider 抽象 + Agent 核心
+│  ├─ agent/            # 自然语言选股（NL 解析，非 LLM 对话）
 │  ├─ sync/             # WebSocket 同步引擎
 │  ├─ backtest/         # 回测作业队列（含向量化 + 参数扫描）
 │  ├─ paper/            # 模拟盘引擎
-│  ├─ scheduler/        # 定时任务 + 分布式调度
 │  ├─ tools/            # 因子/策略/算法/涨停/条件单/参考数据
 │  ├─ gateway/          # 鉴权/限流/风控/审计/脱敏/K线缓存/metrics/日志告警
 │  ├─ data/             # SQLite 数据库
@@ -232,34 +228,35 @@ qmt_work/
 │  ├─ dist/             # PyInstaller 产物
 │  ├─ tests/            # 单测 + 冒烟测试
 │  └─ build_exe.py      # EXE 打包脚本
-├─ frontend/             # React + Vite + Electron（24 个页面覆盖全部后端端点）
+├─ frontend/             # React + Vite + Electron（29 个页面覆盖后端端点）
 │  ├─ src/
-│  │  ├─ App.jsx         # 路由入口 + 14 个核心页面
-│  │  ├─ api.js          # 统一 REST 客户端（60+ 方法）
+│  │  ├─ App.jsx         # 路由入口
+│  │  ├─ api.js          # 统一 REST 客户端（150+ 方法）
+│  │  ├─ pagesRegistry.jsx # 页面注册表（菜单/功能树/命令面板单一真源）
 │  │  ├─ components/     # 页面组件
-│  │  │  ├─ Dashboard.jsx       # 仪表盘
-│  │  │  ├─ Quote.jsx            # 实时行情
-│  │  │  ├─ Trade.jsx            # 手动交易
-│  │  │  ├─ LimitUp.jsx          # 涨停监控（P0）
-│  │  │  ├─ Algo.jsx             # 算法交易（P0）
-│  │  │  ├─ Backtest.jsx         # 回测 + 参数扫描（P1）
-│  │  │  ├─ Factors.jsx          # 因子/指标（P1）
-│  │  │  ├─ Paper.jsx            # 模拟盘（P1）
-│  │  │  ├─ Strategies.jsx       # 策略模板库（P1）
-│  │  │  ├─ StrategyMarket.jsx   # 策略市场（P1）
-│  │  │  ├─ Rebalance.jsx        # 分仓再平衡（P0）
-│  │  │  ├─ Reference.jsx        # 参考数据（P0）
-│  │  │  ├─ Audit.jsx            # 审计日志（P1）
-│  │  │  ├─ Agent.jsx            # Agent 对话（P0）
-│  │  │  ├─ AccountsGrid.jsx     # 多账户网格（P0）
-│  │  │  ├─ Brokers.jsx          # 券商连接（P0）
-│  │  │  ├─ Scheduler.jsx        # 定时任务（P2）
-│  │  │  ├─ Observability.jsx    # 可观测性（P2）
-│  │  │  ├─ Registry.jsx         # 注册表 V2（P2）
-│  │  │  ├─ Alerts.jsx           # 告警规则
-│  │  │  ├─ Webhooks.jsx         # 出站 Webhook
-│  │  │  ├─ Signal.jsx           # 外部信号
-│  │  │  ├─ Reconcile.jsx        # 对账核销
+│  │  │  ├─ Dashboard.jsx      # 仪表盘
+│  │  │  ├─ MarketData.jsx     # 行情分析（实时行情+K线）
+│  │  │  ├─ QuoteBoard.jsx     # 报价牌
+│  │  │  ├─ Trade.jsx          # 手动交易
+│  │  │  ├─ LimitUp.jsx        # 涨停监控（P0）
+│  │  │  ├─ Algo.jsx           # 算法交易（P0）
+│  │  │  ├─ Backtest.jsx       # 回测 + 参数扫描（P1）
+│  │  │  ├─ Factors.jsx        # 因子/指标（P1）
+│  │  │  ├─ Paper.jsx          # 模拟盘（P1）
+│  │  │  ├─ Strategies.jsx     # 策略模板库（P1）
+│  │  │  ├─ StrategyMarket.jsx # 策略市场（P1）
+│  │  │  ├─ Rebalance.jsx      # 分仓再平衡（P0）
+│  │  │  ├─ Reference.jsx      # 参考数据（P0）
+│  │  │  ├─ Audit.jsx          # 审计日志（P1）
+│  │  │  ├─ AccountsGrid.jsx   # 多账户网格（P0）
+│  │  │  ├─ Brokers.jsx        # 券商连接（P0）
+│  │  │  ├─ Boards.jsx/Etfs.jsx/IndexOverview.jsx/Rotation.jsx  # 多维行情（P0）
+│  │  │  ├─ Screen.jsx         # 条件选股 + NL 自然语言选股
+│  │  │  ├─ Research.jsx       # 研究深度（IC/分位/walk-forward/归因）
+│  │  │  ├─ Alerts.jsx         # 告警规则
+│  │  │  ├─ Webhooks.jsx       # 出站 Webhook
+│  │  │  ├─ Signal.jsx         # 外部信号
+│  │  │  ├─ Reconcile.jsx      # 对账核销
 │  │  │  └─ TargetPortfolio.jsx  # 目标持仓
 │  │  ├─ electron/         # 桌面壳（端口发现 + 托盘 + 开机自启 + 自动更新）
 │  │  └─ electron-builder.yml

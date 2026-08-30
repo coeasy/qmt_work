@@ -90,6 +90,8 @@ api.batchRemoveBrokers = (ids) => api.post("/brokers/batch-delete", { ids });
 // ABI 运行时矩阵 / 单连接健康检查（运维排障）
 api.brokerRuntimes = () => api.get("/brokers/runtimes");
 api.brokerHealth = (id) => api.get(`/brokers/${id}/health`);
+// 端到端诊断快照（排障用；deep 含系统运行时发现，较重）
+api.brokerDiagnostics = (deep) => api.get("/brokers/diagnostics", deep ? { deep: 1 } : {});
 
 // ---------------- 涨停监控 / 打板助手 ----------------
 api.limitupStatus = () => api.get("/limitup/status");
@@ -135,6 +137,8 @@ api.marketPeriods = () => api.get("/market/periods");
 api.marketQuote = (params) => api.get("/market/quote", params);
 api.marketQuotes = (body) => api.post("/market/quotes", body);
 api.marketStockInfo = (params) => api.get("/market/stock-info", params);
+// 股票搜索：按中文名/代码模糊匹配（后端零网络，基于本地名称缓存）
+api.marketSearch = (q, limit = 20) => api.get("/market/search", { q, limit });
 api.marketCrawl = (body) => api.post("/market/crawl", body);
 api.klineCacheStats = () => api.get("/market/kline/cache");
 api.klineCacheClear = (code, period) =>
@@ -164,8 +168,7 @@ api.marketOverview = (params) => api.get("/market/overview", params);
 api.marketRotation = (params) => api.get("/market/rotation", params);
 // G2 板块资金流：成分股当日主力净流入聚合
 api.boardMoneyflow = (params) => api.get("/market/board/moneyflow", params);
-// G3 资金流落库快照 / 回放
-api.moneyflowSnapshot = (body) => api.post("/market/moneyflow/snapshot", body);
+// G3 资金流回放
 api.moneyflowReplay = (params) => api.get("/market/moneyflow/replay", params);
 
 // ---------------- 策略模板库 ----------------
@@ -193,6 +196,8 @@ api.putRiskConfig = (body) => api.put("/config/risk", body);
 api.audit = (params) => api.get("/audit", params);
 api.auditVerify = () => api.get("/audit/verify");
 api.aggregate = () => api.get("/account/aggregate");
+// 滑点分析：成交价 vs 当日 open/close/vwap 基点差（需券商成交数据）
+api.accountSlippage = (code = "600519.SH", connId = "") => api.get("/account/slippage", { code, conn_id: connId });
 
 // ---------------- 运行时配置中心（引擎参数热更新） ----------------
 api.getRuntimeConfig = () => api.get("/config/runtime");
@@ -311,6 +316,8 @@ api.notificationLogs = () => api.get("/notifications/logs");
 api.live = () => api.get("/live");
 api.ready = () => api.get("/ready");
 api.quoteBusStats = () => api.get("/quote-bus/stats");
+// 统一能力自描述：各域端点数 / 可自动暴露数（观察能力面是否完整）
+api.capabilitiesSummary = () => api.get("/capabilities/summary");
 // /metrics 返回 Prometheus text/plain（非 JSON），需原始文本读取
 api.metricsRaw = async () => {
   const r = await fetch(`${BASE}/metrics`, { headers: _authHeaders() });

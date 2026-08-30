@@ -23,6 +23,7 @@ export default function SystemStatus() {
   const [readyErr, setReadyErr] = useState(null);
   const [bus, setBus] = useState(null);
   const [metrics, setMetrics] = useState("");
+  const [caps, setCaps] = useState(null);
   const [loading, setLoading] = useState(false);
 
   useActiveInterval(loadAll, 15000);
@@ -39,6 +40,8 @@ export default function SystemStatus() {
       setBus(qb);
       const mt = await api.metricsRaw().catch(() => "");
       setMetrics(mt || "");
+      const cs = await api.capabilitiesSummary().catch(() => null);
+      setCaps(cs);
     } finally { setLoading(false); }
   }
 
@@ -127,6 +130,27 @@ export default function SystemStatus() {
             </div>
           ) : <p className="muted">暂无数据（行情总线未初始化或未连接券商）。</p>}
         </div>
+      </div>
+
+      {/* 能力自描述概览 */}
+      <div className="card" style={{ marginTop: 12 }}>
+        <h3>能力面概览 <span className="muted" style={{ fontWeight: 400, fontSize: 12 }}>（/capabilities 自描述）</span></h3>
+        {caps ? (
+          <>
+            <div className="row" style={{ gap: 16, marginBottom: 8 }}>
+              <span>REST 端点数：<strong>{caps.rest_total}</strong></span>
+              <span>可自动暴露：<strong>{caps.agent_visible_total}</strong></span>
+            </div>
+            <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))", gap: 8 }}>
+              {Object.entries(caps.by_category || {}).map(([cat, c]) => (
+                <div key={cat} style={{ border: "1px solid #22304a", borderRadius: 8, padding: "8px 10px", fontSize: 12 }}>
+                  <div style={{ fontWeight: 600 }}>{cat}</div>
+                  <div className="muted" style={{ fontSize: 11 }}>总数 {c.total} · 读 {c.read} · 写 {c.write} · Agent {c.agent_visible}</div>
+                </div>
+              ))}
+            </div>
+          </>
+        ) : <p className="muted">暂无数据。</p>}
       </div>
 
       {/* Prometheus 原始指标 */}

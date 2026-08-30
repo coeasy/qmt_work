@@ -1174,3 +1174,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 /* ================= G9 多图联动 ================= */
 .bd-linked { position: absolute; top: 4px; right: 8px; z-index: 5; }
 .bd-chart { position: relative; }
+
+/* 顶栏全局股票搜索：结果 hover */
+.gsearch-item:hover { background: #16263f; }
+.gsearch-item:hover .code { color: #7db0ff; }

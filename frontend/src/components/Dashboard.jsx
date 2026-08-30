@@ -14,6 +14,7 @@ export default function Dashboard() {
   const [noBroker, setNoBroker] = useState(false);
   const [health, setHealth] = useState(null);
   const [agg, setAgg] = useState(null);
+  const [slip, setSlip] = useState(null);      // 滑点分析
   const { status: sysStatus, sys, latency } = useSystemStatus();
   const [rt, setRt] = useState(null);
   // G5：runtimeConfig / aggregate 兜底轮询改为 Pane 可见性感知（后台 Tab 停表）
@@ -43,6 +44,8 @@ export default function Dashboard() {
   // 保留 ≥30s 低频兜底轮询防事件丢失
   useActiveInterval(load, 30000, [activeId]);
   useServerEvents(["account", "order", "trade", "reconcile"], () => { load(); api.aggregate().then(setAgg).catch(() => {}); });
+  // 滑点分析：成交价 vs 当日 open/close/vwap 基点差（需券商成交；未连接则忽略）
+  useActiveInterval(() => { api.accountSlippage("600519.SH", activeId).then(setSlip).catch(() => {}); }, 60000, [activeId]);
 
   const pnlOption = {
     backgroundColor: "transparent",
@@ -121,6 +124,28 @@ export default function Dashboard() {
         <h3>净值曲线</h3>
         <Chart option={pnlOption} height={300} />
       </div>
+
+      {slip && slip.samples && (
+        <div className="card" style={{ marginTop: 16 }}>
+          <h3>滑点分析（{slip.code}） <span className="muted" style={{ fontWeight: 400, fontSize: 12 }}>成交价 vs 当日 open/close/VWAP 基点差 · 平均 |滑点| {slip.avg_abs_slippage_avg_bps ?? "—"} bps</span></h3>
+          {slip.samples.length === 0 ? <p className="muted">该标的近期无成交明细。</p> : (
+            <div style={{ maxHeight: 260, overflow: "auto" }}>
+              <table>
+                <thead><tr><th>时间</th><th>方向</th><th>成交价</th><th>open(bps)</th><th>close(bps)</th><th>VWAP(bps)</th></tr></thead>
+                <tbody>
+                  {slip.samples.slice(0, 20).map((r, i) => (
+                    <tr key={i}>
+                      <td className="code">{r.time}</td><td>{r.side}</td><td>{r.price}</td>
+                      <td>{r.slippage_open_bps}</td><td>{r.slippage_close_bps}</td>
+                      <td>{r.slippage_avg_bps}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
 
       <div className="card" style={{ marginTop: 16 }}>
         <h3>持仓明细</h3>

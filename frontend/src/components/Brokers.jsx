@@ -63,6 +63,8 @@ export default function Brokers() {
   const [cands, setCands] = useState(null);   // 自动发现候选（null=未探测）
   const [detecting, setDetecting] = useState(false);
   const [runtimes, setRuntimes] = useState(null); // ABI 运行时矩阵
+  const [diag, setDiag] = useState(null);         // 端到端诊断快照
+  const [diagBusy, setDiagBusy] = useState(false);
   const [health, setHealth] = useState({});       // conn_id -> 健康检查结果
   const [healthBusy, setHealthBusy] = useState("");
   // 「连接中」状态：按 conn_id 维度记录——避免同一连接重复点击、显示"连接中…"
@@ -74,6 +76,13 @@ export default function Brokers() {
 
   async function loadRuntimes() {
     try { setRuntimes(await api.brokerRuntimes()); } catch (e) { setRuntimes({ error: e.message }); }
+  }
+  // 端到端诊断快照（排障）：宿主 ABI / 桥接运行时 / 各连接状态与行情泵健康
+  async function loadDiagnostics() {
+    setDiagBusy(true);
+    try { setDiag(await api.brokerDiagnostics(false)); }
+    catch (e) { setDiag({ error: e.message }); }
+    finally { setDiagBusy(false); }
   }
   // 阶段 4 修复：连接按钮必须可点击、可取消、有可见反馈。
   // 后端握手最坏 30s（短链），按 1s tick 刷新计时器文案，避免用户"以为卡死"。
@@ -471,6 +480,41 @@ export default function Brokers() {
                   <span className="muted">无（全部进程内直连）</span>
                 )}
               </div>
+            </div>
+          )}
+        </div>
+
+        {/* 端到端诊断快照（浅层）：宿主 ABI / 桥接运行时 / 连接状态 / 行情泵健康 */}
+        <div className="card">
+          <div className="row" style={{ alignItems: "center" }}>
+            <h3 style={{ margin: 0 }}>诊断快照</h3>
+            <button className="btn-sm" onClick={loadDiagnostics} disabled={diagBusy} style={{ marginLeft: "auto" }}>
+              {diagBusy ? "诊断中…" : "诊断"}
+            </button>
+          </div>
+          {diag == null && !diagBusy && <p className="muted" style={{ marginTop: 8 }}>生成端到端诊断快照（不依赖真实券商连接），用于排障与长时段稳定性观察。</p>}
+          {diag?.error && <p className="muted" style={{ color: "#e6a23c", marginTop: 8 }}>诊断失败：{diag.error}</p>}
+          {diag && !diag.error && (
+            <div style={{ marginTop: 8, fontSize: 13, lineHeight: 1.9 }}>
+              <div>宿主 ABI：<code>{diag.host_abi}</code> · Python <code>{diag.host_python}</code></div>
+              <div>桥接运行时：{Object.keys(diag.bundled_runtimes || {}).length
+                ? Object.entries(diag.bundled_runtimes).map(([k, v]) => `${v} · cp${k}`).join("、")
+                : "无（进程内直连）"}</div>
+              <div className="muted" style={{ fontSize: 11 }}>生成于 {new Date((diag.generated_at || 0) * 1000).toLocaleTimeString()}</div>
+              {(diag.connections || []).map((c) => (
+                <div key={c.conn_id} style={{ borderTop: "1px solid #22304a", padding: "6px 0", fontSize: 12 }}>
+                  <div className="row" style={{ justifyContent: "space-between", alignItems: "center" }}>
+                    <span>{c.name} <span className="muted">[{c.broker_id}]</span></span>
+                    <span className={`tag ${c.connected ? "ok" : "fail"}`}>{c.connected ? "已连接" : "未连接"}</span>
+                  </div>
+                  <div className="muted" style={{ fontSize: 11 }}>
+                    适配 {c.adapter} · 健康 {c.health_status ?? "—"} · 重连 {c.reconnect_attempts ?? 0} 次 · 行情泵 {c.pump_running ? "运行中" : "停止"}
+                    {c.active ? " · 活跃" : ""}
+                  </div>
+                  {c.last_error && <div className="muted" style={{ fontSize: 11, color: "#e6a23c" }}>最近错误：{c.last_error}</div>}
+                </div>
+              ))}
+              {(diag.connections || []).length === 0 && <p className="muted" style={{ marginTop: 6 }}>尚无已配置连接。</p>}
             </div>
           )}
         </div>
