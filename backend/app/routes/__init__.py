@@ -30,6 +30,7 @@ import app.routes.research as research
 import app.routes.paper as paper
 import app.routes.strategy_market as strategy_market
 import app.routes.capabilities as capabilities
+import app.routes.indicators as indicators
 
 router = APIRouter(prefix="/api/v1")
 router.include_router(broker.router)
@@ -61,3 +62,4 @@ router.include_router(research.router)
 router.include_router(paper.router)
 router.include_router(strategy_market.router)
 router.include_router(capabilities.router)
+router.include_router(indicators.router)
