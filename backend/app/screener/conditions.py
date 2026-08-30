@@ -79,7 +79,39 @@ def _eval_indicator(cond: dict, bars: list) -> Optional[float]:
     return _windowed(arr, int(ind.get("window", -1)))
 
 
+def _operand_value(operand: dict, bars: list) -> Optional[float]:
+    """取操作数在 window 处的值（compare 叶子用）。kind ∈ field/indicator。"""
+    kind = operand.get("kind")
+    if kind == "field":
+        name = operand.get("name")
+        if name not in _FIELD_NAMES:
+            raise ValueError(f"未知字段条件：{name}（可选 {sorted(_FIELD_NAMES)}）")
+        arr = [float(getattr(b, name)) if getattr(b, name, None) is not None else None
+               for b in bars]
+        return _windowed(arr, int(operand.get("window", -1)))
+    if kind == "indicator":
+        spec = get_indicator(operand["name"])
+        params = _resolve_ind_params(spec, operand.get("params") or {})
+        res = calc(operand["name"], bars, **params)
+        out = operand.get("output") or (spec.outputs[0] if spec.outputs else None)
+        arr = res["outputs"].get(out) if out else None
+        if arr is None:
+            raise ValueError(f"指标 {operand['name']} 无输出列 {out}（可选 {spec.outputs}）")
+        return _windowed(arr, int(operand.get("window", -1)))
+    raise ValueError(f"未知操作数类型：{kind}")
+
+
 def _eval_leaf(cond: dict, bars: list) -> bool:
+    if "compare" in cond:
+        c = cond["compare"]
+        op = c.get("op")
+        if op not in _OPS:
+            raise ValueError(f"非法操作符：{op}（可选 {sorted(_OPS)}）")
+        lv = _operand_value(c["left"], bars)
+        rv = _operand_value(c["right"], bars)
+        if lv is None or rv is None:
+            return False
+        return _cmp(lv, op, rv)
     if "indicator" in cond:
         val = _eval_indicator(cond, bars)
         leaf: dict = cond["indicator"]
@@ -93,7 +125,7 @@ def _eval_leaf(cond: dict, bars: list) -> bool:
         val = _windowed(arr, int(f.get("window", -1)))
         leaf = f
     else:
-        raise ValueError("条件叶子须为 {indicator:...} 或 {field:...}")
+        raise ValueError("条件叶子须为 {indicator:...} / {field:...} / {compare:...}")
     op = leaf.get("op")
     if op not in _OPS:
         raise ValueError(f"非法操作符：{op}（可选 {sorted(_OPS)}）")
@@ -114,6 +146,9 @@ def evaluate(conditions: dict, bars: list) -> Tuple[bool, int, int]:
             subs = [_rec(c) for c in node["or"]]
             hits = sum(s[0] for s in subs)
             return any(s[0] for s in subs), hits, sum(s[2] for s in subs)
+        if "not" in node:                       # G2-4 DSL 支持 NOT（叶子计数取反）
+            hit, score, total = _rec(node["not"])
+            return (not hit), (total - score), total
         matched = _eval_leaf(node, bars)
         return matched, (1 if matched else 0), 1
 
