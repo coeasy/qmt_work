@@ -81,3 +81,16 @@ async def market_screen_boards_save(body: Dict[str, Any]):
 async def market_screen_boards_list():
     """列出已保存的动态板块（名称 + 成员数）。"""
     return ok({"items": list_saved_boards(), "count": len(list_saved_boards())})
+
+
+@router.post("/market/screen/nl")
+async def market_screen_nl(body: Dict[str, Any]):
+    """G8 自然语言选股：{text} → 可编辑条件树（conditions/rules/unsupported）。
+    条件树与 /market/screen 完全兼容，用户可回显修改后执行。"""
+    from app.agent.nl_screen import parse_nl
+    text = (body or {}).get("text")
+    try:
+        out = parse_nl(text)
+    except ValueError as exc:
+        return err(400, str(exc))
+    return ok(out)
