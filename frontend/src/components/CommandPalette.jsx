@@ -2,6 +2,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { PAGE_TREE } from "../pagesRegistry.jsx";
 import { navTo, navToQuote } from "../lib/nav.js";
+import { t } from "../lib/i18n.js";
 
 export default function CommandPalette() {
   const [open, setOpen] = useState(false);
@@ -92,7 +93,7 @@ export default function CommandPalette() {
               className={`cmd-item ${i === idx ? "active" : ""}`}
               onMouseEnter={() => setIdx(i)}
               onClick={() => choose(it)}>
-              <span className="cmd-label">{it.label}</span>
+              <span className="cmd-label">{t(`page.${it.key}`)}</span>
               <span className="cmd-group">{it.group}</span>
             </div>
           ))}

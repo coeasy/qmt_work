@@ -27,4 +27,20 @@ describe("i18n 基础框架", () => {
     setLocale("xx");
     expect(getLocale()).toBe("zh");
   });
+
+  it("页面标签 zh/en 全覆盖（导航迁移锚点）", () => {
+    setLocale("zh");
+    expect(t("page.quote")).toBe("行情分析");
+    expect(t("page.trade")).toBe("手动交易");
+    expect(t("page.settings")).toBe("设置");
+    setLocale("en");
+    expect(t("page.quote")).toBe("Quotes");
+    expect(t("page.trade")).toBe("Trade");
+    expect(t("page.settings")).toBe("Settings");
+    // 标题
+    expect(t("page.trade.title")).toBe("Manual Trading");
+    expect(t("tree.行情")).toBe("Market");
+    expect(t("menu.交易")).toBe("Trading");
+    setLocale("zh");
+  });
 });

@@ -1,6 +1,7 @@
 // 左侧功能树（通达信式）：分组可展开/折叠，叶子点击打开工作区标签。
 import { useEffect, useState } from "react";
 import { PAGE_TREE } from "../pagesRegistry.jsx";
+import { t } from "../lib/i18n.js";
 
 export default function FunctionTree({ open = true, onClose }) {
   const [collapsed, setCollapsed] = useState({});
@@ -33,7 +34,7 @@ export default function FunctionTree({ open = true, onClose }) {
           <div className={`fn-group ${collapsed[grp.group] ? "collapsed" : ""}`} key={grp.group}>
             <div className="fn-group-title" onClick={() => toggle(grp.group)}>
               <span className="caret">{collapsed[grp.group] ? "▸" : "▾"}</span>
-              <span className="g-name">{grp.group}</span>
+              <span className="g-name">{t(`tree.${grp.group}`)}</span>
             </div>
             {!collapsed[grp.group] && (
               <div className="fn-items">
@@ -43,7 +44,7 @@ export default function FunctionTree({ open = true, onClose }) {
                     className={`fn-item ${active === it.key ? "active" : ""}`}
                     onClick={() => go(it.key)}
                   >
-                    {it.label}
+                    {t(`page.${it.key}`)}
                   </div>
                 ))}
               </div>

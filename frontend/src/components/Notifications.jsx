@@ -3,6 +3,7 @@ import { api } from "../api.js";
 import { useBatchSelection } from "../hooks/useBatchSelection.js";
 import BatchDeleteBar from "./BatchDeleteBar.jsx";
 import { useActiveInterval } from "../hooks/useActiveInterval.js";
+import { t } from "../lib/i18n.js";
 
 // 通知渠道配置（P2）：钉钉/企微/飞书/邮件/Webhook，含测试与发送日志。
 const CHANNELS = [
@@ -86,7 +87,7 @@ export default function Notifications() {
 
   return (
     <div>
-      <h2 className="page-title">通知渠道配置</h2>
+      <h2 className="page-title">{t(`page.notifications.title`)}</h2>
       <p className="page-sub">
         配置钉钉 / 企业微信 / 飞书 / 邮件 / Webhook 推送，订阅订单成交、风控拦截、涨停触发等事件，支持发送测试与查看发送日志。
       </p>

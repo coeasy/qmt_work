@@ -7,6 +7,7 @@ import { quickTradeNavigate } from "../lib/trade.js";
 import { peek as hubPeek, subscribe as hubSubscribe } from "../lib/dataHub.js";
 import ConfirmTradeModal from "./ui/ConfirmTradeModal.jsx";
 import usePersistentState from "../lib/usePersistentState.js";
+import { t } from "../lib/i18n.js";
 
 // 涨停板 / 打板助手：
 //  - 涨停板：真实行情扫描板块内涨停（或接近涨停）个股，列出最新数据，点击可快速下单
@@ -146,7 +147,7 @@ export default function LimitUp() {
 
   return (
     <div>
-      <h2 className="page-title">涨停板 · 打板助手</h2>
+      <h2 className="page-title">{t(`page.limitup.title`)}</h2>
       <div className="row" style={{ marginBottom: 12 }}>
         <button onClick={() => setView("board")}
                 style={view === "board" ? { background: "var(--accent)", color: "#fff" } : {}}>涨停板</button>

@@ -6,6 +6,7 @@ import { consumePendingPrefill } from "../lib/trade.js";
 import { useActiveInterval } from "../hooks/useActiveInterval.js";
 import ConfirmTradeModal from "./ui/ConfirmTradeModal.jsx";
 import usePersistentState from "../lib/usePersistentState.js";
+import { t } from "../lib/i18n.js";
 
 // 手动交易面板：下单 / 持仓 / 委托 / 成交 / 条件单 / 目标仓位（全部真实接口，下单过风控）
 // v3：支持叶子 params 直达预填（navTo("trade", {params}) 协议通道），
@@ -204,7 +205,7 @@ export default function Trade({ params } = {}) {
 
   return (
     <div>
-      <h2 className="page-title">手动交易</h2>
+      <h2 className="page-title">{t(`page.trade.title`)}</h2>
       <p className="page-sub">
         真实下单（过风控），订单/成交实时状态推送
         {activeBroker && <span className="muted"> · {activeBroker.broker_name} · {activeBroker.account_id || "—"}</span>}

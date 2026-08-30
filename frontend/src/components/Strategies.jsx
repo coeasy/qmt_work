@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { api } from "../api.js";
 import StrategyRunner from "./StrategyRunner.jsx";
+import { t as _t } from "../lib/i18n.js";
 
 // 策略模板库：借鉴 QMT-MCP 的 generate_ma_strategy / save_qmt_strategy
 const TYPES = [
@@ -59,7 +60,7 @@ export default function Strategies() {
 
   return (
     <div>
-      <h2 className="page-title">策略模板库</h2>
+      <h2 className="page-title">{_t(`page.strategies.title`)}</h2>
       <p className="page-sub">借鉴 QMT-MCP：一键生成策略代码（ma_cross/macd/rsi/limitup）。可直接写盘到 QMT 客户端，或「一键运行」在平台内当成机器人实盘/模拟执行。</p>
       {err && <div className="toast err">{err}</div>}
 

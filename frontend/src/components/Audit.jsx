@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { api } from "../api.js";
 import { useActiveInterval } from "../hooks/useActiveInterval.js";
+import { t } from "../lib/i18n.js";
 
 // 审计日志：所有交易动作（下单/撤单/算法单/打板/风控拒绝/连接变更）全程可追溯
 const ACTIONS = ["", "order.submitted", "order.rejected", "order.cancel", "order.cancel_price",
@@ -37,7 +38,7 @@ export default function Audit() {
 
   return (
     <div>
-      <h2 className="page-title">审计日志</h2>
+      <h2 className="page-title">{t(`page.audit.title`)}</h2>
       <p className="page-sub">全部交易动作（下单/撤单/算法单/打板/风控拒绝/连接变更/风控配置）可追溯，15s 自动刷新</p>
       {err && <div className="toast err">{err}</div>}
 

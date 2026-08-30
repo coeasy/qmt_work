@@ -3,6 +3,7 @@ import { api, getApiKey, setApiKey } from "../api.js";
 import { useBatchSelection } from "../hooks/useBatchSelection.js";
 import BatchDeleteBar from "./BatchDeleteBar.jsx";
 import { useBroker } from "../BrokerContext.jsx";
+import { getLocale, setLocale, t } from "../lib/i18n.js";
 
 export default function Settings() {
   const { brokers, connectedCount, activeBroker } = useBroker();
@@ -10,6 +11,7 @@ export default function Settings() {
   const [newKey, setNewKey] = useState("");
   const [msg, setMsg] = useState(null);
   const [apiKeyLocal, setApiKeyLocal] = useState(getApiKey());
+  const [locale, setLocaleState] = useState(getLocale());   // T25 i18n 语言切换
   const isElectron = typeof window !== "undefined" && !!window.electronAPI;
   const [batchBusy, setBatchBusy] = useState(false);
   const bsel = useBatchSelection(keys, "id");
@@ -159,9 +161,21 @@ export default function Settings() {
 
   return (
     <div>
-      <h2 className="page-title">设置</h2>
+      <h2 className="page-title">{t(`page.settings.title`)}</h2>
       <p className="page-sub">第三方 API Key（供外部服务接入）与我方运行参数管理</p>
       {msg && <div className={`toast ${msg.ok ? "ok" : "err"}`}>{msg.t}</div>}
+
+      {/* T25 i18n：界面语言切换（导航/标题/通用操作已国际化，长文案按页渐进） */}
+      <div className="card" style={{ marginBottom: 16 }}>
+        <h3>界面语言 / Language</h3>
+        <div className="row">
+          <button className={`ib-btn ${locale === "zh" ? "active" : ""}`}
+            onClick={() => { setLocale("zh"); setLocaleState("zh"); }}>中文</button>
+          <button className={`ib-btn ${locale === "en" ? "active" : ""}`}
+            onClick={() => { setLocale("en"); setLocaleState("en"); }}>English</button>
+          <span className="muted">切换后立即生效（导航/标题/空态/确认弹窗已国际化，正文长文案按页渐进迁移）</span>
+        </div>
+      </div>
 
       <div className="card" style={{ marginBottom: 16 }}>
         <h3>券商连接状态</h3>

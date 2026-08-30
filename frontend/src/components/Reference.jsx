@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "../api.js";
+import { t as _t } from "../lib/i18n.js";
 
 // 参考数据：交易日历 / 板块列表 / 板块成分 / 财务摘要 / L2 逐笔（借鉴 quant-qmt-proxy 参考数据能力）
 export default function Reference() {
@@ -48,7 +49,7 @@ export default function Reference() {
 
   return (
     <div>
-      <h2 className="page-title">参考数据</h2>
+      <h2 className="page-title">{_t(`page.reference.title`)}</h2>
       <p className="page-sub">交易日历 / 板块成分 / 财务摘要 / Level-2 逐笔（真实数据，需已连接券商）</p>
       {err && <div className="toast err">{err}</div>}
 

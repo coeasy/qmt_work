@@ -5,6 +5,7 @@ import { useBroker } from "../BrokerContext.jsx";
 import { api } from "../api.js";
 import { useBatchSelection } from "../hooks/useBatchSelection.js";
 import BatchDeleteBar from "./BatchDeleteBar.jsx";
+import { t as _t } from "../lib/i18n.js";
 
 const ACCOUNT_TYPES = ["STOCK", "CREDIT", "OPTION", "FUTURES"];
 
@@ -242,7 +243,7 @@ export default function Brokers() {
 
   return (
     <div>
-      <h2 className="page-title">券商连接管理</h2>
+      <h2 className="page-title">{_t(`page.brokers.title`)}</h2>
       <p className="page-sub">
         支持多券商（国金 / 华鑫 / 银河 / 中信建投 / 兴业 / 广发 / 同花顺 / 恒生PTrade / 掘金）× 多客户端版本。
         所有下单 / 行情均经真实券商 SDK，未连接时页面给出明确提示，不返回任何假数据。

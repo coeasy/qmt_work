@@ -29,6 +29,7 @@ import { fetchIndicator, indicatorKey } from "../lib/indicators.js";
 import { subscribe as hubSubscribe, invalidate } from "../lib/dataHub.js";
 // 金额格式化直接引唯一实现（不再经 useMarket 别名中转，链路更短更明确）
 import { fmtAmount } from "../lib/format.js";
+import { t as _t } from "../lib/i18n.js";
 
 // 旧版遗留的悬空引用（fmtPct 未定义，涨跌幅一渲染就会 ReferenceError）——根治为别名
 const fmtPct = formatPct;
@@ -835,7 +836,7 @@ export default function MarketData({ params, leafId, tabId, dispatch } = {}) {
       {/* 顶栏 1：标题 + WS 状态 + 代码/名/价/涨跌 */}
       <div className="mp-header">
         <div className="mp-title-row">
-          <h2 className="page-title">行情分析</h2>
+          <h2 className="page-title">{_t(`page.quote.title`)}</h2>
           <span className={`ws-badge ws-${hubState}`}>
             {hubState === "connected" ? "● 已连接"
               : hubState === "reconnecting" ? "⟳ 重连…"

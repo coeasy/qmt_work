@@ -4,6 +4,7 @@ import { useBroker } from "../BrokerContext.jsx";
 import { useSystemStatus, useServerEvents } from "../hooks/useSystemWS.js";
 import { useActiveInterval } from "../hooks/useActiveInterval.js";
 import Chart from "./Chart.jsx";
+import { t } from "../lib/i18n.js";
 
 export default function Dashboard() {
   const { activeId, activeBroker } = useBroker();
@@ -58,7 +59,7 @@ export default function Dashboard() {
   const positions = (status?.positions || []);
   return (
     <div>
-      <h2 className="page-title">仪表盘</h2>
+      <h2 className="page-title">{t(`page.dashboard.title`)}</h2>
       <p className="page-sub">
         账户总览与净值曲线（事件驱动 · 兜底 30s 刷新）
         {activeBroker && <span className="muted"> · 当前连接：{activeBroker.broker_name} · {activeBroker.account_id || "—"}</span>}

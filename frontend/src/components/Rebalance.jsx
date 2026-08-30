@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { api } from "../api.js";
 import { useBroker } from "../BrokerContext.jsx";
+import { t } from "../lib/i18n.js";
 
 export default function Rebalance() {
   const { activeId, activeBroker } = useBroker();
@@ -34,7 +35,7 @@ export default function Rebalance() {
 
   return (
     <div>
-      <h2 className="page-title">分仓再平衡</h2>
+      <h2 className="page-title">{t(`page.rebalance.title`)}</h2>
       <p className="page-sub">
         按目标市值占比计算差额并生成调仓单（EzQmt Reblance 等权篮子；阈值过滤 + 拆单 + 涨跌停跳过）
         {activeBroker && <span className="muted"> · 当前连接：{activeBroker.broker_name}</span>}

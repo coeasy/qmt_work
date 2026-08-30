@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { t } from "../../lib/i18n.js";
 
 // 金融操作二次确认弹窗（T3/T19 统一）—— 替换 window.confirm 与裸一次点击下单。
 //
@@ -58,7 +59,7 @@ export default function ConfirmTradeModal({ pending, busy, onClose, risk = "high
     >
       <div className={`ctm-panel ${risk === "high" ? "ctm-danger" : ""}`}>
         <div className="ctm-head">
-          <span className="ctm-title">{pending.title || "确认操作"}</span>
+          <span className="ctm-title">{pending.title || t("common.confirm")}</span>
           <button className="ctm-close" onClick={() => !busy && onClose()} aria-label="关闭" disabled={busy}>×</button>
         </div>
         {risk === "high" && <div className="ctm-warn">此操作将真实提交委托/变更，请核对以下信息</div>}
@@ -78,14 +79,14 @@ export default function ConfirmTradeModal({ pending, busy, onClose, risk = "high
           </label>
         )}
         <div className="ctm-actions">
-          <button className="btn btn-sm" onClick={onClose} disabled={busy}>取消</button>
+          <button className="btn btn-sm" onClick={onClose} disabled={busy}>{t('common.cancel')}</button>
           <button
             ref={confirmRef}
             className="btn btn-sm btn-danger-sm"
             disabled={busy || !canConfirm}
             onClick={() => { if (pending.onConfirm) pending.onConfirm(); }}
           >
-            {busy ? "执行中…" : (pending.confirmText || "确认执行")}
+            {busy ? t("common.loading") : (pending.confirmText || t("common.confirm"))}
           </button>
         </div>
       </div>

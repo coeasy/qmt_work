@@ -5,6 +5,7 @@ import { api } from "../api.js";
 import { useServerEvents } from "../hooks/useSystemWS.js";
 import { useActiveInterval } from "../hooks/useActiveInterval.js";
 import ConfirmTradeModal from "./ui/ConfirmTradeModal.jsx";
+import { t } from "../lib/i18n.js";
 
 const PRICE_TYPES = [
   { v: "limit", t: "限价" },
@@ -66,7 +67,7 @@ export default function AccountsGrid() {
     <div>
       <div className="row" style={{ justifyContent: "space-between" }}>
         <div>
-          <h2 className="page-title">多账户网格</h2>
+          <h2 className="page-title">{t(`page.accounts.title`)}</h2>
           <p className="page-sub">
             跨券商 / 跨账户统一看板：逐账户资产、持仓矩阵与批量下单 / 撤单 / 重连。未连接账户一并列出（error 说明原因）。
           </p>

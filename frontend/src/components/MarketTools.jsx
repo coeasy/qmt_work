@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { api } from "../api.js";
+import { t } from "../lib/i18n.js";
 
 /* 行情工具（补齐 /market/quote、/market/crawl、/market/kline/cache 前端入口）
    - 实时报价：单票最新快照（最新价 / 涨跌幅 / 成交量 / 五档）
@@ -102,7 +103,7 @@ export default function MarketTools() {
 
   return (
     <div>
-      <h2 className="page-title">行情工具</h2>
+      <h2 className="page-title">{t(`page.markettools.title`)}</h2>
       <p className="page-sub">
         补齐行情类孤儿接口的前端入口：单票实时报价、K 线缓存查看与清理、手动触发行情抓取落库。
         未连接券商时统一返回 503 引导，不返回任何假数据。

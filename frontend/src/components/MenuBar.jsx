@@ -5,6 +5,7 @@
 import { useState, useRef, useEffect } from "react";
 import Ticker from "./Ticker.jsx";
 import { PAGES } from "../pagesRegistry.jsx";
+import { t } from "../lib/i18n.js";
 
 // 9 个主菜单（按 TDX 习惯顺序）：系统 / 行情 / 分析 / 交易 / 策略 / 组合 / 研究 / 信号 / 账户 / 运维
 const MENUS = [
@@ -50,7 +51,7 @@ export default function MenuBar() {
               className="menu-btn"
               onClick={() => setOpenIdx((v) => (v === i ? -1 : i))}
               aria-expanded={openIdx === i}
-            >{m.label}</button>
+            >{t(`menu.${m.label}`)}</button>
             {openIdx === i && (
               <div className="menu-dropdown" onMouseEnter={cancelClose} onMouseLeave={scheduleClose}>
                 {m.keys.map((k) => {
@@ -58,7 +59,7 @@ export default function MenuBar() {
                   if (!item) return null;
                   return (
                     <div key={k} className="menu-item" onClick={() => open(k)}>
-                      <span className="menu-item-label">{item.label}</span>
+                      <span className="menu-item-label">{t(`page.${k}`)}</span>
                       {item.hint && <span className="menu-item-hint">{item.hint}</span>}
                     </div>
                   );
