@@ -14,6 +14,7 @@ import Chart from "./Chart.jsx";
 import { PALETTE } from "../lib/chartPalette.js";
 import { formatPct, formatAmount } from "../hooks/useMarket.js";
 import { navTo, navToQuote } from "../lib/nav.js";
+import useEscClose from "../hooks/useEscClose.js";
 
 const PAGE_SIZE = 50;
 const SORTS = [
@@ -46,6 +47,7 @@ export default function Etfs() {
   const [pctMax, setPctMax] = useState("");
   // H2 详情抽屉
   const [sel, setSel] = useState(null);   // {code, name}
+useEscClose(sel != null, () => setSel(null));   // T18 ESC 关闭详情面板
   // C1：数据源选择（auto/broker/eltdx），ref 供 load 闭包读取最新值
   const [srcSel, setSrcSel] = useState("auto");
   const srcRef = useRef(srcSel);

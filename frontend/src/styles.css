@@ -1164,3 +1164,9 @@ input[type="checkbox"] { width: 15px; height: 15px; cursor: pointer; accent-colo
 /* ================= T5 G8 自然语言选股入口 ================= */
 .sc-nlbar { background: rgba(79,140,255,.06); border: 1px solid rgba(79,140,255,.18); border-radius: 6px; padding: 6px 8px; }
 .sc-nlinput { flex: 1; min-width: 260px; }
+
+/* ================= T21 无障碍 ================= */
+button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible,
+[tabindex]:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.up-arrow::before { content: "▲ "; font-size: 9px; vertical-align: 1px; }
+.down-arrow::before { content: "▼ "; font-size: 9px; vertical-align: 1px; }

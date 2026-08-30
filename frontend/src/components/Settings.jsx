@@ -310,7 +310,7 @@ export default function Settings() {
       <div className="card">
         <h3>第三方 API Key（列表 / 创建 / 轮换 / 停用 / 删除）</h3>
           <div className="row">
-            <input style={{ flex: 1 }} value={newKey} placeholder="名称" onChange={(e) => setNewKey(e.target.value)} />
+            <input style={{ flex: 1 }} value={newKey} placeholder="名称" maxLength={64} aria-label="API Key 名称" onChange={(e) => setNewKey(e.target.value)} />
             <button onClick={createKey}>生成</button>
             <span className="muted">创建 / 轮换后仅显示一次完整密钥，请妥善保存</span>
           </div>

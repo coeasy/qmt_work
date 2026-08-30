@@ -855,7 +855,8 @@ export default function MarketData({ params, leafId, tabId, dispatch } = {}) {
           <input className="mp-code-input" value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && subscribe()}
-            placeholder="代码 如 600519.SH" />
+            placeholder="代码 如 600519.SH"
+            maxLength={20} aria-label="股票代码" />
           <button onClick={subscribe}>订阅</button>
 
           <div className="mp-periods">

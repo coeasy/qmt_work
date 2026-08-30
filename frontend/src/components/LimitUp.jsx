@@ -5,6 +5,7 @@ import { useActiveInterval } from "../hooks/useActiveInterval.js";
 import { fmtAmount, fmtLimitDur } from "../lib/format.js";
 import { quickTradeNavigate } from "../lib/trade.js";
 import ConfirmTradeModal from "./ui/ConfirmTradeModal.jsx";
+import usePersistentState from "../lib/usePersistentState.js";
 
 // 涨停板 / 打板助手：
 //  - 涨停板：真实行情扫描板块内涨停（或接近涨停）个股，列出最新数据，点击可快速下单
@@ -12,7 +13,7 @@ import ConfirmTradeModal from "./ui/ConfirmTradeModal.jsx";
 const SECTORS = ["沪深A股", "沪深京A股", "创业板", "科创板", "上证50", "沪深300", "中证500", "中证1000"];
 
 export default function LimitUp() {
-  const [view, setView] = useState("board"); // board | monitor
+  const [view, setView] = usePersistentState("limitup:view", "board"); // board | monitor
 
   // ---------- 涨停板（盘口扫描） ----------
   const [board, setBoard] = useState([]);

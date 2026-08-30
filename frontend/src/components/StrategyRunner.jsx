@@ -3,6 +3,7 @@ import { api } from "../api.js";
 import { useBatchSelection } from "../hooks/useBatchSelection.js";
 import BatchDeleteBar from "./BatchDeleteBar.jsx";
 import { useActiveInterval } from "../hooks/useActiveInterval.js";
+import useEscClose from "../hooks/useEscClose.js";
 
 // 策略运行容器（P0）：在平台内把生成的策略当作实盘/模拟机器人运行。
 // 复用与模板生成一致的信号逻辑（ma_cross/macd/rsi/limitup），真实行情 + 真实/模拟下单。
@@ -90,6 +91,7 @@ export default function StrategyRunner({ prefill }) {
   const [msg, setMsg] = useState("");
   const [logs, setLogs] = useState({});       // run_id -> logs[]
   const [openLog, setOpenLog] = useState(null);
+useEscClose(openLog != null, () => setOpenLog(null));   // T18 ESC 关闭日志面板
   const [precheck, setPrecheck] = useState(null);
   const [busy, setBusy] = useState(false);
   const [loadId, setLoadId] = useState("");

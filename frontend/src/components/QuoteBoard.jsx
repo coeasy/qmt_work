@@ -6,6 +6,7 @@ import { navToQuote } from "../lib/nav.js";
 import { useQuotes } from "../lib/quoteHub.jsx";
 // 金额格式化统一走 lib/format.js（原本地副本已删除，避免第 3 份口径漂移）
 import { fmtAmount } from "../lib/format.js";
+import usePersistentState from "../lib/usePersistentState.js";
 
 const WATCH_KEY = "qmt_work.watchlist.v1";
 
@@ -62,7 +63,7 @@ function derive(q) {
 }
 
 export default function QuoteBoard() {
-  const [board, setBoard] = useState("sector"); // sector | watch | rank
+  const [board, setBoard] = usePersistentState("quoteboard:board", "sector"); // sector | watch | rank
   const [sector, setSector] = useState(""); // 板块/综合排名 选中的板块
   const [sectors, setSectors] = useState([]);
   const [codes, setCodes] = useState([]);

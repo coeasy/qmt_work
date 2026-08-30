@@ -97,7 +97,10 @@ export default function Ticker() {
         onClick={() => navToQuote(c, { period: "tick" })}>
         <span className="ticker-name">{names[c] || c}</span>
         <span className="ticker-val">{last != null ? last.toFixed(2) : "—"}</span>
-        <span className={cls}>{pct != null ? (pct >= 0 ? "+" : "") + pct.toFixed(2) + "%" : "—"}</span>
+        {/* T21：涨跌加 ▲/▼ 文本（色盲可达，不只靠颜色） */}
+        <span className={`${cls} ${pct == null ? "" : pct >= 0 ? "up-arrow" : "down-arrow"}`}>
+          {pct != null ? (pct >= 0 ? "+" : "") + pct.toFixed(2) + "%" : "—"}
+        </span>
         <Sparkline points={sp} up={spUp} />
       </span>
     );

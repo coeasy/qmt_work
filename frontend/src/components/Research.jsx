@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api } from "../api.js";
 import { useBroker } from "../BrokerContext.jsx";
+import usePersistentState from "../lib/usePersistentState.js";
 
 /* 研究深度层（阶段 3）：因子 IC/ICIR · 分位分组 · 相关性矩阵 · 组合回测 · walk-forward · 绩效归因
    全部基于真实券商 K 线 / 真实成交，无假数据；降级路径由后端标注 source。 */
@@ -33,7 +34,7 @@ function KV({ k, v, hint }) {
 
 export default function Research() {
   const { activeId, brokers } = useBroker();
-  const [tab, setTab] = useState("ic");
+  const [tab, setTab] = usePersistentState("research:tab", "ic");
   const [connId, setConnId] = useState(activeId);
   const [msg, setMsg] = useState(null);
   const [loading, setLoading] = useState(false);

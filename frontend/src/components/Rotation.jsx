@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { api } from "../api.js";
 import { subscribe, invalidate } from "../lib/dataHub.js";
 import { formatPct } from "../hooks/useMarket.js";
+import usePersistentState from "../lib/usePersistentState.js";
 
 // 涨跌幅 → 背景色（红涨绿跌，CN 惯例；强度随绝对值 0~5% 线性，封顶饱和）。
 function heatBg(pct) {
@@ -15,7 +16,7 @@ function heatBg(pct) {
 
 export default function Rotation() {
   const [days, setDays] = useState(5);
-  const [kind, setKind] = useState("industry");
+  const [kind, setKind] = usePersistentState("rotation:kind", "industry");
   const [topN, setTopN] = useState(40);
   const [rows, setRows] = useState([]);
   const [meta, setMeta] = useState(null);
