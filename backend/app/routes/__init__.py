@@ -23,6 +23,7 @@ import app.routes.rebalance as rebalance
 import app.routes.reconcile as reconcile
 import app.routes.reference as reference
 import app.routes.research as research
+import app.routes.runtime as runtime
 import app.routes.screen as screen
 import app.routes.signal as signal
 import app.routes.strategies as strategies
@@ -67,3 +68,4 @@ router.include_router(capabilities.router)
 router.include_router(indicators.router)
 router.include_router(screen.router)
 router.include_router(analysis.router)
+router.include_router(runtime.router)

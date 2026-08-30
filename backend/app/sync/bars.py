@@ -141,10 +141,24 @@ class BarsSyncer:
                 return SyncOutcome(code=code, error=f"落库失败：{exc}")
             return SyncOutcome(code=code, ok=True, bars_written=n)
 
-    async def sync_many(self, codes: Sequence[str]) -> SyncSummary:
+    async def sync_many(self, codes: Sequence[str],
+                        progress_cb: Optional[Callable[[int, int, str], None]] = None
+                        ) -> SyncSummary:
+        """批量同步（G6 进度钩子：progress_cb(done, total, code) 每完成一只回调）。"""
         started = now_iso()
         t0 = time.perf_counter()
-        outcomes = await asyncio.gather(*[self.sync_one(c) for c in codes])
+        done = 0
+        total = len(codes)
+
+        async def _tracked(code: str):
+            nonlocal done
+            out = await self.sync_one(code)
+            done += 1
+            if progress_cb:
+                progress_cb(done, total, code)
+            return out
+
+        outcomes = await asyncio.gather(*[_tracked(c) for c in codes])
         ok = [o for o in outcomes if o.ok]
         failed = [o for o in outcomes if not o.ok]
         summary = SyncSummary(
@@ -166,7 +180,9 @@ class BarsSyncer:
                      summary.ok, summary.bars_written, summary.elapsed_ms)
         return summary
 
-    async def sync_stock_list(self, limit: Optional[int] = None) -> SyncSummary:
+    async def sync_stock_list(self, limit: Optional[int] = None,
+                              progress_cb: Optional[Callable[[int, int, str], None]] = None
+                              ) -> SyncSummary:
         """同步全市场股票列表（先刷列表，再按需同步 K 线）。"""
         from app.datasource.registry import get_hub as _hub
         items = await _hub().get_stock_list(source="auto")
@@ -178,7 +194,7 @@ class BarsSyncer:
         codes = [str(i.get("code")) for i in items if i.get("code")]
         if limit:
             codes = codes[: int(limit)]
-        return await self.sync_many(codes)
+        return await self.sync_many(codes, progress_cb=progress_cb)
 
 
 async def _main(limit: int, concurrency: int, lookback: int) -> int:

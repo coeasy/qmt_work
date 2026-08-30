@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from app.datasource.local_store import LocalStore, get_store
 from app.screener.conditions import evaluate
@@ -34,6 +34,7 @@ def scan(
     min_price: Optional[float] = None,
     max_price: Optional[float] = None,
     max_codes: int = 0,
+    progress_cb: Optional[Callable[[int, int], None]] = None,   # (done, total) 每 50 只回调
 ) -> Dict[str, Any]:
     """全市场条件扫描（本地仓）。
 
@@ -54,7 +55,10 @@ def scan(
 
     results: List[dict] = []
     scanned = 0
-    for code in codes:
+    total = len(codes)
+    for idx, code in enumerate(codes):
+        if progress_cb and idx % 50 == 0:
+            progress_cb(idx, total)
         bars = st.get_bars(code, period=period, adjust=adjust, limit=250)
         if not bars:
             continue
