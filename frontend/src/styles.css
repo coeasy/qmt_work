@@ -1170,3 +1170,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 [tabindex]:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .up-arrow::before { content: "▲ "; font-size: 9px; vertical-align: 1px; }
 .down-arrow::before { content: "▼ "; font-size: 9px; vertical-align: 1px; }
+
+/* ================= G9 多图联动 ================= */
+.bd-linked { position: absolute; top: 4px; right: 8px; z-index: 5; }
+.bd-chart { position: relative; }

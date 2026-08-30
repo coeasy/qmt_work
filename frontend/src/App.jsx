@@ -19,6 +19,7 @@ import CommandPalette from "./components/CommandPalette.jsx";
 import HelpOverlay from "./components/HelpOverlay.jsx";
 import { WorkspaceProvider } from "./store/workspace.jsx";
 import { QuoteHubProvider } from "./lib/quoteHub.jsx";
+import { ChartConfigProvider } from "./lib/chartConfig.jsx";
 import { useHotkeys } from "./hooks/useHotkeys.js";
 
 export default function App() {
@@ -44,7 +45,8 @@ export default function App() {
   return (
     <BrokerProvider>
       <QuoteHubProvider>
-        <WorkspaceProvider>
+        <ChartConfigProvider>
+          <WorkspaceProvider>
           <ErrorBoundary>
             <div className="tdx-app">
               <MenuBar />
@@ -67,7 +69,8 @@ export default function App() {
               <HelpOverlay />
             </div>
           </ErrorBoundary>
-        </WorkspaceProvider>
+          </WorkspaceProvider>
+        </ChartConfigProvider>
       </QuoteHubProvider>
     </BrokerProvider>
   );

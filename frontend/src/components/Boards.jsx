@@ -8,6 +8,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api.js";
 import Chart from "./Chart.jsx";
 import { PALETTE } from "../lib/chartPalette.js";
+import { useChartSpec, onIndicatorChange } from "../lib/chartConfig.jsx";
 import { formatPct, formatAmount } from "../hooks/useMarket.js";
 import { navToQuote } from "../lib/nav.js";
 import { useQuotes } from "../lib/quoteHub.jsx";
@@ -36,6 +37,9 @@ const pctCls = (v) => (v == null ? "" : v >= 0 ? "up" : "down");
 export default function Boards({ params } = {}) {
   const [kind, setKind] = useState("industry");
   const [sortBy, setSortBy] = useState("pct");
+  const { spec: chartSpec } = useChartSpec();   // G9 chart-spec 单一真源
+  const [linkedInd, setLinkedInd] = useState(null); // G9 跨页联动指标（来自行情页）
+  useEffect(() => onIndicatorChange((d) => setLinkedInd(d.sub || d.main || null)), []);
   const [rows, setRows] = useState([]);
   const [source, setSource] = useState("");
   const [loading, setLoading] = useState(false);
@@ -193,7 +197,8 @@ export default function Boards({ params } = {}) {
       ],
       series: [
         { name: "板块指数", type: "line", data: closes, showSymbol: false,
-          lineStyle: { width: 1.5, color: closes[closes.length - 1] >= closes[0] ? PALETTE.up : PALETTE.down },
+          lineStyle: { width: 1.5, color: closes[closes.length - 1] >= closes[0]
+            ? (chartSpec?.candlestick?.up || PALETTE.up) : (chartSpec?.candlestick?.down || PALETTE.down) },
           areaStyle: { color: "rgba(79,140,255,.10)" } },
         { name: "成交量(手)", type: "bar", xAxisIndex: 1, yAxisIndex: 1, data: vols,
           itemStyle: (p) => ({ color: volColors[p.dataIndex] }) },
@@ -291,6 +296,11 @@ export default function Boards({ params } = {}) {
                 {cons?.total != null && <span className="muted">成分 {cons.total} 只（实时刷新前 {Math.min(cons.items?.length || 0, 200)}）</span>}
               </div>
               <div className="card bd-chart">
+                {linkedInd && (
+                  <span className="tag run bd-linked" title="行情页切换指标时联动">
+                    联动副图：{String(linkedInd).toUpperCase()}
+                  </span>
+                )}
                 <Chart option={klineOption} height={200} />
               </div>
               <div className="card bd-cons">

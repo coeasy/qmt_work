@@ -22,6 +22,7 @@ import { useQuotes } from "../lib/quoteHub.jsx";
 import ErrorBoundary from "./ErrorBoundary.jsx";
 import { useActiveInterval } from "../hooks/useActiveInterval.js";
 import { PALETTE, changeColor, SUB_LINE_COLORS, MAIN_LINE_COLORS } from "../lib/chartPalette.js";
+import { useChartSpec, mainIndicatorOptions, subIndicatorOptions, broadcastIndicatorChange } from "../lib/chartConfig.jsx";
 
 // G2-3：指标单一真源——前端不再自带指标计算，统一消费后端引擎
 import { fetchIndicator, indicatorKey } from "../lib/indicators.js";
@@ -111,6 +112,7 @@ export default function MarketData({ params, leafId, tabId, dispatch } = {}) {
   // 局部"被 tick 就地改写过的 bars"：以 hook 输出为基底，WS tick 到达时改最后一根
   const [barsOverlay, setBarsOverlay] = useState([]);
   // 真实 bars/loading/err/meta/stockInfo/financial 全部由 useKline / useFundamentals 产出
+  const { spec: chartSpec } = useChartSpec();   // G9 chart-spec 单一真源
   const [mainInd, setMainInd] = useState("ma");
   const [subInd, setSubInd] = useState("macd");
   // G2-3：后端指标计算结果缓存（key = indicatorKey(name, params) → outputs）
@@ -881,11 +883,17 @@ export default function MarketData({ params, leafId, tabId, dispatch } = {}) {
           <input type="number" className="mp-count-input" min={30} max={1000} value={count}
             onChange={(e) => setCount(Math.max(30, Math.min(1000, +e.target.value || 180)))} />
 
-          <select value={mainInd} onChange={(e) => setMainInd(e.target.value)} title="主图指标">
-            {MAIN_INDICATORS.map((ind) => <option key={ind.v} value={ind.v}>{ind.label}</option>)}
+          <select value={mainInd}
+            onChange={(e) => { setMainInd(e.target.value); broadcastIndicatorChange(e.target.value, subInd); }}
+            title="主图指标">
+            {(mainIndicatorOptions(chartSpec).length > 1 ? mainIndicatorOptions(chartSpec) : MAIN_INDICATORS)
+              .map((ind) => <option key={ind.v} value={ind.v}>{ind.label}</option>)}
           </select>
-          <select value={subInd} onChange={(e) => setSubInd(e.target.value)} title="副图指标">
-            {SUB_INDICATORS.map((ind) => <option key={ind.v} value={ind.v}>{ind.label}</option>)}
+          <select value={subInd}
+            onChange={(e) => { setSubInd(e.target.value); broadcastIndicatorChange(mainInd, e.target.value); }}
+            title="副图指标">
+            {(subIndicatorOptions(chartSpec).length > 0 ? subIndicatorOptions(chartSpec) : SUB_INDICATORS)
+              .map((ind) => <option key={ind.v} value={ind.v}>{ind.label}</option>)}
           </select>
 
           <button className="ghost btn-sm" onClick={forceKline} disabled={loading}>
