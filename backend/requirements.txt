@@ -23,3 +23,5 @@ fakeredis>=2.0
 # 原因：eltdx 采用「ELTDX Research-Only License」，禁止一切商业使用；
 #      作为主依赖会导致本仓库无法满足商用前置条件。详见 docs/THIRD_PARTY_LICENSES.md 3.2 节。
 # 本文件保持「可商用」的最小依赖集；缺失 eltdx 时行情层自动降级为券商数据源。
+# G10-4 统一导出 Excel 支持（app/export）
+openpyxl>=3.1

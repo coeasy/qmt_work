@@ -1,37 +1,38 @@
 # 路由聚合：各业务域子模块统一挂载到 /api/v1（保持 main.py 的 include_router(router) 接口不变）。
 from fastapi import APIRouter
 
-import app.routes.broker as broker
 import app.routes.account as account
-import app.routes.rebalance as rebalance
-import app.routes.backtest as backtest
-import app.routes.market as market
-import app.routes.config as config
-import app.routes.health as health
-import app.routes.audit as audit
-import app.routes.metrics as metrics
-import app.routes.apikeys as apikeys
-import app.routes.notifications as notifications
-import app.routes.webhooks as webhooks
 import app.routes.alerts as alerts
-import app.routes.reconcile as reconcile
-import app.routes.signal as signal
-import app.routes.target_portfolio as target_portfolio
-import app.routes.limitup as limitup
 import app.routes.algo as algo
-import app.routes.reference as reference
-import app.routes.strategies as strategies
-import app.routes.strategy_run as strategy_run
-import app.routes.trade as trade
-import app.routes.sync as sync
-import app.routes.ws as ws
-import app.routes.factors as factors
-import app.routes.research as research
-import app.routes.paper as paper
-import app.routes.strategy_market as strategy_market
+import app.routes.analysis as analysis
+import app.routes.apikeys as apikeys
+import app.routes.audit as audit
+import app.routes.backtest as backtest
+import app.routes.broker as broker
 import app.routes.capabilities as capabilities
+import app.routes.config as config
+import app.routes.factors as factors
+import app.routes.health as health
 import app.routes.indicators as indicators
+import app.routes.limitup as limitup
+import app.routes.market as market
+import app.routes.metrics as metrics
+import app.routes.notifications as notifications
+import app.routes.paper as paper
+import app.routes.rebalance as rebalance
+import app.routes.reconcile as reconcile
+import app.routes.reference as reference
+import app.routes.research as research
 import app.routes.screen as screen
+import app.routes.signal as signal
+import app.routes.strategies as strategies
+import app.routes.strategy_market as strategy_market
+import app.routes.strategy_run as strategy_run
+import app.routes.sync as sync
+import app.routes.target_portfolio as target_portfolio
+import app.routes.trade as trade
+import app.routes.webhooks as webhooks
+import app.routes.ws as ws
 
 router = APIRouter(prefix="/api/v1")
 router.include_router(broker.router)
@@ -65,3 +66,4 @@ router.include_router(strategy_market.router)
 router.include_router(capabilities.router)
 router.include_router(indicators.router)
 router.include_router(screen.router)
+router.include_router(analysis.router)
