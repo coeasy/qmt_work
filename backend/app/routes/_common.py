@@ -5,9 +5,9 @@
 """
 from fastapi import Request, WebSocket, WebSocketDisconnect
 
+from app import crypto  # noqa: F401  (re-export for routes: config.py/signal.py)
 from app.config import settings
 from app.state import state
-from app import crypto  # noqa: F401  (re-export for routes: config.py/signal.py)
 from xtquant_client.base import BrokerError
 from xtquant_client.manager import ConnectionConfig  # noqa: F401  (re-export for routes: broker.py)
 from xtquant_client.registry import get_profile, list_profiles  # noqa: F401  (re-export for routes: broker.py)

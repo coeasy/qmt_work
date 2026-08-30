@@ -11,15 +11,14 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import pytest
-
 from pathlib import Path
 
-from fastapi.testclient import TestClient
+import pytest
 from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
-from app.state import state
 from app.db import DB
+from app.state import state
 from tools import strategy_market as sm
 
 _BUILTIN = ["ma_cross", "macd", "rsi", "limitup"]

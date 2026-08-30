@@ -8,11 +8,15 @@ import math
 
 from tools import ashare, metrics
 from tools.ashare import (
-    T1Ledger, board_limit_pct, is_limit_down, is_limit_up, limit_price,
+    T1Ledger,
+    board_limit_pct,
+    is_limit_down,
+    is_limit_up,
+    limit_price,
     round_lot,
 )
-from tools.matching import MatchingConfig, simulate
 from tools.backtest import run_backtest_engine
+from tools.matching import MatchingConfig, simulate
 
 
 # ---------------- 合成行情 ----------------
@@ -218,8 +222,8 @@ def test_backtest_vectorized_parity():
 
 # ================= 模拟盘 A 股规则（整手 + T+1） =================
 def test_paper_t1_and_lot():
-    from paper.paper_engine import PaperEngine, _today_date
     import paper.paper_engine as pe
+    from paper.paper_engine import PaperEngine, _today_date
 
     eng = PaperEngine(initial_capital=1_000_000.0)
     # 控制「今天」：买入日为 D1

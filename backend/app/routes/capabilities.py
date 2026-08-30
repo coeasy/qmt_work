@@ -8,8 +8,8 @@
 """
 from fastapi import APIRouter
 
-from app.routes._common import ok
 from app.capabilities import build_capabilities
+from app.routes._common import ok
 
 router = APIRouter()
 

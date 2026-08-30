@@ -322,9 +322,9 @@ def create_app() -> FastAPI:
 
         _pump_task = asyncio.create_task(_pump_guard())
         # 4. 涨停监控 + 算法单引擎（事件推送到 WS）
-        from tools.limitup import LimitUpMonitor
         from tools.algo import AlgoEngine
         from tools.condition_order import ConditionOrderEngine
+        from tools.limitup import LimitUpMonitor
         state.limitup_monitor = LimitUpMonitor(state.broker_manager, state.risk,
                                                state.ws_manager.broadcast, wal=state.wal)
         state.algo_engine = AlgoEngine(state.broker_manager, state.risk,

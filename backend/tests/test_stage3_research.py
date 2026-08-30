@@ -21,7 +21,6 @@ from tools.factor_research import (
     walk_forward,
 )
 
-
 # ---------------- 合成数据 ----------------
 
 def make_kline(n=300, drift=0.001, seed=7):

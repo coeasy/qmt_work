@@ -14,9 +14,15 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
 from xtquant_client.runtime import (  # noqa: E402
-    detect_xtquant_abis, discover_bundled_runtimes, select_runtime,
-    require_runtime_or_raise, ABINotSupportedError, host_python_minor,
-    discover_system_runtimes, _merge_runtimes)
+    ABINotSupportedError,
+    _merge_runtimes,
+    detect_xtquant_abis,
+    discover_bundled_runtimes,
+    discover_system_runtimes,
+    host_python_minor,
+    require_runtime_or_raise,
+    select_runtime,
+)
 
 
 def _mk_xtquant(root: str, abis: list[int], subdir: bool = False) -> str:

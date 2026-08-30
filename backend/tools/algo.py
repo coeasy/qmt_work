@@ -4,7 +4,7 @@
 - 后台 asyncio 任务按时间等分切片，逐片限价/市价下单（价格可选跟随最新价或指定限价）
 - 支持暂停 / 恢复 / 取消 / 查询；每片子单记录到事件列表
 """
-from __future__ import annotations   # 类内有 list() 方法，注解须延迟求值
+from __future__ import annotations  # 类内有 list() 方法，注解须延迟求值
 
 import asyncio
 import logging

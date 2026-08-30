@@ -7,14 +7,17 @@ run_backtest_vectorized 的指标体系必须与 run_backtest_engine 完全相�
 """
 import math
 import os
-import sys
 import random
+import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tools.backtest import (  # noqa: E402
-    _signals, _signals_vectorized, run_backtest_engine,
-    run_backtest_vectorized, run_param_sweep,
+    _signals,
+    _signals_vectorized,
+    run_backtest_engine,
+    run_backtest_vectorized,
+    run_param_sweep,
 )
 
 SEED = 20240814

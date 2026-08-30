@@ -9,14 +9,21 @@ import time
 
 import pytest
 
-from xtquant_client.base import BrokerSDKError
-from xtquant_client.order_status import (
-    normalize_order_status, is_active, is_terminal,
-    PENDING, PARTIAL, FILLED, CANCELLED, REJECTED, UNKNOWN,
-)
-from xtquant_client.xtp import XTPQuantAdapter
 from gateway.order_watchdog import collect_stale
 from gateway.reconcile import OrderReconciler
+from xtquant_client.base import BrokerSDKError
+from xtquant_client.order_status import (
+    CANCELLED,
+    FILLED,
+    PARTIAL,
+    PENDING,
+    REJECTED,
+    UNKNOWN,
+    is_active,
+    is_terminal,
+    normalize_order_status,
+)
+from xtquant_client.xtp import XTPQuantAdapter
 
 
 # ---------------- 统一状态词汇 ----------------

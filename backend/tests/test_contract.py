@@ -17,11 +17,15 @@
 import asyncio
 import time
 
+from sync import SyncEngine
 from xtquant_client.order_status import (
-    FILLED, CANCELLED, REJECTED, UNKNOWN, normalize_order_status,
+    CANCELLED,
+    FILLED,
+    REJECTED,
+    UNKNOWN,
+    normalize_order_status,
 )
 from xtquant_client.xtp import XTPQuantAdapter
-from sync import SyncEngine
 
 
 # ---------------- 契约：完整回调序列 ----------------

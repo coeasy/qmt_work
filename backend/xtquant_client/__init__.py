@@ -12,8 +12,7 @@ registry -> xtp 等）通过 PEP 562 ``__getattr__`` 按需加载。这样嵌入
 xtquant_client.bridge_server`` 可正常启动；主进程 ``from xtquant_client import
 BrokerManager`` 等用法保持不变。
 """
-from .base import (BrokerAdapter, BrokerError, BrokerNotConnectedError,
-                   BrokerSDKError)
+from .base import BrokerAdapter, BrokerError, BrokerNotConnectedError, BrokerSDKError
 
 __all__ = [
     "BrokerAdapter", "BrokerError", "BrokerNotConnectedError", "BrokerSDKError",

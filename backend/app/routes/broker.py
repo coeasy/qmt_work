@@ -1,12 +1,12 @@
-from app.routes._common import ok, err, state, BrokerError, ConnectionConfig, get_profile, list_profiles
-
-from fastapi import APIRouter
 # --- stdlib imports injected by fix_route_imports ---
 import asyncio
 import logging
 import sys
 import time
 
+from fastapi import APIRouter
+
+from app.routes._common import BrokerError, ConnectionConfig, err, get_profile, list_profiles, ok, state
 
 log = logging.getLogger("qmt_work.broker")
 
@@ -112,7 +112,7 @@ async def broker_runtimes():
 
     供排障确认「哪些券商 xtquant ABI 可被进程内直连 / 桥接子进程覆盖」。
     """
-    from xtquant_client.runtime import (host_python_minor, discover_bundled_runtimes)
+    from xtquant_client.runtime import discover_bundled_runtimes, host_python_minor
     bundled = discover_bundled_runtimes()
     return ok({
         "host_python": sys.version.split()[0],
@@ -131,8 +131,7 @@ async def broker_diagnostics(deep: bool = False):
     （首次会 spawn ``py`` 启动器 + 注册表扫描，较重但进程内缓存，故放线程池避免
     阻塞事件循环）。
     """
-    from xtquant_client.runtime import (
-        host_python_minor, discover_bundled_runtimes, discover_system_runtimes)
+    from xtquant_client.runtime import discover_bundled_runtimes, discover_system_runtimes, host_python_minor
 
     host_abi = host_python_minor()
     bundled = discover_bundled_runtimes()
@@ -186,7 +185,7 @@ def _runtime_plan_for(client_path: str):
 
 @router.get("/brokers/profiles")
 async def broker_profiles():
-    from xtquant_client.registry import registry, BROKER_PROFILES
+    from xtquant_client.registry import BROKER_PROFILES, registry
     builtin = {p.id for p in BROKER_PROFILES}
     return ok([{"id": p.id, "name": p.name, "adapter": p.adapter,
                 "supported_account_types": p.supported_account_types,

@@ -393,6 +393,7 @@ def test_condition_safe_int_guards_dirty_counters():
 # ---------------- 下单幂等 ----------------
 def test_idempotency():
     import time
+
     from tools import trading
     trading._IDEMPOTENCY.clear()
     assert trading._idempotent_get("k1") is None
@@ -740,6 +741,7 @@ def test_reconcile_pending_from_wal():
 
 def test_reconcile_no_broker():
     import asyncio as _a
+
     from gateway.reconcile import OrderReconciler
 
     class _NoMgr:
@@ -938,8 +940,8 @@ def _tmp_db():
 
 
 def _cleanup(db, d):
-    import shutil
     import gc
+    import shutil
     try:
         db._conn.close()
     except Exception:  # noqa: BLE001
@@ -970,6 +972,7 @@ def test_kline_cache_basic():
 
 def test_kline_cache_freshness_and_stale():
     import asyncio as _a
+
     from gateway.kline_cache import KlineCache
     db, d = _tmp_db()
     try:
@@ -1052,6 +1055,7 @@ def test_kline_rollover_moves_stale_hot_rows():
 def test_kline_adjust_preserved_on_refetch():
     """普通抓取回写不覆盖已有复权标记（get_or_fetch 复用现存 adjust）。"""
     import asyncio as _a
+
     from gateway.kline_cache import KlineCache
     db, d = _tmp_db()
     try:
@@ -1248,6 +1252,7 @@ def test_config_priority_env_over_json(tmp_path, monkeypatch):
 # ---------------- 交易时段调度（TradingSession） ----------------
 def test_trading_session_weekday_fallback():
     from datetime import datetime
+
     from gateway.trading_session import TradingSession
     ts = TradingSession()   # 未注入日历 -> 周末规则
     # 2026-08-14 周五 盘中 10:00 -> 活跃
@@ -1263,6 +1268,7 @@ def test_trading_session_weekday_fallback():
 
 def test_trading_session_calendar_refresh():
     from datetime import datetime
+
     from gateway.trading_session import TradingSession
     ts = TradingSession()
     # 注入日历：仅包含 20260814（周五）
@@ -1468,8 +1474,9 @@ def test_db_agent_tables_dropped():
 # ---------------- 阶段 3：DB 事务化迁移 + 失败回滚 ----------------
 def test_db_migrate_transactional_rollback(monkeypatch):
     """阶段 3：迁移任一步失败即整体回滚——不留下半成品 schema，也不写版本号。"""
-    import app.db as db_mod
     from pathlib import Path
+
+    import app.db as db_mod
 
     # 构造两条迁移：v10 成功建表；v11 中间含一条非法语句（触发失败）
     fake_migrations = [
@@ -1514,8 +1521,9 @@ def test_db_migrate_transactional_rollback(monkeypatch):
 
 def test_db_backup_consistency_api():
     """阶段 3：sqlite backup API 生成一致备份（单文件、可打开、含 schema_migrations）。"""
-    from app.db import DB
     from pathlib import Path
+
+    from app.db import DB
 
     db, d = _tmp_db()
     try:
@@ -1539,8 +1547,7 @@ def test_db_backup_consistency_api():
 
 # ---------------- P1：本机 QMT 自动发现 ----------------
 def test_discovery_helpers():
-    from xtquant_client.discovery import (_root_from_exe, _is_qmt_proc, guess_broker_id,
-                                          guess_broker_id_by_name)
+    from xtquant_client.discovery import _is_qmt_proc, _root_from_exe, guess_broker_id, guess_broker_id_by_name
     # 由 exe 路径推导客户端根（bin.x64 一级）
     assert os.path.normcase(_root_from_exe(r"P:\stock\gd_qmt\bin.x64\XtMiniQmt.exe")) == \
         os.path.normcase(r"P:\stock\gd_qmt")
@@ -1623,7 +1630,7 @@ def test_discovery_candidate_both_dirs_prefer_full():
 
 def test_discover_accounts_from_config(tmp_path):
     """从客户端 userdata/users/<登录>/Config.xml 自动发现资金账号（STOCK 优先）。"""
-    from xtquant_client.discovery import discover_accounts, _parse_accounts_from_config
+    from xtquant_client.discovery import _parse_accounts_from_config, discover_accounts
     # 单元：直接解析 Config.xml 文本（含券商中文名 / 多账户 / broker_type 映射）
     xml = (
         '<?xml version="1.0" encoding="utf-8"?>\n'
@@ -1750,8 +1757,7 @@ def test_get_full_tick_handles_sdk_error():
 
 def test_find_client_exe_modes():
     """按模式定位客户端主程序 exe（bin.x64 下，忽略大小写）。"""
-    from xtquant_client.xtp import (_find_client_exe, _MINI_EXE_NAMES,
-                                    _FULL_EXE_NAMES, _QUOTE_EXE_NAMES)
+    from xtquant_client.xtp import _FULL_EXE_NAMES, _MINI_EXE_NAMES, _QUOTE_EXE_NAMES, _find_client_exe
     with tempfile.TemporaryDirectory() as d:
         bin64 = os.path.join(d, "bin.x64")
         os.makedirs(bin64)
@@ -1973,8 +1979,8 @@ def test_limitup_cutoff_minutes_comparison():
 
 def test_strategy_runtime_uses_shared_minutes():
     """N2 回归：strategy_runtime 与 limitup 共用 tools.ashare 的同一分钟口径。"""
-    from tools.strategy_runtime import _now_minutes, _parse_minutes
     from tools.ashare import now_minutes, parse_minutes
+    from tools.strategy_runtime import _now_minutes, _parse_minutes
     assert _parse_minutes("9:30") == parse_minutes("9:30") == 570
     assert _now_minutes() == now_minutes()
 
@@ -1994,8 +2000,7 @@ def test_signal_pending_ttl_prune(monkeypatch):
 
 def test_limit_first_seen_prune_bounded():
     """P2-4：涨停首见字典有界化——超上限剔除跨日残留。"""
-    from tools.limitup import (_LIMIT_FIRST_SEEN, _LIMIT_SEEN_MAX,
-                               _prune_limit_first_seen)
+    from tools.limitup import _LIMIT_FIRST_SEEN, _LIMIT_SEEN_MAX, _prune_limit_first_seen
     now = 5_000_000.0
     _LIMIT_FIRST_SEEN.clear()
     # 填充超过上限的条目，其中一半为过期残留

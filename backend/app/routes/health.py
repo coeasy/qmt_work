@@ -1,8 +1,9 @@
-from app.routes._common import ok, err, state
-from app.version import __version__
-
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
+
+from app.routes._common import err, ok, state
+from app.version import __version__
+
 # --- stdlib imports injected by fix_route_imports ---
 
 

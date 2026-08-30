@@ -24,7 +24,6 @@ import threading
 import time
 from collections import defaultdict
 
-
 # API 延迟直方图分桶（毫秒）
 _API_LATENCY_BUCKETS = (50, 100, 200, 500, 1000)
 # trace 环形缓冲容量

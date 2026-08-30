@@ -19,7 +19,9 @@ import math
 from dataclasses import dataclass
 
 from .ashare import (
-    is_limit_down, is_limit_up, round_lot,
+    is_limit_down,
+    is_limit_up,
+    round_lot,
 )
 
 

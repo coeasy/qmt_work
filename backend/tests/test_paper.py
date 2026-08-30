@@ -3,8 +3,8 @@
 运行：cd backend && python -m pytest tests/test_paper.py -q
 """
 import os
-import sys
 import shutil
+import sys
 import tempfile
 from pathlib import Path
 

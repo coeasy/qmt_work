@@ -8,8 +8,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from tools.metrics import compute_metrics, _month_key, _monthly_returns  # noqa: E402
-
+from tools.metrics import _month_key, _monthly_returns, compute_metrics  # noqa: E402
 
 # 先涨到 130，再跌到 80（最大回撤 -38.46%），最后修复并创新高
 _EQUITY = [100, 110, 120, 130, 90, 80, 95, 115, 131, 140]

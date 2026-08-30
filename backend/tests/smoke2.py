@@ -13,6 +13,7 @@ import asyncio
 import json
 import os
 import sqlite3
+
 import websockets
 
 BASE = os.environ.get("QMT_TEST_BASE", "http://127.0.0.1:21118/api/v1")
@@ -209,6 +210,7 @@ async def test_risk_circuit_breaker():
 async def test_idempotent_concurrent():
     """阶段 4：幂等并发——同一 idempotency_key 并发提交只执行一次真实下单（paper 模式）。"""
     import time
+
     import httpx
 
     # 记录并切换到 paper 模式（无需券商连接即可端到端验证幂等）

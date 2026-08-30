@@ -2,13 +2,11 @@
 import math
 
 import pytest
-
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.routes.factors import router
 from tools import factors as F
-
 
 # 最小应用：仅挂载 factors 路由，保持测试快速隔离
 app = FastAPI()

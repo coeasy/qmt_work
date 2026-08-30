@@ -10,12 +10,11 @@
 """
 import asyncio
 
-from tools.algo import AlgoEngine
-from tools.limitup import _limit_factor, LimitUpMonitor
-from tools.rebalance import _at_limit
-
 # BacktestQueue 在 backend/backtest/__init__.py（顶层 backtest 包），非 tools.backtest
 import backtest as bq_mod
+from tools.algo import AlgoEngine
+from tools.limitup import LimitUpMonitor, _limit_factor
+from tools.rebalance import _at_limit
 
 
 # ---------------- P0#1：account.py 接口名 ----------------

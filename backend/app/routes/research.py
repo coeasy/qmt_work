@@ -11,9 +11,9 @@
 """
 from typing import Any, Dict
 
-from app.routes._common import ok, err
 from fastapi import APIRouter
 
+from app.routes._common import err, ok
 from tools import factor_research as FR
 from tools.factor_research import (
     attribute_pnl,

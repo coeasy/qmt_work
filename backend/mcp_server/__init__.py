@@ -6,6 +6,7 @@
 from fastmcp import FastMCP
 
 from app.state import state
+from mcp_server.auto_expose import register_auto_tools
 from tools.account import register_account_tools
 from tools.algo import register_algo_tools
 from tools.analysis import register_analysis_tools
@@ -20,7 +21,6 @@ from tools.reference import register_reference_tools
 from tools.strategy_gen import register_strategy_tools
 from tools.target_portfolio import register_target_portfolio_tools
 from tools.trading import register_trading_tools
-from mcp_server.auto_expose import register_auto_tools
 
 _INSTRUCTIONS = (
     "qmt_work 量化平台工具集（真实券商接入，无 mock）。可用于：\n"

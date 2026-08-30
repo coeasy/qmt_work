@@ -17,21 +17,21 @@
 from __future__ import annotations
 
 import asyncio
+
+# 钉钉签名
+import base64  # noqa: E402
+import hashlib  # noqa: E402
+import hmac  # noqa: E402
 import json
 import re
 import time
+import urllib.parse  # noqa: E402
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from email.mime.text import MIMEText
 from typing import Any
 
 import httpx
-
-# 钉钉签名
-import base64  # noqa: E402
-import hmac  # noqa: E402
-import hashlib  # noqa: E402
-import urllib.parse  # noqa: E402
 
 
 @dataclass

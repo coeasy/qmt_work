@@ -9,9 +9,9 @@
 - GET  /strategies/run/{id}/logs       运行日志
 - POST /strategies/run/precheck        风控预检（非变更型，不计入日级计数）
 """
-from app.routes._common import ok, err, state
-
 from fastapi import APIRouter
+
+from app.routes._common import err, ok, state
 
 router = APIRouter()
 

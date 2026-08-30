@@ -12,7 +12,6 @@ import math
 import statistics
 from typing import Optional, Sequence
 
-
 # A 股典型日内 bar 数（用于分钟线年化换算；可按实际交易时段覆盖）
 _BARS_PER_DAY = {
     "1m": 240, "5m": 48, "15m": 16, "30m": 8, "60m": 4,

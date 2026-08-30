@@ -20,8 +20,12 @@ from app.datasource.models import (
     StockInfo,
 )
 from app.datasource.registry import (
-    DataSourceManager, DataSourceUnavailable, get_manager,
-    get_hub, MarketDataHub, MarketDataUnavailable,
+    DataSourceManager,
+    DataSourceUnavailable,
+    MarketDataHub,
+    MarketDataUnavailable,
+    get_hub,
+    get_manager,
 )
 from app.datasource.result import DataResult
 

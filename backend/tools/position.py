@@ -4,8 +4,9 @@
 - 计算：目标市值 = 总资产 × target_pct；对比当前持仓市值 → 差额 → 折股数（100 股整）
 - do_trade=True 时经统一风控下单；否则仅返回调仓计划
 """
-from . import get_bridge
 from xtquant_client.base import BrokerError
+
+from . import get_bridge
 
 
 def _audit(action: str, target: str, params: dict, result: str):

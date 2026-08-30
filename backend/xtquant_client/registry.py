@@ -157,8 +157,7 @@ def create_adapter(broker_id: str, client_path: str, account_id: str,
         plan = None
         abi_compat = False  # 仅在 ABI 兼容（或 xtquant 未定位）时退回进程内直连
         try:
-            from .runtime import (detect_xtquant_abis,
-                                  host_python_minor, require_runtime_or_raise)
+            from .runtime import detect_xtquant_abis, host_python_minor, require_runtime_or_raise
             from .xtp import _resolve_xtquant_path
             site = _resolve_xtquant_path(client_path or profile.default_client_path)
             broker_abis = detect_xtquant_abis(site)

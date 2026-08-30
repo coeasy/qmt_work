@@ -17,8 +17,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from xtquant_client.xtp import (  # noqa: E402
     _is_likely_root,
-    probe_environment,
     _probe_quote_service,
+    probe_environment,
 )
 
 # 常见迅投系客户端安装位置（探测时自动尝试）

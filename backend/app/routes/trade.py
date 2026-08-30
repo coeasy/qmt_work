@@ -1,7 +1,8 @@
-from app.routes._common import ok, err, state, _need, _call
+from fastapi import APIRouter
+
+from app.routes._common import _call, _need, err, ok, state
 from gateway.idempotency import single_flight
 
-from fastapi import APIRouter
 # --- stdlib imports injected by fix_route_imports ---
 
 

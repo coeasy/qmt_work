@@ -2,9 +2,9 @@
 
 引擎实例由集成方注入 `state.paper_engine`（未注入时统一返回 503）。
 """
-from app.routes._common import ok, err, state
-
 from fastapi import APIRouter
+
+from app.routes._common import err, ok, state
 
 router = APIRouter()
 

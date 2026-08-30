@@ -10,10 +10,12 @@
 import pytest
 
 from app.capabilities import (
-    build_capabilities, agent_visible_reads, tool_name_for,
+    agent_visible_reads,
+    build_capabilities,
+    tool_name_for,
 )
-from app.routes._common import ok, err
 from app.config import settings
+from app.routes._common import err, ok
 from gateway.risk import RiskManager
 from mcp_server import build_mcp
 
@@ -101,7 +103,8 @@ def test_capability_drift_gate():
 def test_capabilities_route():
     """直接调用路由 handler，验证返回结构与过滤。"""
     import asyncio
-    from app.routes.capabilities import list_capabilities, capabilities_summary
+
+    from app.routes.capabilities import capabilities_summary, list_capabilities
 
     res = asyncio.run(list_capabilities(category="market", method="GET"))
     assert res["code"] == 0
@@ -117,8 +120,8 @@ def test_capabilities_route():
 
 def test_auto_tool_unwrap():
     """验证自动 tool 的 {code,data} 解包：成功取 data，非零业务码原样返回（零 mock）。"""
-    from mcp_server.auto_expose import _make_tool_func
     from app.capabilities import Capability, ParamSpec
+    from mcp_server.auto_expose import _make_tool_func
 
     async def ok_ep(code: str = "600519.SH"):
         return ok({"code": code, "last": 1800.0})

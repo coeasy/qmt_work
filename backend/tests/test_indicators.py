@@ -11,8 +11,7 @@ import random
 import numpy as np
 import pytest
 
-from app.indicators import calc, get_indicator, list_indicators
-from app.indicators import builtin
+from app.indicators import builtin, calc, get_indicator, list_indicators
 
 
 # ============================ 参考镜像（JS 逐行翻译） =========================

@@ -6,8 +6,8 @@
 import asyncio
 
 from app.datasource.base import DataSource
-from app.datasource.registry import DataSourceManager
 from app.datasource.board import classify_board, limit_ratio
+from app.datasource.registry import DataSourceManager
 
 
 class FakeBroker:

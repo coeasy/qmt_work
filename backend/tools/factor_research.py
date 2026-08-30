@@ -13,13 +13,13 @@ from __future__ import annotations
 import math
 from typing import Dict, List, Optional, Sequence, Tuple
 
-from . import fetch_kline_cached
-from .backtest import _build_cfg, _signals_vectorized, run_param_sweep
-from .factors import compute_factor, from_kline, _EXTRA_FIELDS
-from .matching import simulate as match_simulate
-from .metrics import compute_metrics
 from xtquant_client.base import BrokerNotConnectedError
 
+from . import fetch_kline_cached
+from .backtest import _build_cfg, _signals_vectorized, run_param_sweep
+from .factors import _EXTRA_FIELDS, compute_factor, from_kline
+from .matching import simulate as match_simulate
+from .metrics import compute_metrics
 
 # ============================================================================
 # 基础统计（纯 Python，确定性，可单测）

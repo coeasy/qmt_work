@@ -5,7 +5,7 @@ stop() 后可干净重启（池重建、泵重建、事件恢复投递）。
 """
 import asyncio
 
-from xtquant_client.gateway import XTQuantGateway, XTQuantBridge
+from xtquant_client.gateway import XTQuantBridge, XTQuantGateway
 
 
 class _G(XTQuantGateway):

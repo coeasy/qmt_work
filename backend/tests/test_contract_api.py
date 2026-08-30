@@ -15,10 +15,16 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from app.routes._common import ok, err, state as _common_state
+from app.routes._common import err, ok
+from app.routes._common import state as _common_state
 from xtquant_client.registry import (
-    BrokerProfile, Registry, list_profiles, get_profile, create_adapter,
+    BrokerProfile,
+    Registry,
+    create_adapter,
+    get_profile,
+    list_profiles,
 )
+
 
 # ---------------- 1. 响应包契约 ----------------
 def test_envelope_ok():

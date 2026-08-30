@@ -14,7 +14,8 @@ from datetime import datetime, timedelta
 
 from xtquant_client.base import BrokerError
 from xtquant_client.order_status import (  # P1-5：调用统一状态词汇表做终态核销
-    normalize_order_status, is_active,
+    is_active,
+    normalize_order_status,
 )
 
 log = logging.getLogger("qmt_work")

@@ -19,8 +19,8 @@ import threading
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Union
 
-from app.db import DB, get_db
 from app.datasource.models import Bar, BoardItem, StockInfo
+from app.db import DB, get_db
 
 log = logging.getLogger("qmt_work.datasource.local_store")
 

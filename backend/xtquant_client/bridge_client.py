@@ -18,11 +18,11 @@ import queue as _queue
 import subprocess
 import sys
 import threading
-from concurrent.futures import Future, TimeoutError as _FutTimeout
+from concurrent.futures import Future
+from concurrent.futures import TimeoutError as _FutTimeout
 
-from .base import (BrokerAdapter, BrokerError, BrokerNotConnectedError,
-                   BrokerSDKError)
-from .runtime import select_runtime, require_runtime_or_raise
+from .base import BrokerAdapter, BrokerError, BrokerNotConnectedError, BrokerSDKError
+from .runtime import require_runtime_or_raise, select_runtime
 
 log = logging.getLogger("qmt_work")
 

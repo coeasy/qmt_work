@@ -1,10 +1,9 @@
-from app.routes._common import ok, err, state
-
-from fastapi import APIRouter
 # --- stdlib imports injected by fix_route_imports ---
 from pathlib import Path
 
+from fastapi import APIRouter
 
+from app.routes._common import err, ok, state
 
 router = APIRouter()
 

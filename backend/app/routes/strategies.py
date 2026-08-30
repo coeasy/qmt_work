@@ -1,6 +1,7 @@
-from app.routes._common import ok, err
-
 from fastapi import APIRouter
+
+from app.routes._common import err, ok
+
 # --- stdlib imports injected by fix_route_imports ---
 
 

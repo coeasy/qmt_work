@@ -26,15 +26,14 @@ from app.datasource.periods import (  # noqa: E402
     TICK_PERIOD,
     UnknownPeriodError,
     UnsupportedPeriodError,
-    all_periods,
     adjust_allowed_periods,
+    all_periods,
     is_supported,
     kline_periods,
     normalize_period,
     spec,
     to_eltdx_period,
 )
-
 
 # ======================== 纯逻辑层（无网络依赖） ========================
 

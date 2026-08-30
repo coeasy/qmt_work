@@ -239,8 +239,7 @@ if __name__ == "__main__":
     _self_check()
     # 启动诊断：ABI 运行时探测结果（frozen EXE 黑盒下排查桥接问题的关键日志）
     try:
-        from xtquant_client.runtime import (discover_bundled_runtimes,
-                                            discover_system_runtimes)
+        from xtquant_client.runtime import discover_bundled_runtimes, discover_system_runtimes
         _b = discover_bundled_runtimes()
         _s = discover_system_runtimes()
         log.info("runtime 探测: bundled=%s", _b)

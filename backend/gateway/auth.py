@@ -7,12 +7,12 @@
 - scope 分级：market/trade/account/backtest/admin/*（通配）
 - 每密钥独立限流（rate_limit>0 时覆盖全局配额）
 """
+import hmac
+
 from fastapi import Request
 from fastapi.responses import JSONResponse
 
-import hmac
-
-from .apikey import scope_for_path, scope_match, _is_public_path
+from .apikey import _is_public_path, scope_for_path, scope_match
 
 _LOOPBACK = {"127.0.0.1", "::1", "localhost"}
 

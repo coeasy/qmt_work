@@ -1,6 +1,7 @@
-from app.routes._common import state, WebSocket, WebSocketDisconnect, _ws_authorized
-
 from fastapi import APIRouter
+
+from app.routes._common import WebSocket, WebSocketDisconnect, _ws_authorized, state
+
 # --- stdlib imports injected by fix_route_imports ---
 
 

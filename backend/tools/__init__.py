@@ -6,8 +6,8 @@ K 线在无券商连接时回退到 eltdx(TDX 公共行情) 数据源。
 """
 import logging
 
-from app.state import state
 from app.datasource.manager import get_hub
+from app.state import state
 from xtquant_client.base import BrokerError, BrokerNotConnectedError
 
 log = logging.getLogger("qmt_work.tools")

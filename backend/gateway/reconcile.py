@@ -18,7 +18,12 @@ from datetime import datetime
 from typing import Any
 
 from xtquant_client.order_status import (
-    normalize_order_status, is_active, FILLED, CANCELLED, REJECTED, UNKNOWN,
+    CANCELLED,
+    FILLED,
+    REJECTED,
+    UNKNOWN,
+    is_active,
+    normalize_order_status,
 )
 
 log = logging.getLogger("qmt_work.reconcile")

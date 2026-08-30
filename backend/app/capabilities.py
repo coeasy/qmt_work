@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import inspect
 import re
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 # --- 自动暴露为 MCP tool 的排除名单（基础设施 / 密钥管理，跳过自动生成） ---

@@ -11,8 +11,7 @@ import time
 import uuid
 
 from app.db import get_db
-from tools.backtest import (fetch_kline_async, fetch_kline_async_meta,
-                            run_backtest_engine, run_param_sweep)
+from tools.backtest import fetch_kline_async, fetch_kline_async_meta, run_backtest_engine, run_param_sweep
 
 log = logging.getLogger("qmt_work.backtest")
 
