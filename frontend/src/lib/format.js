@@ -1,12 +1,25 @@
 // 前端共用纯函数（无副作用，便于 vitest 单测，C3/P2-3）：
 // 金额/时长格式化 + 状态→文案与样式映射。组件内不再各自实现，避免口径漂移。
 
-// 金额缩写：>=1亿 → x.x亿；>=1万 → x.x万；否则原样。
+// 金额缩写（**全站唯一实现**）：>=1亿 → x.xx亿；>=1万 → x.xx万；否则取整。
+//
+// 收敛说明（终极整合方案 G0 批次）：历史上存在 3 份实现且口径互相冲突——
+//   ① hooks/useMarket.js formatAmount：万档 toFixed(2)
+//   ② lib/format.js     fmtAmount   ：万档 toFixed(1) ← 同一金额跨页精度不一致
+//   ③ QuoteBoard.jsx    fmtAmount   ：本地副本，<1万档 String(Math.round(n))
+// 三处现已全部指向本函数。
+//
+// 口径要点（勿回退）：
+//   - 档位用**绝对值**判定：否则负数金额（如资金净流出 -1.5 亿）会漏判档位，
+//     直接输出 "-150000000" 这种原始数字（② 的历史 Bug）。
+//   - 亿/万档统一 2 位小数，<1万取整，与金融终端惯例一致。
 export function fmtAmount(v) {
-  if (v == null) return "—";
-  if (v >= 1e8) return (v / 1e8).toFixed(2) + "亿";
-  if (v >= 1e4) return (v / 1e4).toFixed(1) + "万";
-  return String(v);
+  if (v == null || isNaN(v)) return "—";
+  const n = Number(v);
+  const abs = Math.abs(n);
+  if (abs >= 1e8) return (n / 1e8).toFixed(2) + "亿";
+  if (abs >= 1e4) return (n / 1e4).toFixed(2) + "万";
+  return n.toFixed(0);
 }
 
 // 时长缩写：分钟+秒，如 "3分20秒" / "20秒"；无值返回 "—"。

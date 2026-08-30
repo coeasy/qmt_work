@@ -77,9 +77,19 @@ async def test_brokers_list():
 
 
 async def test_add_broker_invalid():
-    code, data = await post("/brokers", {"broker_id": "nope", "account_id": "123"})
-    check("新增未知券商 -> code=400", data.get("code") == 400,
-          f"{code} {data.get('message')}")
+    # 券商通用化后，未知券商不再返回 400：会被 hotplug 登记为「通用迅投适配器」连接
+    # （契约见 tests/test_contract_api.py::test_http_add_unknown_broker_registers_generic）。
+    # 真正要保证的是：路径无效时不得假报「已连接」，且必须如实出现在连接列表里。
+    code, data = await post("/brokers", {"broker_id": "nope", "account_id": "123",
+                                         "client_path": "__not_a_real_path__",
+                                         "autoconnect": True})
+    body = data.get("data") or {}
+    check("未知券商登记为通用迅投连接", data.get("code") == 0 and bool(body.get("conn_id")),
+          f"{code} {data}")
+    check("路径无效时不假报已连接", body.get("connected") is False, f"{data}")
+    _, lst = await get("/brokers")
+    check("新连接如实出现在列表", any(c.get("broker_id") == "nope" for c in (lst.get("data") or [])),
+          f"{lst.get('data')}")
 
 
 async def test_add_broker_unknown_client():
@@ -114,10 +124,26 @@ async def test_backtest_no_broker():
             if st in ("done", "failed"):
                 break
             await asyncio.sleep(0.5)
-        # 无券商时作业应优雅失败（status=failed），而非崩溃
+        # 无券商时作业应优雅收口（status=failed 或 done），绝不崩溃。
+        # done 是合法结果：C1 缓存优先会用本地真实历史 K 线兜底完成回测
+        # （本地缓存有 600519.SH 的日线）。此时按 G1 必须带 stale/data_source 标注——
+        # 让用户知道结论来自缓存而非券商实时数据。
         _, j = await get(f"/backtest/jobs/{job_id}")
-        check("无券商回测优雅失败", (j.get("data") or {}).get("status") == "failed",
-              f"{j.get('data')}")
+        job = j.get("data") or {}
+        check("无券商回测优雅收口（不崩溃）", job.get("status") in ("failed", "done"),
+              f"{job}")
+        if job.get("status") == "done":
+            res = job.get("result") or {}
+            check("缓存降级回测必须标注 stale", res.get("stale") is True,
+                  f"stale={res.get('stale')} data_source={res.get('data_source')}")
+            check("缓存降级回测必须给出 as_of", bool(res.get("as_of")),
+                  f"as_of={res.get('as_of')}")
+            check("数据来源可追溯", (res.get("data_source") or {}).get("source")
+                  in ("cache", "cache_stale"), f"{res.get('data_source')}")
+            # 0 成交时必须给出可解释的原因（本金买不起 1 手茅台也要说清）
+            if res.get("trade_count") == 0:
+                check("0 成交必须给出原因", bool(res.get("diagnostics")),
+                      f"diagnostics={res.get('diagnostics')}")
 
 
 async def test_api_keys():

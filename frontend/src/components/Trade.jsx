@@ -3,6 +3,7 @@ import { api } from "../api.js";
 import { useBroker } from "../BrokerContext.jsx";
 import { useServerEvents } from "../hooks/useSystemWS.js";
 import { consumePendingPrefill } from "../lib/trade.js";
+import { useActiveInterval } from "../hooks/useActiveInterval.js";
 
 // 手动交易面板：下单 / 持仓 / 委托 / 成交 / 条件单 / 目标仓位（全部真实接口，下单过风控）
 // v3：支持叶子 params 直达预填（navTo("trade", {params}) 协议通道），
@@ -44,7 +45,7 @@ export default function Trade({ params } = {}) {
     if (fail && !err) setErr(fail.reason?.message || "");
   }
   // P2-2：WS 事件驱动近实时刷新（委托/成交/条件单/信号），并用 ≥30s 低频兜底轮询防事件丢失
-  useEffect(() => { load(); const t = setInterval(load, 30000); return () => clearInterval(t); }, [activeId]);
+  useActiveInterval(load, 30000, [activeId]);
   useServerEvents(["order", "trade", "condition", "signal", "algo", "reconcile"], () => { load(); });
 
   // 从涨停板 / 行情等页面「快速交易」带单过来：填充代码+涨停价并切到下单页

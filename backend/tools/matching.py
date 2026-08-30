@@ -128,6 +128,10 @@ def simulate(closes: list[float], sig: list[int], kline: list[dict],
             trades.append({"time": bar.get("time"), "side": "buy",
                            "price": round(buy_px, 4), "qty": int(to_buy),
                            "cost": round(cost, 2)})
+            # 关键：成交后同样要记一个净值点。此前只有「被拒单/无操作」的分支记录，
+            # 发生成交的 bar 被跳过，导致净值序列比 K 线短（实测 159 根 -> 146 点），
+            # 与日期序列错位，最大回撤区间/月度分布等指标全部建立在错帧序列上。
+            equity.append(cash + shares * price)
 
         elif target == 0 and shares > 0:
             # ---- 空仓：在容量约束下逐步平仓（跌停卖不出则持有）----
@@ -163,6 +167,8 @@ def simulate(closes: list[float], sig: list[int], kline: list[dict],
             trades.append({"time": bar.get("time"), "side": "sell",
                            "price": round(sell_px, 4), "qty": int(to_sell),
                            "pnl": round(realized, 2)})
+            # 同上：卖出成交的 bar 也必须记净值点（缺帧会让净值序列与 K 线错位）
+            equity.append(cash + shares * price)
 
         else:
             equity.append(cash + shares * price)

@@ -22,14 +22,13 @@ function deduped(key, fn) {
 }
 
 /* ------------------- 纯函数：格式化 ------------------- */
-export function formatAmount(v) {
-  if (v == null || isNaN(v)) return "—";
-  const n = Number(v);
-  const abs = Math.abs(n);
-  if (abs >= 1e8) return (n / 1e8).toFixed(2) + "亿";
-  if (abs >= 1e4) return (n / 1e4).toFixed(2) + "万";
-  return n.toFixed(0);
-}
+// 金额格式化收敛到 lib/format.js 的唯一实现。
+// 背景：本文件原有一份 formatAmount（万档 .2f），与 lib/format.js 的 fmtAmount
+// （万档 .1f）及 QuoteBoard.jsx 的本地副本三份并存且口径不一致——同一金额在
+// 不同页面显示不同精度。现统一 re-export，调用方（Boards/Etfs/IndexOverview/
+// MarketData 等）零改动即自动对齐，且新增页面只会指向唯一实现。
+export { fmtAmount as formatAmount } from "../lib/format.js";
+
 export function formatPct(v) {
   if (v == null || isNaN(v)) return "—";
   return (v >= 0 ? "+" : "") + Number(v).toFixed(2) + "%";

@@ -1,4 +1,7 @@
 import { useMemo } from "react";
+// 金额格式化统一走 lib/format.js（原本地副本万档 toFixed(0)、<1万档 toFixed(2)，
+// 与其余三处口径全不一致，是同一金额跨页显示不同的直接来源）
+import { fmtAmount } from "../lib/format.js";
 
 /* 通达信风格右侧报价面板 */
 export default function QuotePanel({ tick, stockInfo, code, bars }) {
@@ -41,14 +44,6 @@ export default function QuotePanel({ tick, stockInfo, code, bars }) {
 
   // 逐笔成交
   const trades = tick?.trades || [];
-
-  function fmtAmount(v) {
-    if (v == null) return "—";
-    const n = Number(v);
-    if (n >= 1e8) return (n / 1e8).toFixed(2) + "亿";
-    if (n >= 1e4) return (n / 1e4).toFixed(0) + "万";
-    return n.toFixed(2);
-  }
 
   // 五档行（卖五→卖一，买一→买五），附量能配比（比例色块用）
   const bookRows = useMemo(() => {

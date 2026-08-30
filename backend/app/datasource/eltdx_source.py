@@ -7,12 +7,21 @@
 - 全市场股票列表（含中文名，解决 stock-info 中文名缺失）
 - 行业 / 概念（通达信行业 N012 + 题材概念，来自 F10 网关）
 
-⚠️ 许可证：eltdx 仅允许个人学习 / 协议研究 / 非商业研究使用，禁止商业使用。
-本适配器仅将其作为非商业场景下的行情补充源，不伪造任何数据。
+⚠️ 许可证：eltdx 采用「ELTDX Research-Only License」，仅允许个人学习 / 协议研究 /
+非商业研究使用，禁止一切商业使用和滥用。本适配器将其作为**可选**行情补充源：
+
+- 默认不安装（见 backend/requirements-optional.txt），商用部署请确保环境无此包
+- 本模块采用软依赖导入：eltdx 缺失时模块仍可正常 import，`_HAS_ELTDX=False`，
+  所有网络方法提前返回 / 抛明确异常，系统自动降级为券商数据源
+- 降级 ≠ 造假：宁可无数据，也不返回任何伪造行情（项目零 mock 铁律）
+
+详见 docs/THIRD_PARTY_LICENSES.md 第 3.2 节「阻断级风险」。
 
 本地缓存：股票名称表 / 行业概念表持久化到 <data_dir> 下的 JSON，
 重启后优先读本地缓存（带 TTL），避免首拉 / 每次重启都走网络。
 """
+from __future__ import annotations
+
 import asyncio
 import json
 import logging
@@ -23,7 +32,12 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
-from eltdx import TdxClient
+try:  # 可选依赖：商用部署禁止安装 eltdx（Research-Only 许可）
+    from eltdx import TdxClient
+    _HAS_ELTDX = True
+except ImportError:  # pragma: no cover - 取决于部署环境是否安装
+    TdxClient = None  # type: ignore[assignment,misc]
+    _HAS_ELTDX = False
 
 from app.datasource.base import DataSource
 from app.datasource.board import classify_board, limit_ratio
@@ -217,6 +231,11 @@ class EltdxSource(DataSource):
     # ---------- 连接治理 ----------
     def _acquire_client(self, timeout: int = 8) -> TdxClient:
         """返回可复用的 TdxClient（类级单例，TTL 到期重建）。"""
+        if not _HAS_ELTDX:
+            raise RuntimeError(
+                "eltdx 未安装，TDX 行情源不可用（非商业可选的补充源）。"
+                "请连接券商数据源，或在非商业场景下 pip install -r requirements-optional.txt"
+            )
         now = time.time()
         with self.__class__._client_lock:
             c = self.__class__._client
@@ -285,6 +304,9 @@ class EltdxSource(DataSource):
                 return
             # 2) 缓存缺失 → 网络枚举全 A 股代码 + 批量取中文名（TDX 公共行情可搜索/可就绪）
             def _run():
+                if not _HAS_ELTDX:
+                    log.warning("eltdx 未安装，跳过名称表网络枚举（降级：仅券商源可用）")
+                    return
                 from eltdx import TdxClient as _TCL
                 with _TCL(timeout=90) as cl:
                     # 2.1) 分页枚举全 A 股证券代码。沪深A股 覆盖沪深两市，另兼容 "A股" 分类；

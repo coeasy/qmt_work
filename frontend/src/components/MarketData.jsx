@@ -17,13 +17,15 @@ import QuotePanel from "./QuotePanel.jsx";
 import { quickTradeNavigate } from "../lib/trade.js";
 import { navTo, navToQuote } from "../lib/nav.js";
 import { sendOrder, precheckOrder } from "../lib/tradeApi.js";
-import { useKline, useFundamentals, formatPct, formatAmount, preCloseOf, applyTickToBars } from "../hooks/useMarket.js";
+import { useKline, useFundamentals, formatPct, preCloseOf, applyTickToBars } from "../hooks/useMarket.js";
 import { useQuotes } from "../lib/quoteHub.jsx";
 import ErrorBoundary from "./ErrorBoundary.jsx";
+import { useActiveInterval } from "../hooks/useActiveInterval.js";
+// 金额格式化直接引唯一实现（不再经 useMarket 别名中转，链路更短更明确）
+import { fmtAmount } from "../lib/format.js";
 
-// 旧版遗留的悬空引用（fmtPct/fmtAmount 未定义，涨跌幅一渲染就会 ReferenceError）——根治为别名
+// 旧版遗留的悬空引用（fmtPct 未定义，涨跌幅一渲染就会 ReferenceError）——根治为别名
 const fmtPct = formatPct;
-const fmtAmount = formatAmount;
 
 /* ======================== 常量 ======================== */
 // TDX 同款周期：分时 + 1/5/15/30/60 分 + 日/周/月/季/年。
@@ -374,18 +376,24 @@ export default function MarketData({ params, leafId, tabId, dispatch } = {}) {
   /* ---------- 真分时（TDX 同款）：/market/minutes 分钟曲线，60s 轮询跟随 ---------- */
   const [minutesData, setMinutesData] = useState(null);
   const [minutesErr, setMinutesErr] = useState("");
+  const minutesCodeRef = useRef(code);   // 分时请求回填校验：防 code 切换后旧响应覆盖新数据
+  // 非分时/无代码：清空（保留原语义）
   useEffect(() => {
     if (period !== "tick" || !code) { setMinutesData(null); setMinutesErr(""); return; }
-    let alive = true;
-    const load = () => {
-      api.marketMinutes({ code })
-        .then((d) => { if (alive) { setMinutesData(d); setMinutesErr(""); } })
-        .catch((e) => { if (alive) setMinutesErr(e.message || "分时不可用"); });
-    };
-    load();
-    const timer = setInterval(load, 60000);
-    return () => { alive = false; clearInterval(timer); };
+    minutesCodeRef.current = code;
   }, [period, code]);
+  // G5：60s 跟随刷新，后台 Tab 停表；切回前台立即拉一次
+  // minutesCodeRef 用于防止 code 切换后旧请求回填覆盖新数据（原 alive 标志的等价物）
+  useActiveInterval(
+    () => {
+      api.marketMinutes({ code })
+        .then((d) => { if (minutesCodeRef.current === code) { setMinutesData(d); setMinutesErr(""); } })
+        .catch((e) => { if (minutesCodeRef.current === code) setMinutesErr(e.message || "分时不可用"); });
+    },
+    period === "tick" && code ? 60000 : 0,
+    [period, code],
+    { immediate: period === "tick" && !!code },
+  );
 
   /* ---------- QuoteHub 全局单连接订阅（替代本页自建 WS） ---------- */
   const { quotes, state: hubState } = useQuotes([code]);
@@ -666,7 +674,8 @@ export default function MarketData({ params, leafId, tabId, dispatch } = {}) {
       legend: { data: [], top: 2, textStyle: { color: "#8a97ad", fontSize: 11 }, itemWidth: 16, itemHeight: 8 },
     };
 
-    opt.grid[0] = { left: 55, right: 8, top: 24, height: "54%" };
+    // 底部预留 26px 给 dataZoom 滑块，故三栏较改造前整体压缩
+    opt.grid[0] = { left: 55, right: 8, top: 24, height: "50%" };
     opt.xAxis[0] = { type: "category", data: times, boundaryGap: true,
       axisLine: { lineStyle: { color: "#2c3850" } }, axisLabel: { show: false, color: "#5a6a82", fontSize: 10 },
       splitLine: { show: false }, axisTick: { show: false } };
@@ -695,7 +704,7 @@ export default function MarketData({ params, leafId, tabId, dispatch } = {}) {
       );
     }
 
-    opt.grid[1] = { left: 55, right: 8, top: "74%", height: "13%" };
+    opt.grid[1] = { left: 55, right: 8, top: "70%", height: "11%" };
     opt.xAxis[1] = { type: "category", gridIndex: 1, data: times, boundaryGap: true,
       axisLine: { lineStyle: { color: "#2c3850" } },
       axisLabel: { color: "#5a6a82", fontSize: 10 }, axisTick: { show: false }, splitLine: { show: false } };
@@ -710,7 +719,8 @@ export default function MarketData({ params, leafId, tabId, dispatch } = {}) {
 
     if (subInd === "macd") {
       const m = calcMACD(closes);
-      opt.grid[2] = { left: 55, right: 8, top: "89%", height: "11%" };
+      // bottom 用固定像素（而非百分比）：无论图表容器多高，都稳定留出滑块空间
+      opt.grid[2] = { left: 55, right: 8, top: "82%", bottom: 26 };
       opt.xAxis[2] = { type: "category", gridIndex: 2, data: times, boundaryGap: true,
         axisLine: { lineStyle: { color: "#2c3850" } },
         axisLabel: { color: "#5a6a82", fontSize: 10 }, axisTick: { show: false }, splitLine: { show: false } };
@@ -725,7 +735,8 @@ export default function MarketData({ params, leafId, tabId, dispatch } = {}) {
       );
     } else if (subInd === "kdj") {
       const k = calcKDJ(highs, lows, closes);
-      opt.grid[2] = { left: 55, right: 8, top: "89%", height: "11%" };
+      // bottom 用固定像素（而非百分比）：无论图表容器多高，都稳定留出滑块空间
+      opt.grid[2] = { left: 55, right: 8, top: "82%", bottom: 26 };
       opt.xAxis[2] = { type: "category", gridIndex: 2, data: times, boundaryGap: true,
         axisLine: { lineStyle: { color: "#2c3850" } },
         axisLabel: { color: "#5a6a82", fontSize: 10 }, axisTick: { show: false }, splitLine: { show: false } };
@@ -740,7 +751,8 @@ export default function MarketData({ params, leafId, tabId, dispatch } = {}) {
     } else if (subInd === "rsi") {
       const r6 = calcRSI(closes, 6);
       const r12 = calcRSI(closes, 12);
-      opt.grid[2] = { left: 55, right: 8, top: "89%", height: "11%" };
+      // bottom 用固定像素（而非百分比）：无论图表容器多高，都稳定留出滑块空间
+      opt.grid[2] = { left: 55, right: 8, top: "82%", bottom: 26 };
       opt.xAxis[2] = { type: "category", gridIndex: 2, data: times, boundaryGap: true,
         axisLine: { lineStyle: { color: "#2c3850" } },
         axisLabel: { color: "#5a6a82", fontSize: 10 }, axisTick: { show: false }, splitLine: { show: false } };
@@ -753,7 +765,8 @@ export default function MarketData({ params, leafId, tabId, dispatch } = {}) {
       );
     } else if (subInd === "wr") {
       const w = calcWR(highs, lows, closes);
-      opt.grid[2] = { left: 55, right: 8, top: "89%", height: "11%" };
+      // bottom 用固定像素（而非百分比）：无论图表容器多高，都稳定留出滑块空间
+      opt.grid[2] = { left: 55, right: 8, top: "82%", bottom: 26 };
       opt.xAxis[2] = { type: "category", gridIndex: 2, data: times, boundaryGap: true,
         axisLine: { lineStyle: { color: "#2c3850" } },
         axisLabel: { color: "#5a6a82", fontSize: 10 }, axisTick: { show: false }, splitLine: { show: false } };
@@ -763,6 +776,28 @@ export default function MarketData({ params, leafId, tabId, dispatch } = {}) {
       opt.series.push({ name: "WR", type: "line", xAxisIndex: 2, yAxisIndex: 2, data: w,
         symbol: "none", lineStyle: { width: 1, color: "#91cc75" } });
     }
+
+    /* ---------- G9：缩放平移（TDX 标配体验） ----------
+       inside  = 滚轮缩放 + 拖拽平移（不占版面）
+       slider  = 底部区间条，可拖动两端把手
+       两者共用同一组 xAxisIndex，保证主图 / 成交量 / 副图三者联动；
+       副图（MACD/KDJ/RSI/WR）缺失时 xAxis 只有 2 条，故按实际条数动态取索引。 */
+    const total = times.length;
+    // 默认视野：最多显示最近 120 根，避免 180 根挤成一片；数据不足则全显
+    const startPct = total > 120 ? Math.max(0, 100 - (120 / total) * 100) : 0;
+    const zoomAxes = opt.xAxis.map((_, i) => i);
+    opt.dataZoom = [
+      { type: "inside", xAxisIndex: zoomAxes, start: startPct, end: 100,
+        minValueSpan: 20, zoomOnMouseWheel: true, moveOnMouseMove: true, moveOnMouseWheel: false },
+      { type: "slider", xAxisIndex: zoomAxes, start: startPct, end: 100, minValueSpan: 20,
+        bottom: 4, height: 16, borderColor: "#2c3850",
+        fillerColor: "rgba(79,140,255,.12)",
+        handleStyle: { color: "#4f8cff", borderColor: "#4f8cff" },
+        moveHandleStyle: { color: "#3a4a66" },
+        dataBackground: { lineStyle: { color: "#3a4a66" }, areaStyle: { color: "rgba(58,74,102,.35)" } },
+        selectedDataBackground: { lineStyle: { color: "#4f8cff" }, areaStyle: { color: "rgba(79,140,255,.25)" } },
+        textStyle: { color: "#5a6a82", fontSize: 9 } },
+    ];
     return opt;
   }, [bars, mainInd, subInd, err]);
 

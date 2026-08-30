@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api } from "../api.js";
 import { useBroker } from "../BrokerContext.jsx";
 import { useBatchSelection } from "../hooks/useBatchSelection.js";
@@ -24,6 +24,8 @@ export default function Backtest() {
   const [batchBusy, setBatchBusy] = useState(false);
   const [cost, setCost] = useState({ commission_rate: 0.0003, stamp_tax: 0.001, slippage_bps: 5 });
   const bsel = useBatchSelection(jobs, "id");
+  // 回测任务轮询的句柄：见下方 poll() 说明，卸载时必须清表
+  const pollTimerRef = useRef(null);
 
   /* 参数扫描（sweep）专用 */
   const [sweepParams, setSweepParams] = useState("ma_window:5,10,20|ma_fast:5,10|ma_slow:15,20,30");
@@ -70,19 +72,35 @@ export default function Backtest() {
     return Object.keys(groups).length ? groups : null;
   }
 
+  // 任务轮询（短生命周期，随任务结束自停）。
+  // 刻意不使用 useActiveInterval：这是「等待用户发起的任务完成」的轮询，若随 Pane
+  // 隐藏而停表，用户切走再切回会看到任务永远停在「运行中」，反而更糟。
+  // 但组件被卸载（Workbench MAX_ALIVE 淘汰旧 Tab）时必须清表，否则定时器会继续
+  // 每 800ms 打后端并对已卸载组件 setState —— 泄漏 + React 警告。
   async function poll(id) {
+    if (pollTimerRef.current) clearInterval(pollTimerRef.current);
     const t = setInterval(async () => {
       try {
         const j = await api.get(`/backtest/jobs/${id}`);
         setJob(j);
         if (j.status === "done") {
-          clearInterval(t); setResult(j.result); setBusy(false); refreshJobs();
+          clearInterval(t); pollTimerRef.current = null;
+          setResult(j.result); setBusy(false); refreshJobs();
         } else if (j.status === "failed") {
-          clearInterval(t); setErr(j.error || "回测失败"); setBusy(false);
+          clearInterval(t); pollTimerRef.current = null;
+          setErr(j.error || "回测失败"); setBusy(false);
         }
-      } catch (e) { clearInterval(t); setErr(e.message); setBusy(false); }
+      } catch (e) {
+        clearInterval(t); pollTimerRef.current = null;
+        setErr(e.message); setBusy(false);
+      }
     }, 800);
+    pollTimerRef.current = t;
   }
+
+  useEffect(() => () => {
+    if (pollTimerRef.current) clearInterval(pollTimerRef.current);
+  }, []);
 
   async function deleteJob(id) {
     if (!window.confirm(`确认删除回测任务 ${id.slice(0, 8)}？删除后不可恢复。`)) return;

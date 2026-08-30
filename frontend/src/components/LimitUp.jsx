@@ -1,6 +1,7 @@
-import { useEffect, useState, useRef } from "react";
+import { useState } from "react";
 import { api } from "../api.js";
 import { useServerEvents } from "../hooks/useSystemWS.js";
+import { useActiveInterval } from "../hooks/useActiveInterval.js";
 import { fmtAmount, fmtLimitDur } from "../lib/format.js";
 import { quickTradeNavigate } from "../lib/trade.js";
 
@@ -22,7 +23,6 @@ export default function LimitUp() {
   const [loading, setLoading] = useState(false);
   const [breadth, setBreadth] = useState(null);
   const [breadthErr, setBreadthErr] = useState("");
-  const timer = useRef(null);
 
   async function loadBoard() {
     setLoading(true);
@@ -43,14 +43,13 @@ export default function LimitUp() {
       setBreadthErr("");
     } catch (e) { setBreadthErr(e.message); }
   }
-  useEffect(() => {
-    if (view !== "board") return;
-    loadBoard();
-    loadBreadth();
-    // P2-2：低频兜底轮询（≥30s）防事件丢失；近实时刷新由 useServerEvents 的 limitup/quote 事件驱动
-    timer.current = setInterval(() => { loadBoard(); loadBreadth(); }, 30000);
-    return () => clearInterval(timer.current);
-  }, [view, sector, onlyLimit, minPct]);
+  // G5：仅在「涨停板」视图下轮询，且后台 Tab 停表（delay=0 + immediate:false = 完全静默）
+  useActiveInterval(
+    () => { loadBoard(); loadBreadth(); },
+    view === "board" ? 30000 : 0,
+    [view, sector, onlyLimit, minPct],
+    { immediate: view === "board" },
+  );
 
   function quickTrade(stock, direction) {
     // 切到「交易」Hub 的手动交易子页，把代码 + 参考价 + 买卖方向带过去快速下单：
@@ -73,7 +72,7 @@ export default function LimitUp() {
   async function load() {
     try { setSt(await api.limitupStatus()); } catch (e) { setErr(e.message); }
   }
-  useEffect(() => { load(); const t = setInterval(load, 30000); return () => clearInterval(t); }, []);
+  useActiveInterval(load, 30000);
   // P2-2：limitup/limitup_order 事件驱动近实时刷新（触发/自动买入时立即更新），保留 30s 兜底轮询
   useServerEvents(["limitup"], () => { loadBoard(); loadBreadth(); load(); });
 

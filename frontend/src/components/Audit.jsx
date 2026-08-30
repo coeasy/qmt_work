@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { api } from "../api.js";
+import { useActiveInterval } from "../hooks/useActiveInterval.js";
 
 // 审计日志：所有交易动作（下单/撤单/算法单/打板/风控拒绝/连接变更）全程可追溯
 const ACTIONS = ["", "order.submitted", "order.rejected", "order.cancel", "order.cancel_price",
@@ -20,7 +21,7 @@ export default function Audit() {
     } catch (e) { setErr(e.message); }
   }
   // 审计无独立事件推送（写入时随其他动作广播），采用低频兜底轮询即可（≥15s）
-  useEffect(() => { load(); const t = setInterval(load, 15000); return () => clearInterval(t); }, [action]);
+  useActiveInterval(load, 15000, [action]);
 
   function fmtParams(p) {
     try { return JSON.stringify(JSON.parse(p)); } catch { return p; }

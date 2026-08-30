@@ -11,8 +11,8 @@ import time
 import uuid
 
 from app.db import get_db
-from tools.backtest import (fetch_kline_async, run_backtest_engine,
-                            run_param_sweep)
+from tools.backtest import (fetch_kline_async, fetch_kline_async_meta,
+                            run_backtest_engine, run_param_sweep)
 
 log = logging.getLogger("qmt_work.backtest")
 
@@ -119,9 +119,10 @@ class BacktestQueue:
         cost = {"commission_rate": float(params.get("commission_rate", 0.0003)),
                 "stamp_tax": float(params.get("stamp_tax", 0.001)),
                 "slippage_bps": float(params.get("slippage_bps", 5.0))}
-        kline = await fetch_kline_async(broker_id, symbol, count)
+        kline, meta = await fetch_kline_async_meta(broker_id, symbol, count)
         res = run_backtest_engine(symbol, kline, strategy, pr, capital,
-                                  cost["commission_rate"], cost["stamp_tax"], cost["slippage_bps"])
+                                  cost["commission_rate"], cost["stamp_tax"], cost["slippage_bps"],
+                                  data_meta=meta)
         db = get_db()
         bid = db.insert("backtests", {
             "user_id": 1, "symbol": symbol, "start": params.get("start", ""),
@@ -146,13 +147,17 @@ class BacktestQueue:
         total = max(len(configs), 1)
         for i, cfg in enumerate(configs):
             symbol = cfg.get("symbol", "600519.SH")
-            kline = await fetch_kline_async(broker_id, symbol, int(cfg.get("count", 250)))
+            kline, meta = await fetch_kline_async_meta(broker_id, symbol, int(cfg.get("count", 250)))
             c = _cost(cfg)
             res = run_backtest_engine(symbol, kline, cfg.get("strategy", "ma_cross"),
                                       cfg.get("params", {"fast": 5, "slow": 20}),
                                       float(cfg.get("initial_capital", 100_000)),
-                                      c["commission_rate"], c["stamp_tax"], c["slippage_bps"])
-            rows.append({"config": cfg, "metrics": res["metrics"]})
+                                      c["commission_rate"], c["stamp_tax"], c["slippage_bps"],
+                                      data_meta=meta)
+            rows.append({"config": cfg, "metrics": res["metrics"],
+                         "data_source": res.get("data_source"),
+                         "stale": res.get("stale"), "as_of": res.get("as_of"),
+                         "diagnostics": res.get("diagnostics")})
             job = self._jobs.get(params.get("_job_id", ""))
             if job:
                 job["progress"] = int((i + 1) / total * 100)
@@ -168,20 +173,25 @@ class BacktestQueue:
         table = []
         total = max(len(values), 1)
         base = {"fast": 5, "slow": 20}
+        kline, meta = await fetch_kline_async_meta(broker_id, symbol, 250)
         for i, v in enumerate(values):
-            kline = await fetch_kline_async(broker_id, symbol, 250)
             p = dict(base); p[param] = v
-            res = run_backtest_engine(symbol, kline, "ma_cross", p, 100_000.0)
+            res = run_backtest_engine(symbol, kline, "ma_cross", p, 100_000.0, data_meta=meta)
             m = res["metrics"]
             table.append({"param": v, "sharpe": m.get("sharpe"),
                           "max_drawdown": m.get("max_drawdown"),
-                          "total_return": m.get("total_return")})
+                          "total_return": m.get("total_return"),
+                          "data_source": res.get("data_source"),
+                          "stale": res.get("stale"), "as_of": res.get("as_of")})
             job = self._jobs.get(params.get("_job_id", ""))
             if job:
                 job["progress"] = int((i + 1) / total * 100)
                 self._persist(job)
                 await self._emit(job)
-        return {"symbol": symbol, "param": param, "table": table}
+        return {"symbol": symbol, "param": param, "table": table,
+                "data_source": meta,
+                "stale": meta.get("source") in ("cache", "cache_stale"),
+                "as_of": (kline[-1].get("date") or kline[-1].get("time")) if kline else None}
 
     async def close(self) -> None:
         pass

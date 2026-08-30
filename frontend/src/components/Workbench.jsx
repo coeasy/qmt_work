@@ -19,6 +19,8 @@ import {
 } from "../store/workspace.jsx";
 import { normalizeNavDetail, OPEN_IN, navTo } from "../lib/nav.js";
 import { useQuotes } from "../lib/quoteHub.jsx";
+// G5：为每个 Pane 提供激活态，供 useActiveInterval 在后台时停止定时器
+import { PaneActiveContext } from "../hooks/useActiveInterval.js";
 
 export default function Workbench() {
   const { state, dispatch, activeTab, aliveIds } = useWorkspace();
@@ -159,7 +161,11 @@ export default function Workbench() {
           <div key={t.id} className={`wb-tabpane${t.id === activeId ? "" : " inactive"}`}
             aria-hidden={t.id !== activeId}>
             <ErrorBoundary key={t.id}>
-              <Pane tab={t} rootKey={t.id} seed={t.layout} dispatch={dispatch} />
+              {/* G5：激活态下发给整棵子树。后台 Pane 内的 useActiveInterval
+                  自动停表；切回前台时立即刷新一次并重启定时器。 */}
+              <PaneActiveContext.Provider value={t.id === activeId}>
+                <Pane tab={t} rootKey={t.id} seed={t.layout} dispatch={dispatch} />
+              </PaneActiveContext.Provider>
             </ErrorBoundary>
           </div>
         ))}

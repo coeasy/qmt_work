@@ -4,6 +4,8 @@ import { useEffect, useMemo, useState } from "react";
 import { api } from "../api.js";
 import { navToQuote } from "../lib/nav.js";
 import { useQuotes } from "../lib/quoteHub.jsx";
+// 金额格式化统一走 lib/format.js（原本地副本已删除，避免第 3 份口径漂移）
+import { fmtAmount } from "../lib/format.js";
 
 const WATCH_KEY = "qmt_work.watchlist.v1";
 
@@ -41,13 +43,6 @@ function cellHtmlClass(c, v) {
   // 涨跌幅格：自身带方向底色（与字体红绿相反，DOM 类不冲突，用专用类）
   if (c.kind === "pct") return v == null ? "" : (v >= 0 ? "qb-pct up" : "qb-pct down");
   return "";
-}
-
-function fmtAmount(n) {
-  if (n == null) return "—";
-  if (n >= 1e8) return (n / 1e8).toFixed(2) + "亿";
-  if (n >= 1e4) return (n / 1e4).toFixed(2) + "万";
-  return String(Math.round(n));
 }
 
 function derive(q) {

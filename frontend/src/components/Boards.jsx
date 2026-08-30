@@ -81,6 +81,8 @@ export default function Boards({ params } = {}) {
     if (!want && !wantName) return;
     if (want.slice(2, 5) === "881" && kind !== "industry") setKind("industry");
     else if (want.slice(2, 5) === "880" && kind !== "concept") setKind("concept");
+    // 刻意不用 useActiveInterval：这是「等榜单到位后自动选中目标板块」的等待轮询，
+    // 命中或 6s 超时即自停。若随 Pane 隐藏而停表，用户切回来会发现目标永远没被选中。
     const t = setInterval(() => {
       const cur = rowsRef.current;
       if (!cur.length) return;                       // 榜单未到位，继续等

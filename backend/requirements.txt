@@ -19,4 +19,7 @@ pytest
 # 测试：行情总线 Redis 真路径（fakeredis 替代真实 Redis，无需起服务）
 redis>=5.0
 fakeredis>=2.0
-eltdx>=3.0  # TDX 公共行情补充源（无券商时 fallback：行情/基础数据）；仅限非商业用途
+# 注意：eltdx（TDX 公共行情补充源）已移至 requirements-optional.txt。
+# 原因：eltdx 采用「ELTDX Research-Only License」，禁止一切商业使用；
+#      作为主依赖会导致本仓库无法满足商用前置条件。详见 docs/THIRD_PARTY_LICENSES.md 3.2 节。
+# 本文件保持「可商用」的最小依赖集；缺失 eltdx 时行情层自动降级为券商数据源。

@@ -87,6 +87,8 @@ export default function Brokers() {
       hint: "正在拉起桥接子进程（30s 内返回）；若一直停留，请确认 QMT 客户端已登录。",
     }}));
     // 1s 刷新"连接中…"秒数（避免被误判为卡死）
+    // 刻意不用 useActiveInterval：生命周期与一次握手绑定（finally 里清表），
+    // 且用户发起连接后切走再回来看，期望看到的仍是实时秒数而非冻结文案。
     const tick = setInterval(() => {
       setConnecting((c) => c[connId] ? { ...c, [connId]: { ...c[connId] } } : c);
     }, 1000);

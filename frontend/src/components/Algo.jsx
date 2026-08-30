@@ -1,6 +1,7 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { api } from "../api.js";
 import { useServerEvents } from "../hooks/useSystemWS.js";
+import { useActiveInterval } from "../hooks/useActiveInterval.js";
 import { orderStatus } from "../lib/format.js";
 
 // 算法单（TWAP/VWAP 时间拆单）：借鉴 Rockyzsu/QMT 算法单能力
@@ -16,7 +17,7 @@ export default function Algo() {
     try { setJobs(await api.algoList()); } catch (e) { setErr(e.message); }
   }
   // P2-2：algo_slice/algo_alert 事件驱动近实时刷新，低频兜底轮询防丢失
-  useEffect(() => { load(); const t = setInterval(load, 30000); return () => clearInterval(t); }, []);
+  useActiveInterval(load, 30000);
   useServerEvents(["algo"], () => { load(); });
 
   async function submit() {

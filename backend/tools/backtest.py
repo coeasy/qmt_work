@@ -140,7 +140,8 @@ def run_backtest_engine(symbol: str, kline: list[dict], strategy: str,
                         max_participation_pct: float = 1.0,
                         use_spread_slippage: bool = False,
                         period: str = "1d", is_st: bool = False,
-                        train_ratio: float = 1.0, rf: float = 0.0) -> dict:
+                        train_ratio: float = 1.0, rf: float = 0.0,
+                        data_meta: dict | None = None) -> dict:
     """基于真实 K 线运行回测（多头、满仓切换），含 A 股规则感知的撮合内核。
 
     成本模型：买入价上浮滑点、卖出价下浮滑点；佣金双边（默认万 3），
@@ -149,7 +150,10 @@ def run_backtest_engine(symbol: str, kline: list[dict], strategy: str,
     涨跌停不可成交、成交量容量约束、整手。
     train_ratio<1 时额外输出样本内/外指标对比（防过拟合基线）。
     """
-    closes = [b["close"] for b in kline if b.get("close") is not None]
+    # 只保留有收盘价的 bar：撮合内核按索引访问 kline，长度若与 closes 不一致会整体错位
+    bars = [b for b in kline if b.get("close") is not None]
+    closes = [b["close"] for b in bars]
+    dates = [b.get("date") or b.get("datetime") or b.get("time") for b in bars]
     if len(closes) < 30:
         raise BrokerNotConnectedError(f"{symbol} K 线不足（需≥30 根），请确认券商已返回历史数据。")
     sig = _signals(strategy, closes, params)
@@ -157,9 +161,9 @@ def run_backtest_engine(symbol: str, kline: list[dict], strategy: str,
                      execution_timing=execution_timing, enforce_limit=enforce_limit,
                      max_participation_pct=max_participation_pct,
                      use_spread_slippage=use_spread_slippage, is_st=is_st)
-    sim = match_simulate(closes, sig, kline, cfg, initial_capital)
+    sim = match_simulate(closes, sig, bars, cfg, initial_capital)
     equity, trades = sim["equity"], sim["trades"]
-    metrics = compute_metrics(equity, trades, period=period, rf=rf)
+    metrics = compute_metrics(equity, trades, period=period, rf=rf, dates=dates)
     train_m, test_m = _split_metrics(equity, trades, train_ratio, period, rf=rf)
     out = {"symbol": symbol, "strategy": strategy, "params": params,
            "initial_capital": initial_capital, "metrics": metrics,
@@ -171,10 +175,57 @@ def run_backtest_engine(symbol: str, kline: list[dict], strategy: str,
                           "enforce_limit": enforce_limit,
                           "max_participation_pct": max_participation_pct},
            "engine": "legacy"}
+    _annotate_provenance(out, bars, data_meta)
+    _annotate_no_trade(out, closes, sig, cfg, initial_capital, trades)
     if train_m:
         out["train_test"] = {"train_ratio": train_ratio,
                              "train": train_m, "test": test_m}
     return out
+
+
+def _annotate_provenance(out: dict, bars: list[dict], data_meta: dict | None) -> None:
+    """G1 诚信标注：回测结论必须带数据来源与时效。
+
+    缓存/降级缓存跑出的结果不等于券商实时数据，必须显式标注 stale + as_of，
+    让用户知道这份结论「截止到哪一天、是不是降级来的」。
+    """
+    if not data_meta:
+        return
+    out["data_source"] = data_meta
+    src = data_meta.get("source")
+    if src in ("cache", "cache_stale"):
+        out["stale"] = True
+        out["as_of"] = (bars[-1].get("date") or bars[-1].get("time")) if bars else None
+        if src == "cache_stale":
+            out["data_source"]["stale_reason"] = data_meta.get("note") or "券商不可达，回退本地历史缓存"
+
+
+def _annotate_no_trade(out: dict, closes: list[float], sig: list[int],
+                       cfg, initial_capital: float, trades: list) -> None:
+    """0 成交时必须说清是「没信号」还是「买不起一手」。
+
+    否则用户会把「本金不够买 1 手茅台」误读成「策略不赚钱」——这是最危险的假结论。
+    """
+    if trades:
+        return
+    if not any(sig):
+        out["diagnostics"] = "策略在该区间未产生任何持仓信号（可尝试调整参数或拉长区间）"
+        return
+    hold_px = [closes[i] for i in range(min(len(closes), len(sig))) if sig[i] == 1]
+    if not hold_px:
+        out["diagnostics"] = "策略在该区间未产生任何持仓信号（可尝试调整参数或拉长区间）"
+        return
+    min_px = min(hold_px)
+    need = min_px * cfg.min_lot
+    if need > initial_capital:
+        out["diagnostics"] = (
+            f"初始资金不足，全程无法建仓：持仓信号期间最低价 {min_px:.2f} 元，"
+            f"买入 1 手（{cfg.min_lot} 股）约需 {need:,.0f} 元，"
+            f"而初始资金仅 {initial_capital:,.0f} 元。请提高初始资金或改选低价标的。")
+    else:
+        out["diagnostics"] = (
+            "产生了持仓信号但无成交：可能被「涨停买不进/跌停卖不出」或成交量容量约束拦截；"
+            "可尝试放宽 max_participation_pct 或关闭 enforce_limit 复测。")
 
 
 async def fetch_kline_async(broker_id: str, symbol: str, count: int = 250) -> list[dict]:
@@ -182,6 +233,22 @@ async def fetch_kline_async(broker_id: str, symbol: str, count: int = 250) -> li
     from . import fetch_kline_cached
     res = await fetch_kline_cached(symbol, "1d", count, broker_id=broker_id or None)
     return res.get("bars") or []
+
+
+async def fetch_kline_async_meta(broker_id: str, symbol: str,
+                                 count: int = 250) -> tuple[list[dict], dict]:
+    """同 fetch_kline_async，但连数据来源元信息一起返回。
+
+    G1 诚信要求：回测结论必须说清数据来自「券商实时 / 本地缓存 / 降级缓存」，
+    否则用户会把「用上周缓存跑出的结果」当成今天的决策依据而不自知。
+    """
+    from . import fetch_kline_cached
+    res = await fetch_kline_cached(symbol, "1d", count, broker_id=broker_id or None)
+    bars = res.get("bars") or []
+    meta = {"source": res.get("source"), "cached_at": res.get("cached_at")}
+    if res.get("note"):
+        meta["note"] = res["note"]
+    return bars, meta
 
 
 def register_backtest_tools(mcp):
@@ -212,13 +279,14 @@ def register_backtest_tools(mcp):
         train_ratio(<1 时输出样本内/外对比防过拟合)、rf(无风险年化收益率)。
         """
         params = params or {"fast": 5, "slow": 20}
-        kline = await fetch_kline_async(broker_id, symbol, count)
+        kline, meta = await fetch_kline_async_meta(broker_id, symbol, count)
         return run_backtest_engine(symbol, kline, strategy, params, initial_capital,
                                    commission_rate, stamp_tax, slippage_bps,
                                    execution_timing=execution_timing,
                                    enforce_limit=enforce_limit,
                                    max_participation_pct=max_participation_pct,
-                                   period=period, train_ratio=train_ratio, rf=rf)
+                                   period=period, train_ratio=train_ratio, rf=rf,
+                                   data_meta=meta)
 
     @mcp.tool()
     async def compare_backtests(configs: list[dict], broker_id: str = "") -> dict:
@@ -231,7 +299,7 @@ def register_backtest_tools(mcp):
         rows = []
         for cfg in configs:
             symbol = cfg.get("symbol", "600519.SH")
-            kline = await fetch_kline_async(broker_id, symbol, int(cfg.get("count", 250)))
+            kline, meta = await fetch_kline_async_meta(broker_id, symbol, int(cfg.get("count", 250)))
             res = run_backtest_engine(symbol, kline, cfg.get("strategy", "ma_cross"),
                                       cfg.get("params", {"fast": 5, "slow": 20}),
                                       float(cfg.get("initial_capital", 100_000)),
@@ -239,8 +307,10 @@ def register_backtest_tools(mcp):
                                       stamp_tax=float(cfg.get("stamp_tax", 0.001)),
                                       slippage_bps=float(cfg.get("slippage_bps", 5.0)),
                                       execution_timing=cfg.get("execution_timing", "close"),
-                                      enforce_limit=bool(cfg.get("enforce_limit", True)))
-            rows.append({"config": cfg, "metrics": res["metrics"]})
+                                      enforce_limit=bool(cfg.get("enforce_limit", True)),
+                                      data_meta=meta)
+            rows.append({"config": cfg, "metrics": res["metrics"],
+                         "stale": res.get("stale", False), "as_of": res.get("as_of")})
         return {"rows": sorted(rows, key=lambda r: r["metrics"].get("sharpe", 0), reverse=True)}
 
     @mcp.tool()
@@ -254,15 +324,21 @@ def register_backtest_tools(mcp):
         values = values or [3, 5, 10, 20, 30]
         table = []
         base = {"fast": 5, "slow": 20}
+        stale = False
+        as_of = None
         for v in values:
-            kline = await fetch_kline_async(broker_id, symbol, 250)
+            kline, meta = await fetch_kline_async_meta(broker_id, symbol, 250)
             p = dict(base); p[param] = v
-            res = run_backtest_engine(symbol, kline, "ma_cross", p, 100_000.0)
+            res = run_backtest_engine(symbol, kline, "ma_cross", p, 100_000.0, data_meta=meta)
+            stale = stale or bool(res.get("stale"))
+            as_of = res.get("as_of") or as_of
             m = res["metrics"]
             table.append({"param": v, "sharpe": m.get("sharpe"),
                           "max_drawdown": m.get("max_drawdown"),
                           "total_return": m.get("total_return")})
-        return {"symbol": symbol, "param": param, "table": table}
+        # 敏感性扫描整表共用同一份数据，数据时效标注放在外层
+        return {"symbol": symbol, "param": param, "table": table,
+                "stale": stale, "as_of": as_of}
 
 
 # ============================================================================
@@ -350,7 +426,7 @@ def _simulate(closes: list[float], sig: list[int], kline: list[dict],
               stamp_tax: float, slippage_bps: float,
               cfg: MatchingConfig | None = None, symbol: str = "",
               period: str = "1d", train_ratio: float = 1.0,
-              rf: float = 0.0) -> dict:
+              rf: float = 0.0, dates: list | None = None) -> dict:
     """统一撮合内核封装（向量化信号下的回测）。"""
     if cfg is None:
         cfg = MatchingConfig(commission_rate=float(commission_rate),
@@ -358,7 +434,7 @@ def _simulate(closes: list[float], sig: list[int], kline: list[dict],
                              slippage_bps=float(slippage_bps), code=symbol)
     sim = match_simulate(closes, sig, kline, cfg, initial_capital)
     equity, trades = sim["equity"], sim["trades"]
-    metrics = compute_metrics(equity, trades, period=period, rf=rf)
+    metrics = compute_metrics(equity, trades, period=period, rf=rf, dates=dates)
     train_m, test_m = _split_metrics(equity, trades, train_ratio, period, rf=rf)
     return {"equity": equity, "trades": trades, "metrics": metrics,
             "train": train_m, "test": test_m}
@@ -374,9 +450,12 @@ def run_backtest_vectorized(symbol: str, kline: list[dict], strategy: str,
                             max_participation_pct: float = 1.0,
                             use_spread_slippage: bool = False,
                             period: str = "1d", is_st: bool = False,
-                            train_ratio: float = 1.0, rf: float = 0.0) -> dict:
+                            train_ratio: float = 1.0, rf: float = 0.0,
+                            data_meta: dict | None = None) -> dict:
     """向量化回测（pandas/numpy 指标 + 统一交易内核），输出形状与 run_backtest_engine 一致。"""
-    closes = [b["close"] for b in kline if b.get("close") is not None]
+    bars = [b for b in kline if b.get("close") is not None]
+    closes = [b["close"] for b in bars]
+    dates = [b.get("date") or b.get("datetime") or b.get("time") for b in bars]
     if len(closes) < 30:
         raise BrokerNotConnectedError(f"{symbol} K 线不足（需≥30 根），请确认券商已返回历史数据。")
     sig = _signals_vectorized(strategy, closes, params)
@@ -384,9 +463,9 @@ def run_backtest_vectorized(symbol: str, kline: list[dict], strategy: str,
                      execution_timing=execution_timing, enforce_limit=enforce_limit,
                      max_participation_pct=max_participation_pct,
                      use_spread_slippage=use_spread_slippage, is_st=is_st)
-    sim = _simulate(closes, sig, kline, initial_capital, commission_rate, stamp_tax,
+    sim = _simulate(closes, sig, bars, initial_capital, commission_rate, stamp_tax,
                     slippage_bps, cfg=cfg, symbol=symbol, period=period,
-                    train_ratio=train_ratio, rf=rf)
+                    train_ratio=train_ratio, rf=rf, dates=dates)
     out = {"symbol": symbol, "strategy": strategy, "params": params,
            "initial_capital": initial_capital, "metrics": sim["metrics"],
            "trades": sim["trades"][-20:], "trade_count": len(sim["trades"]),
@@ -397,6 +476,9 @@ def run_backtest_vectorized(symbol: str, kline: list[dict], strategy: str,
                           "enforce_limit": enforce_limit,
                           "max_participation_pct": max_participation_pct},
            "engine": "vectorized"}
+    # 与 legacy 引擎口径一致：数据来源时效标注 + 0 成交原因说明
+    _annotate_provenance(out, bars, data_meta)
+    _annotate_no_trade(out, closes, sig, cfg, initial_capital, sim["trades"])
     if sim["train"]:
         out["train_test"] = {"train_ratio": train_ratio,
                              "train": sim["train"], "test": sim["test"]}

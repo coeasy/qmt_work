@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { api } from "../api.js";
+import { useActiveInterval } from "../hooks/useActiveInterval.js";
 
 /* 系统状态（补齐 /live、/ready、/metrics、/quote-bus/stats 前端入口）
    聚合存活/就绪探针、行情总线统计与 Prometheus 原始指标，供排障与监控对接。 */
@@ -24,9 +25,7 @@ export default function SystemStatus() {
   const [metrics, setMetrics] = useState("");
   const [loading, setLoading] = useState(false);
 
-  useEffect(() => { loadAll(); const t = setInterval(loadAll, 15000); return () => clearInterval(t); },
-    // eslint-disable-next-line
-    []);
+  useActiveInterval(loadAll, 15000);
 
   async function loadAll() {
     setLoading(true);

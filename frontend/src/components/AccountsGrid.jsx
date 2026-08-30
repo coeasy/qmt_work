@@ -1,8 +1,9 @@
 // 多账户网格视图 + 批量操作：跨账户统一看板（资产/持仓矩阵 + 批量下单/撤单/重连）。
 // 后端 /account/grid 与 /account/batch/* 是唯一真相来源；前端仅透传 conn_id，绝不内置券商逻辑。
-import { useEffect, useRef, useState, Fragment } from "react";
+import { useEffect, useState, Fragment } from "react";
 import { api } from "../api.js";
 import { useServerEvents } from "../hooks/useSystemWS.js";
+import { useActiveInterval } from "../hooks/useActiveInterval.js";
 
 const PRICE_TYPES = [
   { v: "limit", t: "限价" },
@@ -29,7 +30,6 @@ export default function AccountsGrid() {
   const [auto, setAuto] = useState(true);
   const [updatedAt, setUpdatedAt] = useState(null);
   const [expanded, setExpanded] = useState({}); // 持仓矩阵展开状态（按 code）
-  const timer = useRef(null);
 
   async function load() {
     setLoading(true);
@@ -48,7 +48,6 @@ export default function AccountsGrid() {
 
   useEffect(() => {
     load();
-    return () => { if (timer.current) clearInterval(timer.current); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -56,12 +55,8 @@ export default function AccountsGrid() {
   // 自动刷新仅作低频兜底轮询（30s），防事件丢失。关闭 auto 后仅保留事件驱动。
   useServerEvents(["account"], () => { if (auto) load(); });
 
-  useEffect(() => {
-    if (timer.current) clearInterval(timer.current);
-    if (auto) timer.current = setInterval(load, 30000);
-    return () => { if (timer.current) clearInterval(timer.current); };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [auto]);
+  // G5：auto 关闭或后台 Tab 时完全静默（immediate:false 避免切换 auto 时重复请求）
+  useActiveInterval(load, auto ? 30000 : 0, [auto], { immediate: false });
 
   const conns = grid?.accounts || [];
   const connOptions = conns.map((c) => ({ conn_id: c.conn_id, name: c.name }));

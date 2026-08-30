@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { api } from "../api.js";
 import { useBroker } from "../BrokerContext.jsx";
 import { useSystemStatus, useServerEvents } from "../hooks/useSystemWS.js";
+import { useActiveInterval } from "../hooks/useActiveInterval.js";
 import Chart from "./Chart.jsx";
 
 export default function Dashboard() {
@@ -14,22 +15,16 @@ export default function Dashboard() {
   const [agg, setAgg] = useState(null);
   const { status: sysStatus, sys, latency } = useSystemStatus();
   const [rt, setRt] = useState(null);
-  useEffect(() => {
-    api.getRuntimeConfig().then(setRt).catch(() => {});
-    const t = setInterval(() => api.getRuntimeConfig().then(setRt).catch(() => {}), 15000);
-    return () => clearInterval(t);
-  }, []);
+  // G5：runtimeConfig / aggregate 兜底轮询改为 Pane 可见性感知（后台 Tab 停表）
+  const loadRt = () => api.getRuntimeConfig().then(setRt).catch(() => {});
+  useActiveInterval(loadRt, 15000);
 
   async function loadHealth() {
     try { setHealth(await api.health()); } catch {}
   }
   useEffect(() => { loadHealth(); }, []);
-  useEffect(() => {
-    api.aggregate().then(setAgg).catch(() => {});
-    // P2-2：低频兜底轮询（≥30s），近实时由下方事件驱动刷新
-    const t = setInterval(() => api.aggregate().then(setAgg).catch(() => {}), 30000);
-    return () => clearInterval(t);
-  }, [activeId]);
+  const loadAgg = () => api.aggregate().then(setAgg).catch(() => {});
+  useActiveInterval(loadAgg, 30000, [activeId]);
 
   async function load() {
     try {
@@ -45,11 +40,7 @@ export default function Dashboard() {
   }
   // P2-2：账户/委托/成交/对账事件驱动近实时刷新（system tick 已由 useSystemStatus 实时驱动），
   // 保留 ≥30s 低频兜底轮询防事件丢失
-  useEffect(() => {
-    load();
-    const t = setInterval(load, 30000);
-    return () => clearInterval(t);
-  }, [activeId]);
+  useActiveInterval(load, 30000, [activeId]);
   useServerEvents(["account", "order", "trade", "reconcile"], () => { load(); api.aggregate().then(setAgg).catch(() => {}); });
 
   const pnlOption = {
