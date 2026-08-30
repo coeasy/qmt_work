@@ -50,6 +50,7 @@ export const PAGES = {
   index_overview: { label: "指数分析", comp: D(() => import("./components/IndexOverview.jsx")) },
   rotation: { label: "板块轮动", comp: D(() => import("./components/Rotation.jsx")) },
   markettools: { label: "行情工具", comp: D(() => import("./components/MarketTools.jsx")) },
+  screen: { label: "条件选股", comp: D(() => import("./components/Screen.jsx")) },
 
   trade: { label: "手动交易", comp: D(() => import("./components/Trade.jsx")) },
   limitup: { label: "涨停监控", comp: D(() => import("./components/LimitUp.jsx")) },
@@ -92,6 +93,7 @@ export const PAGE_TREE = [
     { key: "rotation", label: "板块轮动" },
     { key: "quote", label: "行情分析" },
     { key: "markettools", label: "行情工具" },
+    { key: "screen", label: "条件选股" },
   ] },
   { group: "交易", items: [
     { key: "trade", label: "手动交易" },

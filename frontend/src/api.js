@@ -120,6 +120,10 @@ api.marketMinutes = (params) => api.get("/market/minutes", params);
 // G2-2 统一指标引擎：目录 + 服务端计算（前端不再自带指标实现，单一真源）
 api.marketIndicators = () => api.get("/market/indicators");
 api.marketIndicatorsCalc = (params) => api.get("/market/indicators/calc", params);
+// G7 条件选股：conditions 为 JSON 条件树（URL 编码）；动态板块存取
+api.marketScreen = (params) => api.get("/market/screen", params);
+api.screenBoards = () => api.get("/market/screen/boards");
+api.screenBoardsSave = (body) => api.post("/market/screen/boards", body);
 // 周期契约清单（契约驱动 UI）：前端周期条据此渲染，不支持的周期置灰并显示原因，
 // 杜绝「点了月线实际出日线」这类前后端枚举漂移导致的静默错误。
 api.marketPeriods = () => api.get("/market/periods");

@@ -1,0 +1,266 @@
+// G7 条件选股（通达信条件选股 / 东财问财对标）。
+// 数据：/market/indicators 指标目录（条件构建器元数据）、/market/screen 本地仓
+//       全市场向量化扫描、/market/screen/boards 动态板块存取。
+// 约束：零轮询；零 mock——仓为空时后端返回 503 引导先同步；条件可存为动态板块。
+import { useCallback, useEffect, useState } from "react";
+import { api } from "../api.js";
+
+const OPS = [
+  { v: "gt", label: ">" },
+  { v: "gte", label: "≥" },
+  { v: "lt", label: "<" },
+  { v: "lte", label: "≤" },
+  { v: "eq", label: "=" },
+  { v: "ne", label: "≠" },
+];
+const FIELD_NAMES = [
+  { v: "close", label: "收盘价" },
+  { v: "open", label: "开盘价" },
+  { v: "high", label: "最高价" },
+  { v: "low", label: "最低价" },
+  { v: "volume", label: "成交量" },
+];
+const SORTS = [
+  { v: "score", label: "命中条件数" },
+  { v: "change_pct", label: "涨跌幅" },
+  { v: "close", label: "收盘价" },
+  { v: "volume", label: "成交量" },
+];
+let _seq = 0;
+const newRow = () => ({
+  id: ++_seq,
+  kind: "indicator",
+  name: "roc",
+  output: "",
+  op: "gt",
+  value: "0",
+  window: "-1",
+  params: {},
+});
+
+const pctCls = (v) => (v == null ? "" : v >= 0 ? "up" : "down");
+const fmt = (v) => (v == null || Number.isNaN(Number(v)) ? "—" : Number(v));
+
+export default function Screen() {
+  const [inds, setInds] = useState([]);
+  const [rows, setRows] = useState([newRow()]);
+  const [join, setJoin] = useState("and");
+  const [filters, setFilters] = useState({
+    min_price: "", max_price: "", sort_by: "score", sort_desc: true, limit: 100,
+  });
+  const [results, setResults] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState("");
+  const [boardName, setBoardName] = useState("");
+  const [boards, setBoards] = useState([]);
+  const [msg, setMsg] = useState("");
+
+  const indById = useCallback((n) => inds.find((i) => i.name === n), [inds]);
+
+  const loadBoards = useCallback(() => {
+    api.screenBoards().then((d) => setBoards(d.items || [])).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    api.marketIndicators().then((d) => setInds(d.items || [])).catch(() => {});
+    loadBoards();
+  }, [loadBoards]);
+
+  const buildConditions = () => {
+    const leaves = rows
+      .filter((r) => r.name && String(r.value) !== "")
+      .map((r) => {
+        if (r.kind === "indicator") {
+          const spec = indById(r.name) || {};
+          const params = {};
+          (spec.params || []).forEach((p) => {
+            const key = p.name === "period" ? "win" : p.name;
+            const v = r.params && r.params[key];
+            if (v !== "" && v != null) params[key] = Number(v);
+          });
+          return {
+            indicator: {
+              name: r.name,
+              params,
+              output: r.output || (spec.outputs && spec.outputs[0]) || "",
+              op: r.op,
+              value: Number(r.value),
+              window: Number(r.window || -1),
+            },
+          };
+        }
+        return { field: { name: r.name, op: r.op, value: Number(r.value), window: Number(r.window || -1) } };
+      });
+    return join === "or" ? { or: leaves } : { and: leaves };
+  };
+
+  const run = async () => {
+    setErr("");
+    setResults(null);
+    setMsg("");
+    setLoading(true);
+    try {
+      const cond = buildConditions();
+      const d = await api.marketScreen({
+        conditions: JSON.stringify(cond),
+        limit: filters.limit,
+        sort_by: filters.sort_by,
+        sort_desc: filters.sort_desc ? 1 : 0,
+        min_price: filters.min_price,
+        max_price: filters.max_price,
+      });
+      setResults(d);
+    } catch (e) {
+      setErr(String((e && e.message) || e));
+    }
+    setLoading(false);
+  };
+
+  const save = async () => {
+    if (!boardName.trim() || !results || !results.results || !results.results.length) {
+      setMsg("请先运行选股并输入板块名称");
+      return;
+    }
+    setMsg("");
+    try {
+      await api.screenBoardsSave({
+        name: boardName.trim(),
+        conditions: buildConditions(),
+        results: results.results,
+      });
+      setMsg(`已存为动态板块「${boardName.trim()}」`);
+      loadBoards();
+    } catch (e) {
+      setMsg("保存失败：" + String((e && e.message) || e));
+    }
+  };
+
+  const patchRow = (id, patch) =>
+    setRows((prev) => prev.map((r) => (r.id === id ? { ...r, ...patch } : r)));
+
+  const onRowKind = (r, kind) => {
+    patchRow(r.id, { kind, name: kind === "field" ? "close" : (inds[0] && inds[0].name) || "roc", output: "", params: {} });
+  };
+  const onRowName = (r, name) => {
+    const spec = indById(name) || {};
+    const params = {};
+    (spec.params || []).forEach((p) => { params[p.name === "period" ? "win" : p.name] = p.default; });
+    patchRow(r.id, { name, output: (spec.outputs && spec.outputs[0]) || "", params });
+  };
+
+  return (
+    <div className="market-page sc-page">
+      {/* 条件构建 */}
+      <div className="bd-toolbar sc-toolbar">
+        <span className="sc-title">条件选股</span>
+        <select className="ib-btn" value={join} onChange={(e) => setJoin(e.target.value)} title="条件组合方式">
+          <option value="and">全部满足 (AND)</option>
+          <option value="or">任一满足 (OR)</option>
+        </select>
+        <button className="ib-btn" onClick={() => setRows((p) => [...p, newRow()])}>+ 添加条件</button>
+        <span className="sc-spacer" />
+        <select className="ib-btn" value={filters.sort_by} onChange={(e) => setFilters({ ...filters, sort_by: e.target.value })}>
+          {SORTS.map((s) => <option key={s.v} value={s.v}>{s.label}</option>)}
+        </select>
+        <label className="checkbox sc-chk">
+          <input type="checkbox" checked={filters.sort_desc}
+            onChange={(e) => setFilters({ ...filters, sort_desc: e.target.checked })} /> 降序
+        </label>
+        <input className="mp-code-input sc-input" placeholder="最低价" value={filters.min_price}
+          onChange={(e) => setFilters({ ...filters, min_price: e.target.value })} />
+        <input className="mp-code-input sc-input" placeholder="最高价" value={filters.max_price}
+          onChange={(e) => setFilters({ ...filters, max_price: e.target.value })} />
+        <input className="mp-code-input sc-input" style={{ width: 64 }} placeholder="条数" value={filters.limit}
+          onChange={(e) => setFilters({ ...filters, limit: e.target.value })} />
+        <button className="btn-primary" onClick={run} disabled={loading}>
+          {loading ? "扫描中…" : "运行选股"}
+        </button>
+      </div>
+
+      {/* 条件行 */}
+      <div className="sc-rows">
+        {rows.map((r) => {
+          const spec = r.kind === "indicator" ? indById(r.name) : null;
+          return (
+            <div key={r.id} className="form-row sc-row">
+              <select className="ib-btn" value={r.kind} onChange={(e) => onRowKind(r, e.target.value)}>
+                <option value="indicator">指标</option>
+                <option value="field">字段</option>
+              </select>
+              {r.kind === "indicator" ? (
+                <>
+                  <select className="ib-btn" value={r.name} onChange={(e) => onRowName(r, e.target.value)}>
+                    {inds.map((i) => <option key={i.name} value={i.name}>{i.label}</option>)}
+                  </select>
+                  <select className="ib-btn" value={r.output} onChange={(e) => patchRow(r.id, { output: e.target.value })}>
+                    {(spec && spec.outputs || []).map((o) => <option key={o} value={o}>{o.toUpperCase()}</option>)}
+                  </select>
+                  {(spec && spec.params || []).map((p) => (
+                    <input key={p.name} className="mp-code-input sc-input" style={{ width: 64 }}
+                      placeholder={p.name === "period" ? "周期" : p.name}
+                      value={(r.params && r.params[p.name === "period" ? "win" : p.name]) ?? ""}
+                      onChange={(e) => patchRow(r.id, { params: { ...(r.params || {}), [p.name === "period" ? "win" : p.name]: e.target.value } })} />
+                  ))}
+                </>
+              ) : (
+                <select className="ib-btn" value={r.name} onChange={(e) => patchRow(r.id, { name: e.target.value })}>
+                  {FIELD_NAMES.map((f) => <option key={f.v} value={f.v}>{f.label}</option>)}
+                </select>
+              )}
+              <select className="ib-btn" value={r.op} onChange={(e) => patchRow(r.id, { op: e.target.value })}>
+                {OPS.map((o) => <option key={o.v} value={o.v}>{o.label}</option>)}
+              </select>
+              <input className="mp-code-input sc-input" placeholder="阈值" value={r.value}
+                onChange={(e) => patchRow(r.id, { value: e.target.value })} />
+              <input className="mp-code-input sc-input" style={{ width: 56 }} placeholder="偏移" title="K线偏移，-1=最新"
+                value={r.window} onChange={(e) => patchRow(r.id, { window: e.target.value })} />
+              <button className="btn-danger-sm" onClick={() => setRows((p) => p.filter((x) => x.id !== r.id))}>删</button>
+            </div>
+          );
+        })}
+      </div>
+
+      {err && <div className="sc-msg sc-err">{err}</div>}
+      {msg && <div className="sc-msg">{msg}</div>}
+
+      {/* 结果 */}
+      {results && (
+        <div className="sc-results">
+          <div className="bd-toolbar">
+            <span className="sc-title">命中 {results.count} 只（扫描 {results.total_scanned} 只，{results.elapsed_ms}ms）</span>
+            <input className="mp-code-input sc-input" placeholder="存为板块名称" value={boardName}
+              onChange={(e) => setBoardName(e.target.value)} />
+            <button className="btn-primary" onClick={save}>存为动态板块</button>
+          </div>
+          <table className="table sc-table">
+            <thead>
+              <tr><th>代码</th><th>名称</th><th>收盘</th><th>涨跌幅</th><th>成交量</th><th>命中</th></tr>
+            </thead>
+            <tbody>
+              {results.results.map((r) => (
+                <tr key={r.code}>
+                  <td className="sc-code">{r.code}</td>
+                  <td>{r.name}</td>
+                  <td>{fmt(r.close)}</td>
+                  <td className={pctCls(r.change_pct)}>{r.change_pct == null ? "—" : `${r.change_pct}%`}</td>
+                  <td>{fmt(r.volume)}</td>
+                  <td>{r.score}/{r.total_conditions}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {/* 已存动态板块 */}
+      <div className="sc-boards">
+        <div className="sc-title">已存动态板块</div>
+        {boards.length === 0
+          ? <span className="sc-muted">（暂无，运行选股后可存为板块）</span>
+          : <ul className="sc-board-list">{boards.map((b) => (
+            <li key={b.kind}>{b.name} · {b.count} 只</li>
+          ))}</ul>}
+      </div>
+    </div>
+  );
+}
