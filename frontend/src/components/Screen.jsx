@@ -4,6 +4,8 @@
 // 约束：零轮询；零 mock——仓为空时后端返回 503 引导先同步；条件可存为动态板块。
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../api.js";
+import EmptyState from "./ui/EmptyState.jsx";
+import { useVirtualList } from "../lib/useVirtualList.js";
 
 const OPS = [
   { v: "gt", label: ">" },
@@ -54,6 +56,9 @@ export default function Screen() {
   const [boardName, setBoardName] = useState("");
   const [boards, setBoards] = useState([]);
   const [msg, setMsg] = useState("");
+  // G11-4：结果 >200 行时虚拟化（5000+ 全市场选股不卡顿）
+  const big = (results?.results || []).length > 200;
+  const vl = useVirtualList(big ? results.results : [], { itemHeight: 28, height: 420 });
 
   const indById = useCallback((n) => inds.find((i) => i.name === n), [inds]);
 
@@ -232,23 +237,42 @@ export default function Screen() {
               onChange={(e) => setBoardName(e.target.value)} />
             <button className="btn-primary" onClick={save}>存为动态板块</button>
           </div>
-          <table className="table sc-table">
-            <thead>
-              <tr><th>代码</th><th>名称</th><th>收盘</th><th>涨跌幅</th><th>成交量</th><th>命中</th></tr>
-            </thead>
-            <tbody>
-              {results.results.map((r) => (
-                <tr key={r.code}>
-                  <td className="sc-code">{r.code}</td>
-                  <td>{r.name}</td>
-                  <td>{fmt(r.close)}</td>
-                  <td className={pctCls(r.change_pct)}>{r.change_pct == null ? "—" : `${r.change_pct}%`}</td>
-                  <td>{fmt(r.volume)}</td>
-                  <td>{r.score}/{r.total_conditions}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          {results.count === 0 ? (
+            <EmptyState title="无命中" hint="放宽条件，或先运行全市场同步（本地仓为空时选股返回 503）" />
+          ) : big ? (
+            <div className="sc-vlist" style={{ height: 420, overflow: "auto" }} onScroll={vl.onScroll}>
+              <div style={{ height: vl.totalHeight, position: "relative" }}>
+                {vl.visible.map((r, i) => (
+                  <div key={r.code} className="sc-vrow" style={{ top: (vl.startIndex + i) * 28 }}>
+                    <span className="sc-code">{r.code}</span>
+                    <span>{r.name}</span>
+                    <span>{fmt(r.close)}</span>
+                    <span className={pctCls(r.change_pct)}>{r.change_pct == null ? "—" : `${r.change_pct}%`}</span>
+                    <span>{fmt(r.volume)}</span>
+                    <span>{r.score}/{r.total_conditions}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : (
+            <table className="table sc-table">
+              <thead>
+                <tr><th>代码</th><th>名称</th><th>收盘</th><th>涨跌幅</th><th>成交量</th><th>命中</th></tr>
+              </thead>
+              <tbody>
+                {results.results.map((r) => (
+                  <tr key={r.code}>
+                    <td className="sc-code">{r.code}</td>
+                    <td>{r.name}</td>
+                    <td>{fmt(r.close)}</td>
+                    <td className={pctCls(r.change_pct)}>{r.change_pct == null ? "—" : `${r.change_pct}%`}</td>
+                    <td>{fmt(r.volume)}</td>
+                    <td>{r.score}/{r.total_conditions}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
         </div>
       )}
 

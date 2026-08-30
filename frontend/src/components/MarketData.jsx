@@ -110,6 +110,19 @@ export default function MarketData({ params, leafId, tabId, dispatch } = {}) {
   const [subInd, setSubInd] = useState("macd");
   // G2-3：后端指标计算结果缓存（key = indicatorKey(name, params) → outputs）
   const [indData, setIndData] = useState({});
+  // G9-2 画线工具：水平线（点击 K 线取价位），localStorage 按 code 持久化
+  const [drawMode, setDrawMode] = useState(false);
+  const [drawings, setDrawings] = useState([]);
+  const DRAW_KEY = `qmt_drawings_${code}`;
+  useEffect(() => {
+    try { setDrawings(JSON.parse(localStorage.getItem(DRAW_KEY) || "[]") || []); }
+    catch { setDrawings([]); }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [DRAW_KEY]);
+  useEffect(() => {
+    try { localStorage.setItem(DRAW_KEY, JSON.stringify(drawings)); } catch { /* ignore */ }
+  }, [drawings, DRAW_KEY]);
+  const clearDrawings = () => setDrawings([]);
 
   // 底部抽屉：五档盘口 | 快速交易 | F10
   const [drawerTab, setDrawerTab] = useState("quote");
@@ -199,17 +212,34 @@ export default function MarketData({ params, leafId, tabId, dispatch } = {}) {
     else if (subInd === "wr") need.push(["wr", {}]);
     let alive = true;
     const base = { code, period, count, adj, source: "auto" };
-    Promise.all(need.map(([name, params]) =>
-      fetchIndicator(name, { ...base, ...params }).then((outs) => [name, params, outs])))
+    Promise.all(need.map(([name, indParams]) =>
+      fetchIndicator(name, { ...base, ...indParams }).then((outs) => [name, indParams, outs])))
       .then((rows) => {
         if (!alive) return;
         const map = {};
-        rows.forEach(([name, params, outs]) => { if (outs) map[indicatorKey(name, params)] = outs; });
+        rows.forEach(([name, indParams, outs]) => { if (outs) map[indicatorKey(name, indParams)] = outs; });
         setIndData(map);
       });
     return () => { alive = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bars.length, code, period, count, adj, mainInd, subInd]);
+
+  /* ---------- G9-2 画线：画线模式点击 K 线取价 → 水平线（convertToPixel 像素存储） ---------- */
+  useEffect(() => {
+    const inst = chartRef.current && chartRef.current.getInstance
+      ? chartRef.current.getInstance() : null;
+    if (!drawMode || !inst) return;
+    const onClick = (p) => {
+      if (!p || p.value == null) return;
+      const price = Array.isArray(p.value) ? Number(p.value[1]) : Number(p.value);
+      if (Number.isNaN(price)) return;
+      const y = inst.convertToPixel({ yAxisIndex: 0 }, price);
+      if (y == null) return;
+      setDrawings((prev) => [...prev.slice(-19), { id: Date.now(), price, y }]);
+    };
+    inst.on("click", onClick);
+    return () => inst.off("click", onClick);
+  }, [drawMode, code, period, bars.length]);
 
   const meta = klineQ.data && klineQ.data.source ? {
     source: klineQ.data.source,
@@ -737,8 +767,16 @@ export default function MarketData({ params, leafId, tabId, dispatch } = {}) {
         selectedDataBackground: { lineStyle: { color: "#4f8cff" }, areaStyle: { color: "rgba(79,140,255,.25)" } },
         textStyle: { color: "#5a6a82", fontSize: 9 } },
     ];
+    // G9-2 画线：水平线 graphic 元素（y 为点击时 convertToPixel 像素；缩放后位置近似）
+    if (drawings.length) {
+      opt.graphic = drawings.map((d) => ({
+        type: "line",
+        shape: { x1: 0, y1: d.y, x2: 10000, y2: d.y },
+        style: { stroke: "#fdbb30", lineWidth: 1, lineDash: [4, 4], opacity: 0.8 },
+      }));
+    }
     return opt;
-  }, [bars, mainInd, subInd, err, indData]);
+  }, [bars, mainInd, subInd, err, indData, drawings]);
 
   /* ======================== C1：十字光标 OHLC 信息条 ======================== */
   useEffect(() => {
@@ -894,6 +932,15 @@ export default function MarketData({ params, leafId, tabId, dispatch } = {}) {
               <Chart ref={chartRef} option={periodMeta.kind === "tick" ? tickOption : klineOption} height={DRAWER_CHART_H[drawerOpen ? "open" : "closed"]} />
             </ErrorBoundary>
           </div>
+          {periodMeta.kind !== "tick" && (
+            <div className="kline-draw-bar">
+              <button className={`ib-btn ${drawMode ? "active" : ""}`}
+                onClick={() => setDrawMode((v) => !v)} title="开启后点击K线画水平线">✎ 画线</button>
+              {drawings.length > 0 && (
+                <button className="btn-danger-sm" onClick={clearDrawings}>清除画线 ({drawings.length})</button>
+              )}
+            </div>
+          )}
 
           <div className="indicator-bar">
             {SUB_INDICATORS.map((ind) => (

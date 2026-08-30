@@ -11,6 +11,7 @@ import app.routes.backtest as backtest
 import app.routes.broker as broker
 import app.routes.capabilities as capabilities
 import app.routes.config as config
+import app.routes.datahub as datahub
 import app.routes.factors as factors
 import app.routes.health as health
 import app.routes.indicators as indicators
@@ -69,3 +70,4 @@ router.include_router(indicators.router)
 router.include_router(screen.router)
 router.include_router(analysis.router)
 router.include_router(runtime.router)
+router.include_router(datahub.router)

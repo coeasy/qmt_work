@@ -10,6 +10,7 @@ import Chart from "./Chart.jsx";
 import { formatPct, formatAmount } from "../hooks/useMarket.js";
 import { navToQuote } from "../lib/nav.js";
 import { useQuotes } from "../lib/quoteHub.jsx";
+import { subscribe } from "../lib/dataHub.js";
 
 const KIND_TABS = [
   { v: "industry", label: "行业板块" },
@@ -58,7 +59,7 @@ export default function Boards({ params } = {}) {
     () => (cons?.items || []).slice(0, 200).map((c) => c.code), [cons]);
   const { quotes: consQuotes } = useQuotes(consCodes);
 
-  /* ---------- 板块榜单 ---------- */
+  /* ---------- 板块榜单（G4 数据面试点：topic 总线 + 后端策略表节流/合并） ---------- */
   const loadBoards = (k = kind, s = sortBy) => {
     setLoading(true); setErr("");
     api.marketBoards({ kind: k, sort_by: s, limit: BOARD_COUNT, source: srcRef.current })
@@ -66,7 +67,20 @@ export default function Boards({ params } = {}) {
       .catch((e) => { setRows([]); setErr(e.message || "板块榜获取失败"); })
       .finally(() => setLoading(false));
   };
-  useEffect(() => { loadBoards(); /* eslint-disable-line react-hooks/exhaustive-deps */ }, [kind, sortBy, srcSel]);
+  useEffect(() => {
+    const unsub = subscribe(`market:boards:${kind}:${sortBy}`, async () => {
+      const r = await api.marketBoards({ kind, sort_by: sortBy, limit: BOARD_COUNT,
+                                         source: srcRef.current });
+      setSource(r.source || "");
+      return r.items || [];
+    }, ({ data, error }) => {
+      if (data) setRows(data);
+      else if (error) { setRows([]); setErr(error.message || "板块榜获取失败"); }
+      setLoading(false);
+    });
+    return unsub;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [kind, sortBy, srcSel]);
 
   /* ---------- 深链定位（F3：个股页概念/板块点击 → 本页） ---------- */
   // A2（R2）重构：不再在 setRows 的 updater 里调 selectBoard（副作用进 setState

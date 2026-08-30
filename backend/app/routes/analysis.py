@@ -75,3 +75,34 @@ async def market_export(body: Dict[str, Any]):
                    "note": "openpyxl 不可用时已回退为 CSV 内容", "fallback_csv": content})
     except Exception as exc:  # noqa: BLE001
         return err(500, f"导出失败：{exc}")
+
+
+@router.get("/market/analysis/scripts")
+async def market_analysis_scripts_list():
+    """G10-3 分析脚本目录（契约元数据；GET 只读 → G3 自动暴露 MCP）。"""
+    from app.analysis.contract import list_scripts
+    items = list_scripts()
+    return ok({"items": items, "count": len(items)})
+
+
+@router.post("/market/analysis/run")
+async def market_analysis_run(body: Dict[str, Any]):
+    """执行分析脚本：{name, params?, data: DataResult 兼容结构}。"""
+    from app.analysis.contract import run
+    from app.datasource.result import DataResult
+    name = (body or {}).get("name")
+    data_raw = (body or {}).get("data") or {}
+    if not name:
+        return err(400, "缺少脚本名 name")
+    try:
+        dres = DataResult.from_source(
+            data_raw.get("results"), source=data_raw.get("source") or "api",
+            stale=bool(data_raw.get("stale", False)),
+            as_of=data_raw.get("as_of"),
+        )
+        out = await run(name, dres, **(body.get("params") or {}))
+    except KeyError as exc:
+        return err(404, str(exc))
+    except (ValueError, TypeError) as exc:
+        return err(400, str(exc))
+    return ok(out)

@@ -1112,3 +1112,19 @@ input[type="checkbox"] { width: 15px; height: 15px; cursor: pointer; accent-colo
 .sc-board-list { display: flex; flex-wrap: wrap; gap: 8px; list-style: none; margin: 0; padding: 0; }
 .sc-board-list li { background: #0d1424; border: 1px solid #1a2233; border-radius: 6px; padding: 4px 10px; font-size: 12px; color: #e6ecf5; }
 .sc-muted { color: #5a6a82; font-size: 12px; }
+
+/* ================= G11-5 统一空态 ================= */
+.es-empty { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 30px 12px; color: var(--text-dim, #8a97ad); }
+.es-icon { font-size: 26px; opacity: .45; }
+.es-title { font-size: 13px; }
+.es-hint { font-size: 12px; color: #5a6a82; }
+
+/* ================= G11-4 虚拟列表行（Screen 大结果集） ================= */
+.sc-vlist { border: 1px solid #1a2233; border-radius: 6px; background: #0d1424; }
+.sc-vrow { position: absolute; left: 0; right: 0; height: 28px; display: grid;
+  grid-template-columns: 1.2fr 1.4fr 0.8fr 0.9fr 1fr 0.8fr; align-items: center;
+  padding: 0 10px; font-size: 12px; border-bottom: 1px solid #121a2b; color: #e6ecf5; }
+
+/* ================= G9-2 画线工具条 ================= */
+.kline-draw-bar { display: flex; align-items: center; gap: 6px; padding: 4px 8px 0; }
+.kline-draw-bar .ib-btn.active { background: #2c3850; color: #fff; }

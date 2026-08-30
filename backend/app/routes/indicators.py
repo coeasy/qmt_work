@@ -80,3 +80,34 @@ async def market_indicators_calc(
         "name": out["name"], "params": out["params"], "outputs": out["outputs"],
         "meta": {k: spec.to_dict()[k] for k in ("label", "category", "formula")},
     })
+
+
+@router.get("/market/chart-spec")
+async def market_chart_spec():
+    """G9-4 图表规范（后端下发，前端渲染器统一消费，消灭 4 份模板）：
+    主图指标（MA 周期/配色）、副图指标、K 线配色。"""
+    return ok({
+        "candlestick": {"up": "#ef4d56", "down": "#29c08a"},
+        "main": {
+            "default": "ma",
+            "options": [
+                {"indicator": "ma", "label": "MA", "periods": [5, 10, 20, 60],
+                 "colors": ["#ffffff", "#fdbb30", "#9b7bd8", "#91cc75"]},
+                {"indicator": "boll", "label": "BOLL",
+                 "colors": ["#c23531", "#91cc75", "#c23531"]},
+            ],
+        },
+        "sub": {
+            "default": "macd",
+            "options": [
+                {"indicator": "macd", "label": "MACD",
+                 "colors": ["#ffffff", "#fdbb30", "#ef4d56"]},
+                {"indicator": "kdj", "label": "KDJ",
+                 "colors": ["#ef4d56", "#fdbb30", "#4f8cff"]},
+                {"indicator": "rsi", "label": "RSI",
+                 "params": [{"win": 6}, {"win": 12}],
+                 "colors": ["#ef4d56", "#4f8cff"]},
+                {"indicator": "wr", "label": "WR", "colors": ["#91cc75"]},
+            ],
+        },
+    })
