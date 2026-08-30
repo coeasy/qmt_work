@@ -243,13 +243,17 @@ def test_custom_params_match_reference(prices):
 
 
 # ============================ 注册表与调度 ==================================
-def test_registry_has_seven_indicators():
+def test_registry_has_sixteen_indicators():
     inds = list_indicators()
-    assert len(inds) == 7
-    assert {i["name"] for i in inds} == {"ma", "ema", "macd", "kdj", "rsi",
-                                         "boll", "wr"}
+    assert len(inds) == 16
+    assert {i["name"] for i in inds} == {
+        "ma", "ema", "macd", "kdj", "rsi", "boll", "wr",
+        "atr", "adx", "cci", "obv", "volume_ma",
+        "returns", "log_returns", "zscore", "roc",
+    }
     for i in inds:
-        assert {"name", "label", "category", "params", "outputs", "formula"} <= set(i)
+        assert {"name", "label", "category", "params", "outputs", "inputs",
+                "formula"} <= set(i)
 
 
 def test_calc_dispatch_dict_bars(prices):
@@ -299,3 +303,71 @@ def test_get_indicator_metadata():
     assert spec.category == "momentum"
     assert spec.outputs == ["k", "d", "j"]
     assert spec.params[0].name == "n" and spec.params[0].default == 9
+
+
+# ============================ G2-5 增补因子 ================================
+def test_atr_known_flat_bars():
+    """全部同价 → TR=0，ATR 预热后为 0。"""
+    bars = [{"open": 10, "high": 11, "low": 9, "close": 10, "volume": 100}] * 30
+    out = builtin.atr([b["close"] for b in bars], [b["high"] for b in bars],
+                      [b["low"] for b in bars], 14)
+    assert np.isnan(out[:14]).all()
+    assert np.allclose(out[14:], 2.0)   # TR = H-L = 2 恒定
+
+
+def test_atr_dispatch_via_calc(prices):
+    res = calc("atr", _bars(prices), period=14)
+    assert res["name"] == "atr"
+    assert res["params"] == {"period": 14}
+    assert res["outputs"]["atr"][0] is None
+
+
+def test_returns_log_returns():
+    c = [100.0, 110.0, 121.0]
+    r = builtin.returns(c)
+    assert r[0] != r[0]              # 首根 NaN
+    assert r[1] == pytest.approx(0.1)
+    assert r[2] == pytest.approx(0.1)
+    lr = builtin.log_returns(c)
+    assert lr[1] == pytest.approx(0.0953101798, rel=1e-6)
+
+
+def test_roc_known():
+    c = [100.0, 110.0, 90.0, 120.0]
+    out = builtin.roc(c, 2)
+    assert np.isnan(out[:2]).all()
+    assert out[2] == pytest.approx((90 / 100 - 1) * 100)
+    assert out[3] == pytest.approx((120 / 110 - 1) * 100)
+
+
+def test_obv_known():
+    closes = [10, 11, 11, 9]
+    vols = [100, 200, 300, 400]
+    out = builtin.obv(closes, vols)
+    assert out[0] == 100
+    assert out[1] == pytest.approx(300)      # 涨 +200
+    assert out[2] == pytest.approx(300)      # 平 +0
+    assert out[3] == pytest.approx(-100)     # 跌 -400
+
+
+def test_volume_ma_known():
+    out = builtin.volume_ma([1, 2, 3, 4, 5], 3)
+    assert np.isnan(out[:2]).all()
+    assert out[2] == pytest.approx(2.0)
+
+
+def test_zscore_zero_std_nan():
+    """std=0 → NaN（不伪造）。"""
+    out = builtin.zscore([5, 5, 5, 5, 5, 5], 3)
+    assert np.isnan(out[2:]).all()
+
+
+def test_calc_new_factor_with_bar_models(prices):
+    from app.datasource.models import Bar
+    bars = [Bar(time=f"2026082{i % 9 + 1}", open=h, high=h, low=l, close=c, volume=1000)
+            for i, (h, l, c) in enumerate(zip(prices["highs"], prices["lows"],
+                                              prices["closes"]))]
+    for name in ("cci", "adx", "obv", "volume_ma", "returns", "log_returns", "zscore", "roc"):
+        res = calc(name, bars)
+        assert res["name"] == name
+        assert res["outputs"]

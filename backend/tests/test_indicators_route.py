@@ -26,9 +26,11 @@ def test_list_indicators():
     res = asyncio.run(market_indicators())
     assert res["code"] == 0
     data = res["data"]
-    assert data["count"] == 7
+    assert data["count"] == 16
     names = {i["name"] for i in data["items"]}
-    assert names == {"ma", "ema", "macd", "kdj", "rsi", "boll", "wr"}
+    assert names == {"ma", "ema", "macd", "kdj", "rsi", "boll", "wr",
+                     "atr", "adx", "cci", "obv", "volume_ma",
+                     "returns", "log_returns", "zscore", "roc"}
 
 
 def test_calc_kdj(fake_kline):
