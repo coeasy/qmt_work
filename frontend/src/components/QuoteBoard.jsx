@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { api } from "../api.js";
 import { navToQuote } from "../lib/nav.js";
 import { useQuotes } from "../lib/quoteHub.jsx";
+import { peek as hubPeek, subscribe as hubSubscribe } from "../lib/dataHub.js";
 // 金额格式化统一走 lib/format.js（原本地副本已删除，避免第 3 份口径漂移）
 import { fmtAmount } from "../lib/format.js";
 import usePersistentState from "../lib/usePersistentState.js";
@@ -101,7 +102,17 @@ export default function QuoteBoard() {
         } else {
           const sec = sector || (sectors[0] && (sectors[0].code || sectors[0].name));
           if (sec) {
-            const stk = await api.sectorStocks(sec);
+            // G4 铺开：板块成分股走 dataHub（market:sector_stocks: 前缀），
+            // 报价牌/板块页/行情页复用同一份列表，切回秒出
+            const snap = hubPeek(`market:sector_stocks:${sec}`);
+            let stk = snap && snap.data ? snap.data : null;
+            if (stk === null) {
+              stk = await new Promise((resolve) => {
+                hubSubscribe(`market:sector_stocks:${sec}`, () => api.sectorStocks(sec), (r) => {
+                  resolve(r && !r.error ? r.data : null);
+                });
+              });
+            }
             list = (stk || []).map((s) => s.code || s.stock_code || s).filter(Boolean).slice(0, 300);
           }
         }

@@ -50,6 +50,18 @@ _TOPIC_POLICIES = {
         "ttl_ms": 300000, "min_interval_ms": 30000, "coalesce_within_ms": 2000,
         "priority": "low", "stale_ok": True,
     },
+    "market:limitup": {
+        "ttl_ms": 10000, "min_interval_ms": 5000, "coalesce_within_ms": 1000,
+        "priority": "medium", "stale_ok": True,
+    },
+    "market:breadth": {
+        "ttl_ms": 10000, "min_interval_ms": 5000, "coalesce_within_ms": 1000,
+        "priority": "medium", "stale_ok": True,
+    },
+    "market:sector_stocks": {
+        "ttl_ms": 300000, "min_interval_ms": 60000, "coalesce_within_ms": 2000,
+        "priority": "low", "stale_ok": True,
+    },
     "runtime:jobs": {
         "ttl_ms": 2000, "min_interval_ms": 800, "coalesce_within_ms": 500,
         "priority": "high", "stale_ok": True,

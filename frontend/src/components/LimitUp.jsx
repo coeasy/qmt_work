@@ -28,16 +28,32 @@ export default function LimitUp() {
   const [breadthErr, setBreadthErr] = useState("");
 
   async function loadBoard() {
+    // G4 铺开：涨停板扫描走 dataHub 总线（market:limitup: 前缀 ttl 缓存 + 合并），
+    // sector/筛选参数不同 → 不同 topic；同参数重复进入秒回缓存
     setLoading(true);
+    const topic = `market:limitup:${sector}:${onlyLimit}:${minPct}`;
     try {
-      const data = await api.marketLimitup({
+      const snap = hubPeek(topic);
+      if (snap && snap.data) {
+        setBoard(snap.data.rows || []);
+        setMeta({ sector: snap.data.sector, count: snap.data.count });
+        setBoardErr("");
+        setLoading(false);
+        return;
+      }
+      hubSubscribe(topic, () => api.marketLimitup({
         sector, min_pct: minPct, only_limit: onlyLimit, limit: 200, sort: "change",
+      }), (r) => {
+        setLoading(false);
+        if (r && r.data) {
+          setBoard(r.data.rows || []);
+          setMeta({ sector: r.data.sector, count: r.data.count });
+          setBoardErr("");
+        } else if (r && r.error) {
+          setBoardErr(r.error.message || "涨停板数据获取失败");
+        }
       });
-      setBoard(data.rows || []);
-      setMeta({ sector: data.sector, count: data.count });
-      setBoardErr("");
-    } catch (e) { setBoardErr(e.message); }
-    finally { setLoading(false); }
+    } catch (e) { setBoardErr(e.message); setLoading(false); }
   }
   async function loadBreadth() {
     // T23：涨跌停家数（breadth）经 dataHub 总线（策略表 ttl 缓存 + 合并），
