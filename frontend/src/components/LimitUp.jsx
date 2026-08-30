@@ -4,6 +4,7 @@ import { useServerEvents } from "../hooks/useSystemWS.js";
 import { useActiveInterval } from "../hooks/useActiveInterval.js";
 import { fmtAmount, fmtLimitDur } from "../lib/format.js";
 import { quickTradeNavigate } from "../lib/trade.js";
+import ConfirmTradeModal from "./ui/ConfirmTradeModal.jsx";
 
 // 涨停板 / 打板助手：
 //  - 涨停板：真实行情扫描板块内涨停（或接近涨停）个股，列出最新数据，点击可快速下单
@@ -64,6 +65,7 @@ export default function LimitUp() {
   const [st, setSt] = useState(null);
   const [code, setCode] = useState("");
   const [err, setErr] = useState("");
+  const [confirm, setConfirm] = useState(null);   // T3 自动买入二次确认
   const [params, setParams] = useState({
     limit_pct: 0.1, cutoff: "10:00", min_rise: 0.03,
     buy_volume: 0, do_trade: false, interval: 2,
@@ -85,9 +87,29 @@ export default function LimitUp() {
   async function remove(c) {
     try { await api.limitupPoolRemove(c); load(); } catch (e) { setErr(e.message); }
   }
-  async function start() {
+  async function doStart() {
     try { await api.limitupStart(params); setErr(""); load(); }
     catch (e) { setErr(e.message); }
+  }
+  async function start() {
+    // T3：打板监控含「自动买入」开关 → 开启即可能真实下单，必须二次确认
+    if (params.do_trade) {
+      setConfirm({
+        title: "启动打板监控（含自动买入）",
+        rows: [
+          { k: "股票池", v: `${(st?.pool || []).length} 只` },
+          { k: "触发价", v: `${params.price_pct}%` },
+          { k: "时间窗", v: `${params.window_min} 分钟` },
+          { k: "买入量", v: `${params.buy_volume} 股` },
+          { k: "检查间隔", v: `${params.interval}s` },
+        ],
+        note: "「自动买入」已开启：触发条件满足时将自动真实提交买入委托（过风控）。",
+        confirmText: "确认启动监控",
+        onConfirm: async () => { await doStart(); setConfirm(null); },
+      });
+    } else {
+      await doStart();
+    }
   }
   async function stop() {
     try { await api.limitupStop(); load(); } catch (e) { setErr(e.message); }
@@ -282,6 +304,8 @@ export default function LimitUp() {
           </div>
         </div>
       )}
+
+      <ConfirmTradeModal pending={confirm} busy={false} onClose={() => setConfirm(null)} risk="high" />
     </div>
   );
 }

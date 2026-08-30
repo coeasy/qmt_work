@@ -4,6 +4,7 @@ import { useEffect, useState, Fragment } from "react";
 import { api } from "../api.js";
 import { useServerEvents } from "../hooks/useSystemWS.js";
 import { useActiveInterval } from "../hooks/useActiveInterval.js";
+import ConfirmTradeModal from "./ui/ConfirmTradeModal.jsx";
 
 const PRICE_TYPES = [
   { v: "limit", t: "限价" },
@@ -200,6 +201,8 @@ function BatchOrder({ connOptions }) {
   const [broadcast, setBroadcast] = useState({ conn_ids: [], code: "", direction: "buy", volume: "", price: "", price_type: "limit" });
   const [result, setResult] = useState(null);
   const [busy, setBusy] = useState(false);
+  // T3：批量下单 = 多账户真实委托，必须二次确认
+  const [confirm, setConfirm] = useState(false);
 
   function setRow(i, patch) {
     setRows((rs) => rs.map((r, idx) => (idx === i ? { ...r, ...patch } : r)));
@@ -207,7 +210,7 @@ function BatchOrder({ connOptions }) {
   function addRow() { setRows((rs) => [...rs, blankOrder()]); }
   function delRow(i) { setRows((rs) => rs.filter((_, idx) => idx !== i)); }
 
-  async function submit() {
+  async function doSubmit() {
     setBusy(true); setResult(null);
     try {
       const body = mode === "explicit"
@@ -222,6 +225,25 @@ function BatchOrder({ connOptions }) {
     } catch (e) {
       setResult({ error: e.message });
     } finally { setBusy(false); }
+  }
+
+  async function submit() {
+    const n = mode === "explicit"
+      ? rows.filter((r) => r.code).length
+      : (broadcast.conn_ids || []).length;
+    if (!n) return;
+    setConfirm({
+      title: "批量下单确认",
+      rows: [
+        { k: "模式", v: mode === "explicit" ? `逐笔 ${n} 条` : `广播到 ${n} 个账户` },
+        { k: "代码", v: mode === "explicit" ? rows.map((r) => r.code).filter(Boolean).join(", ") : broadcast.code },
+        { k: "方向", v: (mode === "explicit" ? rows[0]?.direction : broadcast.direction) === "buy" ? "买入" : "卖出" },
+        { k: "数量/价格", v: `${mode === "explicit" ? rows[0]?.volume : broadcast.volume} 股 @ ${mode === "explicit" ? (rows[0]?.price || "市价") : (broadcast.price || "市价")}` },
+      ],
+      note: "将对多个账户同时真实提交委托，请再次核对。",
+      confirmText: "确认批量提交",
+      onConfirm: async () => { await doSubmit(); setConfirm(null); },
+    });
   }
 
   return (
@@ -275,6 +297,7 @@ function BatchOrder({ connOptions }) {
         <button onClick={submit} disabled={busy}>{busy ? "提交中…" : "提交批量下单"}</button>
       </div>
       {result && <ResultTable kind="order" result={result} />}
+      <ConfirmTradeModal pending={confirm} busy={busy} onClose={() => !busy && setConfirm(null)} risk="high" />
     </div>
   );
 }
@@ -290,12 +313,14 @@ function BatchCancel({ connOptions }) {
   const [broadcast, setBroadcast] = useState({ conn_ids: [], order_id: "" });
   const [result, setResult] = useState(null);
   const [busy, setBusy] = useState(false);
+  // T3：批量撤单 = 多账户真实撤单，必须二次确认
+  const [confirm, setConfirm] = useState(false);
 
   function setRow(i, patch) {
     setRows((rs) => rs.map((r, idx) => (idx === i ? { ...r, ...patch } : r)));
   }
 
-  async function submit() {
+  async function doSubmit() {
     setBusy(true); setResult(null);
     try {
       const body = mode === "explicit"
@@ -305,6 +330,23 @@ function BatchCancel({ connOptions }) {
     } catch (e) {
       setResult({ error: e.message });
     } finally { setBusy(false); }
+  }
+
+  async function submit() {
+    const n = mode === "explicit"
+      ? rows.filter((r) => r.order_id).length
+      : (broadcast.conn_ids || []).length;
+    if (!n) return;
+    setConfirm({
+      title: "批量撤单确认",
+      rows: [
+        { k: "模式", v: mode === "explicit" ? `逐单 ${n} 条` : `广播到 ${n} 个账户` },
+        { k: "委托号", v: mode === "explicit" ? rows.map((r) => r.order_id).filter(Boolean).join(", ") : broadcast.order_id },
+      ],
+      note: "将同时取消多条委托，未成交部分立即撤销。",
+      confirmText: "确认批量撤单",
+      onConfirm: async () => { await doSubmit(); setConfirm(null); },
+    });
   }
 
   return (
@@ -341,6 +383,7 @@ function BatchCancel({ connOptions }) {
         <button onClick={submit} disabled={busy}>{busy ? "提交中…" : "提交批量撤单"}</button>
       </div>
       {result && <ResultTable kind="cancel" result={result} />}
+      <ConfirmTradeModal pending={confirm} busy={busy} onClose={() => !busy && setConfirm(null)} risk="high" />
     </div>
   );
 }

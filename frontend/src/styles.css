@@ -12,6 +12,11 @@
   --warn: #ffb020;
   --up: #ff4d4f;     /* 涨 红 */
   --down: #19c37d;   /* 跌 绿 */
+  /* T4/T12 派生令牌：浅底/量能条用，与 --up/--down 同源（避免硬编码色漂移） */
+  --up-soft: rgba(255, 77, 79, .05);
+  --down-soft: rgba(25, 195, 125, .05);
+  --up-bar: rgba(255, 77, 79, .28);
+  --down-bar: rgba(25, 195, 125, .28);
 }
 
 * { box-sizing: border-box; }
@@ -494,9 +499,11 @@ input[type="checkbox"] { width: 15px; height: 15px; cursor: pointer; accent-colo
 .qp-book-table td {
   padding: 3px 8px; font-size: 11px; border-bottom: 1px solid rgba(44,56,80,.3);
 }
-.qa-ask-row { background: rgba(25,195,125,.05); }
-.qa-bid-row { background: rgba(255,77,79,.05); }
+/* 五档盘口：卖=绿（下行压力）/ 买=红（上行买力），A 股行业标准；token 派生防漂移 */
+.qa-ask-row { background: var(--down-soft); }
+.qa-bid-row { background: var(--up-soft); }
 .qa-side { width: 36px; text-align: left; font-weight: 600; }
+.qa-lang-hint { margin-left: 3px; font-size: 9px; opacity: .55; font-weight: 400; }
 .qa-ask-row .qa-side, .qa-bid-row .qa-side { color: var(--text-dim); }
 .qa-ask-row .qa-side { color: var(--down); }
 .qa-bid-row .qa-side { color: var(--up); }
@@ -1128,3 +1135,24 @@ input[type="checkbox"] { width: 15px; height: 15px; cursor: pointer; accent-colo
 /* ================= G9-2 画线工具条 ================= */
 .kline-draw-bar { display: flex; align-items: center; gap: 6px; padding: 4px 8px 0; }
 .kline-draw-bar .ib-btn.active { background: #2c3850; color: #fff; }
+
+/* ================= T3/T19 金融操作确认弹窗 ================= */
+.ctm-overlay { position: fixed; inset: 0; background: rgba(8,14,26,.62); z-index: 300; display: flex; align-items: center; justify-content: center; }
+.ctm-panel { width: 420px; max-width: 92vw; background: var(--bg-2); border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 20px 60px rgba(0,0,0,.55); overflow: hidden; }
+.ctm-panel.ctm-danger { border-color: rgba(255,92,108,.4); }
+.ctm-head { display: flex; align-items: center; justify-content: space-between; padding: 12px 14px; border-bottom: 1px solid var(--border); }
+.ctm-title { font-size: 14px; font-weight: 700; color: var(--text); }
+.ctm-close { background: none; border: none; color: var(--text-dim); font-size: 18px; cursor: pointer; line-height: 1; padding: 0 4px; }
+.ctm-close:hover { color: var(--text); }
+.ctm-warn { padding: 8px 14px; font-size: 12px; color: var(--danger); background: var(--up-soft); border-bottom: 1px solid var(--border); }
+.ctm-body { padding: 12px 14px; display: flex; flex-direction: column; gap: 6px; }
+.ctm-row { display: flex; gap: 10px; font-size: 13px; }
+.ctm-k { color: var(--text-dim); width: 110px; flex-shrink: 0; }
+.ctm-v { color: var(--text); word-break: break-all; }
+.ctm-note { font-size: 12px; color: var(--text-dim); margin: 4px 0 0; }
+.ctm-ack { display: flex; align-items: center; gap: 8px; padding: 0 14px 10px; font-size: 12px; color: var(--warn); cursor: pointer; }
+.ctm-actions { display: flex; justify-content: flex-end; gap: 8px; padding: 10px 14px; border-top: 1px solid var(--border); }
+
+/* ================= T5 G8 自然语言选股入口 ================= */
+.sc-nlbar { background: rgba(79,140,255,.06); border: 1px solid rgba(79,140,255,.18); border-radius: 6px; padding: 6px 8px; }
+.sc-nlinput { flex: 1; min-width: 260px; }

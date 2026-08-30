@@ -110,6 +110,18 @@ export default function QuoteBoard() {
     return () => { canceled = true; };
   }, [board, sector, sectors]);
 
+  // T2 自选股双写一致性：BottomDock 增删自选后广播事件，此处重读 localStorage
+  useEffect(() => {
+    if (board !== "watch") return undefined;
+    const reload = () => {
+      let list = [];
+      try { list = JSON.parse(localStorage.getItem(WATCH_KEY) || "[]"); } catch { list = []; }
+      setCodes(list);
+    };
+    window.addEventListener("qmt:watch:update", reload);
+    return () => window.removeEventListener("qmt:watch:update", reload);
+  }, [board]);
+
   // 批量快照首屏 + QuoteHub 全局单连接增量（替代自建裸 WS：无重连、绕过多路复用的历史问题）
   const { quotes } = useQuotes(codes);
   useEffect(() => {

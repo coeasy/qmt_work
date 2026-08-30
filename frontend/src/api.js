@@ -122,6 +122,7 @@ api.marketIndicators = () => api.get("/market/indicators");
 api.marketIndicatorsCalc = (params) => api.get("/market/indicators/calc", params);
 // G7 条件选股：conditions 为 JSON 条件树（URL 编码）；动态板块存取
 api.marketScreen = (params) => api.get("/market/screen", params);
+api.screenNL = (body) => api.post("/market/screen/nl", body);   // T5 G8 自然语言选股
 api.screenBoards = () => api.get("/market/screen/boards");
 api.screenBoardsSave = (body) => api.post("/market/screen/boards", body);
 // G4 数据面策略表 + G9-4 图表规范（后端下发单一真源）

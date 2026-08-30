@@ -1,6 +1,7 @@
 // 底部综合栏（通达信式）：可折叠多 tab（自选股/板块/预警/成交/日志）。
 import { useEffect, useRef, useState } from "react";
 import { api } from "../api.js";
+import { navToQuote } from "../lib/nav.js";
 import { useSystemStatus, useServerEvents } from "../hooks/useSystemWS.js";
 
 const TABS = [
@@ -53,15 +54,16 @@ export default function BottomDock() {
     const nw = watch.includes(c) ? watch : [...watch, c];
     setWatch(nw);
     try { localStorage.setItem(WATCH_KEY, JSON.stringify(nw)); } catch { /* noop */ }
+    window.dispatchEvent(new CustomEvent("qmt:watch:update"));   // T2 双写同步广播
     setWatchInput("");
   }
   function rmWatch(c) {
     const nw = watch.filter((x) => x !== c);
     setWatch(nw);
     try { localStorage.setItem(WATCH_KEY, JSON.stringify(nw)); } catch { /* noop */ }
+    window.dispatchEvent(new CustomEvent("qmt:watch:update"));   // T2 双写同步广播
   }
-  const openQuote = (code) =>
-    window.dispatchEvent(new CustomEvent("nav", { detail: "quote" }));
+  const openQuote = (code) => navToQuote(code);
 
   return (
     <div className={`dock ${open ? "" : "collapsed"}`}>

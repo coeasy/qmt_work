@@ -4,6 +4,7 @@ import { useBroker } from "../BrokerContext.jsx";
 import { useServerEvents } from "../hooks/useSystemWS.js";
 import { consumePendingPrefill } from "../lib/trade.js";
 import { useActiveInterval } from "../hooks/useActiveInterval.js";
+import ConfirmTradeModal from "./ui/ConfirmTradeModal.jsx";
 
 // 手动交易面板：下单 / 持仓 / 委托 / 成交 / 条件单 / 目标仓位（全部真实接口，下单过风控）
 // v3：支持叶子 params 直达预填（navTo("trade", {params}) 协议通道），
@@ -14,6 +15,9 @@ export default function Trade({ params } = {}) {
   const [err, setErr] = useState("");
   const [msg, setMsg] = useState(null);
   const [precheck, setPrecheck] = useState(null);
+  // T3：金融操作二次确认（提交订单/撤单/条件单/调仓计划）
+  const [confirm, setConfirm] = useState(null);
+  const [busy, setBusy] = useState(false);
 
   const [form, setForm] = useState({
     code: "600519.SH", direction: "buy", volume: 100, price: 0, price_type: "limit",
@@ -93,9 +97,25 @@ export default function Trade({ params } = {}) {
   }, [params && params.code, params && params.price]);
 
   async function submitOrder() {
-    // 订单提交成功/失败都要保留 toast 反馈（此前紧跟 setMsg(null) 把 wrap 的提示立即清掉，
-    // 导致下单始终"无任何反馈"，是交易链路最直接的体验断点）
-    await wrap(() => api.tradeOrder(form), `已提交：${form.direction === "buy" ? "买入" : "卖出"} ${form.code} ${form.volume} 股`);
+    // T3 二次确认：真实下单前弹窗核对（金额 = 价格×数量，市价单显示「市价」）
+    setConfirm({
+      title: "提交委托",
+      rows: [
+        { k: "方向", v: form.direction === "buy" ? "买入 BUY" : "卖出 SELL" },
+        { k: "代码", v: form.code },
+        { k: "价格", v: form.price_type === "limit" ? `¥${Number(form.price).toFixed(2)}` : "市价" },
+        { k: "数量", v: `${form.volume} 股` },
+        { k: "预估金额", v: form.price_type === "limit" ? `¥${(Number(form.price) * Number(form.volume)).toLocaleString()}` : "以成交价为准" },
+      ],
+      note: "委托将真实提交至券商，过风控校验后生效。",
+      confirmText: "确认下单",
+      onConfirm: async () => {
+        setBusy(true);
+        try {
+          await wrap(() => api.tradeOrder(form), `已提交：${form.direction === "buy" ? "买入" : "卖出"} ${form.code} ${form.volume} 股`);
+        } finally { setBusy(false); setConfirm(null); }
+      },
+    });
   }
   async function runPrecheck() {
     setPrecheck({ loading: true });
@@ -108,17 +128,69 @@ export default function Trade({ params } = {}) {
     } catch (e) { setPrecheck({ ok: false, reason: e.message }); }
   }
   async function cancelOrder(oid) {
-    await wrap(() => api.tradeCancel(oid), `已撤单：${oid}`);
+    const o = orders.find((x) => x.order_id === oid);
+    setConfirm({
+      title: "撤单确认",
+      rows: [
+        { k: "委托号", v: oid },
+        { k: "代码", v: o?.code || "—" },
+        { k: "方向", v: o?.direction === "buy" ? "买入" : "卖出" },
+        { k: "委托量", v: o?.volume != null ? `${o.volume} 股` : "—" },
+      ],
+      note: "撤单后未成交部分将被取消。",
+      confirmText: "确认撤单",
+      onConfirm: async () => {
+        setBusy(true);
+        try {
+          await wrap(() => api.tradeCancel(oid), `已撤单：${oid}`);
+        } finally { setBusy(false); setConfirm(null); }
+      },
+    });
   }
   async function submitCond() {
-    await wrap(() => api.tradeConditionSubmit(condForm), "条件单已提交（达到触发价自动下单）");
+    setConfirm({
+      title: "提交条件单",
+      rows: [
+        { k: "方向", v: condForm.side === "buy" ? "买入" : "卖出" },
+        { k: "代码", v: condForm.code },
+        { k: "触发", v: `${condForm.trigger_type === "gte" ? "≥" : "≤"} ¥${Number(condForm.trigger_price).toFixed(2)}` },
+        { k: "数量", v: `${condForm.volume} 股` },
+        { k: "下单方式", v: condForm.price_type === "market" ? "市价" : "限价" },
+      ],
+      note: "达到触发价后将自动真实下单（过风控）。",
+      confirmText: "确认提交",
+      onConfirm: async () => {
+        setBusy(true);
+        try {
+          await wrap(() => api.tradeConditionSubmit(condForm), "条件单已提交（达到触发价自动下单）");
+        } finally { setBusy(false); setConfirm(null); }
+      },
+    });
   }
   async function cancelCond(cid) {
     await wrap(() => api.tradeConditionCancel(cid), "条件单已取消");
   }
   async function submitTarget() {
-    const r = await wrap(() => api.tradeTarget(targetForm), "目标仓位计划已生成");
-    if (r && r.action === "trade") setMsg({ ok: true, t: `${r.direction === "buy" ? "买入" : "卖出"} ${r.code} ${r.volume} 股（目标 ${(r.target_pct * 100).toFixed(1)}%）` });
+    // T3：调仓 = 真实下单，必须二次确认（无论是否勾选 do_trade，均展示将发生的动作）
+    const doTrade = targetForm.do_trade;
+    setConfirm({
+      title: doTrade ? "生成调仓计划并下单" : "生成调仓计划（仅计划）",
+      rows: [
+        { k: "代码", v: targetForm.code },
+        { k: "目标比例", v: `${(Number(targetForm.target_pct) * 100).toFixed(1)}%` },
+        { k: "价格", v: targetForm.price ? `¥${Number(targetForm.price).toFixed(2)}` : "以现价成交" },
+        { k: "执行方式", v: doTrade ? "实际下单（真实委托）" : "仅生成计划" },
+      ],
+      note: doTrade ? "勾选了「实际下单」：将按目标比例差额真实提交委托（过风控）。" : "未勾选「实际下单」，本次仅生成调仓计划。",
+      confirmText: doTrade ? "确认下单" : "生成计划",
+      onConfirm: async () => {
+        setBusy(true);
+        try {
+          const r = await wrap(() => api.tradeTarget(targetForm), "目标仓位计划已生成");
+          if (r && r.action === "trade") setMsg({ ok: true, t: `${r.direction === "buy" ? "买入" : "卖出"} ${r.code} ${r.volume} 股（目标 ${(r.target_pct * 100).toFixed(1)}%）` });
+        } finally { setBusy(false); setConfirm(null); }
+      },
+    });
   }
 
   const set = (obj, fn) => (e) => fn({ ...obj, [e.target.name]: e.target.type === "number" ? +e.target.value : e.target.value });
@@ -287,6 +359,8 @@ export default function Trade({ params } = {}) {
           <p className="muted">按当前总资产与持仓市值计算差额，折 100 股整；勾选「实际下单」才真正提交（过风控）</p>
         </div>
       )}
+
+      <ConfirmTradeModal pending={confirm} busy={busy} onClose={() => !busy && setConfirm(null)} risk="high" />
     </div>
   );
 }

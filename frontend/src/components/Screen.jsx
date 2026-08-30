@@ -56,8 +56,39 @@ export default function Screen() {
   const [boardName, setBoardName] = useState("");
   const [boards, setBoards] = useState([]);
   const [msg, setMsg] = useState("");
+  // T5（G8 闭环）：自然语言输入（放量上涨 / RSI 超卖 / 均线金叉…）
+  const [nlText, setNlText] = useState("");
+  const [nlBusy, setNlBusy] = useState(false);
   // G11-4：结果 >200 行时虚拟化（5000+ 全市场选股不卡顿）
   const big = (results?.results || []).length > 200;
+
+  // T5：NL → 可编辑条件树（回显到构建器，不黑箱）
+  const nlRun = useCallback(async () => {
+    const text = nlText.trim();
+    if (!text) { setErr("请输入选股描述，如：放量上涨 / RSI(14) 超卖 / 5日均线金叉10日均线"); return; }
+    setNlBusy(true); setErr("");
+    try {
+      const r = await api.screenNL({ text });
+      if (r.conditions) {
+        const tree = r.conditions;
+        // AND 顶层 → 条件行；否则整体 OR 单组（DSL 返回多为 and 树）
+        if (tree.and && Array.isArray(tree.and)) {
+          setRows(tree.and.map((leaf) => rowFromLeaf(leaf)));
+          setJoin("and");
+        } else {
+          setRows([rowFromLeaf(tree)]);
+          setJoin("and");
+        }
+        setMsg(`已按「${text}」生成条件，可继续调整后运行`);
+      } else if (r.unsupported && r.unsupported.length) {
+        setErr(`暂不支持：${r.unsupported.join("、")}（可改用条件构建器）`);
+      } else {
+        setErr("未能识别该描述，请改用条件构建器");
+      }
+    } catch (e) {
+      setErr(e.message || "自然语言解析失败");
+    } finally { setNlBusy(false); }
+  }, [nlText]);
   const vl = useVirtualList(big ? results.results : [], { itemHeight: 28, height: 420 });
 
   const indById = useCallback((n) => inds.find((i) => i.name === n), [inds]);
@@ -121,6 +152,53 @@ export default function Screen() {
     setLoading(false);
   };
 
+  // T5：NL/DSL 条件树叶子 → 构建器行（回显可编辑，不黑箱）
+  const rowFromLeaf = (leaf) => {
+    const node = leaf.indicator || leaf.field || leaf.compare;
+    if (!node) {
+      // and/or 嵌套的叶子 → 取最内层单条件
+      const inner = leaf.and ? leaf.and[0] : leaf.or ? leaf.or[0] : null;
+      return inner ? rowFromLeaf(inner) : newRow();
+    }
+    const row = newRow();
+    if (leaf.indicator) {
+      const spec = indById(node.name) || {};
+      row.kind = "indicator";
+      row.name = node.name;
+      row.output = node.output || (spec.outputs && spec.outputs[0]) || "";
+      row.op = node.op || "gt";
+      row.value = String(node.value ?? "");
+      row.window = String(node.window ?? -1);
+      row.params = node.params || {};
+    } else if (leaf.compare) {
+      // 双序列比较（如 VOLUME > VOL-MA(20)）→ 映射为指标行（右侧 indicator）
+      const right = node.right && node.right.kind === "indicator" ? node.right : null;
+      if (right) {
+        const spec = indById(right.name) || {};
+        row.kind = "indicator";
+        row.name = right.name;
+        row.output = right.output || (spec.outputs && spec.outputs[0]) || "";
+        row.op = node.op || "gt";
+        row.value = "0";                       // 与序列比较 → 与 0 比（volume_ma 系）
+        row.window = String((node.left && node.left.window) ?? -1);
+        row.params = right.params || {};
+      } else {
+        row.kind = "field";
+        row.name = (node.left && node.left.name) || "close";
+        row.op = node.op || "gt";
+        row.value = String((node.right && node.right.value) ?? "");
+        row.window = "-1";
+      }
+    } else {
+      row.kind = "field";
+      row.name = node.name || "close";
+      row.op = node.op || "gt";
+      row.value = String(node.value ?? "");
+      row.window = String(node.window ?? -1);
+    }
+    return row;
+  };
+
   const save = async () => {
     if (!boardName.trim() || !results || !results.results || !results.results.length) {
       setMsg("请先运行选股并输入板块名称");
@@ -155,6 +233,22 @@ export default function Screen() {
 
   return (
     <div className="market-page sc-page">
+      {/* T5（G8 闭环）：自然语言选股入口 → 生成可编辑条件树 */}
+      <div className="bd-toolbar sc-toolbar sc-nlbar">
+        <span className="sc-title">自然语言选股</span>
+        <input
+          className="mp-code-input sc-input sc-nlinput"
+          placeholder="试试：放量上涨 / 近5日下跌 / RSI(14) 超卖 / 5日均线金叉 / 站上20日均线"
+          value={nlText}
+          onChange={(e) => setNlText(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && nlRun()}
+          maxLength={120}
+        />
+        <button className="ib-btn" onClick={nlRun} disabled={nlBusy || !nlText.trim()}>
+          {nlBusy ? "解析中…" : "生成条件"}
+        </button>
+      </div>
+
       {/* 条件构建 */}
       <div className="bd-toolbar sc-toolbar">
         <span className="sc-title">条件选股</span>

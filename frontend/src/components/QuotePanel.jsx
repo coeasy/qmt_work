@@ -146,14 +146,15 @@ export default function QuotePanel({ tick, stockInfo, code, bars }) {
               const pct = r.volume != null ? Math.min(100, (Number(r.volume) / maxVol) * 100) : 0;
               return (
                 <tr key={idx} className={`${r.side === "ask" ? "qa-ask-row" : "qa-bid-row"}`}>
-                  <td className={`qa-side ${r.side === "ask" ? "down" : "up"}`}>
+                  <td className={`qa-side ${r.side === "ask" ? "down" : "up"}`} aria-label={r.side === "ask" ? "卖 SELL" : "买 BUY"}>
                     {r.side === "ask" ? "卖" : "买"}{r.level}
+                    <span className="qa-lang-hint">{r.side === "ask" ? "SELL" : "BUY"}</span>
                   </td>
                   <td className={`qa-price ${r.side === "ask" ? "down" : "up"}`}>
                     {r.price != null ? Number(r.price).toFixed(2) : "—"}
                   </td>
                   <td className="qa-volwrap">
-                    <span className="qa-volbar" style={{ width: `${pct}%`, background: r.side === "ask" ? "rgba(25,195,125,.28)" : "rgba(255,77,79,.28)" }} aria-hidden="true" />
+                    <span className="qa-volbar" style={{ width: `${pct}%`, background: r.side === "ask" ? "var(--down-bar)" : "var(--up-bar)" }} aria-hidden="true" />
                     <span className="qa-vol">{r.volume != null ? Number(r.volume).toLocaleString() : "—"}</span>
                   </td>
                 </tr>
