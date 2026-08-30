@@ -20,6 +20,7 @@ from tools.reference import register_reference_tools
 from tools.strategy_gen import register_strategy_tools
 from tools.target_portfolio import register_target_portfolio_tools
 from tools.trading import register_trading_tools
+from mcp_server.auto_expose import register_auto_tools
 
 _INSTRUCTIONS = (
     "qmt_work 量化平台工具集（真实券商接入，无 mock）。可用于：\n"
@@ -85,4 +86,7 @@ def build_mcp(risk) -> FastMCP:
     register_condition_tools(mcp)
     register_position_tools(mcp, risk)
     register_target_portfolio_tools(mcp)
+    # G3-2：把 agent_visible 的 GET 端点自动暴露为 MCP tool（补齐行情能力覆盖缺口，
+    # 31.6% → 接近全覆盖）。手工 tool 优先，自动 tool 仅补齐缺口且不重复。
+    register_auto_tools(mcp)
     return mcp
