@@ -21,6 +21,8 @@ import { useKline, useFundamentals, formatPct, preCloseOf, applyTickToBars } fro
 import { useQuotes } from "../lib/quoteHub.jsx";
 import ErrorBoundary from "./ErrorBoundary.jsx";
 import { useActiveInterval } from "../hooks/useActiveInterval.js";
+// G2-3：指标单一真源——前端不再自带指标计算，统一消费后端引擎
+import { fetchIndicator, indicatorKey } from "../lib/indicators.js";
 // 金额格式化直接引唯一实现（不再经 useMarket 别名中转，链路更短更明确）
 import { fmtAmount } from "../lib/format.js";
 
@@ -83,103 +85,9 @@ function toDate(s) {
   return String(s).slice(0, 10);
 }
 
-/* ======================== 指标计算 ======================== */
-function calcMA(closes, period) {
-  const out = [];
-  let sum = 0;
-  for (let i = 0; i < closes.length; i++) {
-    sum += closes[i];
-    if (i >= period) sum -= closes[i - period];
-    out.push(i < period - 1 ? null : sum / period);
-  }
-  return out;
-}
-function calcEMA(series, period) {
-  const out = [];
-  const k = 2 / (period + 1);
-  let prev = null;
-  for (let i = 0; i < series.length; i++) {
-    if (series[i] == null) { out.push(null); continue; }
-    if (prev == null) { prev = series[i]; out.push(series[i]); continue; }
-    prev = series[i] * k + prev * (1 - k);
-    out.push(prev);
-  }
-  return out;
-}
-function calcMACD(closes) {
-  const ema12 = calcEMA(closes, 12);
-  const ema26 = calcEMA(closes, 26);
-  const dif = ema12.map((v, i) => (v != null && ema26[i] != null) ? v - ema26[i] : null);
-  const deaRaw = calcEMA(dif.filter((v) => v != null), 9);
-  const dea = [];
-  let idx = 0;
-  for (let i = 0; i < dif.length; i++) {
-    if (dif[i] == null) { dea.push(null); continue; }
-    dea.push(idx < deaRaw.length ? deaRaw[idx++] : null);
-  }
-  const bar = dif.map((d, i) => (d != null && dea[i] != null ? (d - dea[i]) * 2 : null));
-  return { dif, dea, bar };
-}
-function calcKDJ(highs, lows, closes, n = 9) {
-  const kArr = [], dArr = [], jArr = [];
-  let k = 50, d = 50;
-  for (let i = 0; i < closes.length; i++) {
-    if (i < n - 1) { kArr.push(null); dArr.push(null); jArr.push(null); continue; }
-    let hn = -Infinity, ln = Infinity;
-    for (let t = i - n + 1; t <= i; t++) { hn = Math.max(hn, highs[t]); ln = Math.min(ln, lows[t]); }
-    const rsv = hn === ln ? 50 : ((closes[i] - ln) / (hn - ln)) * 100;
-    k = (2 / 3) * k + (1 / 3) * rsv;
-    d = (2 / 3) * d + (1 / 3) * k;
-    kArr.push(k); dArr.push(d); jArr.push(3 * k - 2 * d);
-  }
-  return { k: kArr, d: dArr, j: jArr };
-}
-function calcRSI(closes, period = 14) {
-  const out = [];
-  let avgG = 0, avgL = 0;
-  for (let i = 0; i < closes.length; i++) {
-    if (i <= period) { out.push(null); continue; }
-    if (i === period + 1) {
-      let g = 0, l = 0;
-      for (let j = 1; j <= period; j++) {
-        const delta = closes[j] - closes[j - 1];
-        if (delta > 0) g += delta; else l -= delta;
-      }
-      avgG = g / period; avgL = l / period;
-    } else {
-      const delta = closes[i] - closes[i - 1];
-      avgG = (avgG * (period - 1) + (delta > 0 ? delta : 0)) / period;
-      avgL = (avgL * (period - 1) + (delta < 0 ? -delta : 0)) / period;
-    }
-    out.push(avgL === 0 ? 100 : 100 - 100 / (1 + avgG / avgL));
-  }
-  return out;
-}
-function calcBOLL(closes, n = 20, m = 2) {
-  const mid = calcMA(closes, n);
-  const std = [];
-  for (let i = 0; i < closes.length; i++) {
-    if (mid[i] == null) { std.push(null); continue; }
-    let s = 0, c = 0;
-    for (let j = i - n + 1; j <= i; j++) if (closes[j] != null) { s += (closes[j] - mid[i]) ** 2; c++; }
-    std.push(c > 0 ? Math.sqrt(s / c) * m : null);
-  }
-  return {
-    upper: mid.map((v, i) => v != null && std[i] != null ? v + std[i] : null),
-    mid,
-    lower: mid.map((v, i) => v != null && std[i] != null ? v - std[i] : null),
-  };
-}
-function calcWR(highs, lows, closes, n = 14) {
-  const out = [];
-  for (let i = 0; i < closes.length; i++) {
-    if (i < n - 1) { out.push(null); continue; }
-    let hn = -Infinity, ln = Infinity;
-    for (let t = i - n + 1; t <= i; t++) { hn = Math.max(hn, highs[t]); ln = Math.min(ln, lows[t]); }
-    out.push(hn === ln ? 50 : ((hn - closes[i]) / (hn - ln)) * (-100));
-  }
-  return out;
-}
+// G2-3：本地 7 个指标实现（calcMA/calcEMA/calcMACD/calcKDJ/calcRSI/calcBOLL/calcWR）
+// 已删除——指标计算收敛到后端统一引擎（app/indicators，契约逐位一致），
+// 本组件经 ../lib/indicators.js 消费 /market/indicators/calc 结果。
 
 /* ======================== 主组件 ======================== */
 export default function MarketData({ params, leafId, tabId, dispatch } = {}) {
@@ -200,6 +108,8 @@ export default function MarketData({ params, leafId, tabId, dispatch } = {}) {
   // 真实 bars/loading/err/meta/stockInfo/financial 全部由 useKline / useFundamentals 产出
   const [mainInd, setMainInd] = useState("ma");
   const [subInd, setSubInd] = useState("macd");
+  // G2-3：后端指标计算结果缓存（key = indicatorKey(name, params) → outputs）
+  const [indData, setIndData] = useState({});
 
   // 底部抽屉：五档盘口 | 快速交易 | F10
   const [drawerTab, setDrawerTab] = useState("quote");
@@ -270,6 +180,36 @@ export default function MarketData({ params, leafId, tabId, dispatch } = {}) {
 
   // 当 baseBars 出现新数据（period/count/adj/code 变更）时，重置 overlay
   useEffect(() => { setBarsOverlay([]); /* eslint-disable-next-line */ }, [code, period, count, adj]);
+
+  /* ---------- G2-3：后端指标（单一真源）——按主/副图需要并行拉取，带缓存 ----------
+     指标计算已收敛到后端引擎（app/indicators），此处仅消费 /market/indicators/calc。
+     依赖用 bars.length + 显式维度，避免 tick 就地改写 barsOverlay 触发的无谓重拉；
+     后端不可用时该叠加层不渲染（绝不本地重算，避免重新制造双份实现）。 */
+  useEffect(() => {
+    if (!bars.length) return;
+    const need = [];
+    if (mainInd === "ma") {
+      MA_PERIODS.forEach((p) => need.push(["ma", { win: p }]));
+    } else if (mainInd === "boll") {
+      need.push(["boll", {}]);
+    }
+    if (subInd === "macd") need.push(["macd", {}]);
+    else if (subInd === "kdj") need.push(["kdj", {}]);
+    else if (subInd === "rsi") { need.push(["rsi", { win: 6 }]); need.push(["rsi", { win: 12 }]); }
+    else if (subInd === "wr") need.push(["wr", {}]);
+    let alive = true;
+    const base = { code, period, count, adj, source: "auto" };
+    Promise.all(need.map(([name, params]) =>
+      fetchIndicator(name, { ...base, ...params }).then((outs) => [name, params, outs])))
+      .then((rows) => {
+        if (!alive) return;
+        const map = {};
+        rows.forEach(([name, params, outs]) => { if (outs) map[indicatorKey(name, params)] = outs; });
+        setIndData(map);
+      });
+    return () => { alive = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [bars.length, code, period, count, adj, mainInd, subInd]);
 
   const meta = klineQ.data && klineQ.data.source ? {
     source: klineQ.data.source,
@@ -654,9 +594,6 @@ export default function MarketData({ params, leafId, tabId, dispatch } = {}) {
     }
     const times = bars.map((b) => toDate(b.time || b.date));
     const candle = bars.map((b) => [Number(b.open), Number(b.close), Number(b.low), Number(b.high)]);
-    const closes = bars.map((b) => Number(b.close));
-    const highs = bars.map((b) => Number(b.high));
-    const lows = bars.map((b) => Number(b.low));
     const vols = bars.map((b) => Number(b.volume) || 0);
     const volColors = bars.map((b) => Number(b.close) >= Number(b.open) ? "#ef4d56" : "#29c08a");
 
@@ -690,17 +627,18 @@ export default function MarketData({ params, leafId, tabId, dispatch } = {}) {
 
     if (mainInd === "ma") {
       MA_PERIODS.forEach((p, idx) => {
+        const ma = indData[indicatorKey("ma", { win: p })] || {};
         opt.legend.data.push(`MA${p}`);
-        opt.series.push({ name: `MA${p}`, type: "line", data: calcMA(closes, p), smooth: true,
+        opt.series.push({ name: `MA${p}`, type: "line", data: ma.ma || [], smooth: true,
           symbol: "none", lineStyle: { width: 1, color: MA_COLORS[idx] } });
       });
     } else if (mainInd === "boll") {
-      const b = calcBOLL(closes);
+      const b = indData[indicatorKey("boll", {})] || {};
       opt.legend.data.push("BOLL-UP", "BOLL-MID", "BOLL-LOW");
       opt.series.push(
-        { name: "BOLL-UP", type: "line", data: b.upper, symbol: "none", lineStyle: { width: 1, color: "#c23531" } },
-        { name: "BOLL-MID", type: "line", data: b.mid, symbol: "none", lineStyle: { width: 1, color: "#91cc75" } },
-        { name: "BOLL-LOW", type: "line", data: b.lower, symbol: "none", lineStyle: { width: 1, color: "#c23531" } },
+        { name: "BOLL-UP", type: "line", data: b.upper || [], symbol: "none", lineStyle: { width: 1, color: "#c23531" } },
+        { name: "BOLL-MID", type: "line", data: b.mid || [], symbol: "none", lineStyle: { width: 1, color: "#91cc75" } },
+        { name: "BOLL-LOW", type: "line", data: b.lower || [], symbol: "none", lineStyle: { width: 1, color: "#c23531" } },
       );
     }
 
@@ -718,7 +656,7 @@ export default function MarketData({ params, leafId, tabId, dispatch } = {}) {
     });
 
     if (subInd === "macd") {
-      const m = calcMACD(closes);
+      const m = indData[indicatorKey("macd", {})] || {};
       // bottom 用固定像素（而非百分比）：无论图表容器多高，都稳定留出滑块空间
       opt.grid[2] = { left: 55, right: 8, top: "82%", bottom: 26 };
       opt.xAxis[2] = { type: "category", gridIndex: 2, data: times, boundaryGap: true,
@@ -727,14 +665,15 @@ export default function MarketData({ params, leafId, tabId, dispatch } = {}) {
       opt.yAxis[2] = { gridIndex: 2, scale: true, splitNumber: 2, axisLabel: { show: false },
         axisTick: { show: false }, splitLine: { show: false } };
       opt.legend.data.push("DIF", "DEA", "MACD");
+      const mBar = m.bar || [];
       opt.series.push(
-        { name: "DIF", type: "line", xAxisIndex: 2, yAxisIndex: 2, data: m.dif, symbol: "none", lineStyle: { width: 1, color: "#ffffff" } },
-        { name: "DEA", type: "line", xAxisIndex: 2, yAxisIndex: 2, data: m.dea, symbol: "none", lineStyle: { width: 1, color: "#fdbb30" } },
-        { name: "MACD", type: "bar", xAxisIndex: 2, yAxisIndex: 2, data: m.bar,
-          itemStyle: (p) => ({ color: (m.bar[p.dataIndex] || 0) >= 0 ? "#ef4d56" : "#29c08a" }) },
+        { name: "DIF", type: "line", xAxisIndex: 2, yAxisIndex: 2, data: m.dif || [], symbol: "none", lineStyle: { width: 1, color: "#ffffff" } },
+        { name: "DEA", type: "line", xAxisIndex: 2, yAxisIndex: 2, data: m.dea || [], symbol: "none", lineStyle: { width: 1, color: "#fdbb30" } },
+        { name: "MACD", type: "bar", xAxisIndex: 2, yAxisIndex: 2, data: mBar,
+          itemStyle: (p) => ({ color: (mBar[p.dataIndex] || 0) >= 0 ? "#ef4d56" : "#29c08a" }) },
       );
     } else if (subInd === "kdj") {
-      const k = calcKDJ(highs, lows, closes);
+      const k = indData[indicatorKey("kdj", {})] || {};
       // bottom 用固定像素（而非百分比）：无论图表容器多高，都稳定留出滑块空间
       opt.grid[2] = { left: 55, right: 8, top: "82%", bottom: 26 };
       opt.xAxis[2] = { type: "category", gridIndex: 2, data: times, boundaryGap: true,
@@ -744,13 +683,13 @@ export default function MarketData({ params, leafId, tabId, dispatch } = {}) {
         axisLabel: { show: false }, axisTick: { show: false }, splitLine: { show: false } };
       opt.legend.data.push("K", "D", "J");
       opt.series.push(
-        { name: "K", type: "line", xAxisIndex: 2, yAxisIndex: 2, data: k.k, symbol: "none", lineStyle: { width: 1, color: "#ef4d56" } },
-        { name: "D", type: "line", xAxisIndex: 2, yAxisIndex: 2, data: k.d, symbol: "none", lineStyle: { width: 1, color: "#fdbb30" } },
-        { name: "J", type: "line", xAxisIndex: 2, yAxisIndex: 2, data: k.j, symbol: "none", lineStyle: { width: 1, color: "#4f8cff" } },
+        { name: "K", type: "line", xAxisIndex: 2, yAxisIndex: 2, data: k.k || [], symbol: "none", lineStyle: { width: 1, color: "#ef4d56" } },
+        { name: "D", type: "line", xAxisIndex: 2, yAxisIndex: 2, data: k.d || [], symbol: "none", lineStyle: { width: 1, color: "#fdbb30" } },
+        { name: "J", type: "line", xAxisIndex: 2, yAxisIndex: 2, data: k.j || [], symbol: "none", lineStyle: { width: 1, color: "#4f8cff" } },
       );
     } else if (subInd === "rsi") {
-      const r6 = calcRSI(closes, 6);
-      const r12 = calcRSI(closes, 12);
+      const r6 = (indData[indicatorKey("rsi", { win: 6 })] || {}).rsi || [];
+      const r12 = (indData[indicatorKey("rsi", { win: 12 })] || {}).rsi || [];
       // bottom 用固定像素（而非百分比）：无论图表容器多高，都稳定留出滑块空间
       opt.grid[2] = { left: 55, right: 8, top: "82%", bottom: 26 };
       opt.xAxis[2] = { type: "category", gridIndex: 2, data: times, boundaryGap: true,
@@ -764,7 +703,7 @@ export default function MarketData({ params, leafId, tabId, dispatch } = {}) {
         { name: "RSI12", type: "line", xAxisIndex: 2, yAxisIndex: 2, data: r12, symbol: "none", lineStyle: { width: 1, color: "#4f8cff" } },
       );
     } else if (subInd === "wr") {
-      const w = calcWR(highs, lows, closes);
+      const w = (indData[indicatorKey("wr", {})] || {}).wr || [];
       // bottom 用固定像素（而非百分比）：无论图表容器多高，都稳定留出滑块空间
       opt.grid[2] = { left: 55, right: 8, top: "82%", bottom: 26 };
       opt.xAxis[2] = { type: "category", gridIndex: 2, data: times, boundaryGap: true,
@@ -799,7 +738,7 @@ export default function MarketData({ params, leafId, tabId, dispatch } = {}) {
         textStyle: { color: "#5a6a82", fontSize: 9 } },
     ];
     return opt;
-  }, [bars, mainInd, subInd, err]);
+  }, [bars, mainInd, subInd, err, indData]);
 
   /* ======================== C1：十字光标 OHLC 信息条 ======================== */
   useEffect(() => {
