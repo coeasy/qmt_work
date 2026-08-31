@@ -5,7 +5,7 @@
 // 新版：navTo("quote", { params: { code: "000001.SH" }, openIn: "auto" })
 //   detail 统一为对象，携带实例参数与打开方式；旧字符串调用点由兼容层自动归一化，
 //   因此 FunctionTree / MenuBar / CommandPalette / Dashboard 等调用点无需同步修改。
-import { PAGES, DEFAULT_PAGE } from "../pagesRegistry.jsx";
+import { PAGES, DEFAULT_PAGE, resolveKey, aliasTab, KEY_ALIAS } from "../pagesRegistry.jsx";
 
 export const OPEN_IN = {
   AUTO: "auto",          // 智能路由（默认）
@@ -17,15 +17,24 @@ export const OPEN_IN = {
 };
 
 // 归一化 nav 事件 detail：兼容字符串（旧调用点）与对象（新调用点）。
+// 阶段一：被并入中心页的旧 key（KEY_ALIAS）在此统一归一为中心页 key，
+// 并把旧 key 写入 params.tab 以定位到对应子页签。
 export function normalizeNavDetail(detail) {
   if (typeof detail === "string") {
-    return PAGES[detail] ? { pageKey: detail, params: {}, openIn: OPEN_IN.AUTO } : null;
+    if (!(PAGES[detail] || KEY_ALIAS[detail])) return null;
+    const tab = aliasTab(detail);
+    return { pageKey: resolveKey(detail), params: tab ? { tab } : {}, openIn: OPEN_IN.AUTO };
   }
   if (detail && typeof detail === "object" && typeof detail.pageKey === "string") {
-    const key = PAGES[detail.pageKey] ? detail.pageKey : DEFAULT_PAGE;
+    if (!(PAGES[detail.pageKey] || KEY_ALIAS[detail.pageKey])) {
+      return { pageKey: DEFAULT_PAGE, params: {}, openIn: detail.openIn || OPEN_IN.AUTO };
+    }
+    const tab = aliasTab(detail.pageKey);
+    const params = detail.params && typeof detail.params === "object" ? detail.params : {};
+    const merged = tab ? { ...params, tab: params.tab || tab } : params;
     return {
-      pageKey: key,
-      params: detail.params && typeof detail.params === "object" ? detail.params : {},
+      pageKey: resolveKey(detail.pageKey),
+      params: merged,
       openIn: detail.openIn || OPEN_IN.AUTO,
     };
   }

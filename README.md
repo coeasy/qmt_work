@@ -10,7 +10,7 @@
 
 | 模块 | 说明 |
 |------|------|
-| 可视化界面 | React + Vite + ECharts SPA，纯前端，前后端解耦，24 个页面覆盖全部后端端点 |
+| 可视化界面 | React + Vite + ECharts SPA，纯前端，前后端解耦，7 大中心 / 21 个顶层页 / 31 个能力入口覆盖全部后端端点 |
 | MCP 接口 | FastMCP Streamable HTTP，Cursor / Claude Desktop 直连 |
 | REST API | FastAPI `/api/v1/*`（账户/行情/下单/回测/再平衡/风控/配置） |
 | 实时推送 | WebSocket，活跃券商只订阅一次，多客户端扇出 |
@@ -228,10 +228,10 @@ qmt_work/
 │  ├─ dist/             # PyInstaller 产物
 │  ├─ tests/            # 单测 + 冒烟测试
 │  └─ build_exe.py      # EXE 打包脚本
-├─ frontend/             # React + Vite + Electron（29 个页面覆盖后端端点）
+├─ frontend/             # React + Vite + Electron（7 大中心 / 21 顶层页 / 31 个能力入口）
 │  ├─ src/
 │  │  ├─ App.jsx         # 路由入口
-│  │  ├─ api.js          # 统一 REST 客户端（150+ 方法）
+│  │  ├─ api.js          # 统一 REST 客户端（167 个方法）
 │  │  ├─ pagesRegistry.jsx # 页面注册表（菜单/功能树/命令面板单一真源）
 │  │  ├─ components/     # 页面组件
 │  │  │  ├─ Dashboard.jsx      # 仪表盘

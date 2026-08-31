@@ -49,39 +49,27 @@ export default function GlobalSearch() {
   };
 
   return (
-    <div className="gsearch" ref={boxRef} style={{ position: "relative", marginRight: 6 }}>
+    <div className="gsearch" ref={boxRef}>
       <input
+        className="gsearch-input"
         value={q}
         onChange={(e) => setQ(e.target.value)}
         onFocus={() => { if (q.trim() && rows.length) setOpen(true); }}
         onKeyDown={onKey}
         placeholder="搜索 代码/名称"
         title="输入股票代码或中文名，回车打开行情"
-        style={{
-          width: 170, padding: "4px 10px", borderRadius: 6,
-          border: "1px solid #334155", background: "#0d1526", color: "#e2e8f0",
-          fontSize: 12, outline: "none",
-        }}
       />
-      {busy && <span style={{ position: "absolute", right: 8, top: 6, color: "#64748b", fontSize: 11 }}>…</span>}
+      {busy && <span className="gsearch-busy">…</span>}
       {open && rows.length > 0 && (
-        <div style={{
-          position: "absolute", top: "100%", left: 0, right: 0, marginTop: 4,
-          background: "#111a2e", border: "1px solid #334155", borderRadius: 8,
-          boxShadow: "0 8px 24px rgba(0,0,0,.4)", zIndex: 200, overflow: "hidden",
-        }}>
+        <div className="gsearch-drop">
           {rows.map((r) => (
             <div key={r.code}
+              className="gsearch-item"
               onClick={() => pick(r.code)}
               onMouseDown={(e) => e.preventDefault()}
-              style={{
-                padding: "6px 10px", cursor: "pointer", display: "flex",
-                justifyContent: "space-between", gap: 8, fontSize: 12,
-              }}
-              className="gsearch-item"
             >
-              <span style={{ color: "#4f8cff" }} className="code">{r.code}</span>
-              <span style={{ color: "#cbd5e1" }} className="muted">{r.name}</span>
+              <span className="code">{r.code}</span>
+              <span className="muted">{r.name}</span>
             </div>
           ))}
         </div>

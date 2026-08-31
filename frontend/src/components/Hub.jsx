@@ -23,6 +23,10 @@ function _isComponentType(comp) {
 
 export default function Hub({ tabs, initial, hubKey }) {
   const [active, setActive] = useState(initial || (tabs[0] && tabs[0].key));
+  // 外部以 params.tab 打开（navTo 旧 key / REPLACE 切换）时同步激活对应子页签
+  useEffect(() => {
+    if (initial && tabs.some((t) => t.key === initial)) setActive(initial);
+  }, [initial, tabs]);
   // 支持外部「快速交易」等场景切换子页签（见 lib/trade.js 的 quickTradeNavigate）
   useEffect(() => {
     const onSwitch = (e) => {

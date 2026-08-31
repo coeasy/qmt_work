@@ -1175,6 +1175,26 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .bd-linked { position: absolute; top: 4px; right: 8px; z-index: 5; }
 .bd-chart { position: relative; }
 
-/* 顶栏全局股票搜索：结果 hover */
-.gsearch-item:hover { background: #16263f; }
+/* 顶栏全局股票搜索 */
+.gsearch { position: relative; margin-right: 6px; }
+.gsearch-input {
+  width: 170px; padding: 4px 10px; border-radius: 6px; box-sizing: border-box;
+  border: 1px solid var(--border); background: var(--bg-2); color: var(--text);
+  font-size: 12px; outline: none;
+}
+.gsearch-input::placeholder { color: var(--text-dim); }
+.gsearch-busy {
+  position: absolute; right: 8px; top: 6px; color: var(--text-dim); font-size: 11px;
+  pointer-events: none;
+}
+.gsearch-drop {
+  position: absolute; top: 100%; left: 0; right: 0; margin-top: 4px;
+  background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .4); z-index: 200; overflow: hidden;
+}
+.gsearch-item {
+  padding: 6px 10px; cursor: pointer; display: flex;
+  justify-content: space-between; gap: 8px; font-size: 12px;
+}
+.gsearch-item:hover { background: var(--panel-2); }
 .gsearch-item:hover .code { color: #7db0ff; }

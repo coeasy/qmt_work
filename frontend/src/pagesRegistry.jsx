@@ -41,15 +41,34 @@ const D = (imp) => {
   return lazyWithRetry(imp, key);
 };
 
+// ================= 旧 key → 中心页 key 归一（阶段一入口合并） =================
+// 被并入 Hub 子页签的旧页面 key，在导航/持久化/迁移三处统一归一。
+// 归并后的旧 key 仍可通过 nav / 菜单 / 命令面板打开，表现为「中心页 + 对应子页签」。
+export const KEY_ALIAS = {
+  boards: "mktstructure", etfs: "mktstructure", index_overview: "mktstructure", rotation: "mktstructure",
+  strategies: "strategy_hub", strmarket: "strategy_hub",
+  factors: "factor_hub", research: "factor_hub",
+  signal: "automation", alerts: "automation", notifications: "automation", webhooks: "automation",
+  markettools: "datacenter", reference: "datacenter",
+  audit: "audit_recon", reconcile: "audit_recon",
+};
+
+// 把任意 key 解析为 PAGES 中实际存在的 key（旧 key → 新中心 key；非法 → 默认页）。
+export function resolveKey(key) {
+  const k = KEY_ALIAS[key] || key;
+  return PAGES[k] ? k : DEFAULT_PAGE;
+}
+
+// 若 key 是被归并的旧 key，返回它在目标中心页里应携带的 tab 参数，否则 undefined。
+export function aliasTab(key) {
+  return KEY_ALIAS[key] ? key : undefined;
+}
+
 export const PAGES = {
   dashboard: { label: "仪表盘", comp: D(() => import("./components/Dashboard.jsx")) },
   quote: { label: "行情分析", comp: D(() => import("./components/MarketData.jsx")) },
   quoteboard: { label: "报价牌", comp: D(() => import("./components/QuoteBoard.jsx")) },
-  boards: { label: "板块行情", comp: D(() => import("./components/Boards.jsx")) },
-  etfs: { label: "ETF 基金", comp: D(() => import("./components/Etfs.jsx")) },
-  index_overview: { label: "指数分析", comp: D(() => import("./components/IndexOverview.jsx")) },
-  rotation: { label: "板块轮动", comp: D(() => import("./components/Rotation.jsx")) },
-  markettools: { label: "行情工具", comp: D(() => import("./components/MarketTools.jsx")) },
+  mktstructure: { label: "市场结构", comp: D(() => import("./hubs/MarketStructureHub.jsx")) },
   screen: { label: "条件选股", comp: D(() => import("./components/Screen.jsx")) },
 
   trade: { label: "手动交易", comp: D(() => import("./components/Trade.jsx")) },
@@ -57,43 +76,32 @@ export const PAGES = {
   algo: { label: "算法交易", comp: D(() => import("./components/Algo.jsx")) },
   paper: { label: "模拟盘", comp: D(() => import("./components/Paper.jsx")) },
 
-  strategies: { label: "模板生成", comp: D(() => import("./components/Strategies.jsx")) },
-  strmarket: { label: "策略市场", comp: D(() => import("./components/StrategyMarket.jsx")) },
+  strategy_hub: { label: "策略工场", comp: D(() => import("./hubs/StrategyHub.jsx")) },
   target: { label: "目标持仓", comp: D(() => import("./components/TargetPortfolio.jsx")) },
   rebalance: { label: "即时再平衡", comp: D(() => import("./components/Rebalance.jsx")) },
 
   backtest: { label: "回测对比", comp: D(() => import("./components/Backtest.jsx")) },
-  factors: { label: "因子/指标", comp: D(() => import("./components/Factors.jsx")) },
-  research: { label: "研究深度", comp: D(() => import("./components/Research.jsx")) },
-  reference: { label: "参考数据", comp: D(() => import("./components/Reference.jsx")) },
+  factor_hub: { label: "因子研究", comp: D(() => import("./hubs/FactorHub.jsx")) },
 
-  signal: { label: "信号路由", comp: D(() => import("./components/Signal.jsx")) },
-  alerts: { label: "告警规则", comp: D(() => import("./components/Alerts.jsx")) },
-  notifications: { label: "通知渠道", comp: D(() => import("./components/Notifications.jsx")) },
-  webhooks: { label: "出站 Webhook", comp: D(() => import("./components/Webhooks.jsx")) },
+  automation: { label: "信号与自动化", comp: D(() => import("./hubs/AutomationHub.jsx")) },
 
   brokers: { label: "连接管理", comp: D(() => import("./components/Brokers.jsx")) },
   accounts: { label: "多账户网格", comp: D(() => import("./components/AccountsGrid.jsx")) },
 
+  datacenter: { label: "数据中心", comp: D(() => import("./hubs/DataCenterHub.jsx")) },
+  audit_recon: { label: "审计对账", comp: D(() => import("./hubs/AuditReconHub.jsx")) },
   sysstatus: { label: "系统状态", comp: D(() => import("./components/SystemStatus.jsx")) },
-  audit: { label: "审计日志", comp: D(() => import("./components/Audit.jsx")) },
-  reconcile: { label: "对账核销", comp: D(() => import("./components/Reconcile.jsx")) },
 
   settings: { label: "设置", comp: D(() => import("./components/Settings.jsx")) },
 };
 
-// 功能树（通达信式左树）：分组 -> 叶子
+// 功能树（通达信式左树）：分组 -> 叶子（阶段一：入口合并为 7 中心组 21 顶层页）
 export const PAGE_TREE = [
   { group: "总览", items: [{ key: "dashboard", label: "仪表盘" }] },
   { group: "行情", items: [
     { key: "quoteboard", label: "报价牌" },
-    { key: "boards", label: "板块行情" },
-    { key: "etfs", label: "ETF 基金" },
-    { key: "index_overview", label: "指数分析" },
-    { key: "rotation", label: "板块轮动" },
     { key: "quote", label: "行情分析" },
-    { key: "markettools", label: "行情工具" },
-    { key: "screen", label: "条件选股" },
+    { key: "mktstructure", label: "市场结构" },
   ] },
   { group: "交易", items: [
     { key: "trade", label: "手动交易" },
@@ -101,34 +109,25 @@ export const PAGE_TREE = [
     { key: "algo", label: "算法交易" },
     { key: "paper", label: "模拟盘" },
   ] },
-  { group: "策略与组合", items: [
-    { key: "strategies", label: "模板生成" },
-    { key: "strmarket", label: "策略市场" },
+  { group: "组合与策略", items: [
+    { key: "strategy_hub", label: "策略工场" },
     { key: "target", label: "目标持仓" },
     { key: "rebalance", label: "即时再平衡" },
   ] },
   { group: "研究", items: [
     { key: "backtest", label: "回测对比" },
-    { key: "factors", label: "因子/指标" },
-    { key: "research", label: "研究深度" },
-    { key: "reference", label: "参考数据" },
+    { key: "factor_hub", label: "因子研究" },
   ] },
-  { group: "信号与告警", items: [
-    { key: "signal", label: "信号路由" },
-    { key: "alerts", label: "告警规则" },
-    { key: "notifications", label: "通知渠道" },
-    { key: "webhooks", label: "出站 Webhook" },
+  { group: "选股与信号", items: [
+    { key: "screen", label: "条件选股" },
+    { key: "automation", label: "信号与自动化" },
   ] },
-  { group: "账户", items: [
+  { group: "系统运维", items: [
     { key: "brokers", label: "连接管理" },
     { key: "accounts", label: "多账户网格" },
-  ] },
-  { group: "运维", items: [
+    { key: "datacenter", label: "数据中心" },
+    { key: "audit_recon", label: "审计对账" },
     { key: "sysstatus", label: "系统状态" },
-    { key: "audit", label: "审计日志" },
-    { key: "reconcile", label: "对账核销" },
-  ] },
-  { group: "系统", items: [
     { key: "settings", label: "设置" },
   ] },
 ];

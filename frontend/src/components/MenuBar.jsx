@@ -5,7 +5,7 @@
 import { useState, useRef, useEffect } from "react";
 import Ticker from "./Ticker.jsx";
 import GlobalSearch from "./GlobalSearch.jsx";
-import { PAGES } from "../pagesRegistry.jsx";
+import { PAGES, KEY_ALIAS } from "../pagesRegistry.jsx";
 import { t } from "../lib/i18n.js";
 
 // 9 个主菜单（按 TDX 习惯顺序）：系统 / 行情 / 分析 / 交易 / 策略 / 组合 / 研究 / 信号 / 账户 / 运维
@@ -58,7 +58,7 @@ export default function MenuBar() {
             {openIdx === i && (
               <div className="menu-dropdown" onMouseEnter={cancelClose} onMouseLeave={scheduleClose}>
                 {m.keys.map((k) => {
-                  const item = PAGES[k];
+                  const item = PAGES[k] || KEY_ALIAS[k];
                   if (!item) return null;
                   return (
                     <div key={k} className="menu-item" onClick={() => open(k)}>

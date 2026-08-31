@@ -9,7 +9,7 @@
 // 5. aliveOrder 控制 keep-alive 常驻上限（LRU）：超出的 tab 停止渲染 DOM，
 //    激活时重新挂载并从本 store 恢复全部参数与布局。
 import { createContext, useContext, useEffect, useMemo, useReducer, useRef } from "react";
-import { PAGES, DEFAULT_PAGE } from "../pagesRegistry.jsx";
+import { PAGES, DEFAULT_PAGE, resolveKey, KEY_ALIAS } from "../pagesRegistry.jsx";
 
 const LS_KEY = "qmt_work.workspace.v3";
 const OLD_WB_KEY = "qmt_work.workbench.v1";
@@ -28,9 +28,16 @@ let _seq = 0;
 const newId = (p) => `${p}${Date.now().toString(36)}${(_seq++).toString(36)}x`;
 
 /* ======================== 叶子 / 树（纯函数） ======================== */
+// 把旧 key 携带的子页签参数并入 params（阶段一：旧 key → 中心页，tab 定位子页签）。
+function aliasParams(key, params) {
+  const target = KEY_ALIAS[key];
+  if (target) return { ...params, tab: (params && params.tab) || key };
+  return params;
+}
+
 export function makeLeaf(pageKey, params = {}) {
-  const ok = PAGES[pageKey] ? pageKey : DEFAULT_PAGE;
-  return { id: newId("l_"), pageKey: ok, params: { ...params } };
+  const ok = resolveKey(pageKey);
+  return { id: newId("l_"), pageKey: ok, params: { ...aliasParams(pageKey, params) } };
 }
 
 export function makeContainer(dir, kids) {
@@ -91,7 +98,7 @@ export function replaceKid(node, parentId, newNode) {
 export function sanitizeTree(node, seed) {
   const fallback = seed && seed.pageKey ? seed : { pageKey: DEFAULT_PAGE, params: {} };
   if (!node || typeof node !== "object") return makeLeaf(fallback.pageKey, fallback.params);
-  if (node.pageKey) return makeLeaf(PAGES[node.pageKey] ? node.pageKey : fallback.pageKey, node.params);
+  if (node.pageKey) return makeLeaf(node.pageKey, node.params);
   const kids = (node.kids || []).map((k) => sanitizeTree(k, fallback)).filter(Boolean);
   if (kids.length === 0) return makeLeaf(fallback.pageKey, fallback.params);
   if (kids.length === 1) return kids[0];
@@ -284,7 +291,7 @@ function migrateLegacy() {
     const panes = readJson(OLD_PANES_KEY);
     let keys = [];
     if (wb && Array.isArray(wb.openTabs) && wb.openTabs.length) {
-      keys = wb.openTabs.filter((k) => PAGES[k]);
+      keys = wb.openTabs.map(resolveKey).filter((k, i, a) => k && a.indexOf(k) === i);
     }
     if (!keys.length) keys = [DEFAULT_PAGE];
 
@@ -352,7 +359,7 @@ export function workspaceReducer(state, action) {
   switch (action.type) {
     case "OPEN": {
       const { pageKey, params, openIn } = action;
-      const key = PAGES[pageKey] ? pageKey : DEFAULT_PAGE;
+      const key = resolveKey(pageKey);
       const cur = findTab(state, state.activeId);
       const curLeaf = cur ? findNode(cur.layout, cur.activeLeaf) : null;
 

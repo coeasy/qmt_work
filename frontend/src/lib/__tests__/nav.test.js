@@ -14,8 +14,20 @@ describe("normalizeNavDetail（导航协议归一化）", () => {
       .toEqual({ pageKey: "quote", params: { code: "600519.SH" }, openIn: "replace" });
   });
   it("对象缺 params → 补空对象；缺 openIn → auto", () => {
+    expect(normalizeNavDetail({ pageKey: "quote" }))
+      .toEqual({ pageKey: "quote", params: {}, openIn: "auto" });
+  });
+  it("对象里旧 key（并入中心页）→ 归一为中心页 + 携带 tab=旧key", () => {
     expect(normalizeNavDetail({ pageKey: "boards" }))
-      .toEqual({ pageKey: "boards", params: {}, openIn: "auto" });
+      .toEqual({ pageKey: "mktstructure", params: { tab: "boards" }, openIn: "auto" });
+  });
+  it("字符串旧 key → 归一为中心页 + 携带 tab=旧key", () => {
+    expect(normalizeNavDetail("webhooks"))
+      .toEqual({ pageKey: "automation", params: { tab: "webhooks" }, openIn: "auto" });
+  });
+  it("旧 key 已显式带 tab 时保留显式 tab", () => {
+    expect(normalizeNavDetail({ pageKey: "etfs", params: { tab: "custom" } }))
+      .toEqual({ pageKey: "mktstructure", params: { tab: "custom" }, openIn: "auto" });
   });
   it("对象非法 pageKey → 兜底 DEFAULT_PAGE", () => {
     const r = normalizeNavDetail({ pageKey: "nope", params: {} });
