@@ -21,6 +21,17 @@ from .registry import create_adapter, get_profile
 log = logging.getLogger("qmt_work.manager")
 
 
+def _version_profile(adapter: BrokerAdapter) -> dict | None:
+    """提取适配器的版本画像（xtp 系提供；其余适配器无则返回 None）。"""
+    getter = getattr(adapter, "version_profile", None)
+    if not callable(getter):
+        return None
+    try:
+        return getter().to_dict()
+    except Exception:  # noqa: BLE001  画像探测失败不影响连接状态列表
+        return None
+
+
 @dataclass
 class ConnectionConfig:
     conn_id: str = ""
@@ -302,6 +313,7 @@ class BrokerManager:
                 "client_version": conn.adapter.client_version,
                 "supported_periods": conn.adapter.supported_periods,
                 "supported_account_types": conn.adapter.supported_account_types,
+                "version_profile": _version_profile(conn.adapter),
             })
         return out
 

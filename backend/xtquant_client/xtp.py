@@ -11,8 +11,10 @@ xtquant 包自动发现（无需用户手动安装）：
 """
 import logging
 import os
+import re
 import sys
 import threading
+from dataclasses import dataclass, field
 from datetime import datetime
 
 from .base import BrokerAdapter, BrokerError, BrokerNotConnectedError, BrokerSDKError
@@ -868,6 +870,218 @@ def _effective_trade_dir(client_path: str, mode: str = "auto") -> tuple[str, str
     return client_path, "auto"
 
 
+# ---------------- 多版本能力矩阵与版本画像 ----------------
+# QMT 存在「完整版大客户端（XtItClient）」、「极速版 MiniQMT（XtMiniQmt + miniquote）」
+# 两种启动模式，且各券商/各年代客户端的 xtquant SDK 能力参差。为优雅支持"全功能版本"
+# 与"仅部分功能的极简版本"，这里把「版本指纹」与「能力矩阵」显式建模：
+#   版本画像（QmtVersionProfile）  = 客户端类型 + 版本号 + SDK 版本 + 交易目录 + 能力矩阵
+#   能力矩阵（QmtCapabilities）    = 该客户端实际能提供的功能集合（缺即 False，不臆测）
+# 上游（discovery 候选 / /brokers/test / 连接结果 / 前端）统一消费 image_to_dict，
+# 前端据此展示"检测到什么版本、支持哪些功能"，并可按能力自动禁用入口。
+
+
+@dataclass
+class QmtCapabilities:
+    """按客户端类型 / 账户类型 / 版本推导的运行期能力集。
+
+    唯一事实来源是「本适配器（XTPQuantAdapter）真实实现的 API」+「连接时实际可用」
+    两层。这里只标注适配器统一具备的基础能力；极简版（仅行情、无完整交易）或
+    特定账户类型下，部分能力由构造参数/运行时状态裁剪，缺则置 False，绝不臆测。
+    """
+    quote: bool = True            # 实时行情（xtdata get_quote/get_full_tick）
+    kline: bool = True            # 历史 K 线（xtdata get_kline）
+    stock_list: bool = True       # 板块股票列表
+    sector: bool = True           # 板块列表 / 成分
+    trading_calendar: bool = True # 交易日历
+    trade: bool = True            # 交易（下单/撤单/委托/成交）
+    account: bool = True          # 账户 / 资金 / 持仓
+    condition_order: bool = False # 条件单 / 多条件单（依赖账号权限与版本，连接成功才置真）
+    credit: bool = False          # 融资融券
+    option: bool = False          # 期权
+    futures: bool = False         # 期货
+    l2_tick: bool = False         # Level-2 逐笔（需账号订阅权限）
+    financial: bool = True        # 财务数据（xtdata get_stock_financial）
+    realtime_push: bool = False   # 实时成交/委托推送（仅配置交易账号且已连接）
+
+    def as_list(self) -> list[str]:
+        return [k for k, v in self.__dict__.items() if v]
+
+    def to_dict(self) -> dict:
+        return dict(self.__dict__)
+
+
+@dataclass
+class QmtVersionProfile:
+    """一个 QMT 客户端安装的完整版本画像（前端展示 / 排障用）。"""
+    client_type: str = "unknown"    # mini / full / both / unknown（本机运行场景）
+    client_mode: str = "auto"       # auto / mini / full（解析出的交易目录模式）
+    version_str: str = ""           # 客户端主程序版本，如 "7.2.1"（未知留空）
+    sdk_version: str = ""           # xtquant SDK 版本，如 "4.1.0"（未知留空）
+    trade_dir: str = ""             # XtQuantTrader 实际使用的数据目录
+    quote_port: int = 58610         # 行情服务端口
+    trade_port: int = 0             # 大客户端交易端口（58600，未监听为 0）
+    broker_name: str = ""           # 从 Config.xml 读出的真实券商名（未知留空）
+    account_id: str = ""            # 资金账号（未配置留空）
+    account_type: str = "STOCK"     # STOCK / CREDIT / OPTION / FUTURES
+    capabilities: QmtCapabilities = field(default_factory=QmtCapabilities)
+    detail: str = ""                # 人类可读的诊断文案
+
+    def to_dict(self) -> dict:
+        return {
+            "client_type": self.client_type,
+            "client_mode": self.client_mode,
+            "version_str": self.version_str,
+            "sdk_version": self.sdk_version,
+            "trade_dir": self.trade_dir,
+            "quote_port": self.quote_port,
+            "trade_port": self.trade_port,
+            "broker_name": self.broker_name,
+            "account_id": self.account_id,
+            "account_type": self.account_type,
+            "capabilities": self.capabilities.to_dict(),
+            "capabilities_list": self.capabilities.as_list(),
+            "detail": self.detail,
+        }
+
+
+_VERSION_RE = re.compile(r"(?i)(?:\bversion\b|\bver\b)\s*[:=]\s*([0-9][0-9a-zA-Z._-]*)")
+
+
+def _detect_version_str(client_path: str) -> str:
+    """从客户端目录读取主程序版本（best-effort，未知返回 ''）。
+
+    候选来源：bin.x64/version.txt、bin.x64/version.ini、<根>/version.txt。
+    内容多为 "Version=7.23.1" 或 "version: 4.0.0" 之类键值，取其首个版本号。
+    """
+    if not client_path:
+        return ""
+    try:
+        roots = _candidate_roots(client_path)
+    except Exception:  # noqa: BLE001
+        roots = []
+    base = roots[0] if roots else _normalize(client_path)
+    for rel, names in (("", ("version.txt", "version.ini")),
+                       ("bin.x64", ("version.txt", "version.ini"))):
+        for fname in names:
+            p = os.path.join(base, rel, fname) if rel else os.path.join(base, fname)
+            try:
+                if not os.path.isfile(p):
+                    continue
+                with open(p, "r", encoding="utf-8", errors="ignore") as f:
+                    txt = (f.read() or "")[:4000]
+                m = _VERSION_RE.search(txt)
+                if m:
+                    return m.group(1)
+            except Exception:  # noqa: BLE001
+                continue
+    return ""
+
+
+def _detect_sdk_version(client_path: str) -> str:
+    """读取客户端自带 xtquant 的 __version__（best-effort，未知返回 ''）。"""
+    if not client_path:
+        return ""
+    try:
+        sp = _resolve_xtquant_path(client_path)
+    except Exception:  # noqa: BLE001
+        sp = None
+    if not sp:
+        return ""
+    pkg = os.path.join(sp, "xtquant", "__init__.py")
+    try:
+        if os.path.isfile(pkg):
+            with open(pkg, "r", encoding="utf-8", errors="ignore") as f:
+                txt = f.read()
+            m = re.search(r"(?m)^\s*__version__\s*=\s*['\"]([^'\"]+)['\"]", txt)
+            if m:
+                return m.group(1).strip()
+    except Exception:  # noqa: BLE001
+        pass
+    return ""
+
+
+def _infer_capabilities(client_type: str, account_type: str,
+                        account_id: str = "", realtime_push: bool = False) -> QmtCapabilities:
+    """由客户端类型 / 账户类型推导能力矩阵（仅裁剪「本就可选/依赖权限」项）。
+
+    基础能力（行情/K线/板块/交易/账户/财务）是本适配器统一实现的，恒为 True。
+    依赖账号/权限/运行状态的能力按以下规则收敛，缺则 False，绝不臆测：
+      - credit/option/futures：仅当账户类型匹配时置 True
+      - condition_order：需交易账号 + 连接期确认真实可用才由外部置 True
+      - l2_tick：需 Level-2 订阅权限，默认 False（连接成功后由运行时探测覆盖）
+      - realtime_push：仅配置了交易账号时按参数置真
+    """
+    caps = QmtCapabilities()
+    at = (account_type or "STOCK").upper()
+    caps.credit = (at == "CREDIT")
+    caps.option = (at == "OPTION")
+    caps.futures = (at == "FUTURES")
+    caps.realtime_push = bool(realtime_push and account_id)
+    # 极简行情版（未配交易账号）：交易/账户不可用，行情仍可用
+    if not account_id:
+        caps.trade = False
+        caps.account = False
+        caps.condition_order = False
+    return caps
+
+
+def build_version_profile(client_path: str, client_mode: str = "auto",
+                          account_id: str = "", account_type: str = "STOCK",
+                          realtime_push: bool = False,
+                          probe: dict | None = None) -> QmtVersionProfile:
+    """构建一个客户端安装的版本画像（纯静态探测，不连接券商、不 import xtquant）。
+
+    这是「支持所有 QMT 版本」的收敛入口：无论完整版 XtItClient 还是只提供部分
+    功能的极速 MiniQMT，都归一成一份 {类型 + 版本 + 能力矩阵} 画像，供 discovery /
+    /brokers/test / 连接结果 / 前端统一展示与按能力路由入口。
+    """
+    p = QmtVersionProfile()
+    p.client_mode = (client_mode or "auto").lower()
+    p.account_id = account_id or ""
+    p.account_type = (account_type or "STOCK").upper()
+    p.version_str = _detect_version_str(client_path)
+    p.sdk_version = _detect_sdk_version(client_path)
+    # 交易目录 + 解析出的模式（auto 推断出的 mini/full 回填到 client_mode）
+    trade_dir, resolved_mode = _effective_trade_dir(client_path, p.client_mode)
+    p.trade_dir = trade_dir
+    if resolved_mode in ("mini", "full"):
+        p.client_mode = resolved_mode
+    # 运行场景（本机在跑 full/mini/both）+ 端口：优先复用调用方已探测结果，避免重复探测
+    if probe is None:
+        try:
+            probe = _probe_quote_service(client_path) if client_path else {}
+        except Exception:  # noqa: BLE001
+            probe = {}
+    probe = probe or {}
+    p.client_type = probe.get("client_type") or "unknown"
+    qports = probe.get("quote_ports") or []
+    tports = probe.get("trade_ports") or []
+    p.quote_port = int(qports[0]) if qports else int(probe.get("expected_port") or 58610)
+    p.trade_port = int(tports[0]) if tports else 0
+    # 真实券商名：优先复用 probe 中的 broker_name（discovery 已从 Config.xml 读出）
+    p.broker_name = probe.get("broker_name") or ""
+    p.capabilities = _infer_capabilities(p.client_type, p.account_type,
+                                         p.account_id, realtime_push)
+    # 可读诊断文案：说明识别到哪种客户端、支持到什么程度
+    type_label = {
+        "mini": "极速版 MiniQMT（仅提供行情 + 极简交易通道）",
+        "full": "完整版大客户端（交易 + 行情一体）",
+        "both": "完整版 + 极速版 同时运行（交易走完整版）",
+        "none": "未检测到运行中的客户端进程",
+    }.get(p.client_type, "未知客户端类型")
+    mode_label = ("极速版 userdata_mini" if p.client_mode == "mini"
+                  else "完整版 userdata")
+    caps = p.capabilities
+    if caps.trade:
+        scope = "行情 + 交易"
+    elif caps.quote:
+        scope = "仅行情（未配置交易账户）"
+    else:
+        scope = "未知"
+    p.detail = (f"识别到{type_label}（{mode_label}），能力范围：{scope}。"
+                f"版本 {p.version_str or '未知'} / SDK {p.sdk_version or '未知'}")
+    return p
+
 
 # ---------------- 多版本 SDK 兼容辅助 ----------------
 # 不同 xtquant 版本对象属性命名不一致：旧版 xttrader 全小写（order_id/stock_code/
@@ -967,6 +1181,7 @@ class XTPQuantAdapter(BrokerAdapter):
         self._on_order_cb = None
         self._on_trade_cb = None
         self._on_disconnect_cb = None
+        self._probe_cache = None  # 版本画像复用：连接期探测的运行场景结果缓存
 
     # ---------------- 身份 ----------------
     @property
@@ -1008,6 +1223,31 @@ class XTPQuantAdapter(BrokerAdapter):
     @property
     def sdk_required(self) -> str:
         return "xtquant"
+
+    def capabilities(self) -> list[str]:
+        """运行时能力探测：按当前账号 / 目录 / 连接状态推导能力矩阵。
+
+        供 Registry.probe 优先采用（优于基于券商档案的静态推导），前端据此
+        展示「当前 QMT 版本实际支持哪些功能」。连接失败/未连接时不臆造能力。
+        """
+        try:
+            return self.version_profile().capabilities.as_list()
+        except Exception:  # noqa: BLE001
+            return []
+
+    def version_profile(self) -> QmtVersionProfile:
+        """返回当前客户端安装的版本画像（类型 + 版本 + 能力矩阵）。
+
+        复用连接期已解析的交易目录 / 模式；运行进程探测优先复用适配器内缓存，
+        未缓存时现测（诊断路径，无副作用）。
+        """
+        probe = getattr(self, "_probe_cache", None)
+        acc_filled = bool(self._account_id)
+        return build_version_profile(
+            self.client_path, self._client_mode,
+            account_id=self._account_id, account_type=self._account_type,
+            realtime_push=self._connected and acc_filled,
+            probe=probe)
 
     # ---------------- 生命周期 ----------------
     def start(self) -> None:
@@ -1072,6 +1312,7 @@ class XTPQuantAdapter(BrokerAdapter):
                 else:
                     # 深度诊断：主动探测进程 / 端口 / 配置一致性，替代笼统的「不可用」
                     probe = _probe_quote_service(self.client_path)
+                    self._probe_cache = probe  # 供版本画像复用，避免重复探测
                     _probe_diag = (f"[探测] client_type={probe.get('client_type')} "
                                    f"full={probe.get('full_client_running')} "
                                    f"mini={probe.get('mini_client_running')} "

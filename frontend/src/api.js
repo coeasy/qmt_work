@@ -90,6 +90,8 @@ api.batchRemoveBrokers = (ids) => api.post("/brokers/batch-delete", { ids });
 // ABI 运行时矩阵 / 单连接健康检查（运维排障）
 api.brokerRuntimes = () => api.get("/brokers/runtimes");
 api.brokerHealth = (id) => api.get(`/brokers/${id}/health`);
+// QMT 客户端版本画像探测（识别完整版/极速版、版本号与能力矩阵）
+api.brokerVersionInfo = (body) => api.post("/brokers/version-info", body);
 // 端到端诊断快照（排障用；deep 含系统运行时发现，较重）
 api.brokerDiagnostics = (deep) => api.get("/brokers/diagnostics", deep ? { deep: 1 } : {});
 

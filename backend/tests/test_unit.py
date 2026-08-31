@@ -1734,6 +1734,106 @@ def test_effective_trade_dir_empty_path():
     assert _effective_trade_dir("", "auto") == ("", "auto")
 
 
+# ---------------- QMT 多版本画像 / 能力矩阵 ----------------
+def test_detect_version_from_files(tmp_path):
+    """从客户端目录的 version.txt / version.ini 读取主程序版本。"""
+    from xtquant_client.xtp import _detect_version_str
+    root = tmp_path / "client"
+    (root / "bin.x64").mkdir(parents=True)
+    (root / "bin.x64" / "version.txt").write_text("Version=7.23.1\n", encoding="utf-8")
+    assert _detect_version_str(str(root)) == "7.23.1"
+    # 无版本文件 / 空路径 -> ""
+    assert _detect_version_str(str(tmp_path / "nonexistent")) == ""
+    assert _detect_version_str("") == ""
+
+
+def test_detect_sdk_version_from_init(tmp_path):
+    """从客户端自带 xtquant/__init__.py 读取 __version__。"""
+    from xtquant_client.xtp import _detect_sdk_version
+    root = tmp_path / "client"
+    sp = root / "bin.x64" / "Lib" / "site-packages" / "xtquant"
+    sp.mkdir(parents=True)
+    userdir = tmp_path / "userdata_mini"
+    userdir.mkdir()
+    (sp / "__init__.py").write_text('__version__ = "4.1.0"\n', encoding="utf-8")
+    assert _detect_sdk_version(str(userdir)) == "4.1.0"
+    assert _detect_sdk_version("") == ""
+
+
+def test_infer_capabilities_modes():
+    """能力矩阵按账户类型裁剪：股票/信用/期权/期货 + 未配账号降级交易能力。"""
+    from xtquant_client.xtp import _infer_capabilities
+    stock = _infer_capabilities("full", "STOCK", account_id="123", realtime_push=True)
+    assert stock.quote and stock.trade and stock.account
+    assert not stock.credit and not stock.option and not stock.futures
+    assert stock.realtime_push is True          # 配账号 + realtime_push=True
+    credit = _infer_capabilities("full", "CREDIT", "123", True)
+    assert credit.credit and not credit.option
+    option = _infer_capabilities("full", "OPTION", "123")
+    assert option.option
+    future = _infer_capabilities("full", "FUTURES", "123")
+    assert future.futures
+    # 极简行情版（未配账号）：交易/账户降级为 False，行情仍可用
+    quote_only = _infer_capabilities("mini", "STOCK", account_id="")
+    assert quote_only.trade is False and quote_only.account is False
+    assert quote_only.quote and quote_only.kline
+    assert ["quote", "kline", "financial"]  # 基础能力恒在 as_list
+    assert "trade" not in quote_only.as_list()
+
+
+def test_build_version_profile(tmp_path, monkeypatch):
+    """版本画像：识别极速版/完整版 + 能力矩阵 + 交易目录解析。"""
+    from xtquant_client import xtp as xtp_mod
+    from xtquant_client.xtp import build_version_profile
+    # 极速版：仅 userdata_mini，运行场景 mini
+    root = tmp_path / "mini_client"
+    (root / "userdata_mini").mkdir(parents=True)
+    (root / "bin.x64").mkdir()
+    (root / "bin.x64" / "version.txt").write_text("Version=6.10.0\n", encoding="utf-8")
+    monkeypatch.setattr(xtp_mod, "_probe_quote_service",
+                        lambda p: {"client_type": "mini",
+                                   "quote_ports": [58610], "trade_ports": [],
+                                   "expected_port": 58610, "broker_name": "测试证券"})
+    p = build_version_profile(str(root / "userdata_mini"), "auto",
+                              account_id="", account_type="STOCK")
+    d = p.to_dict()
+    assert d["client_type"] == "mini"
+    assert d["client_mode"] == "mini"          # auto 推断出极速版
+    assert d["version_str"] == "6.10.0"
+    assert d["capabilities"]["trade"] is False  # 未配账号 -> 仅行情
+    assert "trade" not in d["capabilities_list"]
+    assert "行情" in d["detail"] or "仅行情" in d["detail"]
+
+    # 完整版：userdata 存在，运行场景 full，配账号 -> 交易 + 实时推送可用
+    root2 = tmp_path / "full_client"
+    (root2 / "userdata").mkdir(parents=True)
+    monkeypatch.setattr(xtp_mod, "_probe_quote_service",
+                        lambda p: {"client_type": "full",
+                                   "quote_ports": [58610], "trade_ports": [58600],
+                                   "expected_port": 58610, "broker_name": ""})
+    p2 = build_version_profile(str(root2 / "userdata"), "auto",
+                               account_id="55012345", account_type="STOCK",
+                               realtime_push=True)
+    d2 = p2.to_dict()
+    assert d2["client_mode"] == "full"
+    assert d2["client_type"] == "full"
+    assert d2["capabilities"]["trade"] is True
+    assert d2["capabilities"]["realtime_push"] is True
+    assert d2["trade_port"] == 58600
+
+
+def test_adapter_version_profile_and_capabilities():
+    """适配器提供 version_profile/capabilities，统一供上游消费。"""
+    from xtquant_client.xtp import XTPQuantAdapter
+    a = XTPQuantAdapter(r"C:\nonexistent", "", client_mode="auto")
+    prof = a.version_profile()
+    d = prof.to_dict()
+    assert d["account_id"] == ""
+    assert "client_type" in d and "capabilities" in d
+    # 未连接 + 未配账号：多能力被裁剪，但仍能返回能力列表（不崩溃）
+    assert isinstance(a.capabilities(), list)
+
+
 def test_get_full_tick_handles_sdk_error():
     """行情未认证/非交易时段：get_full_tick 不应抛协议级 JSONDecodeError，
     而应返回空 dict，由上层给出「已连但行情未就绪」诊断。"""

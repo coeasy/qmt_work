@@ -28,6 +28,15 @@ function friendlyErr(detail) {
   return d;
 }
 
+// 能力矩阵标签（与后端 QmtCapabilities 字段名对应）
+const CAP_LABELS = {
+  quote: "行情", kline: "K线", stock_list: "股票列表", sector: "板块",
+  trading_calendar: "交易日历", trade: "交易", account: "账户",
+  condition_order: "条件单", credit: "信用", option: "期权",
+  futures: "期货", l2_tick: "L2逐笔", financial: "财务", realtime_push: "实时推送",
+};
+function capLabel(k) { return CAP_LABELS[k] || k; }
+
 // 将后端结构化探测诊断格式化为可读文本（sdk 定位/导入/目录线索）
 function probeText(p) {
   const lines = [];
@@ -67,6 +76,9 @@ export default function Brokers() {
   const [diagBusy, setDiagBusy] = useState(false);
   const [health, setHealth] = useState({});       // conn_id -> 健康检查结果
   const [healthBusy, setHealthBusy] = useState("");
+  // QMT 客户端版本画像（识别完整版/极速版、版本号、能力矩阵）
+  const [verInfo, setVerInfo] = useState(null);
+  const [verBusy, setVerBusy] = useState(false);
   // 「连接中」状态：按 conn_id 维度记录——避免同一连接重复点击、显示"连接中…"
   // 提示，并支持取消。必须用 ref + state 双轨：state 触发重渲染，ref 持有
   // AbortController 让"取消"能真正打断后端连接请求（不依赖用户在 spinner
@@ -170,6 +182,15 @@ export default function Brokers() {
       account_id: c.default_account_id || prev.account_id || "",
     }));
     setTestRes(null);
+    // 候选已带版本指纹（版本号/SDK 版本），先展示；完整画像延后探测
+    setVerInfo(c.version_str || c.sdk_version
+      ? {
+          version_str: c.version_str || "",
+          sdk_version: c.sdk_version || "",
+          capabilities_list: [],
+          detail: "",
+        }
+      : null);
     // 延迟读取最新 state：setForm 是批量的，这里用 setTimeout 让它先落盘
     test({
       broker_id: c.broker_id || "",
@@ -180,6 +201,25 @@ export default function Brokers() {
       session_id: 0,
       min_version: "",
     }).then(setTestRes).catch((e) => setTestRes({ connected: false, detail: e.message }));
+  }
+
+  // 探测 / 刷新客户端版本画像（前端按能力展示：完整版 vs 极速版、支持哪些功能）
+  async function detectVersion() {
+    const path = form.client_path;
+    if (!path) { setVerInfo(null); return; }
+    setVerBusy(true);
+    try {
+      const r = await api.brokerVersionInfo({
+        client_path: path,
+        client_mode: form.client_mode || "auto",
+        account_id: form.account_id || "",
+        account_type: form.account_type || "STOCK",
+        realtime_push: false,
+      });
+      setVerInfo(r);
+    } catch (e) {
+      setVerInfo(null);
+    } finally { setVerBusy(false); }
   }
 
   // 选择券商档案后回填默认客户端路径 / 账户类型
@@ -319,6 +359,17 @@ export default function Brokers() {
           <label>客户端路径（userdata_mini / userdata）</label>
           <input value={form.client_path} placeholder="如 C:\国金证券QMT交易端\userdata_mini（完整版填 ...\userdata）"
             onChange={(e) => setForm({ ...form, client_path: e.target.value })} />
+          <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 6 }}>
+            <button type="button" className="btn btn-sm" onClick={detectVersion} disabled={verBusy || !form.client_path}>
+              {verBusy ? "探测中…" : "探测版本 / 能力"}
+            </button>
+            {verInfo && (
+              <span className="muted" style={{ fontSize: 11 }}>
+                {verInfo.version_str ? `客户端 v${verInfo.version_str}` : "版本未知"}
+                {verInfo.sdk_version ? ` · SDK ${verInfo.sdk_version}` : ""}
+              </span>
+            )}
+          </div>
 
           <label>客户端模式</label>
           <select value={form.client_mode}
@@ -331,6 +382,25 @@ export default function Brokers() {
             极速版用 <code>userdata_mini</code> 数据目录；完整版大客户端用 <code>userdata</code>。
             选「自动识别」时按路径后缀 / 运行进程 / 目录存在性智能判断。
           </p>
+
+          {verInfo && !!(verInfo.capabilities && verInfo.capabilities_list && verInfo.capabilities_list.length) && (() => {
+            const list = verInfo.capabilities_list || [];
+            const t = verInfo.client_type;
+            const typeLabel = t === "mini" ? "极速版 MiniQMT" : t === "full" ? "完整版大客户端" : t === "both" ? "完整版+极速版并列运行" : "类型未知";
+            return (
+              <div className="form-tip" style={{ marginTop: 6, padding: 8, background: "#0f2133", borderRadius: 6 }}>
+                <div style={{ fontSize: 12, marginBottom: 4 }}>
+                  <b>检测到：{typeLabel}</b>
+                  {verInfo.detail ? <span className="muted"> — {verInfo.detail}</span> : null}
+                </div>
+                <div style={{ fontSize: 11, color: "#8fb4d4", wordBreak: "break-all" }}>
+                  能力：{list.map((k) => (
+                    <span key={k} style={{ marginRight: 6 }}>{capLabel(k)}</span>
+                  ))}
+                </div>
+              </div>
+            );
+          })()}
 
           <label>资金账号</label>
           <input value={form.account_id} placeholder="如 55012345"
@@ -424,6 +494,8 @@ export default function Brokers() {
                     {c.has_userdata ? " · userdata ✓" : ""}
                     {c.client_mode === "mini"
                       ? " · [极速版]" : c.client_mode === "full" ? " · [完整版]" : ""}
+                    {c.version_str ? ` · v${c.version_str}` : ""}
+                    {c.sdk_version ? ` · SDK ${c.sdk_version}` : ""}
                   </div>
                   {Array.isArray(c.accounts) && c.accounts.length > 0 && (
                     <div style={{ marginTop: 4, fontSize: 11, wordBreak: "break-all" }}>

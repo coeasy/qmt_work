@@ -468,6 +468,15 @@ def _candidate(root: str, running: bool = False, pid: str = "",
     # light=True：auto-detect 阶段只做轻量定位，不 import xtquant、不扫运行时，避免每条
     # 候选触发昂贵扫描导致 auto-detect 慢/超时；完整诊断在用户点击候选后由 /brokers/test 给出。
     probe = probe_environment(client_path, light=True)
+    # 版本指纹（轻量文件读取，不触发进程/端口扫描，供前端展示与按版本路由）
+    try:
+        from .xtp import _candidate_roots, _detect_sdk_version, _detect_version_str
+        root_base = _candidate_roots(root)
+        _ver_base = root_base[0] if root_base else root
+        version_str = _detect_version_str(_ver_base)
+        sdk_version = _detect_sdk_version(_ver_base)
+    except Exception:  # noqa: BLE001
+        version_str, sdk_version = "", ""
     return {
         "root": root,
         "name": os.path.basename(root) or root,
@@ -481,6 +490,8 @@ def _candidate(root: str, running: bool = False, pid: str = "",
         "client_path_full": ud_full if has_full else "",
         "has_userdata_mini": has_mini,
         "has_userdata": has_full,
+        "version_str": version_str,       # 客户端主程序版本（未知 ''）
+        "sdk_version": sdk_version,       # xtquant SDK 版本（未知 ''）
         "has_bin_x64": probe["has_bin_x64"],
         "xtquant_found": probe["xtquant_found"],
         "xtquant_site": probe["xtquant_site"],

@@ -122,6 +122,32 @@ async def broker_runtimes():
     })
 
 
+@router.post("/brokers/version-info")
+async def broker_version_info(body: dict):
+    """QMT 客户端版本画像探测（不连接券商）：识别客户端类型 / 版本 / 能力矩阵。
+
+    解决「全功能完整版 vs 仅部分功能的极速 MiniQMT」的识别与能力路由：
+    返回一份 {client_type, version_str, sdk_version, trade_dir, capabilities} 画像，
+    前端据此展示检测到的 QMT 版本，并可按能力自动禁用/标记不支持的入口。
+    """
+    from xtquant_client.xtp import build_version_profile
+    client_path = body.get("client_path") or ""
+    if not client_path:
+        return err(400, "client_path 不能为空")
+    try:
+        profile = await asyncio.to_thread(
+            build_version_profile,
+            client_path,
+            body.get("client_mode", "auto") or "auto",
+            body.get("account_id", "") or "",
+            body.get("account_type", "STOCK") or "STOCK",
+            bool(body.get("realtime_push", False)),
+            None)
+        return ok(profile.to_dict())
+    except Exception as exc:  # noqa: BLE001
+        return err(500, f"版本画像探测失败：{exc}")
+
+
 @router.get("/brokers/diagnostics")
 async def broker_diagnostics(deep: bool = False):
     """端到端可观测性快照（排障 / 长时段稳定性观察用，不依赖真实券商）。
