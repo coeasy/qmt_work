@@ -1018,6 +1018,21 @@ input[type="checkbox"] { width: 15px; height: 15px; cursor: pointer; accent-colo
   font-size: 12px; color: var(--text-dim);
   margin-top: 6px; padding-top: 6px; border-top: 1px dashed rgba(44,56,80,.6);
 }
+/* ---- 标的画像条（检索分析体系③）：类型徽章 + 近期表现 + 估值摘要 ---- */
+.mp-profile {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  font-size: 12px; color: var(--text-dim); margin-top: 4px;
+}
+.mp-profile .up { color: var(--up); }
+.mp-profile .down { color: var(--down); }
+.mp-pf-name { color: var(--text); font-weight: 600; }
+.mp-pf-plain { color: var(--text); font-weight: 600; }
+.mp-pf-sep { width: 1px; height: 12px; background: var(--border); margin: 0 2px; }
+/* 表现数据陈旧标注（券商 K 线未同步且公共源补数失败） */
+.mp-pf-stale {
+  color: var(--warn, #d48806); border: 1px solid currentColor; border-radius: 3px;
+  padding: 0 6px; font-size: 11px; cursor: help;
+}
 .mp-brief b { color: var(--text); font-weight: 600; }
 .mp-brief button { cursor: pointer; }
 
@@ -1198,3 +1213,22 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 }
 .gsearch-item:hover { background: var(--panel-2); }
 .gsearch-item:hover .code { color: #7db0ff; }
+.gsearch-item.active { background: var(--panel-2); }
+.gsearch-item.active .code { color: #7db0ff; }
+.gsearch-main { display: flex; align-items: center; gap: 6px; min-width: 0; overflow: hidden; }
+.gsearch-meta { color: var(--text-dim); font-size: 11px; flex: none; }
+.gsearch-sec {
+  padding: 4px 10px; font-size: 11px; color: var(--text-dim);
+  background: var(--bg-2); border-bottom: 1px solid var(--border);
+}
+/* 类型徽章：ETF 蓝 / 股 灰 / 指 紫 / 板块 橙 / 债 青（与后端 instrument.py 分类对应） */
+.gbadge {
+  flex: none; padding: 0 5px; border-radius: 4px; font-size: 10px; line-height: 16px;
+  color: #fff; background: var(--text-dim);
+}
+.gbadge.etf { background: #2f6fd8; }
+.gbadge.stock { background: #6b7684; }
+.gbadge.index { background: #8a5ad8; }
+.gbadge.board { background: #d8822a; }
+.gbadge.bond { background: #1f9e8e; }
+.gbadge.other { background: #5a6470; }

@@ -156,6 +156,27 @@ def test_classify_and_limit():
     assert abs(limit_ratio("600519.SH", "ST 某某") - 0.05) < 1e-9
 
 
+def test_merge_quote_derives_change_pct():
+    """broker 原始快照不带 change/change_pct（eltdx 已在源内算）——
+    _merge_quote 必须从 last/昨收统一推导，否则券商连接后指数条全空涨跌幅。"""
+    from app.datasource.registry import DataSourceManager as _DSM
+    merged = _DSM._merge_quote(
+        {"code": "000001.SH", "last": 10.0, "lastClose": 8.0}, "000001.SH",
+        classify_board("000001.SH"), {}, "broker")
+    assert merged["change"] == 2.0
+    assert merged["change_pct"] == 25.0
+    # 已带 change/change_pct 的源（eltdx）：保持原值不重算
+    keep = _DSM._merge_quote(
+        {"code": "X.SH", "last": 10.0, "lastClose": 8.0,
+         "change": 1.5, "change_pct": 15.0}, "X.SH",
+        classify_board("600519.SH"), {}, "eltdx")
+    assert keep["change"] == 1.5 and keep["change_pct"] == 15.0
+    # 缺昨收：置 None（不伪造）
+    none_c = _DSM._merge_quote({"code": "X.SH", "last": 10.0}, "X.SH",
+                               classify_board("600519.SH"), {}, "broker")
+    assert none_c["change"] is None and none_c["change_pct"] is None
+
+
 if __name__ == "__main__":
     for fn in (test_auto_prefers_broker, test_auto_falls_back_to_eltdx,
                test_explicit_source, test_kline_broker_then_adjust_to_eltdx,

@@ -23,6 +23,7 @@ import ErrorBoundary from "./ErrorBoundary.jsx";
 import { useActiveInterval } from "../hooks/useActiveInterval.js";
 import { PALETTE, changeColor, SUB_LINE_COLORS, MAIN_LINE_COLORS } from "../lib/chartPalette.js";
 import { useChartSpec, mainIndicatorOptions, subIndicatorOptions, broadcastIndicatorChange } from "../lib/chartConfig.jsx";
+import { badgeOf } from "../lib/instrument.js";
 
 // G2-3：指标单一真源——前端不再自带指标计算，统一消费后端引擎
 import { fetchIndicator, indicatorKey } from "../lib/indicators.js";
@@ -34,6 +35,11 @@ import { t as _t } from "../lib/i18n.js";
 
 // 旧版遗留的悬空引用（fmtPct 未定义，涨跌幅一渲染就会 ReferenceError）——根治为别名
 const fmtPct = formatPct;
+
+// 标的画像条（检索分析体系③）：/market/analysis 结果的模块级缓存，
+// code → {ts, data}，30s TTL —— 切回已看标的秒出，不重复打后端。
+const ANALYSIS_TTL = 30000;
+const analysisCache = new Map();
 
 /* ======================== 常量 ======================== */
 // TDX 同款周期：分时 + 1/5/15/30/60 分 + 日/周/月/季/年。
@@ -193,6 +199,27 @@ export default function MarketData({ params, leafId, tabId, dispatch } = {}) {
   /* ---------- 统一数据获取：useKline / useFundamentals ---------- */
   const klineQ = useKline({ code, period, count, adj, connId: activeId });
   const fundQ = useFundamentals(code, activeId);
+
+  /* ---------- 标的画像条（检索分析体系③）：/market/analysis 六维聚合 ----------
+   * 单请求拿全 快照/画像/股本/表现/资金流/估值；任一维度缺失显「—」
+   * （availability 标注），模块级缓存 30s TTL 切回秒出，不重复打后端。 */
+  const [analysis, setAnalysis] = useState(null);
+  useEffect(() => {
+    if (!code) return;
+    const cached = analysisCache.get(code);
+    if (cached && Date.now() - cached.ts < ANALYSIS_TTL) { setAnalysis(cached.data); return; }
+    let alive = true;
+    setAnalysis(null);
+    api.marketAnalysis({ code })
+      .then((r) => {
+        if (!alive) return;
+        analysisCache.set(code, { ts: Date.now(), data: r });
+        setAnalysis(r);
+      })
+      .catch(() => { if (alive) setAnalysis(null); });
+    return () => { alive = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [code]);
 
   // 合并：hook 输出的 bars 为基底，barsOverlay（被 tick 就地改写过）覆盖
   const baseBars = klineQ.data?.bars || [];
@@ -851,6 +878,37 @@ export default function MarketData({ params, leafId, tabId, dispatch } = {}) {
             {chg != null && <span className={`mp-chg ${cls}`}>{chg >= 0 ? "+" : ""}{chg.toFixed(2)}</span>}
             {pct != null && <span className={`mp-pct ${cls}`}>{fmtPct(pct)}</span>}
           </span>
+        </div>
+
+        {/* 标的画像条（检索分析体系③）：类型徽章 + 近期表现 + 估值摘要；缺失维度显「—」 */}
+        <div className="mp-profile">
+          <span className={`gbadge ${badgeOf(analysis?.type).cls}`}>{badgeOf(analysis?.type).label}</span>
+          <span className="mp-pf-name">{name}</span>
+          <span className="muted">{analysis?.exchange || "—"} · {analysis?.board || "—"}</span>
+          <span className="mp-pf-sep" />
+          {[["5日", "chg_5d"], ["20日", "chg_20d"], ["60日", "chg_60d"]].map(([lb, k]) => {
+            const v = analysis?.performance?.[k];
+            return (
+              <span key={k} className={v == null ? "muted" : v >= 0 ? "up" : "down"}>
+                {lb} {v != null ? (v >= 0 ? "+" : "") + v.toFixed(2) + "%" : "—"}</span>
+            );
+          })}
+          <span>52周分位 <b className="mp-pf-plain">{analysis?.performance?.pct_in_52w != null ? analysis.performance.pct_in_52w.toFixed(0) + "%" : "—"}</b></span>
+          {analysis?.performance?.stale && (
+            <span className="mp-pf-stale" title="券商本地 K 线未同步且公共源补数失败，表现数据截至以下日期">
+              表现截至 {analysis.performance.as_of || "旧缓存"}
+            </span>
+          )}
+          <span>换手 <b className="mp-pf-plain">{analysis?.capital?.turnover_rate != null ? analysis.capital.turnover_rate.toFixed(2) + "%" : "—"}</b></span>
+          <span className={analysis?.moneyflow?.net == null ? "muted" : analysis.moneyflow.net >= 0 ? "up" : "down"}>
+            净流入 {analysis?.moneyflow?.net != null ? analysis.moneyflow.net.toLocaleString() + " 手" : "—"}</span>
+          {(analysis?.valuation?.pe != null || analysis?.valuation?.pb != null)
+            ? <span>PE <b className="mp-pf-plain">{analysis.valuation.pe != null ? analysis.valuation.pe : "—"}</b>
+                · PB <b className="mp-pf-plain">{analysis.valuation.pb != null ? analysis.valuation.pb : "—"}</b></span>
+            : <span className="muted">{activeId ? "估值 —" : "估值需券商连接"}</span>}
+          {analysis?.snapshot?.source && (
+            <span className="muted">数据源: {SRC_LABEL[analysis.snapshot.source] || analysis.snapshot.source}</span>
+          )}
         </div>
 
         {/* 顶栏 2：代码 + 周期 + 复权 + 指标 + 根数 + 刷新 */}

@@ -10,7 +10,9 @@ from fastapi import APIRouter
 from pydantic import BaseModel
 
 from app.datasource.board import classify_board
+from app.datasource.instrument import classify_instrument
 from app.datasource.manager import MarketDataUnavailable, get_hub
+from app.datasource.pinyin import matches_initials, pinyin_initials
 from app.db import get_db
 from app.routes._common import BrokerError, _call, _need, err, ok, state
 
@@ -32,21 +34,320 @@ def _quote_err(code: str, source: str):
     return err(503, f"行情获取失败：{code} 券商不可用且 TDX 行情源亦无数据，请连接券商或检查网络。")
 
 
-@router.get("/market/search")
-async def market_search(q: str, limit: int = 20):
-    """股票搜索：按中文名 / 代码模糊匹配（零网络，基于本地名称缓存）。
+def _enrich_search_row(row: dict, q: str) -> dict:
+    """搜索结果富化：补 type/exchange/board/match/pinyin（缺数据不伪造）。"""
+    code = str(row.get("code", "") or "")
+    name = str(row.get("name", "") or "")
+    cls = classify_instrument(code, name)
+    ql = (q or "").lower()
+    if row.get("match"):
+        match = row["match"]
+    elif code.lower() == ql or (name and name.lower() == ql):
+        match = "exact"
+    elif code.lower().startswith(ql):
+        match = "code"
+    elif name and (ql in name.lower() or code.lower() in ql):
+        match = "name"
+    elif name and ql.isalpha() and matches_initials(name, ql):
+        match = "pinyin"
+    else:
+        match = "name"
+    out = dict(row)
+    out.update({"type": cls["type"], "exchange": cls["exchange"],
+                "board": cls["board"], "label": cls["label"], "match": match})
+    if name:
+        out["pinyin"] = pinyin_initials(name)
+    return out
 
-    返回 [{"code": "600519.SH", "name": "贵州茅台"}, ...]，最多 limit 条。
+
+@router.get("/market/search")
+async def market_search(q: str, limit: int = 20, include_boards: bool = True):
+    """标的搜索：代码 / 中文名 / 拼音首字母 / 板块名 模糊匹配（零网络，基于本地缓存）。
+
+    返回 {code:0, data:[{code, name, type, exchange, board, label, match, pinyin?}, ...]}：
+    - type: stock/etf/index/board/bond/unknown（画像层分类，前端据此显示徽章）
+    - match: exact/code/name/pinyin（命中方式，前端可高亮）
+    - include_boards=true（默认）联合板块名称检索，板块条目 type=board
     q 为空时返回空列表。完全离线，不依赖券商连接。
     """
     q = (q or "").strip()
     if not q:
-        return []
+        return ok([])
+    limit = max(1, min(int(limit or 20), 50))
     try:
-        return await get_hub().search_stocks(q, limit)
+        rows = await get_hub().search_stocks(q, limit)
     except Exception as exc:  # noqa: BLE001
         log.warning("股票搜索失败：%s", exc)
+        rows = []
+    out = [_enrich_search_row(r, q) for r in (rows or []) if r.get("code")]
+    # 板块联合检索（仅当无股票结果或结果不足时补充；板块排在股票之后）
+    if include_boards and len(out) < limit:
+        try:
+            matches, _ = await get_hub().search_boards(q, max(1, limit - len(out)))
+        except Exception:  # noqa: BLE001
+            matches = []
+        for m in matches or []:
+            if len(out) >= limit:
+                break
+            code = str(m.get("code", "") or "")
+            if not code or any(o["code"] == code for o in out):
+                continue
+            kind = str(m.get("kind", "") or "")
+            out.append({"code": code, "name": m.get("name", ""),
+                        "type": "board", "exchange": "板块",
+                        "board": "行业板块" if kind == "industry" else "概念板块",
+                        "label": "板块", "match": "name"})
+    return ok(out)
+
+
+def _normalize_code(q: str) -> list:
+    """把用户输入归一为候选 QMT 代码列表（代码段 × 交易所推断）。
+
+    支持：600519 / 600519.SH / sh600519 / 513090 / 000001（歧义码双候选）。
+    歧义码（000 开头：沪=指数 / 深=股票）返回双候选，由上层让用户确认。
+    非代码输入返回空列表。
+    """
+    s = (q or "").strip().upper()
+    if not s:
         return []
+    num = "".join(ch for ch in s if ch.isdigit())
+    # 已带交易所后缀：直接归一
+    if s.endswith((".SH", ".SZ", ".BJ")) and num:
+        return [f"{num}{s[-3:]}"]
+    # sh600519 / SZ000001 前缀式
+    low = s.lower()
+    for pref, suf in (("sh", ".SH"), ("sz", ".SZ"), ("bj", ".BJ")):
+        if low.startswith(pref) and num:
+            return [f"{num}{suf}"]
+    if not num or not num.isdigit() or not (4 <= len(num) <= 8):
+        return []
+    # 纯数字：按代码段推断（歧义码双候选；注意 899/920 北交所段须在 9 沪 B 段之前）
+    if num.startswith("899") or num.startswith("920"):
+        return [f"{num}.BJ"]
+    if num.startswith("399"):
+        return [f"{num}.SZ"]
+    if num.startswith(("60", "68", "9", "51", "56", "58", "11", "88")):
+        return [f"{num}.SH"]
+    # 000 开头歧义：沪=指数、深=股票 → 双候选（调用方据名称表定夺）；
+    # 须在 "00" 深市段之前判断，否则被 "00" 提前命中、指数候选永远丢失。
+    if num.startswith("000"):
+        return [f"{num}.SH", f"{num}.SZ"]
+    if num.startswith(("00", "30", "2", "15", "16", "12")):
+        return [f"{num}.SZ"]
+    if num.startswith(("83", "87", "92", "43")):
+        return [f"{num}.BJ"]
+    return [f"{num}.SH", f"{num}.SZ"]
+
+
+@router.get("/market/resolve")
+async def market_resolve(q: str, limit: int = 8):
+    """标的解析归一：任意输入（代码/带后缀/前缀式/名称/拼音）→ 标准 QMT 代码 + 候选。
+
+    唯一命中 → resolved=true；多候选 → resolved=false + candidates（前端让用户选择）。
+    中文/拼音输入退化为搜索语义。返回
+    {q, resolved, code, name, type, exchange, board, label, match, candidates}。
+    """
+    q = (q or "").strip()
+    if not q:
+        return err(400, "缺少 q")
+    candidates: list = []
+
+    # 1) 代码形式：归一后缀，逐一验证名称表
+    for code in _normalize_code(q):
+        try:
+            det = await get_hub().get_instrument_detail(code)
+        except Exception:  # noqa: BLE001
+            det = None
+        name = (det or {}).get("name") or ""
+        cls = classify_instrument(code, name)
+        candidates.append({"code": code, "name": name, "type": cls["type"],
+                           "exchange": cls["exchange"], "board": cls["board"],
+                           "label": cls["label"], "match": "code"})
+    # 代码直接命中唯一候选 → 解析成功
+    if len(candidates) == 1 and candidates[0]["name"]:
+        c = candidates[0]
+        return ok({"q": q, "resolved": True, **c, "candidates": candidates[:limit]})
+    # 歧义双候选：取有名称者优先（000001.SH 上证指数 / 000001.SZ 平安银行均合法 → 双候选）
+
+    # 2) 名称/拼音：搜索语义补候选（与 search 同源）
+    try:
+        rows = await get_hub().search_stocks(q, limit)
+    except Exception:  # noqa: BLE001
+        rows = []
+    for r in rows or []:
+        if len(candidates) >= limit:
+            break
+        code = str(r.get("code", "") or "")
+        if not code or any(c["code"] == code for c in candidates):
+            continue
+        candidates.append(_enrich_search_row(r, q))
+
+    resolved = None
+    if candidates:
+        # 名称精确等于 q 的候选唯一 → 直接解析成功
+        exact = [c for c in candidates if c.get("name") and c["name"] == q]
+        if len(exact) == 1:
+            resolved = exact[0]
+        elif len(candidates) == 1 and candidates[0].get("name"):
+            resolved = candidates[0]
+    if resolved:
+        return ok({"q": q, "resolved": True, **resolved,
+                   "candidates": candidates[:limit]})
+    return ok({"q": q, "resolved": False, "code": "", "name": "",
+               "type": "unknown", "exchange": "—", "board": "—", "label": "标的",
+               "candidates": candidates[:limit]})
+
+
+def _perf_from_bars(bars):
+    """近期表现：5/20/60 日涨跌幅 + 52 周高低点与现价分位 + as_of（数据截至日）。
+
+    chg_Nd = close[-1]/close[-1-N] - 1（%）；52 周取近 250 根 high/low 极值；
+    pct_in_52w = (last-low)/(high-low)×100。K 线不足 N 根的项为 None（不外推、不伪造）。
+    """
+    if not bars:
+        return None
+    valid = [b for b in bars if isinstance(b, dict) and b.get("close") is not None]
+    closes = [b["close"] for b in valid]
+    if len(closes) < 2:
+        return None
+    last = closes[-1]
+    out = {"bars_used": len(closes)}
+    # 数据截至日：最后一根有效收盘 K 线的日期（供前端标注新鲜度，绝不静默旧数据）
+    out["as_of"] = str(valid[-1].get("time") or "")[:10] or None
+    for tag, n in (("chg_5d", 5), ("chg_20d", 20), ("chg_60d", 60)):
+        base = closes[-1 - n] if len(closes) > n else None
+        out[tag] = round((last / base - 1) * 100, 2) if base else None
+    win = [b for b in bars if isinstance(b, dict)][-250:]
+    highs = [b["high"] for b in win if b.get("high") is not None]
+    lows = [b["low"] for b in win if b.get("low") is not None]
+    hi = max(highs) if highs else None
+    lo = min(lows) if lows else None
+    out["high_52w"] = hi
+    out["low_52w"] = lo
+    out["pct_in_52w"] = round((last - lo) / (hi - lo) * 100, 1) \
+        if (hi is not None and lo is not None and hi > lo) else None
+    return out
+
+
+def _perf_stale(as_of, max_days: int = 10) -> bool:
+    """表现数据是否陈旧：最后一根 K 线距今超过 max_days 个自然日（覆盖长假）。
+
+    解析不了日期（as_of 缺失/脏格式）时不武断判陈旧，由 availability 如实标注。
+    """
+    s = "".join(ch for ch in str(as_of or "")[:10] if ch.isdigit())
+    if len(s) != 8:
+        return False
+    try:
+        d = datetime.strptime(s, "%Y%m%d").date()
+    except ValueError:
+        return False
+    return (datetime.now().date() - d).days > max_days
+
+
+@router.get("/market/analysis")
+async def market_analysis(code: str, conn_id: str = "", source: str = "auto"):
+    """标的深度画像：单请求并发聚合 6 维（快照/画像/股本/表现/资金流/估值）。
+
+    每维独立超时容错（8s），单维失败只置 availability=unavailable，不拖垮整体。
+    估值维度依赖券商财务数据，无券商连接时 unavailable（前端显示「估值需券商连接」）。
+    PE/PB 用现价 / 每股收益 / 每股净资产现算（EPS≤0 时 PE 为 None，不伪造负值）。
+    """
+    code = (code or "").strip().upper()
+    if not code:
+        return err(400, "缺少 code")
+    m = get_hub()
+
+    async def _guard(coro, timeout: float = 8.0):
+        try:
+            return await asyncio.wait_for(coro, timeout)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("analysis 维度获取失败 %s：%s", code, exc)
+            return None
+
+    async def _snapshot():
+        return await m.get_quote(code, source=source, conn_id=conn_id or None)
+
+    async def _profile():
+        return await m.get_instrument_detail(code, source=source, conn_id=conn_id or None)
+
+    async def _capital():
+        caps, _ = await m.get_share_capital([code])
+        return (caps or {}).get(code)
+
+    async def _performance():
+        from tools import fetch_kline_cached
+        res = await fetch_kline_cached(code, "1d", 250, broker_id=conn_id or None)
+        perf = _perf_from_bars(res.get("bars") or [])
+        # 券商本地 K 线可能陈旧（QMT 客户端未同步该标的，如 ETF 段停在多年前）：
+        # 检测 as_of 距今 >10 个自然日 → 用 TDX 公共源补最新真实 K 线重算；
+        # 补数失败则保留原表现并显式标 stale（前端展示「数据截至 as_of」，不静默旧数据）。
+        if perf and _perf_stale(perf.get("as_of")):
+            try:
+                bars, _ = await m.get_kline(code, "1d", 250, source="eltdx",
+                                           conn_id=conn_id or None)
+                fresh = _perf_from_bars(bars or [])
+                if fresh and not _perf_stale(fresh.get("as_of")):
+                    return fresh
+            except Exception as exc:  # noqa: BLE001
+                log.debug("analysis 表现维度 TDX 补数失败 %s：%s", code, exc)
+            perf["stale"] = True
+        return perf
+
+    async def _moneyflow():
+        mf, _ = await m.get_moneyflow(code)
+        return mf
+
+    async def _valuation():
+        b = _need(conn_id or None)
+        if b is None:
+            return None
+        return await b.call(b.gateway.get_financial, code)
+
+    snap, prof, cap, perf, mf, fin = await asyncio.gather(
+        _guard(_snapshot()), _guard(_profile()), _guard(_capital()),
+        _guard(_performance()), _guard(_moneyflow()), _guard(_valuation()),
+    )
+
+    last = (snap or {}).get("last")
+    name = (prof or {}).get("name") or (snap or {}).get("name") or ""
+    cls = classify_instrument(code, name)
+    availability = {
+        tag: ("ok" if data else "unavailable")
+        for tag, data in (("snapshot", snap), ("profile", prof), ("capital", cap),
+                          ("performance", perf), ("moneyflow", mf), ("valuation", fin))
+    }
+    # 表现维度陈旧（券商 K 线未同步且 TDX 补数失败）：ok → stale，前端展示数据截至日
+    if perf and perf.get("stale"):
+        availability["performance"] = "stale"
+
+    valuation = None
+    if fin:
+        eps, bps = fin.get("EPS"), fin.get("BPS")
+        valuation = {
+            "report_time": fin.get("report_time"), "eps": eps, "bps": bps,
+            "roe": fin.get("ROE"), "detail": fin.get("detail", ""),
+            "pe": round(last / eps, 2) if (last and eps and eps > 0) else None,
+            "pb": round(last / bps, 2) if (last and bps and bps > 0) else None,
+        }
+        availability["valuation"] = "ok" if (valuation["pe"] or valuation["pb"]) \
+            else "unavailable"
+
+    if cap:
+        circ, total = cap.get("circulating_shares"), cap.get("total_shares")
+        vol = (snap or {}).get("volume")
+        cap = {**cap,
+               "turnover_rate": round(vol / circ * 100, 2) if (vol and circ) else None,
+               "total_mktcap": round(last * total, 2) if (last and total) else None,
+               "float_mktcap": round(last * circ, 2) if (last and circ) else None}
+
+    return ok({
+        "code": code, "name": name, "type": cls["type"],
+        "exchange": cls["exchange"], "board": cls["board"], "label": cls["label"],
+        "ts": datetime.now().isoformat(timespec="seconds"),
+        "snapshot": snap, "profile": prof, "capital": cap,
+        "performance": perf, "moneyflow": mf, "valuation": valuation,
+        "availability": availability,
+    })
 
 
 @router.get("/market/quote")

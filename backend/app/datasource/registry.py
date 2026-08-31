@@ -186,6 +186,16 @@ class DataSourceManager:
             raw["industry"] = industry
         if concepts:
             raw["concepts"] = concepts
+        # 涨跌额/幅：broker 原始快照不带 change/change_pct（eltdx 已在源内计算），
+        # 统一从 last/昨收 真实推导；任一缺失或分母为 0 时置 None（不伪造）。
+        if raw.get("change") is None or raw.get("change_pct") is None:
+            last, pre = raw.get("last"), raw.get("pre_close")
+            if last is not None and pre:
+                raw["change"] = round(float(last) - float(pre), 4)
+                raw["change_pct"] = round((float(last) - float(pre)) / float(pre) * 100, 2)
+            else:
+                raw["change"] = None
+                raw["change_pct"] = None
         raw["source"] = src
         return raw
 

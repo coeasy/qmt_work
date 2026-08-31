@@ -858,6 +858,8 @@ class EltdxSource(DataSource):
         """
         cached = self._board_cache_get("etfs", self._ETF_TTL)
         if cached:
+            # 并入名称表（幂等）：旧缓存升级后首次访问即让 ETF 全局可搜
+            self._merge_into_name_map(cached)
             return self._cap_etfs(cached, limit)
 
         def _run():
@@ -889,6 +891,8 @@ class EltdxSource(DataSource):
                     it["name"] = nm.get(it["code"], "")
         etfs.sort(key=lambda e: e["code"])
         self._board_cache_set("etfs", etfs)
+        # 并入名称表（幂等）并持久化：此后 ETF 搜索/详情/解析全链路离线可用
+        self._merge_into_name_map(etfs)
         return self._cap_etfs(etfs, limit)
 
     @staticmethod
@@ -1053,20 +1057,24 @@ class EltdxSource(DataSource):
             "pre_close": pre_close,
         }
 
-    async def search(self, q: str, limit: int = 20) -> list:
-        """按代码 / 中文名模糊搜索（基于本地小写索引，完全离线，不依赖券商连接）。
-
-        精确匹配（code 或全名）优先，其次包含匹配；上限 limit 条。
-        """
-        q = (q or "").strip()
-        if not q:
-            return []
-        await self._ensure_name_map()
+    def _index_match(self, q: str, limit: int) -> list:
+        """在已加载的名称索引上匹配（同步、纯本地）：精确 → 拼音首字母 → 包含。"""
         idx = self.__class__._search_index
         ql = q.lower()
         exact = idx.get(ql) or []
         contain = []
-        if len(exact) < limit:
+        # 拼音首字母匹配（q 为纯字母且非 6 位代码形态时启用；名称含字母的除外）
+        if ql.isalpha() and not q.isdigit():
+            from app.datasource.pinyin import matches_initials
+            for code, name in self.__class__._name_map.items():
+                if len(exact) + len(contain) >= limit:
+                    break
+                it = (code, name)
+                if it in exact or it in contain:
+                    continue
+                if name and matches_initials(name, ql):
+                    contain.append(it)
+        if len(exact) + len(contain) < limit:
             for key, items in idx.items():
                 if ql in key:
                     for it in items:
@@ -1081,6 +1089,50 @@ class EltdxSource(DataSource):
             if len(out) >= limit:
                 break
             out.append({"code": code, "name": name})
+        return out
+
+    def _merge_into_name_map(self, entries: list) -> None:
+        """把 [{code,name}] 清单并入类级名称表并持久化（ETF 可搜索的关键路径）。
+
+        仅补充缺失项（已有中文名不覆盖），增量写回 stock_names.json —— 并入一次后
+        重启即离线可搜，后续不再触发网络。
+        """
+        added = {}
+        for e in entries or []:
+            code = (e.get("code") or "").strip()
+            nm = (e.get("name") or "").strip()
+            if code and nm and not self.__class__._name_map.get(code):
+                self.__class__._name_map[code] = nm
+                added[code] = nm
+        if added:
+            self.__class__._rebuild_search_index()
+            try:
+                _save_json_cache(_name_cache_path(), dict(self.__class__._name_map))
+                log.info("eltdx 名称表已并入 ETF 简称：%d 只（总 %d 只）",
+                         len(added), len(self.__class__._name_map))
+            except OSError as exc:
+                log.warning("eltdx 名称表持久化失败：%s", exc)
+
+    async def search(self, q: str, limit: int = 20) -> list:
+        """按代码 / 中文名 / 拼音首字母模糊搜索（本地索引优先，ETF 惰性并入）。
+
+        匹配优先级：精确（code/全名）→ 拼音首字母（支持多音字，gzmt→贵州茅台、
+        payh→平安银行）→ 包含；上限 limit 条。
+        A 股名称表不含 ETF（51/56/58/15/16 段）：当 ETF 代码段查询无命中时，惰性拉取
+        ETF 清单并入名称表后重试一次（此后持久化，重启离线可搜；非 ETF 段不触发网络）。
+        """
+        q = (q or "").strip()
+        if not q:
+            return []
+        await self._ensure_name_map()
+        out = self._index_match(q, limit)
+        digits = "".join(ch for ch in q if ch.isdigit())
+        if not out and digits[:2] in ("51", "56", "58", "15", "16"):
+            try:
+                await self.get_etf_list()
+                out = self._index_match(q, limit)
+            except Exception as exc:  # noqa: BLE001
+                log.debug("eltdx ETF 清单并入重试失败：%s", exc)
         return out
 
 

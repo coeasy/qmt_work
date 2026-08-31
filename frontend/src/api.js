@@ -139,8 +139,12 @@ api.marketPeriods = () => api.get("/market/periods");
 api.marketQuote = (params) => api.get("/market/quote", params);
 api.marketQuotes = (body) => api.post("/market/quotes", body);
 api.marketStockInfo = (params) => api.get("/market/stock-info", params);
-// 股票搜索：按中文名/代码模糊匹配（后端零网络，基于本地名称缓存）
+// 股票搜索：按中文名/代码/拼音首字母/板块名模糊匹配（后端零网络，基于本地名称缓存）
 api.marketSearch = (q, limit = 20) => api.get("/market/search", { q, limit });
+// 标的解析归一：任意输入 → 标准 QMT 代码 + 候选（歧义码返回多候选由用户确认）
+api.marketResolve = (q, limit = 8) => api.get("/market/resolve", { q, limit });
+// 标的深度画像：单请求聚合快照/画像/股本/表现/资金流/估值六维（availability 标注各维可用性）
+api.marketAnalysis = (params) => api.get("/market/analysis", params);
 api.marketCrawl = (body) => api.post("/market/crawl", body);
 api.klineCacheStats = () => api.get("/market/kline/cache");
 api.klineCacheClear = (code, period) =>
