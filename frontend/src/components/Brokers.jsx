@@ -16,7 +16,7 @@ function friendlyErr(detail) {
   const d = String(detail);
   // 后端已给出分步排查指引（行情/交易连接失败均如此）时直接透出，
   // 不再叠加前端提示——否则同一条建议出现两遍，反而降低可读性。
-  if (d.includes("请按顺序排查") || d.includes("请按以下顺序排查")) return d;
+  if (d.includes("请按顺序排查") || d.includes("请按以下顺序排查") || d.includes("官方四步排查")) return d;
   if (d.includes("未登录") || d.includes("行情服务") || d.includes("无法连接行情") || d.includes("未启动"))
     return d + "\n\n→ 请先登录 QMT 客户端（极速/普通模式均可），保持客户端运行，再重试连接。";
   if (d.includes("握手失败"))
@@ -117,6 +117,8 @@ export default function Brokers() {
     try {
       const r = await connect(connId, { signal: ac.signal });
       const okc = !!(r && r.connected);
+      // 连接成功携版本画像：展示检测到的客户端类型/版本/能力
+      if (r && r.version_profile) setVerInfo(r.version_profile);
       setMsg({ ok: okc, t: okc ? "连接成功" : friendlyErr(r && r.detail) });
     } catch (e) {
       const txt = String(e && e.message || e);
@@ -272,6 +274,8 @@ export default function Brokers() {
         session_id: parseInt(form.session_id || "0", 10) || 0,
         min_version: form.min_version,
       });
+      // 探测结果携版本画像：展示检测到的客户端类型/版本/能力
+      if (r && r.version_profile) setVerInfo(r.version_profile);
       setTestRes(r);
     } catch (e) {
       setTestRes({ connected: false, detail: e.message });

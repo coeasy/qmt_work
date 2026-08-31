@@ -551,6 +551,61 @@ class BridgeAdapter(BrokerAdapter):
     def get_l2_transactions(self, code: str, count: int = 100) -> list[dict]:
         return self._rpc("get_l2_transactions", [code, count])
 
+    # ---------------- 版本画像 / 能力（桥接态真实上报） ----------------
+    def version_profile(self) -> dict:
+        """返回当前客户端版本画像（类型 + 版本 + 能力矩阵）。
+
+        优先转发子进程内真实 SDK 的探测结果，保证桥接（打包）态与直连态一致；
+        子进程未启动/不可达时回退到本端静态探测（路径/SDK 版本/目录推断），
+        绝不返回空画像——前端口径统一，装任何版本客户端都能展示。
+        """
+        try:
+            if self._proc is not None and self._proc.poll() is None:
+                d = self._rpc("get_version_profile", [], timeout=8.0)
+                if isinstance(d, dict) and d:
+                    return d
+        except Exception:  # noqa: BLE001  子进程不可达时回退本地静态探测
+            pass
+        try:
+            from .xtp import build_version_profile
+            p = build_version_profile(self.client_path, self._client_mode,
+                                      account_id=self._account_id,
+                                      account_type=self._account_type,
+                                      realtime_push=False)
+            return p.to_dict()
+        except Exception:  # noqa: BLE001
+            return {"client_type": "unknown", "client_mode": self._client_mode,
+                    "capabilities_list": [], "detail": "版本画像暂不可用"}
+
+    def capabilities(self) -> list[str]:
+        """运行时能力探测：优先子进程真实能力；子进程不可达时回退静态推断。"""
+        try:
+            if self._proc is not None and self._proc.poll() is None:
+                caps = self._rpc("get_capabilities", [], timeout=5.0)
+                if isinstance(caps, list):
+                    return caps
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            return self.version_profile().get("capabilities_list") or []
+        except Exception:  # noqa: BLE001
+            return []
+
+    def probe(self) -> dict:
+        """结构化环境诊断：优先转发子进程真实探测（含 SDK 导入/目录线索）。"""
+        try:
+            if self._proc is not None and self._proc.poll() is None:
+                d = self._rpc("probe", [], timeout=8.0)
+                if isinstance(d, dict):
+                    return d
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            from .xtp import probe_environment
+            return probe_environment(self.client_path)
+        except Exception:  # noqa: BLE001
+            return {}
+
     # ---------------- 状态 ----------------
     def is_connected(self) -> bool:
         # 反映真实子进程存活状态：子进程退出后返回 False，健康监控据此触发重连

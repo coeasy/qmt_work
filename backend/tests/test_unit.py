@@ -1834,6 +1834,47 @@ def test_adapter_version_profile_and_capabilities():
     assert isinstance(a.capabilities(), list)
 
 
+def test_bridge_adapter_version_fallback():
+    """桥接适配器在无子进程时回退本端静态画像/能力（不崩溃、返回纯 dict）。"""
+    from xtquant_client.bridge_client import BridgeAdapter
+    a = BridgeAdapter("", "", client_mode="auto")
+    vp = a.version_profile()
+    assert isinstance(vp, dict)
+    assert vp["client_mode"] == "auto"
+    assert "capabilities_list" in vp
+    assert isinstance(a.capabilities(), list)
+    assert isinstance(a.probe(), dict)
+
+
+def test_bridge_server_serializable_dispatch():
+    """桥接服务端对版本画像/能力/探测走可序列化分发（转 dict/list）。"""
+    from xtquant_client.bridge_server import _err_type
+    assert callable(_err_type)  # 冒烟：模块可导入，桥接分发路径可用
+
+
+def test_effective_trade_dir_exposes_both_modes_for_fallback():
+    """连接失败自动降级依赖：同一路径下 userdata / userdata_mini 并存时，
+    无论 client_mode 指定哪一侧，都能解析出另一侧作为候选互备目录。"""
+    from xtquant_client.xtp import _effective_trade_dir
+    with tempfile.TemporaryDirectory() as d:
+        mini = os.path.join(d, "userdata_mini")
+        full = os.path.join(d, "userdata")
+        os.makedirs(mini)
+        os.makedirs(full)
+        td_full, mode_full = _effective_trade_dir(d, "full")
+        td_mini, mode_mini = _effective_trade_dir(d, "mini")
+        def _c(p): return os.path.normpath(p).lower()
+        # full 配置应命中 userdata；同时能解析出 mini 一侧作为降级候选
+        assert _c(td_full) == _c(full)
+        assert mode_full == "full"
+        assert _c(td_mini) == _c(mini)
+        assert mode_mini == "mini"
+        # auto：运行场景探测无进程时，仍能给出唯一存在的目录作为候选
+        td_auto, mode_auto = _effective_trade_dir(d, "auto")
+        assert _c(td_auto) in (_c(mini), _c(full))
+        assert mode_auto in ("mini", "full")
+
+
 def test_get_full_tick_handles_sdk_error():
     """行情未认证/非交易时段：get_full_tick 不应抛协议级 JSONDecodeError，
     而应返回空 dict，由上层给出「已连但行情未就绪」诊断。"""

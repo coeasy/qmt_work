@@ -1401,46 +1401,73 @@ class XTPQuantAdapter(BrokerAdapter):
             # 指向「session 被占用」误导排查方向。
             # 正确语义：start() 返回 None 视为已启动；真正的连接结果由 connect()
             # 决定（返回 0 成功，非 0 失败——session 冲突在这里暴露）。
+            # 候选交易目录：首选按客户端模式解析的目录；失败时自动降级尝试另一模式
+            # 目录（完整版 userdata <-> 极速版 userdata_mini 互备）。很多券商同一路径
+            # 下既有完整版又有极速版（userdata + userdata_mini 并存），当前解析模式
+            # 连不上并不代表另一模式也连不上——例如完整版大客户端未以「极简模式」登录、
+            # 而极速版 miniQMT 已登录的情况。故按序尝试，命中即成功。
+            candidate_dirs = [trade_dir]
+            _alt_dir, _alt_mode = _effective_trade_dir(
+                self.client_path, "mini" if resolved_mode != "mini" else "full")
+            if _alt_dir and _alt_dir != trade_dir and os.path.isdir(_alt_dir):
+                candidate_dirs.append(_alt_dir)
             trader = None
             last_err = ""
-            for attempt in range(6):
-                sid = self.session_id + attempt
-                t = XtQuantTrader(trade_dir, sid)
-                rc = t.start()
-                if rc is not None and rc != 0:
-                    last_err = f"start rc={rc}"
-                    continue
-                crc = t.connect()
-                if crc == 0:
-                    trader = t
-                    self.session_id = sid
+            used_dir = trade_dir
+            resolved_mode_final = resolved_mode
+            for d in candidate_dirs:
+                if trader is not None:
                     break
-                last_err = f"connect rc={crc}"
-                # 释放本次失败的会话，避免连续重试泄漏多个 session
-                try:
-                    t.stop()
-                except Exception:  # noqa: BLE001
-                    pass
+                used_dir = d
+                resolved_mode_final = ("mini" if d.endswith("userdata_mini") else "full")
+                for attempt in range(6):
+                    sid = self.session_id + attempt
+                    t = XtQuantTrader(d, sid)
+                    rc = t.start()
+                    if rc is not None and rc != 0:
+                        last_err = f"start rc={rc}"
+                        continue
+                    crc = t.connect()
+                    if crc == 0:
+                        trader = t
+                        self.session_id = sid
+                        break
+                    last_err = f"connect rc={crc}"
+                    # 释放本次失败的会话，避免连续重试泄漏多个 session
+                    try:
+                        t.stop()
+                    except Exception:  # noqa: BLE001
+                        pass
+            trade_dir = used_dir
             if trader is None:
                 _exe_procs = _running_client_exes()
                 _login_log = _latest_login_log(trade_dir)
+                # 多因子真实归因（替代旧版「一律归因程序化权限请联系券商」的误导文案）：
+                # rc=-1 常见根因按官方排查顺序为 ①登录模式 ②路径 ③session ④权限。
+                # 这里把已实测到的事实（运行进程 / 尝试的模式 + 目录互备 / client_mode）
+                # 一并列出，让定位不再猜。
+                tried = " → ".join(os.path.basename(x) for x in candidate_dirs)
                 raise BrokerNotConnectedError(
-                    f"交易连接失败（已尝试 session_id {self.session_id}~"
-                    f"{self.session_id + 5}，最后 {last_err}）。"
-                    f"已按序排查：客户端运行（{_exe_procs or '未检测到'}）、路径"
-                    f"({trade_dir} @{resolved_mode})、session 均已正确，仍被拒绝。\n"
-                    f"### 常见且应优先核对的根因：程序化交易权限\n"
-                    f"若客户端日志出现 `COrderServiceQuantAdaptor::onConnected ... "
-                    f"illegal pid`，说明客户端把本程序判定为非法外部进程并拒绝连接，"
-                    f"通常是【资金账号未开通 QMT 「程序化交易 / 策略交易权限」】。\n"
-                    f"手动在客户端界面可下单、但 API 连不上，几乎都是这个原因。请：\n"
-                    f"  a) 联系开户券商/营业部，为账号 开通「程序化交易 / 策略交易权限」"
-                    f"（仅勾选「基础交易权限」无法使用 XtQuant 外部 API）；\n"
-                    f"  b) 部分券商模拟（仿真）账户可改走【极简模式 MiniQMT】"
-                    f"(userdata_mini) 通道，无需额外权限，可联系券商确认；\n"
-                    f"  c) 若确已开通仍失败，再核对客户端是否以极简模式登录、"
-                    f"客户端路径/模式是否匹配，以及是否存在其他进程占用同一账号/session。"
-                    f"（客户端登录时间 日志 {_login_log}）")
+                    f"交易连接失败（session_id {self.session_id}~{self.session_id + 5} "
+                    f"均 {last_err}）。\n"
+                    f"### 已实测的排查事实\n"
+                    f"  1) 客户端进程：{_exe_procs or '未检测到'}；\n"
+                    f"  2) 尝试的数据目录（按顺序）：{tried or (trade_dir or '（无）')}；\n"
+                    f"  3) 配置客户端模式：client_mode={self._client_mode}"
+                    f"，解析判定 @{resolved_mode_final}。\n"
+                    f"### 官方四步排查（迅投 FAQ）\n"
+                    f"  ① [极简模式] QMT 登录时是否勾选「极简模式」——完整版大客户端未以"
+                    f"极简模式登录时，外部 API 交易连接（XtQuantTrader）会返回 rc=-1；\n"
+                    f"  ② [路径/模式匹配] 极速版必须指向 <安装目录>\\userdata_mini，"
+                    f"完整版指向 \\userdata；C 盘安装需以管理员权限运行连接端；\n"
+                    f"  ③ [session] 换另一个 session_id 再试（同一 session 两次 connect "
+                    f"间隔需 >3 秒）；\n"
+                    f"  ④ [权限] 若以上均正确仍 rc=-1，才是【资金账号未开通 QMT "
+                    f"「程序化交易/策略交易权限」】（仅「基础交易权限」不够），联系券商核实。\n"
+                    f"建议优先：运行并登录极速版 bin.x64\\XtMiniQmt.exe（登录时勾选极简"
+                    f"模式），或以极简模式重新登录完整版客户端后再连接。"
+                    f"（客户端登录日志 {_login_log}）")
+            resolved_mode = resolved_mode_final
             if self._account_type not in _acc_classes:
                 raise BrokerNotConnectedError(
                     f"该客户端不支持账户类型 {self._account_type}（支持：{sorted(_acc_classes)}）")

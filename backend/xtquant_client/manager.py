@@ -22,12 +22,20 @@ log = logging.getLogger("qmt_work.manager")
 
 
 def _version_profile(adapter: BrokerAdapter) -> dict | None:
-    """提取适配器的版本画像（xtp 系提供；其余适配器无则返回 None）。"""
+    """提取适配器的版本画像（xtp 系提供；其余适配器无则返回 None）。
+
+    兼容两种返回形态：XTPQuantAdapter 返回 QmtVersionProfile（需 .to_dict()），
+    BridgeAdapter 的 version_profile() 已回传纯 dict（直接可用）。
+    """
     getter = getattr(adapter, "version_profile", None)
     if not callable(getter):
         return None
     try:
-        return getter().to_dict()
+        val = getter()
+        if isinstance(val, dict):
+            return val
+        to_dict = getattr(val, "to_dict", None)
+        return to_dict() if callable(to_dict) else None
     except Exception:  # noqa: BLE001  画像探测失败不影响连接状态列表
         return None
 
@@ -188,7 +196,12 @@ class BrokerManager:
         if conn.connected and self._active_id is None:
             self._active_id = conn_id
             self._persist_active()
-        return conn.adapter.test_connection()
+        res = conn.adapter.test_connection()
+        # 打通「版本画像 → 前端」链路：连接成功即带上检测到的客户端类型/版本/能力，
+        # 前端据此展示「当前连接的是完整版/极速版、支持哪些功能」（任何客户端版本通用）。
+        res = dict(res)
+        res["version_profile"] = _version_profile(conn.adapter)
+        return res
 
     def disconnect(self, conn_id: str) -> None:
         conn = self._conns.get(conn_id)
@@ -231,7 +244,9 @@ class BrokerManager:
         if cfg.conn_id and cfg.conn_id in self._conns:
             conn = self._conns[cfg.conn_id]
             if conn.connected:
-                return conn.adapter.test_connection()
+                res = dict(conn.adapter.test_connection())
+                res["version_profile"] = _version_profile(conn.adapter)
+                return res
         tmp = None
         try:
             # create_adapter 在 ABI 不兼容且无兼容运行时时会抛 BrokerSDKError；
@@ -240,7 +255,9 @@ class BrokerManager:
                                  cfg.account_type, cfg.session_id, cfg.min_version,
                                  cfg.client_mode)
             tmp.start()
-            return tmp.test_connection()
+            res = dict(tmp.test_connection())
+            res["version_profile"] = _version_profile(tmp)
+            return res
         except Exception as exc:  # noqa: BLE001
             res = {"connected": False, "detail": str(exc)}
             # 附加环境诊断（sdk 发现/导入/目录线索），前端据此给出可操作提示

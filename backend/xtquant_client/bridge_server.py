@@ -249,6 +249,21 @@ def serve_adapter(adapter, stdin=None, stdout=None,
                 _write(stdout, {"id": rid, "ok": False, "error": _safe_err(exc),
                                 "error_type": _err_type(exc)})
             return
+        # 版本画像 / 能力 / 结构诊断：子进程内适配器返回的不是 JSON 可序列化对象
+        #（QmtVersionProfile dataclass 等），这里显式转 dict/list 再编码回传，
+        # 让主端 BridgeAdapter 拿到与直连态一致的真实版本与能力（任何 QMT 版本通用）。
+        if method == "get_version_profile":
+            _write(stdout, {"id": rid, "ok": True,
+                            "result": getattr(adapter, "version_profile")().to_dict()})
+            return
+        if method == "get_capabilities":
+            _write(stdout, {"id": rid, "ok": True,
+                            "result": getattr(adapter, "capabilities")()})
+            return
+        if method == "probe":
+            _write(stdout, {"id": rid, "ok": True,
+                            "result": getattr(adapter, "probe")()})
+            return
         fn = getattr(adapter, method, None)
         if fn is None or not callable(fn):
             _write(stdout, {"id": rid, "ok": False, "error": f"未知方法: {method}"})
