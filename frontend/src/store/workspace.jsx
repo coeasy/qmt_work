@@ -327,6 +327,11 @@ export function setAutoSplit(on) {
 }
 
 /* ======================== reducer ======================== */
+// LRU 语义（统一为「头部 = 最近使用」）：withAlive 把 tabId 放到 aliveOrder 头部，
+// 渲染层 aliveIds 取 aliveOrder 的**头部** MAX_ALIVE 个。历史缺陷：渲染层曾用
+// slice(-MAX_ALIVE) 取尾部，而激活路径把最新 tab 放头部 —— 一旦打开超过 8 个
+// 标签页，刚激活（或刚关闭其它标签后聚焦）的 tab 恰好被挤出 alive 集合，
+// wb-body 内不渲染它的 Pane → 「tab 存在但内容区一片空白」。两处语义必须一致。
 function withAlive(state, tabId) {
   const order = [tabId, ...state.aliveOrder.filter((id) => id !== tabId)];
   return { ...state, aliveOrder: order.slice(0, Math.max(state.tabs.length, MAX_ALIVE)) };
@@ -537,7 +542,8 @@ export function WorkspaceProvider({ children }) {
     state,
     dispatch,
     activeTab: state.tabs.find((t) => t.id === state.activeId) || state.tabs[0],
-    aliveIds: new Set(state.aliveOrder.slice(-MAX_ALIVE)),
+    // 与 withAlive 同语义：取头部（最近使用）MAX_ALIVE 个，激活 tab 永远在列
+    aliveIds: new Set(state.aliveOrder.slice(0, MAX_ALIVE)),
   }), [state]);
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;

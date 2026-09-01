@@ -55,10 +55,12 @@ try {
       key);
     await sleep(1800);
     const st = await page.evaluate(() => {
-      const panes = document.querySelectorAll(".pane");
-      const txt = Array.from(panes).map((p) => (p.innerText || "").slice(0, 80)).join("|");
+      // v3 工作区：keep-alive 容器 .wb-tabpane，激活面板内部叶子为 .pane-leaf
+      const active = document.querySelector(".wb-tabpane:not(.inactive)");
+      const leaves = active ? active.querySelectorAll(".pane-leaf") : [];
+      const txt = Array.from(leaves).map((p) => (p.innerText || "").slice(0, 80)).join("|");
       // 页面必须有实际内容（非纯空白）
-      return { paneCount: panes.length, sample: txt.slice(0, 120) };
+      return { paneCount: leaves.length, sample: txt.slice(0, 120) };
     });
     const rendered = st.sample.replace(/[\s|]/g, "").length > 6;
     ok(rendered, `T22b ${label} 页渲染（pane=${st.paneCount} 有内容）`,

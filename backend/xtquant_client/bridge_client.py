@@ -555,7 +555,7 @@ class BridgeAdapter(BrokerAdapter):
 
     # ---------------- 参考数据 / L2 ----------------
     def get_sector_list(self) -> list[str]:
-        return self._rpc("get_sector_list")
+        return self._rpc("get_sector_list", [])
 
     def get_sector_stocks(self, sector: str = "沪深A股") -> list[str]:
         return self._rpc("get_sector_stocks", [sector])

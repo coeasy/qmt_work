@@ -66,6 +66,11 @@ function LeafPane({ node, tabId, active, dispatch }) {
     if (!active) dispatch({ type: "LEAF_ACTIVE", tabId, leafId: node.id });
   };
 
+  // 布局分级：终端型页面（fullBleed：行情/报价牌/市场结构/选股）满幅贴边渲染；
+  // 文档型页面（表单/表格/卡片）由 .pane-leaf-body.padded 统一提供四周留白，
+  // 根治「所有内容贴左边缘、界面左侧拥挤」的历史观感问题。
+  const bodyCls = page?.fullBleed ? "pane-leaf-body" : "pane-leaf-body padded";
+
   return (
     <div
       className={`pane-leaf ${active ? "active" : ""}`}
@@ -82,7 +87,7 @@ function LeafPane({ node, tabId, active, dispatch }) {
             onClick={(e) => { e.stopPropagation(); dispatch({ type: "CLOSE_LEAF", tabId, leafId: node.id }); }}>×</button>
         </span>
       </div>
-      <div className="pane-leaf-body" onMouseDown={(e) => e.stopPropagation()}>
+      <div className={bodyCls} onMouseDown={(e) => e.stopPropagation()}>
         <ErrorBoundary>
           <Suspense key={node.id} fallback={<div className="page-loading">加载 {label}…</div>}>
             {Comp

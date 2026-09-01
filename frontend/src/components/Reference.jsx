@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "../api.js";
+import { useListRefresh } from "../lib/listRefresh.js";
 import { t as _t } from "../lib/i18n.js";
 
 // 参考数据：交易日历 / 板块列表 / 板块成分 / 财务摘要 / L2 逐笔（借鉴 quant-qmt-proxy 参考数据能力）
@@ -14,7 +15,8 @@ export default function Reference() {
   const [code, setCode] = useState("600519.SH");
   const [sector, setSector] = useState("");
 
-  useEffect(() => { loadSectors(); loadCalendar(); }, []);
+  // 统一刷新机制：挂载加载 + 激活即刷新（日历/板块为低频静态数据，仅激活时拉一次）
+  useListRefresh(() => { loadSectors(); loadCalendar(); }, []);
   useEffect(() => { if (sector) loadStocks(); }, [sector]);
 
   async function wrap(fn) {

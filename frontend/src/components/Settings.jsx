@@ -3,6 +3,7 @@ import { api, getApiKey, setApiKey } from "../api.js";
 import { useBatchSelection } from "../hooks/useBatchSelection.js";
 import BatchDeleteBar from "./BatchDeleteBar.jsx";
 import { useBroker } from "../BrokerContext.jsx";
+import { useListRefresh, notifyListChanged } from "../lib/listRefresh.js";
 import { getLocale, setLocale, t } from "../lib/i18n.js";
 
 export default function Settings() {
@@ -95,25 +96,28 @@ export default function Settings() {
       setKeys(Array.isArray(r) ? r : (Array.isArray(r?.items) ? r.items : (Array.isArray(r?.keys) ? r.keys : [])));
     } catch {}
   }
-  useEffect(() => { load(); }, []);
+  // 统一刷新机制：挂载加载 + 激活即刷新 + api_keys 作用域变更联动
+  useListRefresh(load, { scope: "api_keys" });
+  // 增删改后的刷新 = 本页重拉 + 广播 api_keys 作用域（其它订阅列表自动跟进）
+  const reloadKeys = () => { load(); notifyListChanged("api_keys"); };
 
   async function createKey() {
     try {
       const r = await api.createApiKey({ name: newKey || "default" });
       setMsg({ ok: true, t: `已生成 API Key：${r.api_key}（仅显示一次，请妥善保存）` });
-      setNewKey(""); load();
+      setNewKey(""); reloadKeys();
     } catch (e) { setMsg({ ok: false, t: e.message }); }
   }
   async function rotateKey(kid) {
     try {
       const r = await api.rotateApiKey(kid);
       setMsg({ ok: true, t: `已轮换 #${kid}：新密钥 ${r.api_key}（仅显示一次，旧密钥已失效）` });
-      load();
+      reloadKeys();
     } catch (e) { setMsg({ ok: false, t: e.message }); }
   }
   async function deleteKey(kid) {
     if (!window.confirm(`确认删除 API Key #${kid}？删除后该密钥立即失效，且无法恢复。`)) return;
-    try { await api.deleteApiKey(kid); setMsg({ ok: true, t: `已删除 #${kid}` }); load(); }
+    try { await api.deleteApiKey(kid); setMsg({ ok: true, t: `已删除 #${kid}` }); reloadKeys(); }
     catch (e) { setMsg({ ok: false, t: e.message }); }
   }
   async function batchDeleteKeys() {
@@ -121,7 +125,7 @@ export default function Settings() {
     try {
       await api.batchDeleteApiKeys(bsel.selected);
       setMsg({ ok: true, t: `已删除 ${bsel.selected.length} 个 API Key` });
-      bsel.clear(); load();
+      bsel.clear(); reloadKeys();
     } catch (e) { setMsg({ ok: false, t: e.message }); }
     finally { setBatchBusy(false); }
   }
@@ -136,7 +140,7 @@ export default function Settings() {
     try {
       const r = await api.cleanUnusedApiKeys(n);
       setMsg({ ok: true, t: `已清理 ${r.deleted} 个未使用 Key` });
-      load();
+      reloadKeys();
     } catch (e) { setMsg({ ok: false, t: e.message }); }
     finally { setCleanBusy(false); }
   }
@@ -144,7 +148,7 @@ export default function Settings() {
     const next = k.status === "active" ? "disabled" : "active";
     try {
       await api.patchApiKey(k.id, { status: next });
-      setMsg({ ok: true, t: `#${k.id} 已${next === "active" ? "启用" : "停用"}` }); load();
+      setMsg({ ok: true, t: `#${k.id} 已${next === "active" ? "启用" : "停用"}` }); reloadKeys();
     } catch (e) { setMsg({ ok: false, t: e.message }); }
   }
 

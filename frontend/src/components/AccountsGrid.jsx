@@ -1,6 +1,6 @@
 // 多账户网格视图 + 批量操作：跨账户统一看板（资产/持仓矩阵 + 批量下单/撤单/重连）。
 // 后端 /account/grid 与 /account/batch/* 是唯一真相来源；前端仅透传 conn_id，绝不内置券商逻辑。
-import { useEffect, useState, Fragment } from "react";
+import { useState, Fragment } from "react";
 import { api } from "../api.js";
 import { useServerEvents } from "../hooks/useSystemWS.js";
 import { useActiveInterval } from "../hooks/useActiveInterval.js";
@@ -48,17 +48,13 @@ export default function AccountsGrid() {
     }
   }
 
-  useEffect(() => {
-    load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
   // C2/N5：账户快照事件（account_snapshot，每交易周期广播）驱动近实时刷新；
   // 自动刷新仅作低频兜底轮询（30s），防事件丢失。关闭 auto 后仅保留事件驱动。
   useServerEvents(["account"], () => { if (auto) load(); });
 
-  // G5：auto 关闭或后台 Tab 时完全静默（immediate:false 避免切换 auto 时重复请求）
-  useActiveInterval(load, auto ? 30000 : 0, [auto], { immediate: false });
+  // G5 + 列表刷新机制：激活即刷新（切回标签页立取最新账户矩阵）；
+  // auto 开启时低频轮询兜底；auto 切换时立即重拉一次（刷新语义，无害）。
+  useActiveInterval(load, auto ? 30000 : 0, [auto], { immediate: true });
 
   const conns = grid?.accounts || [];
   const connOptions = conns.map((c) => ({ conn_id: c.conn_id, name: c.name }));

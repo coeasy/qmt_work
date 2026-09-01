@@ -883,6 +883,19 @@ input[type="checkbox"] { width: 15px; height: 15px; cursor: pointer; accent-colo
 .pane-leaf-tools button:hover { color: var(--text); border-color: var(--border); background: var(--panel); }
 .pane-leaf-body { flex: 1 1 0; min-height: 0; overflow: auto; }
 
+/* ---- 文档型页面留白（布局分级） ----
+   fullBleed 页面（行情/报价牌/市场结构/选股）不加 padding，保持终端满幅；
+   其余页面统一由 .padded 提供四周留白 + 页头强调条，根治内容贴左拥挤。 */
+.pane-leaf-body.padded { padding: 14px 20px 28px; }
+.pane-leaf-body.padded > .page { padding-top: 0; }
+.pane-leaf-body.padded .page-header {
+  padding-left: 12px; border-left: 3px solid var(--accent);
+}
+.pane-leaf-body.padded .page-title {
+  padding-left: 12px; border-left: 3px solid var(--accent); line-height: 1.3;
+}
+.pane-leaf-body.padded .hub { min-height: 100%; }
+
 .sa-body { flex: 1; min-height: 0; padding: 10px; }
 .sa-chart { min-width: 0; }
 .sa-side { display: flex; flex-direction: column; gap: 10px; min-width: 0; overflow: auto; }

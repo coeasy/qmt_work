@@ -59,7 +59,12 @@ export default function Workbench() {
   };
 
   const activeId = activeTab ? activeTab.id : null;
-  const aliveTabs = state.tabs.filter((t) => aliveIds.has(t.id));
+  // 防御：激活 tab 必须永远在 alive 集合内（否则 wb-body 不渲染它的 Pane → 空白）。
+  // 兜底覆盖旧持久化数据 aliveOrder 异常（历史版本 slice(-N) 尾部语义可能把激活 tab 挤出）。
+  const aliveSet = activeId && !aliveIds.has(activeId)
+    ? new Set([...aliveIds, activeId])
+    : aliveIds;
+  const aliveTabs = state.tabs.filter((t) => aliveSet.has(t.id));
 
   return (
     <div className="workbench">
@@ -71,7 +76,7 @@ export default function Workbench() {
             index={idx}
             total={state.tabs.length}
             active={t.id === activeId}
-            dimmed={!aliveIds.has(t.id)}
+            dimmed={!aliveSet.has(t.id)}
             dragId={dragId}
             setDragId={setDragId}
             onClick={() => dispatch({ type: "ACTIVATE", tabId: t.id })}

@@ -1,6 +1,7 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { api } from "../api.js";
 import EmptyState from "./ui/EmptyState.jsx";
+import { useListRefresh, notifyListChanged } from "../lib/listRefresh.js";
 
 /* 策略市场（P1）
    DB 目录 + zip/json 导入导出，吸收 Rockyzsu/QMT 范式。
@@ -27,7 +28,8 @@ export default function StrategyMarket() {
   const [importFile, setImportFile] = useState(null);
   const [importZipPath, setImportZipPath] = useState("");
 
-  useEffect(() => { loadCatalog(); }, []);
+  // 统一刷新机制：挂载加载 + 激活即刷新 + strategies 作用域变更联动
+  useListRefresh(loadCatalog, { scope: "strategies" });
 
   async function loadCatalog() {
     try {
@@ -45,6 +47,7 @@ export default function StrategyMarket() {
       await api.strategyInstall({ id });
       setMsg({ ok: true, t: "策略已安装，可在策略库中查看" });
       loadCatalog();
+      notifyListChanged("strategies");
     } catch (e) { setMsg({ ok: false, t: e.message }); }
     finally { setLoading(false); }
   }
@@ -60,6 +63,7 @@ export default function StrategyMarket() {
       setMsg({ ok: true, t: "策略已发布到市场" });
       setPublishName(""); setPublishDesc(""); setPublishParams(""); setPublishFile(null);
       loadCatalog();
+      notifyListChanged("strategies");
     } catch (e) { setMsg({ ok: false, t: e.message }); }
     finally { setLoading(false); }
   }

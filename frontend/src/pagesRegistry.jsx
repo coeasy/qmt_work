@@ -65,11 +65,13 @@ export function aliasTab(key) {
 }
 
 export const PAGES = {
+  // fullBleed: 终端型页面（行情/K线/报价牌/选股/市场结构），满幅渲染不加留白；
+  // 其余文档型页面由 Pane 统一包裹 .pane-leaf-body.padded 提供四周留白。
   dashboard: { label: "仪表盘", comp: D(() => import("./components/Dashboard.jsx")) },
-  quote: { label: "行情分析", comp: D(() => import("./components/MarketData.jsx")) },
-  quoteboard: { label: "报价牌", comp: D(() => import("./components/QuoteBoard.jsx")) },
-  mktstructure: { label: "市场结构", comp: D(() => import("./hubs/MarketStructureHub.jsx")) },
-  screen: { label: "条件选股", comp: D(() => import("./components/Screen.jsx")) },
+  quote: { label: "行情分析", comp: D(() => import("./components/MarketData.jsx")), fullBleed: true },
+  quoteboard: { label: "报价牌", comp: D(() => import("./components/QuoteBoard.jsx")), fullBleed: true },
+  mktstructure: { label: "市场结构", comp: D(() => import("./hubs/MarketStructureHub.jsx")), fullBleed: true },
+  screen: { label: "条件选股", comp: D(() => import("./components/Screen.jsx")), fullBleed: true },
 
   trade: { label: "手动交易", comp: D(() => import("./components/Trade.jsx")) },
   limitup: { label: "涨停监控", comp: D(() => import("./components/LimitUp.jsx")) },

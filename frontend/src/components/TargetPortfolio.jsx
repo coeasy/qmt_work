@@ -1,8 +1,9 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { api } from "../api.js";
 import { useBatchSelection } from "../hooks/useBatchSelection.js";
 import BatchDeleteBar from "./BatchDeleteBar.jsx";
 import EmptyState from "./ui/EmptyState.jsx";
+import { useListRefresh, notifyListChanged } from "../lib/listRefresh.js";
 
 /* 目标持仓差量同步
    保存/删除持仓计划 · 按计划执行差量同步
@@ -23,7 +24,8 @@ export default function TargetPortfolio() {
   const [planName, setPlanName] = useState("");
   const [planWeights, setPlanWeights] = useState("");
 
-  useEffect(() => { loadPlans(); }, []);
+  // 统一刷新机制：挂载加载 + 激活即刷新 + target_plans 作用域变更联动
+  useListRefresh(loadPlans, { scope: "target_plans" });
 
   async function loadPlans() {
     api.targetPlans().then(setPlans).catch(() => setPlans([]));
@@ -38,6 +40,7 @@ export default function TargetPortfolio() {
       await api.targetCreatePlan({ name: planName, weights });
       setMsg({ ok: true, t: `持仓计划「${planName}」已保存` });
       setPlanName(""); setPlanWeights(""); loadPlans();
+      notifyListChanged("target_plans");
     } catch (e) { setMsg({ ok: false, t: e.message }); }
     finally { setLoading(false); }
   }
@@ -49,6 +52,7 @@ export default function TargetPortfolio() {
       setMsg({ ok: true, t: "计划已删除" });
       if (selectedPlan === pid) setSelectedPlan(null);
       loadPlans();
+      notifyListChanged("target_plans");
     } catch (e) { setMsg({ ok: false, t: e.message }); }
     finally { setLoading(false); }
   }
@@ -61,6 +65,7 @@ export default function TargetPortfolio() {
       if (bsel.sel.has(selectedPlan)) setSelectedPlan(null);
       bsel.clear();
       loadPlans();
+      notifyListChanged("target_plans");
     } catch (e) { setMsg({ ok: false, t: e.message }); }
     finally { setBatchBusy(false); }
   }
