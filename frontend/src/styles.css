@@ -668,54 +668,6 @@ input[type="checkbox"] { width: 15px; height: 15px; cursor: pointer; accent-colo
 .status-link:hover { background: rgba(79,140,255,.14); color: #fff; border-color: #2a3a55; }
 .status-hint { color: #6a7a99; font-size: 11px; font-family: "Consolas", monospace; }
 
-/* ---- 左功能树 (TDX 风格) ---- */
-.fn-tree {
-  width: 188px; flex-shrink: 0; background: #0f1828;
-  border-right: 1px solid #0a1322; overflow: hidden; display: flex; flex-direction: column;
-  transition: width .18s ease, margin-left .18s ease, opacity .18s ease;
-}
-.fn-tree.collapsed { width: 0; margin-left: -1px; border-right: none; opacity: 0; pointer-events: none; }
-.fn-tree-head {
-  display: flex; align-items: center; justify-content: space-between;
-  height: 30px; flex-shrink: 0; padding: 0 8px 0 12px;
-  border-bottom: 1px solid #0a1322; background: #0c1422;
-}
-.fn-tree-title { font-size: 12px; font-weight: 600; color: #8aa0c0; letter-spacing: .3px; }
-.fn-tree-close {
-  border: none; background: transparent; color: #8aa0c0; cursor: pointer;
-  font-size: 18px; line-height: 1; padding: 0 4px; border-radius: 4px;
-}
-.fn-tree-close:hover { background: rgba(79,140,255,.14); color: #fff; }
-.fn-tree-scroll { display: flex; flex-direction: column; overflow-y: auto; flex: 1; padding: 6px 0; }
-/* 收起状态下的悬浮唤出按钮 */
-.fn-tree-fab {
-  position: absolute; left: 6px; top: 8px; z-index: 20;
-  width: 30px; height: 30px; border-radius: 6px; cursor: pointer;
-  border: 1px solid #1c2c44; background: #0f1828; color: #b8c4d6;
-  font-size: 15px; line-height: 1; display: flex; align-items: center; justify-content: center;
-  box-shadow: 0 2px 8px rgba(0,0,0,.35);
-}
-.fn-tree-fab:hover { background: #16233a; color: #fff; border-color: #2a3f60; }
-.fn-group { margin-bottom: 2px; }
-.fn-group-title {
-  display: flex; align-items: center; gap: 6px; padding: 7px 12px;
-  font-size: 12px; color: #8aa0c0; cursor: pointer; user-select: none;
-  font-weight: 600; letter-spacing: .3px; transition: background .1s, color .1s;
-}
-.fn-group-title:hover { background: rgba(79,140,255,.08); color: #e6ecf7; }
-.fn-group.collapsed { opacity: .75; }
-.fn-items { padding: 1px 0 4px; }
-.fn-item {
-  display: flex; align-items: center; gap: 6px;
-  padding: 5px 12px 5px 26px; font-size: 13px; color: #b8c4d6;
-  cursor: pointer; white-space: nowrap; border-left: 2px solid transparent;
-  transition: background .1s, color .1s, border-color .1s;
-}
-.fn-item::before { content: "·"; color: #6a7a99; font-size: 14px; line-height: 1; }
-.fn-item:hover { background: rgba(79,140,255,.1); color: #fff; }
-.fn-item.active { background: rgba(79,140,255,.18); color: #fff; border-left-color: #4f8cff; }
-.caret { font-size: 10px; color: #6a7a99; width: 12px; text-align: center; }
-
 /* ---- 中央工作区 ---- */
 .workbench { flex: 1; display: flex; flex-direction: column; min-height: 0; background: #0a1322; }
 .wb-tabs {

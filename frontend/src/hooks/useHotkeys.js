@@ -1,5 +1,5 @@
 // 键盘流：全局快捷键（通达信风格 F-key + 通用键位）
-//  - Ctrl/Cmd+K：命令面板
+//  - Ctrl/Cmd+K 或 Ctrl/Cmd+B：命令面板
 //  - Alt+1..9：跳转到第 N 个功能分组的首个页面
 //  - F1：帮助/快捷键说明
 //  - Esc：关闭浮层
@@ -22,8 +22,9 @@ export function useHotkeys() {
         return;
       }
       if (mod && (e.key === "b" || e.key === "B")) {
+        // 旧版此处切换左侧功能树；功能树已移除，改为唤起命令面板（与 Ctrl+K 一致）
         e.preventDefault();
-        window.dispatchEvent(new CustomEvent("tree:toggle"));
+        window.dispatchEvent(new CustomEvent("cmd:toggle"));
         return;
       }
       if (e.key === "Escape") {

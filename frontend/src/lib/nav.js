@@ -4,7 +4,7 @@
 //   仅携带 pageKey 字符串，无法带参数 → 「打开行情页再按 F3 点了没反应」的历史根因。
 // 新版：navTo("quote", { params: { code: "000001.SH" }, openIn: "auto" })
 //   detail 统一为对象，携带实例参数与打开方式；旧字符串调用点由兼容层自动归一化，
-//   因此 FunctionTree / MenuBar / CommandPalette / Dashboard 等调用点无需同步修改。
+//   因此 MenuBar / CommandPalette / Dashboard 等调用点无需同步修改。
 import { PAGES, DEFAULT_PAGE, resolveKey, aliasTab, KEY_ALIAS } from "../pagesRegistry.jsx";
 
 export const OPEN_IN = {

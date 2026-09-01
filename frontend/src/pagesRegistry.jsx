@@ -1,5 +1,5 @@
 // 页面注册表：所有页面的「树形分组 + 扁平映射」单一真相来源。
-// 顶菜单（MenuBar）、左侧功能树（FunctionTree）、中央工作区（Workbench）共用。
+// 顶菜单（MenuBar）、命令面板（CommandPalette）、中央工作区（Workbench）共用。
 // 通达信式重构：每个叶子即一个独立窗口（Workbench 标签），分组仅用于树形归类。
 import { lazy } from "react";
 
@@ -95,7 +95,7 @@ export const PAGES = {
   settings: { label: "设置", comp: D(() => import("./components/Settings.jsx")) },
 };
 
-// 功能树（通达信式左树）：分组 -> 叶子（阶段一：入口合并为 7 中心组 21 顶层页）
+// 页面分组树（命令面板 / Alt+1..9 快捷跳转共用）：分组 -> 叶子（阶段一：入口合并为 7 中心组 21 顶层页）
 export const PAGE_TREE = [
   { group: "总览", items: [{ key: "dashboard", label: "仪表盘" }] },
   { group: "行情", items: [
