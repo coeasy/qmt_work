@@ -123,6 +123,14 @@ class BridgeAdapter(BrokerAdapter):
         self._connected = False
         self._init_error: str | None = None
         self._stderr_buf: list[str] = []
+        # 版本画像缓存（性能关键）：探测成本极高（子进程 RPC 8s + 本地静态目录/SDK
+        # 扫描数十秒，实测单次 ~47s）。而 status_list() 在每次 /brokers 轮询（前端
+        # 15s 一次）都会调用 version_profile()，无缓存 → 每个请求同步阻塞 ~47s，
+        # 冻结 FastAPI 事件循环 → 「连接管理」永远加载不出并拖垮整机。
+        # 画像属静态信息（客户端路径/版本/能力），按实例缓存一次即可。
+        self._vp_cache: dict | None = None
+        self._vp_lock = threading.Lock()
+        self._vp_started = False
 
     # ---------------- 身份 ----------------
     @property
@@ -475,6 +483,16 @@ class BridgeAdapter(BrokerAdapter):
                   start: str = "", end: str = "") -> list[dict]:
         return self._rpc("get_kline", [code, period, count, start, end])
 
+    def get_instrument_detail(self, code: str) -> dict:
+        """合约详情（名称 / 涨停价 / 跌停价 / 昨收）。
+
+        经桥接子进程反射转发到适配器实现（XTP 适配器已实现；其余适配器
+        未实现时子进程返回「未知方法」→ 客户端抛 BrokerError，由上层优雅降级为 503）。
+        此前缺失该方法导致 registry 调用 `bridge.gateway.get_instrument_detail`
+        直接 AttributeError，触发券商数据源熔断，进而 行情分析 / 个股分析 全量不可用。
+        """
+        return self._rpc("get_instrument_detail", [code])
+
     def get_tick(self, code: str) -> dict:
         return self._rpc("get_tick", [code])
 
@@ -558,7 +576,39 @@ class BridgeAdapter(BrokerAdapter):
         优先转发子进程内真实 SDK 的探测结果，保证桥接（打包）态与直连态一致；
         子进程未启动/不可达时回退到本端静态探测（路径/SDK 版本/目录推断），
         绝不返回空画像——前端口径统一，装任何版本客户端都能展示。
+
+        性能：探测成本高（RPC 8s + 本地静态扫描，实测 ~47s），结果按实例缓存，
+        重复调用直接命中缓存。高频路径（如连接状态列表）请改用
+        version_profile_cached() + warm_version_profile()，避免首次调用阻塞。
         """
+        cached = self.version_profile_cached()
+        if cached is not None:
+            return cached
+        result = self._compute_version_profile()
+        with self._vp_lock:
+            self._vp_cache = result
+        return result
+
+    def version_profile_cached(self) -> dict | None:
+        """已缓存的版本画像；尚未探测完成则返回 None（绝不触发阻塞探测）。
+
+        供 status_list() 等高频/低延迟路径使用：拿不到画像也让调用方立即返回，
+        画像随后由后台预热补齐，不拖慢前台渲染。
+        """
+        with self._vp_lock:
+            return self._vp_cache
+
+    def warm_version_profile(self) -> None:
+        """后台预热版本画像：首调用触发一次异步探测，之后高频路径直接命中缓存。"""
+        with self._vp_lock:
+            if self._vp_cache is not None or self._vp_started:
+                return
+            self._vp_started = True
+        threading.Thread(target=self.version_profile, daemon=True,
+                         name="vp-warm").start()
+
+    def _compute_version_profile(self) -> dict:
+        """真正的画像探测（昂贵，调用方应确保只执行一次）。"""
         try:
             if self._proc is not None and self._proc.poll() is None:
                 d = self._rpc("get_version_profile", [], timeout=8.0)

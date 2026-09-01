@@ -252,7 +252,10 @@ async def market_analysis(code: str, conn_id: str = "", source: str = "auto"):
     估值维度依赖券商财务数据，无券商连接时 unavailable（前端显示「估值需券商连接」）。
     PE/PB 用现价 / 每股收益 / 每股净资产现算（EPS≤0 时 PE 为 None，不伪造负值）。
     """
-    code = (code or "").strip().upper()
+    from app.datasource.instrument import with_exchange_suffix
+    # 统一补交易所后缀：券商只认 600519.SH，eltdx 名称表亦以此为键。
+    # 不规范化 → 券商静默返空 + 名称查不到，两个维度同时「无数据」。
+    code = with_exchange_suffix((code or "").strip().upper())
     if not code:
         return err(400, "缺少 code")
     m = get_hub()
@@ -425,6 +428,9 @@ async def market_stock_info(code: str, conn_id: str = "", source: str = "auto"):
 
     source: auto（券商优先，失败回退 eltdx）/ broker / eltdx
     """
+    from app.datasource.instrument import with_exchange_suffix
+    # 名称表与券商接口均以带后缀代码为键，裸代码会查不到中文名（界面只剩数字）
+    code = with_exchange_suffix((code or "").strip().upper())
     board = classify_board(code)
     info = {
         "code": code,
@@ -504,6 +510,10 @@ async def market_kline(code: str, period: str = "1d", count: int = 250,
         period = normalize_period(period)
     except UnknownPeriodError as exc:
         return err(400, str(exc))
+    # 分时不是 K 线周期：走独立端点 /market/minutes。这里必须显式拒绝并给出
+    # 去向，否则会「通过校验 → 券商返回空 → 静默 0 根」，前端图表空白却无报错。
+    if spec(period).kind == "tick":
+        return err(400, "分时数据请使用 /market/minutes 端点（K 线端点不支持 tick 周期）")
     try:
         if not spec(period).supported:
             return err(400, f"周期 {spec(period).label} 暂不可用：{spec(period).reason}")
@@ -530,10 +540,16 @@ async def market_kline(code: str, period: str = "1d", count: int = 250,
                  "cached_at": None, "note": None, "adjust": adj or "",
                  "bars": dres.results}, dres))
         return err(503, f"K 线获取失败：{code} 券商不可用、TDX 行情源无数据且本地数据仓为空，请连接券商或检查网络。")
+    # ⚠️ stale 一致性（曾经出现 source=cache_stale 却 stale:false 误导用户）：
+    # 当缓存层回退供给「过期缓存」时（kline_cache.get_or_fetch 返回 source=cache_stale），
+    # 必须同步把 stale 置 True，并透传 as_of（=cached_at 数据截至时间），绝不静默冒充最新。
+    src = res.get("source")
+    stale = src == "cache_stale"
     return ok({"code": code, "period": period, "count": len(bars),
-               "source": res.get("source"), "cached_at": res.get("cached_at"),
+               "source": src, "cached_at": res.get("cached_at"),
+               "as_of": res.get("cached_at") if stale else None,
                "note": res.get("note"), "adjust": adj or "",
-               "stale": False,
+               "stale": stale,
                "bars": bars})
 
 @router.get("/market/minutes")

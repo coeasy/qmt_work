@@ -21,15 +21,44 @@ from .registry import create_adapter, get_profile
 log = logging.getLogger("qmt_work.manager")
 
 
-def _version_profile(adapter: BrokerAdapter) -> dict | None:
+def _version_profile(adapter: BrokerAdapter, allow_block: bool = True) -> dict | None:
     """提取适配器的版本画像（xtp 系提供；其余适配器无则返回 None）。
 
     兼容两种返回形态：XTPQuantAdapter 返回 QmtVersionProfile（需 .to_dict()），
     BridgeAdapter 的 version_profile() 已回传纯 dict（直接可用）。
+
+    allow_block=False（高频路径专用，如 /brokers 轮询）：
+        只取已缓存画像，绝不触发同步探测。画像探测成本极高（子进程 RPC 8s +
+        本地静态目录/SDK 扫描，实测单次 ~47s），在 async 路由里同步调用会冻结
+        FastAPI 事件循环 → 「连接管理」永远加载不出并拖垮整机。
+        未命中缓存时返回 None 并在后台线程预热，下一轮轮询即可拿到画像。
     """
     getter = getattr(adapter, "version_profile", None)
     if not callable(getter):
         return None
+
+    cached_getter = getattr(adapter, "version_profile_cached", None)
+    warmer = getattr(adapter, "warm_version_profile", None)
+
+    if not allow_block:
+        if callable(cached_getter):
+            try:
+                val = cached_getter()
+                if isinstance(val, dict):
+                    return val
+                to_dict = getattr(val, "to_dict", None)
+                if callable(to_dict):
+                    return to_dict()
+            except Exception:  # noqa: BLE001
+                pass
+        # 后台预热：本轮先返回 None，画像稍后由缓存补齐
+        if callable(warmer):
+            try:
+                warmer()
+            except Exception:  # noqa: BLE001
+                pass
+        return None
+
     try:
         val = getter()
         if isinstance(val, dict):
@@ -330,7 +359,8 @@ class BrokerManager:
                 "client_version": conn.adapter.client_version,
                 "supported_periods": conn.adapter.supported_periods,
                 "supported_account_types": conn.adapter.supported_account_types,
-                "version_profile": _version_profile(conn.adapter),
+                # 高频轮询路径：只取缓存画像，避免 ~47s 同步探测冻结事件循环
+                "version_profile": _version_profile(conn.adapter, allow_block=False),
             })
         return out
 

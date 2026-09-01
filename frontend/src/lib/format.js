@@ -51,3 +51,13 @@ const STATUS_MAP = {
 export function orderStatus(status) {
   return STATUS_MAP[status] || { label: String(status ?? "—"), className: "" };
 }
+
+// 时间戳（秒级 Unix epoch，来自后端 cached_at/as_of）转本地可读串。
+// 用于「数据已过期 · 截至 X」等提示，避免把陈旧 K 线伪装成实时数据。
+export function fmtTs(ts) {
+  if (ts == null || isNaN(Number(ts))) return "—";
+  const d = new Date(Number(ts) * 1000);
+  if (isNaN(d.getTime())) return "—";
+  const p = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}

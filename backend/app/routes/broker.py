@@ -222,8 +222,14 @@ async def broker_profiles():
 
 @router.get("/brokers")
 async def list_brokers():
-    """获取brokers（GET /brokers）。"""
-    return ok(state.broker_manager.status_list())
+    """获取brokers（GET /brokers）。
+
+    status_list() 内含磁盘/子进程 I/O，是同步阻塞调用。前端「连接管理」页每 15s
+    轮询一次，若直接在事件循环里执行，单次耗时会被放大为整机卡死（实测未缓存时
+    单次 ~47s → 请求堆积 → 任何页面都加载不出来）。此处统一丢进线程池，
+    保证事件循环永远不被单个连接状态查询拖住。
+    """
+    return ok(await asyncio.to_thread(state.broker_manager.status_list))
 
 @router.post("/brokers")
 async def add_broker(body: dict):

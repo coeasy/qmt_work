@@ -471,6 +471,7 @@ input[type="checkbox"] { width: 15px; height: 15px; cursor: pointer; accent-colo
 .tag.src-eltdx { background: rgba(43,212,164,.15); color: var(--accent-2); }
 .tag.src-broker { background: rgba(79,140,255,.15); color: var(--accent); }
 .tag.src-cache { background: rgba(255,176,32,.15); color: var(--warn); }
+.tag.src-cache_stale { background: rgba(255,92,108,.15); color: var(--danger); }
 /* 行业高亮 + 概念标签 */
 .up-accent { color: var(--accent-2); font-weight: 600; }
 .qp-concepts { display: flex; flex-wrap: wrap; gap: 5px; padding: 6px 10px; }

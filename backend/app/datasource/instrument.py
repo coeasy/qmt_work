@@ -33,6 +33,57 @@ def _digits(code: str) -> str:
     return "".join(ch for ch in _norm(code) if ch.isdigit())
 
 
+def with_exchange_suffix(code: str) -> str:
+    """把裸代码补全为券商/风控链路要求的 `NNNNNN.XX` 形态。
+
+    券商（迅投 xtquant）行情接口**只认带交易所后缀的完整代码**：传 `600519`
+    会静默返回空列表（不报错、不抛异常），导致 K 线 0 根且不触发任何回退，
+    界面表现为「图表空白/无数据」却无任何错误提示。而 eltdx(TDX) 源两种形态
+    都能识别，掩盖了该问题——表现为「同一只股票有的页面有数据、有的没有」。
+
+    因此所有进入券商链路的代码必须先过本函数统一规范化：
+        600519      -> 600519.SH
+        sh600519    -> 600519.SH
+        600519.sh   -> 600519.SH
+        600519.SH   -> 600519.SH（幂等）
+
+    代码段规则与 routes/market.py::_normalize_code 保持同一口径（那里是面向
+    用户输入的「多候选」版本，本函数是面向数据链路的「单值」版本）：
+        899/920 段（北交所）必须在 9 沪市段之前判定；
+        51/56/58/11 段（ETF/基金/可转债/国债）归沪；
+        83/87/92/43 段归北交所；000 段为歧义码（沪指数/深股票），数据链路上
+        取深市（个股）为主——000001 更常指平安银行而非上证指数。
+    无法判定的（空/非 6 位/TDX 板块指数 880/881）原样返回，交由下游按需处理。
+    """
+    c = _norm(code)
+    if not c:
+        return ""
+    # 已是 NNNNNN.XX 形态（或带任意后缀）→ 原样返回，保证幂等
+    if "." in c:
+        return c
+    # eltdx 形态 sh600519 / sz000001 / bj430047
+    if len(c) > 2 and c[:2].lower() in ("sh", "sz", "bj") and c[2:].isdigit():
+        return f"{c[2:]}.{c[:2].upper()}"
+    d = _digits(c)
+    if len(d) != 6:
+        return c  # 板块指数等非常规代码：原样返回，不强加后缀
+    # TDX 板块指数（880/881 段）不是交易所标的，无交易所后缀；
+    # 错加后缀会让板块行情/成分股请求直接查无此标的。
+    if d.startswith(("880", "881")):
+        return c
+    if d.startswith(("899", "920")):
+        return f"{d}.BJ"
+    if d.startswith("399"):
+        return f"{d}.SZ"
+    if d.startswith(("60", "68", "9", "51", "56", "58", "11")):
+        return f"{d}.SH"
+    if d.startswith(("00", "30", "2", "15", "16", "12")):
+        return f"{d}.SZ"
+    if d.startswith(("83", "87", "43")):
+        return f"{d}.BJ"
+    return f"{d}.SH"
+
+
 def classify_instrument(code: str, name: str = "") -> dict:
     """标的分类画像：{type, exchange, board, label}。无法识别给 unknown，绝不抛错。
 

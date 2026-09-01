@@ -217,10 +217,14 @@ def create_app() -> FastAPI:
         for conn in state.broker_manager.all_connections():
             if conn.cfg.active:
                 try:
-                    await conn.bridge.start()
+                    await asyncio.wait_for(conn.bridge.start(), timeout=32.0)
                     conn.connected = conn.adapter.is_connected()
                     log.info("broker connection started: %s (%s) connected=%s",
                              conn.cfg.name, conn.cfg.conn_id, conn.connected)
+                except asyncio.TimeoutError:
+                    log.warning("broker start timed out (32s) for %s: 券商客户端未就绪，已跳过自动连接",
+                                conn.cfg.conn_id)
+                    conn.connected = False
                 except Exception as exc:  # noqa: BLE001
                     log.warning("broker start failed %s: %s", conn.cfg.conn_id, exc)
         state.bridge = state.broker_manager.active_bridge()

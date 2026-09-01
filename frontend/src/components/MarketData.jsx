@@ -30,7 +30,7 @@ import { fetchIndicator, indicatorKey } from "../lib/indicators.js";
 // G4 数据面：资金流/股本 topic 总线
 import { subscribe as hubSubscribe, invalidate } from "../lib/dataHub.js";
 // 金额格式化直接引唯一实现（不再经 useMarket 别名中转，链路更短更明确）
-import { fmtAmount } from "../lib/format.js";
+import { fmtAmount, fmtTs } from "../lib/format.js";
 import { t as _t } from "../lib/i18n.js";
 
 // 旧版遗留的悬空引用（fmtPct 未定义，涨跌幅一渲染就会 ReferenceError）——根治为别名
@@ -278,6 +278,8 @@ export default function MarketData({ params, leafId, tabId, dispatch } = {}) {
   const meta = klineQ.data && klineQ.data.source ? {
     source: klineQ.data.source,
     cached_at: klineQ.data.cached_at,
+    as_of: klineQ.data.as_of,
+    stale: klineQ.data.stale,
     note: klineQ.data.note,
     count: klineQ.data.count,
   } : null;
@@ -967,6 +969,11 @@ export default function MarketData({ params, leafId, tabId, dispatch } = {}) {
                 {minutesErr ? <span className="down"> · {minutesErr}</span> : null}</>)
             : <span> · 共 {bars.length} 根</span>}
           {meta && (<> · 数据来源 <span className={`tag ok src-${meta.source}`}>{SRC_LABEL[meta.source] || meta.source}</span></>)}
+          {meta?.stale && (
+            <span className="tag warn" title={meta.note || "本地缓存已过期，未取得最新行情"}>
+              数据已过期{meta.as_of ? ` · 截至 ${fmtTs(meta.as_of)}` : ""}
+            </span>
+          )}
         </div>
 
         {/* 多维摘要条（I1）：换手/量比/净流入 + 行业概念深链板块页（F3 联动） */}

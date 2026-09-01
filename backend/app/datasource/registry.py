@@ -22,6 +22,7 @@ from typing import Optional
 
 from app.datasource.base import DataSource
 from app.datasource.board import classify_board, limit_ratio
+from app.datasource.instrument import with_exchange_suffix
 from app.datasource.periods import (
     UnknownPeriodError,
     adjust_allowed_periods,
@@ -35,6 +36,37 @@ log = __import__("logging").getLogger("qmt_work.datasource.registry")
 _PER_SOURCE_TIMEOUT = 8.0
 _BREAKER_THRESHOLD = 3
 _BREAKER_COOLDOWN = 30.0
+
+
+def _contentless_detail(det: Optional[dict], code: str) -> bool:
+    """判定一份合约详情是否「成功但无内容」（空壳）。
+
+    部分券商 SDK（xtquant 的合约/F10 详情）在部分客户端版本上只回空壳：
+    name 回退成代码本身、涨跌停/昨收/行业/概念全为空，**且不抛异常**。
+    auto 链若把它当成功直接返回，eltdx 里明明有完整画像（中文名/行业/
+    概念/涨跌停价）却永远轮不到——界面表现就是「个股资料只有代码、无名称、
+    无涨跌停」，而用户无从判断是没数据还是坏了。
+
+    判定口径（任一成立即视为有内容）：
+      · name 存在且不等于代码本身；
+      · 昨收/涨停/跌停 任一有值；
+      · 行业或概念非空。
+    """
+    if not det:
+        return True
+    name = (det.get("name") or "").strip()
+    bare = (code or "").split(".")[0].upper()
+    # name 为空或回退成代码本身（空壳）→ 无有效名称，强制视为无内容，
+    # 让 auto 链回退 eltdx 补全中文名（否则界面只剩代码、无名称）。
+    if not name or name.upper() in (bare, (code or "").upper()):
+        return True
+    for key in ("pre_close", "high_limit", "low_limit",
+                "up_limit_price", "down_limit_price"):
+        if det.get(key) is not None:
+            return False
+    if det.get("industry") or det.get("concepts"):
+        return False
+    return True
 
 
 class DataSourceUnavailable(Exception):
@@ -74,7 +106,9 @@ class _BoundBrokerSource:
     async def get_instrument_detail(self, code: str) -> Optional[dict]:
         try:
             det = await self._b.call(self._b.gateway.get_instrument_detail, code)
-        except BrokerError:
+        except (BrokerError, AttributeError):
+            # AttributeError：适配器未实现该方法（如 BridgeAdapter 历史缺失
+            # get_instrument_detail）。降级为不可用，避免击穿 auto 链 / 误触发熔断。
             return None
         if isinstance(det, dict) and isinstance(det.get("code"), int):
             return None
@@ -206,6 +240,9 @@ class DataSourceManager:
     # ---------- 行情快照 ----------
     async def get_quote(self, code: str, source: str = "auto",
                         conn_id: Optional[str] = None) -> Optional[dict]:
+        # 代码规范化（唯一入口）：券商只认 600519.SH，eltdx 名称表也以带后缀代码为键。
+        # 传裸代码会让券商静默返空、eltdx 查不到中文名——两处都表现为「无数据」。
+        code = with_exchange_suffix(code)
         board = classify_board(code)
 
         async def _from_broker():
@@ -216,6 +253,16 @@ class DataSourceManager:
             if raw is None:
                 return None
             det = await self._detail_for("broker", b, code)
+            # 券商实时价最准，但其合约详情可能是空壳（无中文名/涨跌停）。
+            # 名称缺失会一路透到界面（个股名显示为一串代码），因此这里用补充源
+            # 富化画像；价格仍以券商为准，富化失败也不影响行情本身。
+            if _contentless_detail(det, code):
+                for pname in self._plugins:
+                    pdet = await self._call_source(
+                        pname, self._plugins[pname].get_instrument_detail(code))
+                    if not _contentless_detail(pdet, code):
+                        det = pdet
+                        break
             return self._merge_quote(raw, code, board, det, "broker")
 
         async def _from_plugin(name: str):
@@ -247,6 +294,9 @@ class DataSourceManager:
     # ---------- 合约基础信息 ----------
     async def get_instrument_detail(self, code: str, source: str = "auto",
                                     conn_id: Optional[str] = None) -> Optional[dict]:
+        # 同上：统一补交易所后缀，否则 eltdx 名称表（键为 600519.SH）查不到中文名，
+        # 券商侧也只回空壳 —— 界面就会把个股名显示成一串代码。
+        code = with_exchange_suffix(code)
         board = classify_board(code)
         base = {
             "code": code,
@@ -300,11 +350,18 @@ class DataSourceManager:
             return await _broker_detail()
         if source in self._plugins:
             return await _plugin_detail(source)
+        last: Optional[dict] = None
         for name in self._auto_chain:
             det = await (_broker_detail() if name == "broker" else _plugin_detail(name))
-            if det is not None:
+            if det is None:
+                continue
+            # 「成功但无内容」不等于成功：券商空壳详情会让 eltdx 的完整画像
+            # （中文名/行业/概念/涨跌停）永远轮不到，界面只剩代码。
+            if not _contentless_detail(det, code):
                 return det
-        return None
+            last = det
+        # 全链都无内容：返回最后一个空壳（至少带上交易所/板块），保持旧行为不退化
+        return last
 
     # ---------- 历史 K 线 ----------
     async def get_kline(self, code: str, period: str = "1d", count: int = 250,

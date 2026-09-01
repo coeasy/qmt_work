@@ -3,6 +3,8 @@
 拆分 routes.py（原 1400+ 行单体）后，各业务域子模块（broker/account/trade/...）
 统一从此处导入 ok/err/_need/_call 与共享符号，避免循环依赖、保持单一真相来源。
 """
+import asyncio
+
 from fastapi import Request, WebSocket, WebSocketDisconnect
 
 from app import crypto  # noqa: F401  (re-export for routes: config.py/signal.py)
@@ -40,10 +42,12 @@ def _need(conn_id: str | None = None):
     return state.broker_manager.bridge(conn_id)
 
 
-async def _call(b, fn, *args):
-    """统一包装券商调用，BrokerError -> 错误响应字典。"""
+async def _call(b, fn, *args, timeout: float = 12.0):
+    """统一包装券商调用，BrokerError -> 错误响应字典；超时保护防止桥接子进程僵死时请求被永久挂起（否则 curl 5s 断开 → http=000）。"""
     try:
-        return await b.call(fn, *args)
+        return await asyncio.wait_for(b.call(fn, *args), timeout=timeout)
+    except asyncio.TimeoutError:
+        return err(503, f"券商响应超时（>{int(timeout)}s），请检查券商客户端是否已连接并登录")
     except BrokerError as exc:
         return err(503, str(exc))
 

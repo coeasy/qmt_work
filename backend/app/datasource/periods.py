@@ -100,6 +100,11 @@ def normalize_period(period: Optional[str]) -> str:
     p = (period or "").strip().lower()
     if not p:
         raise UnknownPeriodError(f"周期不能为空（{_hint()}）")
+    # 分时不进 CANONICAL_PERIODS（自有 /market/minutes 端点），但 /market/periods
+    # 会把它与 K 线周期同列下发给前端。若此处不认，前端点「分时」必得 400
+    # 「不支持的周期: tick」——而契约表明明宣称 tick 可用（前后端口径不一致）。
+    if p == TICK_PERIOD:
+        return TICK_PERIOD
     if p in CANONICAL_PERIODS:
         return p
     if p in ALIASES:
@@ -107,9 +112,18 @@ def normalize_period(period: Optional[str]) -> str:
     raise UnknownPeriodError(f"不支持的周期: {period}（{_hint()}）")
 
 
+#: 分时契约（kind=tick，走 /market/minutes，不进 CANONICAL_PERIODS 以免被
+#: K 线缓存/同步任务误纳入；但 must 能被 normalize/spec 识别，否则前端点
+#: 「分时」调 /market/kline 会得到 400 而非引导到分时端点）。
+TICK_SPEC = PeriodSpec(TICK_PERIOD, "分时", "tick", None)
+
+
 def spec(period: str) -> PeriodSpec:
     """取周期契约描述（会先归一化）。"""
-    return CANONICAL_PERIODS[normalize_period(period)]
+    p = normalize_period(period)
+    if p == TICK_PERIOD:
+        return TICK_SPEC
+    return CANONICAL_PERIODS[p]
 
 
 def to_eltdx_period(period: str) -> str:

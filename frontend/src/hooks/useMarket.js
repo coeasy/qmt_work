@@ -132,9 +132,14 @@ export function useAsyncData(loader, deps, { initial = null, debounceMs = 0 } = 
 
 /* ------------------- 业务 hook ------------------- */
 export function useKline({ code, period, count, adj, connId, force = false }) {
+  // 分时不是 K 线周期：由 /market/minutes 提供数据。这里必须短路，否则会打出
+  // /market/kline?period=tick 并被服务端 400 拒绝 → 界面在分时图上叠一个
+  // 「不支持的周期」红字报错（数据其实正常）。
+  const isTick = period === "tick";
   return useAsyncData(
-    () => fetchKline({ code, period, count, adj, connId, force }),
-    [code, period, count, adj, connId, force],
+    () => (isTick || !code ? Promise.resolve({ bars: [], source: "", count: 0 })
+                           : fetchKline({ code, period, count, adj, connId, force })),
+    [code, period, count, adj, connId, force, isTick],
     { initial: { bars: [], source: "", count: 0 }, debounceMs: 60 },
   );
 }
