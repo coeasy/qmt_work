@@ -16,18 +16,13 @@
 import {
   createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore,
 } from "react";
+import { createReconnectingSocket } from "./wsCore";
 
 function wsUrl() {
   const proto = location.protocol === "https:" ? "wss" : "ws";
   return `${proto}://${location.host}/api/v1/ws`;
 }
 
-const MAX_RETRIES = 10;
-const RETRY_CAP_SEC = 15;
-// 心跳保活：后端支持 {action:"ping"} → {"type":"pong"}。长时间空闲的 WS 可能被
-// 中间层/代理静默掐断而前端毫无感知（onclose 不触发），定时 ping 探活是唯一可靠手段。
-const PING_INTERVAL_MS = 25000;   // 每 25s 发一次 ping
-const PONG_TIMEOUT_MS = 10000;    // 10s 内无 pong 视为连接已死，主动断开触发重连
 // 退订宽限：本地引用清零后 60s 再通知服务端退订，避免翻页 / 短暂切走造成订阅抖动。
 const UNSUB_GRACE_MS = 60000;
 
@@ -82,9 +77,7 @@ const HubContext = createContext(null);
 let _tokenSeq = 0;
 
 export function QuoteHubProvider({ children }) {
-  const wsRef = useRef(null);
-  const retryRef = useRef(0);
-  const timerRef = useRef(null);
+  const coreRef = useRef(null);
   // code -> Set<token>：本地引用计数。token 是订阅句柄。
   const subsRef = useRef(new Map());
   // 已向服务端声明过的 code（幂等集合，断线重连后原样重发）
@@ -92,9 +85,28 @@ export function QuoteHubProvider({ children }) {
   // code -> timeoutId：本地引用清零后待执行的延迟退订（宽限期内重新订阅则取消）
   const pendingUnsubRef = useRef(new Map());
   const [state, setState] = useState("connecting");
-  // 心跳状态（声明在 connect 之前，onopen/onmessage 闭包引用）
-  const lastPongRef = useRef(Date.now());
-  const stopPingRef = useRef(() => {});
+
+  // 连接治理（重连/心跳/退避/僵尸检测）全部委托 wsCore（H4：单一实现）。
+  // 本组件只保留行情域逻辑：订阅引用计数 + 60s 退订宽限 + 重连后重发声明。
+  if (coreRef.current === null) {
+    coreRef.current = createReconnectingSocket({
+      url: wsUrl(),
+      onStateChange: setState,
+      // 重连成功 / 首次连接：把已声明集合整体重发（幂等）
+      onOpen: () => {
+        const codes = Array.from(declaredRef.current);
+        if (codes.length) coreRef.current.send({ action: "subscribe", codes });
+      },
+      onMessage: (msg) => {
+        if (msg.type === "quotes" && Array.isArray(msg.data?.items)) pushBatch(msg.data.items);
+        else if (msg.type === "quotes_replay" && Array.isArray(msg.data?.items)) pushBatch(msg.data.items);
+        else if (msg.type === "quote" && msg.data) pushQuote(msg.data);
+        else if (msg.type === "snapshot" && msg.data && typeof msg.data === "object") {
+          pushBatch(Object.values(msg.data.quotes || {}));
+        }
+      },
+    });
+  }
 
   const declare = useCallback((code) => {
     if (!code) return;
@@ -103,10 +115,7 @@ export function QuoteHubProvider({ children }) {
     if (t) { clearTimeout(t); pendingUnsubRef.current.delete(code); }
     if (declaredRef.current.has(code)) return;
     declaredRef.current.add(code);
-    const ws = wsRef.current;
-    if (ws && ws.readyState === 1) {
-      try { ws.send(JSON.stringify({ action: "subscribe", codes: [code] })); } catch { /* noop */ }
-    }
+    coreRef.current.send({ action: "subscribe", codes: [code] });
   }, []);
 
   // 订阅：返回一个句柄，页面卸载时用它释放引用。
@@ -131,111 +140,22 @@ export function QuoteHubProvider({ children }) {
       const code = token.code;
       const timer = setTimeout(() => {
         pendingUnsubRef.current.delete(code);
-        const ws = wsRef.current;
-        if (ws && ws.readyState === 1) {
-          try { ws.send(JSON.stringify({ action: "unsubscribe", codes: [code] })); } catch { /* noop */ }
-        }
+        coreRef.current.send({ action: "unsubscribe", codes: [code] });
         declaredRef.current.delete(code);
       }, UNSUB_GRACE_MS);
       pendingUnsubRef.current.set(code, timer);
     }
   }, []);
 
-  const redeclareAll = useCallback(() => {
-    const ws = wsRef.current;
-    if (!ws || ws.readyState !== 1) return;
-    try { ws.send(JSON.stringify({ action: "subscribe", codes: Array.from(declaredRef.current) })); } catch { /* noop */ }
-  }, []);
-
-  const scheduleReconnect = useCallback(() => {
-    if (timerRef.current) return;
-    setState("reconnecting");
-    // 重连永不放弃：前 MAX_RETRIES 次指数退避（0.5s→15s）；
-    // 超限后固定 30s 降频无限重试（后端恢复即自动重连，避免「10 次后永久 offline」
-    // 导致用户必须手动刷新页面的历史问题）。
-    const n = retryRef.current;
-    const delay = n >= MAX_RETRIES ? 30 : Math.min(0.5 * Math.pow(2, n), RETRY_CAP_SEC);
-    retryRef.current += 1;
-    timerRef.current = setTimeout(() => {
-      timerRef.current = null;
-      connectRef.current();
-    }, delay * 1000);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  const connect = useCallback(() => {
-    if (wsRef.current) { try { wsRef.current.close(); } catch { /* noop */ } wsRef.current = null; }
-    retryRef.current = 0;
-    setState("connecting");
-    let ws;
-    try { ws = new WebSocket(wsUrl()); }
-    catch { setState("offline"); scheduleReconnect(); return; }
-    wsRef.current = ws;
-    ws.onopen = () => {
-      retryRef.current = 0;
-      lastPongRef.current = Date.now();
-      setState("connected");
-      // 重连成功 / 首次连接：把已声明集合整体重发（幂等）
-      const codes = Array.from(declaredRef.current);
-      if (codes.length) {
-        try { ws.send(JSON.stringify({ action: "subscribe", codes })); } catch { /* noop */ }
-      }
-    };
-    ws.onmessage = (e) => {
-      let msg;
-      try { msg = JSON.parse(e.data); } catch { return; }
-      // pong（客户端 ping 的应答）与 heartbeat（服务端主动下行帧，B1）都证明链路存活。
-      // 服务端心跳的意义：即使客户端没发 ping，也能确认下行通路与代理层未被静默切断。
-      if (msg.type === "pong" || msg.type === "heartbeat") { lastPongRef.current = Date.now(); return; }
-      if (msg.type === "quotes" && Array.isArray(msg.data?.items)) pushBatch(msg.data.items);
-      else if (msg.type === "quotes_replay" && Array.isArray(msg.data?.items)) pushBatch(msg.data.items);
-      else if (msg.type === "quote" && msg.data) pushQuote(msg.data);
-      else if (msg.type === "snapshot" && msg.data && typeof msg.data === "object") {
-        pushBatch(Object.values(msg.data.quotes || {}));
-      }
-    };
-    ws.onclose = () => {
-      if (wsRef.current === ws) wsRef.current = null;
-      stopPingRef.current();
-      setState("offline");
-      scheduleReconnect();
-    };
-    ws.onerror = () => { try { ws.close(); } catch { /* noop */ } };
-  }, [scheduleReconnect]);
-
-  // 心跳保活：连接打开期间定时 ping；超时无 pong 主动断开（触发 onclose→重连）。
   useEffect(() => {
-    let pingTimer = null;
-    const tick = () => {
-      const ws = wsRef.current;
-      if (ws && ws.readyState === 1) {
-        if (Date.now() - lastPongRef.current > PING_INTERVAL_MS + PONG_TIMEOUT_MS) {
-          // 连接已僵尸化：强制断开，走 onclose → scheduleReconnect
-          try { ws.close(); } catch { /* noop */ }
-          return;
-        }
-        try { ws.send(JSON.stringify({ action: "ping" })); } catch { /* noop */ }
-      }
-    };
-    pingTimer = setInterval(tick, PING_INTERVAL_MS);
-    stopPingRef.current = () => { clearInterval(pingTimer); };
-    return () => { clearInterval(pingTimer); stopPingRef.current = () => {}; };
-  }, []);
-
-  // 稳定引用，供 connect() 内部自调用（避免 useCallback 循环依赖）
-  const connectRef = useRef(connect);
-  useEffect(() => { connectRef.current = connect; }, [connect]);
-
-  useEffect(() => {
-    connect();
+    coreRef.current.connect();
     return () => {
-      if (timerRef.current) { clearTimeout(timerRef.current); timerRef.current = null; }
       // 清理所有待执行的延迟退订定时器，避免卸载后向已关闭连接发送
       pendingUnsubRef.current.forEach((t) => clearTimeout(t));
       pendingUnsubRef.current.clear();
-      if (wsRef.current) { try { wsRef.current.close(); } catch { /* noop */ } wsRef.current = null; }
+      coreRef.current.destroy();
     };
-  }, [connect]);
+  }, []);
 
   const value = useMemo(
     () => ({ subscribe, unsubscribe, state, declared: declaredRef.current.size }),
