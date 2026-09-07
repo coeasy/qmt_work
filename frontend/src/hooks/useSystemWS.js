@@ -1,6 +1,6 @@
 // 全局系统状态 WS：单例连接，周期推送系统状态（uptime/连接/交易时段），
 // 并定期 ping 测延迟。多个组件共享同一连接（通过 listeners 广播快照）。
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 const listeners = new Set();
 const brokerHandlers = new Set();
@@ -13,9 +13,11 @@ let lastLatency = null;
 let sysData = null;
 let connState = "connecting";
 
-// 最大自动重连次数：防止后端持续宕机/端口异常时无限指数退避重连
-// （项目硬性约束：WS 重连必须有上限，杜绝无限重连循环）。
+// 重连语义与 quoteHub 统一：前 10 次指数退避（0.5s→15s 封顶），之后转为 30s
+// 固定间隔慢速重连、永不放弃（此前本 hook 10 次后置 offline 等待重挂载，与
+// quoteHub 的"10 次后 30s 永不放弃"两套语义并存，系统状态条会永久显示离线）。
 const MAX_RETRIES = 10;
+const SLOW_INTERVAL = 30000;
 // 显式停机后禁止再自动重连（shutdown 事件后 onclose 不再调度重连）。
 let stopped = false;
 
@@ -41,27 +43,31 @@ export function subscribeEvent(cb) {
 
 // P2-2：便捷 hook —— 监听若干事件类型，命中即回调刷新函数。
 // types: 事件类型前缀数组（如 ["order", "trade"]）。列表为空则订阅全部事件。
+// 回调经 ref 间接调用：始终使用最新一次渲染的闭包。此前 useEffect(..., []) 只注册
+// 首帧回调 —— LimitUp 切板块后事件刷新仍打旧板块、AccountsGrid 关掉 auto 后仍被
+// 事件触发刷新（陈旧闭包），均由此修复；调用方无需传 deps。
+
 export function useServerEvents(types = [], onEvent) {
   const typeSet = new Set(types);
+  const cbRef = useRef(onEvent);
+  cbRef.current = onEvent;
   useEffect(() => {
     return subscribeEvent((msg) => {
       if (!typeSet.size || typeSet.has(msg.type)
           || [...typeSet].some((t) => msg.type && msg.type.startsWith(t))) {
-        try { onEvent(msg); } catch { /* noop */ }
+        try { cbRef.current(msg); } catch { /* noop */ }
       }
     });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 }
 
 function scheduleReconnect() {
   if (reconnectTimer || stopped) return;
-  if (retry >= MAX_RETRIES) {
-    // 已达最大重试次数：停止自动重连，置为离线并等待显式触发（组件重挂载 connect()）。
-    connState = "offline";
-    emit();
-    return;
-  }
-  const delay = Math.min(0.5 * Math.pow(2, retry), 15);
+  // 达到快速重试上限后不放弃：转 30s 慢速重连（与 quoteHub 一致），状态改 reconnecting
+  const delay = retry >= MAX_RETRIES
+    ? SLOW_INTERVAL
+    : Math.min(0.5 * Math.pow(2, retry), 15);
   retry += 1;
   connState = "reconnecting";
   emit();
