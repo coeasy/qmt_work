@@ -214,11 +214,13 @@ async def broker_profiles():
     """获取brokers / profiles（GET /brokers/profiles）。"""
     from xtquant_client.registry import BROKER_PROFILES, registry
     builtin = {p.id for p in BROKER_PROFILES}
+    # H1 修复：planned profile 也返回（前端显示为路线图，但不可连接）
     return ok([{"id": p.id, "name": p.name, "adapter": p.adapter,
                 "supported_account_types": p.supported_account_types,
                 "supported_periods": p.supported_periods,
                 "sdk_required": p.sdk_required, "min_version": p.min_version,
-                "note": p.note, "is_custom": p.id not in builtin} for p in registry.list()])
+                "note": p.note, "is_custom": p.id not in builtin,
+                "status": getattr(p, "status", "active")} for p in registry.list()])
 
 @router.get("/brokers")
 async def list_brokers():

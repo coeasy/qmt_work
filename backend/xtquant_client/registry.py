@@ -42,6 +42,9 @@ class BrokerProfile:
         default_factory=lambda: ["quote", "kline", "trade", "account", "positions"])
     features: dict = field(default_factory=dict)
     note: str = ""
+    # H1 修复：适配器实现状态。"active"=已实现可用 / "planned"=占位待实现
+    # 前端 list_profiles 只展示 active，planned 在帮助→路线图中可见
+    status: str = "active"
 
 
 # 内置券商档案（可扩展：新增券商只需在此追加一条 + 实现对应适配器）
@@ -92,17 +95,20 @@ BROKER_PROFILES: list[BrokerProfile] = [
         id="ths", name="同花顺量化", adapter="ths",
         default_client_path="", supported_account_types=["STOCK"],
         sdk_required="ths_quant_sdk", min_version="同花顺量化终端",
-        note="需安装同花顺量化 SDK"),
+        note="需安装同花顺量化 SDK（路线图）",
+        status="planned"),
     BrokerProfile(
         id="ptrade", name="恒生 PTrade", adapter="ptrade",
         default_client_path="", supported_account_types=["STOCK", "CREDIT"],
         sdk_required="ptrade_sdk", min_version="PTrade 客户端",
-        note="需安装恒生 PTrade SDK"),
+        note="需安装恒生 PTrade SDK（路线图）",
+        status="planned"),
     BrokerProfile(
         id="juejin", name="掘金量化", adapter="juejin",
         default_client_path="", supported_account_types=["STOCK", "FUTURES"],
         sdk_required="gm", min_version="掘金终端",
-        note="需 pip install gm 并登录掘金终端"),
+        note="需 pip install gm 并登录掘金终端（路线图）",
+        status="planned"),
 ]
 
 _PROFILE_MAP = {p.id: p for p in BROKER_PROFILES}
@@ -121,7 +127,10 @@ def get_profile(broker_id: str) -> BrokerProfile | None:
     return _PROFILE_MAP.get(broker_id)
 
 
-def list_profiles() -> list[BrokerProfile]:
+def list_profiles(active_only: bool = True) -> list[BrokerProfile]:
+    """返回券商档案列表。active_only=True 时只返回已实现的（status=active）。"""
+    if active_only:
+        return [p for p in BROKER_PROFILES if p.status == "active"]
     return list(BROKER_PROFILES)
 
 
