@@ -272,14 +272,21 @@ class DB:
 
         E4：params 中的 api_key/token/secret/账号自动脱敏；
         D4：写入 prev_hash/hash 构成链式哈希，任何篡改都可被 /audit/verify 检出。
+        M5 审计身份：api_key_id 从鉴权中间件的 ContextVar 读取（主密钥="master"、
+        子密钥=行 id、未鉴权=""→存 NULL），修复此前恒为 None 导致审计链身份缺失。
         """
         try:
             from gateway.masking import mask_dict
             safe_params = mask_dict(params)
         except Exception:  # noqa: BLE001
             safe_params = params
+        try:
+            from gateway.auth import current_api_key_id
+            key_id = current_api_key_id.get("") or None
+        except Exception:  # noqa: BLE001 gateway 未初始化（纯 DB 层单测等）
+            key_id = None
         rec = {
-            "actor": actor, "api_key_id": None, "action": action, "target": target,
+            "actor": actor, "api_key_id": key_id, "action": action, "target": target,
             "params_json": json.dumps(safe_params, ensure_ascii=False, default=str),
             "result": result, "ip": ip, "created_at": now_iso(),
         }

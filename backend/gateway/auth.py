@@ -8,6 +8,7 @@
 - 每密钥独立限流（rate_limit>0 时覆盖全局配额）
 """
 import hmac
+from contextvars import ContextVar
 
 from fastapi import Request
 from fastapi.responses import JSONResponse
@@ -15,6 +16,12 @@ from fastapi.responses import JSONResponse
 from .apikey import _is_public_path, scope_for_path, scope_match
 
 _LOOPBACK = {"127.0.0.1", "::1", "localhost"}
+
+# M5 审计身份：鉴权中间件把已验证的密钥身份写入 ContextVar，
+# DB.audit() 写审计时统一读取（路由层几十处 state.db.audit 调用方零改动）。
+# 值为主密钥用 "master"、子密钥用 api_keys 行 id 字符串、未鉴权（loopback/公共路径）为 ""。
+# uvicorn 每个 HTTP 请求在独立 task 中处理（context 全新拷贝），无跨请求串号风险。
+current_api_key_id: ContextVar[str] = ContextVar("current_api_key_id", default="")
 
 
 def is_loopback(request) -> bool:
@@ -63,6 +70,7 @@ def make_auth_middleware(master_key: str, store_getter, limiter_getter):
         required_scope = scope_for_path(path)
         # 1) 主密钥（向后兼容，全权限）；阶段 0-E：常量时间比较防时序侧信道
         if token and master_key and hmac.compare_digest(token, master_key):
+            current_api_key_id.set("master")
             resp = await call_next(request)
             m.record_request("admin", resp.status_code, "master")
             return resp
@@ -81,6 +89,7 @@ def make_auth_middleware(master_key: str, store_getter, limiter_getter):
                     m.record_request(required_scope or "public", 429, str(row["id"]))
                     return JSONResponse(status_code=429, content={
                         "code": 429, "message": "rate limit exceeded (api key)", "data": None})
+                current_api_key_id.set(str(row["id"]))
                 request.state.api_key_id = row["id"]
                 request.state.api_key_name = row.get("name", "")
                 resp = await call_next(request)
