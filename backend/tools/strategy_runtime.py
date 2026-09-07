@@ -123,6 +123,9 @@ class StrategyRuntime:
         return self.state.db
 
     def _ensure_tables(self) -> None:
+        # M4 迁移账本收编：strategy_runs/strategy_logs 的权威 DDL 在
+        # app/db_migrations.py v10（Database.__init__ 必然执行）。
+        # 此处保留幂等兜底执行，防止账本外建库（内存测试库等）缺表。
         db = self._db()
         for sql in _DDL:
             db.execute(sql)

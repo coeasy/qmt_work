@@ -65,7 +65,11 @@ def _safe_name(s: str) -> str:
 
 
 def _ensure_table(db) -> None:
-    """惰性建表（幂等）。依赖 state.db 自管连接。"""
+    """惰性建表（幂等）。依赖 state.db 自管连接。
+
+    M4 迁移账本收编：权威 DDL 已收编进 app/db_migrations.py v17（Database
+    初始化必然执行），此处仅作账本外建库（内存测试库等）的幂等兜底。
+    """
     db.execute(
         f"CREATE TABLE IF NOT EXISTS {_TABLE} ("
         "id TEXT PRIMARY KEY, title TEXT DEFAULT '', author TEXT DEFAULT '', "

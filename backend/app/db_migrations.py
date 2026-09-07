@@ -442,6 +442,16 @@ CREATE TABLE IF NOT EXISTS local_sync_meta (
     updated_at TEXT DEFAULT ''
 );
 """),
+    (17, """
+-- M4 迁移账本收编：strategy_market 此前是 tools/strategy_market.py 里的
+-- ad-hoc 惰性建表（账本外 schema，漂移无感知）。DDL 原样收编进迁移体系；
+-- 代码里的 _ensure_table 保留为幂等兜底（覆盖跳过迁移的内存测试库）。
+CREATE TABLE IF NOT EXISTS strategy_market (
+    id TEXT PRIMARY KEY, title TEXT DEFAULT '', author TEXT DEFAULT '',
+    description TEXT DEFAULT '', type TEXT DEFAULT '', content TEXT DEFAULT '',
+    tags_json TEXT DEFAULT '[]', created_at TEXT, downloads INTEGER DEFAULT 0
+);
+"""),
 ]
 
 
