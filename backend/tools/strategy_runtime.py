@@ -40,66 +40,30 @@ def _parse_minutes(s: str) -> Optional[int]:
 
 # ---------------- 信号计算（纯函数，复用 strategy_gen 模板逻辑） ----------------
 
-def _ma_signal(closes, fast: int, slow: int):
-    if len(closes) < slow + 1:
-        return "hold", None
-    fast_ma = float(np.mean(closes[-fast:]))
-    slow_ma = float(np.mean(closes[-slow:]))
-    prev_fast = float(np.mean(closes[-fast - 1:-1]))
-    prev_slow = float(np.mean(closes[-slow - 1:-1]))
-    if prev_fast <= prev_slow and fast_ma > slow_ma:
-        return "buy", fast_ma
-    if prev_fast >= prev_slow and fast_ma < slow_ma:
-        return "sell", fast_ma
-    return "hold", fast_ma
+# ---------------- 信号计算（统一委托 tools.indicators） ----------------
+# 历史：2026-09-07 重构 R2，把分散在 strategy_runtime.py + backtest.py 的
+# MA/MACD/RSI 实现统一到 tools/indicators.py。下面这些函数保留为薄包装，
+# 既不破坏本地 import 路径，也方便旧测试/调用方继续使用。
+
+from .indicators import last_signal_for as _last_signal_for  # noqa: F401
+from .indicators import ma_cross_last as _ma_signal  # noqa: F401
+from .indicators import macd_last as _macd_signal  # noqa: F401
+from .indicators import rsi_last as _rsi_signal  # noqa: F401
 
 
 def _ema(vals, n: int):
-    vals = np.asarray(vals, dtype=float)
-    if len(vals) == 0:
-        return vals
-    w = 2.0 / (n + 1)
-    out = np.empty_like(vals)
-    out[0] = vals[0]
-    for i in range(1, len(vals)):
-        out[i] = vals[i] * w + out[i - 1] * (1 - w)
-    return out
-
-
-def _macd_signal(closes, fast: int, slow: int, signal: int):
-    need = slow + signal + 2
-    if len(closes) < need:
-        return "hold", None
-    dif = _ema(closes, fast) - _ema(closes, slow)
-    dea = _ema(dif, signal)
-    cross_up = dea[-2] <= dif[-2] and dea[-1] > dif[-1]
-    cross_dn = dea[-2] >= dif[-2] and dea[-1] < dif[-1]
-    if cross_up:
-        return "buy", float(dif[-1])
-    if cross_dn:
-        return "sell", float(dif[-1])
-    return "hold", float(dif[-1])
+    """deprecated: 委托 tools.indicators.ema（保留为兼容本地 import）"""
+    from .indicators import ema as _ema_impl
+    return _ema_impl(vals, n)
 
 
 def _rsi(closes, n: int) -> float:
-    if len(closes) < n + 2:
+    """deprecated: 取 tools.indicators.rsi 最后一根；窗口不足时按 50.0 平局值（与原实现对齐）"""
+    from .indicators import rsi as _rsi_impl
+    arr = _rsi_impl(list(closes), n)
+    if len(arr) == 0 or (len(arr) > 0 and (arr[-1] != arr[-1])):  # NaN check
         return 50.0
-    diffs = np.diff(closes[-n - 1:])
-    gain = float(np.mean(np.clip(diffs, 0, None)))
-    loss = float(-np.mean(np.clip(diffs, None, 0)))
-    if loss == 0:
-        return 100.0
-    rs = gain / loss
-    return float(100 - 100 / (1 + rs))
-
-
-def _rsi_signal(closes, period: int, buy_at: float, sell_at: float):
-    r = _rsi(closes, period)
-    if r < buy_at:
-        return "buy", r
-    if r > sell_at:
-        return "sell", r
-    return "hold", r
+    return float(arr[-1])
 
 
 _DDL = (

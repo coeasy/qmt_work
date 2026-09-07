@@ -4,98 +4,25 @@
 - 策略：ma_cross / macd / rsi（覆盖 QMT-MCP 缺失的 MACD/RSI）
 - 指标：总收益 / 年化 / 最大回撤 / 年化波动率 / 夏普 / 交易次数 / 胜率 / 平均盈亏 / VaR
 - 覆盖 EzQmt 的「测量效果」对比：compare 多方案并排，sensitivity 参数扫描防过拟合
-"""
-import math
 
+指标实现统一从 ``tools.indicators`` 取（2026-09-07 重构 R2），避免与
+``tools.strategy_runtime`` 重复实现。
+"""
 from xtquant_client.base import BrokerNotConnectedError
 
+from .indicators import signals_for
 from .matching import MatchingConfig
 from .matching import simulate as match_simulate
 from .metrics import compute_metrics
 
 
-# ---------------- 指标 ----------------
-def _sma(values: list[float], n: int) -> list[float]:
-    out = []
-    for i in range(len(values)):
-        if i + 1 < n:
-            out.append(float("nan"))
-        else:
-            out.append(sum(values[i + 1 - n:i + 1]) / n)
-    return out
-
-
-def _ema(values: list[float], n: int) -> list[float]:
-    if not values:
-        return []
-    k = 2 / (n + 1)
-    out = [values[0]]
-    for v in values[1:]:
-        out.append(v * k + out[-1] * (1 - k))
-    return out
-
-
-def _macd(closes: list[float], fast=12, slow=26, signal=9):
-    dif = [a - b for a, b in zip(_ema(closes, fast), _ema(closes, slow))]
-    dea = _ema(dif, signal)
-    hist = [d - e for d, e in zip(dif, dea)]
-    return dif, dea, hist
-
-
-def _rsi(closes: list[float], n=14) -> list[float]:
-    out = [float("nan")] * len(closes)
-    gains, losses = [], []
-    for i in range(1, len(closes)):
-        ch = closes[i] - closes[i - 1]
-        gains.append(max(ch, 0.0)); losses.append(max(-ch, 0.0))
-        if i >= n:
-            ag = sum(gains[i - n:i]) / n
-            al = sum(losses[i - n:i]) / n
-            out[i] = 100 - 100 / (1 + (ag / al if al else 100))
-    return out
-
-
-# ---------------- 信号 ----------------
 def _signals(strategy: str, closes: list[float], params: dict) -> list[int]:
-    """返回与 closes 等长的仓位信号：1=持有，0=空仓。"""
-    n = len(closes)
-    sig = [0] * n
-    if strategy == "macd":
-        _, _, hist = _macd(closes, int(params.get("fast", 12)),
-                           int(params.get("slow", 26)), int(params.get("signal", 9)))
-        for i in range(1, n):
-            if not math.isnan(hist[i]) and not math.isnan(hist[i - 1]):
-                sig[i] = 1 if hist[i] > 0 and hist[i - 1] <= 0 else (0 if hist[i] < 0 and hist[i - 1] >= 0 else sig[i - 1])
-            else:
-                sig[i] = sig[i - 1]
-    elif strategy == "rsi":
-        p = int(params.get("period", 14))
-        r = _rsi(closes, p)
-        for i in range(1, n):
-            if not math.isnan(r[i]):
-                if r[i] < float(params.get("buy", 30)):
-                    sig[i] = 1
-                elif r[i] > float(params.get("sell", 70)):
-                    sig[i] = 0
-                else:
-                    sig[i] = sig[i - 1]
-            else:
-                sig[i] = sig[i - 1]
-    else:  # ma_cross
-        fast = _sma(closes, int(params.get("fast", 5)))
-        slow = _sma(closes, int(params.get("slow", 20)))
-        for i in range(1, n):
-            if math.isnan(fast[i]) or math.isnan(slow[i]):
-                sig[i] = sig[i - 1]
-            elif fast[i] > slow[i] and (math.isnan(fast[i - 1]) or math.isnan(slow[i - 1])
-                                        or fast[i - 1] <= slow[i - 1]):
-                sig[i] = 1
-            elif fast[i] < slow[i] and (math.isnan(fast[i - 1]) or math.isnan(slow[i - 1])
-                                        or fast[i - 1] >= slow[i - 1]):
-                sig[i] = 0
-            else:
-                sig[i] = sig[i - 1]
-    return sig
+    """返回与 closes 等长的仓位信号：1=持有，0=空仓。
+
+    委托给统一的 tools.indicators.signals_for（2026-09-07 抽取）。
+    保留此函数为兼容旧调用方。
+    """
+    return [int(x) for x in signals_for(strategy, closes, params).tolist()]
 
 
 # ---------------- 回测核心 ----------------
@@ -359,69 +286,21 @@ except ImportError:  # pragma: no cover
 
 
 def _signals_vectorized(strategy: str, closes, params: dict) -> list[int]:
-    """向量化生成仓位信号（1=持有 / 0=空仓），pandas/numpy 加速。
+    """向量化生成仓位信号（1=持有 / 0=空仓），统一委托给 tools.indicators。
 
-    与 `_signals` 语义严格一致：
-    - 状态携带（carry）：无穿越时维持上一根信号；
-    - ma_cross：当前柱无效（NaN）则携带；前一周期无效或等于边界视为「穿越触发」；
-    - macd：仅当当前与前一柱均有效、且 hist 符号翻转时穿越；
-    - rsi：阈值触发（<buy 持有、>sell 空仓），无效柱携带。
-
-    实现要点：以 NaN 为基底，仅在穿越点显式置 1/0，再用 ffill 携带——规避
-    旧版 `.where(...).where(...)` 把中性柱置 0 导致无法携带上一状态的缺陷。
+    历史背景：原实现独立维护 pandas EMA/RSI 公式（_signals_vectorized + _rsi_vectorized），
+    与 tools/strategy_runtime 的 numpy 版本语义微妙不同。2026-09-07 重构 R2 收敛为单一实现。
+    向量化优势（pandas/numpy）由 tools.indicators 内部 numpy 数组保证，无需本文件再写。
     """
-    if pd is not None and np is not None:
-        s = pd.Series(closes, dtype="float64")
-        sig = pd.Series(np.nan, index=s.index, dtype="float64")
-        if strategy == "macd":
-            fast = int(params.get("fast", 12)); slow = int(params.get("slow", 26))
-            sig_n = int(params.get("signal", 9))
-            dif = s.ewm(span=fast, adjust=False).mean() - s.ewm(span=slow, adjust=False).mean()
-            dea = dif.ewm(span=sig_n, adjust=False).mean()
-            hist = dif - dea
-            cur_valid = ~hist.isna()
-            prev_valid = ~hist.shift(1).isna()
-            cross_up = cur_valid & prev_valid & (hist > 0) & (hist.shift(1) <= 0)
-            cross_dn = cur_valid & prev_valid & (hist < 0) & (hist.shift(1) >= 0)
-            sig = sig.where(~cross_up, 1.0).where(~cross_dn, 0.0)
-        elif strategy == "rsi":
-            p = int(params.get("period", 14))
-            r = _rsi_vectorized(s, p)   # 无效柱返回 NaN -> 携带
-            buy = float(params.get("buy", 30)); sell = float(params.get("sell", 70))
-            valid = ~r.isna()
-            up = valid & (r < buy)
-            dn = valid & (r > sell)
-            sig = sig.where(~up, 1.0).where(~dn, 0.0)
-        else:  # ma_cross
-            fast = int(params.get("fast", 5)); slow = int(params.get("slow", 20))
-            fa = s.rolling(fast).mean(); sa = s.rolling(slow).mean()
-            cur_valid = ~(fa.isna() | sa.isna())
-            cur_above = (fa > sa)
-            cur_below = (fa < sa)
-            prev_invalid = fa.shift(1).isna() | sa.shift(1).isna()
-            prev_le = (fa.shift(1) <= sa.shift(1))
-            prev_ge = (fa.shift(1) >= sa.shift(1))
-            cross_up = cur_valid & cur_above & (prev_invalid | prev_le)
-            cross_dn = cur_valid & cur_below & (prev_invalid | prev_ge)
-            sig = sig.where(~cross_up, 1.0).where(~cross_dn, 0.0)
-        sig = sig.ffill().fillna(0.0).astype("int64")
-        return [int(x) for x in sig.tolist()]
-    # 回退：纯 Python（无 pandas 时）
-    return _signals(strategy, list(closes), params)
+    return [int(x) for x in signals_for(strategy, list(closes), params).tolist()]
 
 
-def _rsi_vectorized(s: "pd.Series", n: int) -> "pd.Series":
-    """向量化 RSI：与 `_rsi` 严格一致（窗口不足返回 NaN；al==0 时 ratio 取 100）。
-
-    注意：legacy `_rsi` 在 al==0 时写死 `ag/al if al else 100`，故全涨窗口 RSI≈99.0099
-    而非 NaN，这里用 `.where` 精确复刻该分支，避免信号穿越语义偏差。返回 Series。
-    """
-    delta = s.diff()
-    gain = delta.clip(lower=0).rolling(n).mean()
-    loss = (-delta.clip(upper=0)).rolling(n).mean()
-    with np.errstate(divide="ignore", invalid="ignore"):
-        ratio = (gain / loss).where(loss != 0, 100.0)
-    return 100 - 100 / (1 + ratio)  # 窗口不足处为 NaN -> 信号携带
+# 旧的 _rsi_vectorized 已废弃（2026-09-07 R2 统一到 tools.indicators.rsi），
+# 保留为薄包装避免破坏可能的外部 import：
+def _rsi_vectorized(s, n: int):
+    """deprecated: 委托给 tools.indicators.rsi（输入可为 list/Series，统一转 np.array）"""
+    from .indicators import rsi as _rsi
+    return _rsi(list(s) if hasattr(s, "tolist") else s, n)
 
 
 def _simulate(closes: list[float], sig: list[int], kline: list[dict],
