@@ -67,17 +67,56 @@ def _make_tool_func(endpoint, cap, name: str):
     return func
 
 
-def register_auto_tools(mcp) -> int:
-    """把 agent_visible 的 GET 端点注册为 MCP tool。返回新增工具数。"""
-    # FastMCP 2.14.7 的 get_tools() 是协程，无法在同步注册期 await；
-    # 直接读内部 _tool_manager._tools（dict）拿到已注册手工 tool 名，用于碰撞跳过。
-    existing = set()
+def _get_existing_tool_names(mcp) -> set[str]:
+    """获取已注册的 tool 名称集合（H2 版本守卫）。
+
+    FastMCP 各版本的 tool 管理内部结构不同：
+    - 2.14.x: mcp._tool_manager._tools (dict, 同步可读)
+    - >= 2.15: get_tools() 可能改为同步返回
+    - 未来: 可能完全私有化
+
+    策略：依次尝试私有属性 → 公共 API → 空集降级（碰撞检测跳过，不影响功能）。
+    """
+    # 方式1：FastMCP 2.14.x 的私有属性
     try:
         tm = getattr(mcp, "_tool_manager", None)
-        if tm is not None and getattr(tm, "_tools", None) is not None:
-            existing = set(tm._tools.keys())
+        if tm is not None:
+            tools = getattr(tm, "_tools", None)
+            if tools is not None and isinstance(tools, dict):
+                return set(tools.keys())
     except Exception:  # noqa: BLE001
-        existing = set()
+        pass
+
+    # 方式2：尝试公共 get_tools() API（同步版本）
+    try:
+        gt = getattr(mcp, "get_tools", None)
+        if gt is not None:
+            import inspect
+            if not inspect.iscoroutinefunction(gt):
+                result = gt()
+                if isinstance(result, dict):
+                    return set(result.keys())
+                if isinstance(result, (list, set)):
+                    names = set()
+                    for t in result:
+                        name = getattr(t, "name", None) or (t if isinstance(t, str) else None)
+                        if name:
+                            names.add(name)
+                    return names
+    except Exception:  # noqa: BLE001
+        pass
+
+    # 方式3：降级为空集 —— 碰撞检测失效，但功能不受影响
+    # 同名 tool 注册会被 FastMCP 拒绝（覆盖），仅日志告警
+    import logging
+    logging.getLogger("qmt_work.mcp").debug(
+        "无法获取已注册 tool 列表（FastMCP 版本兼容降级），碰撞检测跳过")
+    return set()
+
+
+def register_auto_tools(mcp) -> int:
+    """把 agent_visible 的 GET 端点注册为 MCP tool。返回新增工具数。"""
+    existing = _get_existing_tool_names(mcp)
 
     added = 0
     for cap in agent_visible_reads():
