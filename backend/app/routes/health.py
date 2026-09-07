@@ -1,8 +1,11 @@
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
+import logging
 
 from app.routes._common import err, ok, state
 from app.version import __version__
+
+log = logging.getLogger("qmt_work.routes.health")
 
 # --- stdlib imports injected by fix_route_imports ---
 
@@ -20,8 +23,9 @@ async def health_check():
         for c in state.broker_manager.status_list():
             brokers.append({"conn_id": c["conn_id"], "broker": c["broker_name"],
                             "connected": c["connected"], "active": c["active"]})
-    except Exception:  # noqa: BLE001
-        pass
+    except (AttributeError, RuntimeError) as exc:
+        # broker_manager 未初始化（启动早期）：返回空列表而非 500
+        log.debug("broker_manager.status_list 失败：%s", exc)
     engines = {
         "backtest_queue": state.backtest_queue is not None,
         "limitup": bool(state.limitup_monitor and state.limitup_monitor.is_running()),

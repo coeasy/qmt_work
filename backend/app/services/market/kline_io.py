@@ -84,8 +84,9 @@ async def _moneyflow_collector_loop():
                         conf = [c.strip() for c in str(raw).replace("，", ",").split(",") if c.strip()]
                         if conf:
                             watch = conf
-                    except Exception:  # noqa: BLE001
-                        pass
+                    except (AttributeError, TypeError) as exc:
+                        # 配置缺失/类型异常：使用默认 watchlist，不阻断采集
+                        log.debug("moneyflow.watchlist 配置读取失败，使用默认值：%s", exc)
                     n = await snapshot_codes(watch)
                     if n:
                         log.info("资金流自动采集 %d 条", n)
@@ -262,8 +263,9 @@ async def crawl_market(body: dict) -> dict:
                         "code": code, "dtype": "kline", "ts": bb.get("time", ""),
                         "payload_json": json.dumps(bb, ensure_ascii=False)})
                     inserted += 1
-                except Exception:
-                    pass
+                except (AttributeError, OSError, ValueError) as exc:
+                    # 单条 K 线写入失败：跳过该条，其他继续
+                    log.debug("market_cache K 线写入失败（已跳过）：%s", exc)
         else:
             # 统一经 KlineCache 落库（热/归档分离）：抓取结果直接进入图表/回测查询链路
             inserted += await cache.aput(code, period, bars, adjust)

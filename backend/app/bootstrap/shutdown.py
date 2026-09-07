@@ -25,8 +25,9 @@ async def shutdown(app: FastAPI) -> None:
             await state.ws_manager.broadcast(
                 "system", {"event": "shutdown",
                            "message": "服务正在关闭，稍后将自动重连"})
-        except Exception:  # noqa: BLE001
-            pass
+        except (asyncio.CancelledError, ConnectionError, RuntimeError) as exc:
+            # 关停期广播失败不阻断其他清理
+            log.debug("ws shutdown 广播失败（已忽略）：%s", exc)
 
     # 2. 系统广播
     _system_task = getattr(app.state, "_system_task", None)
@@ -34,8 +35,9 @@ async def shutdown(app: FastAPI) -> None:
         _system_task.cancel()
         try:
             await _system_task
-        except (asyncio.CancelledError, Exception):  # noqa: BLE001
-            pass
+        except (asyncio.CancelledError, RuntimeError) as exc:
+            # 系统广播 task 关停本身可预期被取消
+            log.debug("system broadcast task 关停异常（已忽略）：%s", exc)
 
     # 3. DB 备份
     db_backup = getattr(app.state, "_db_backup", None)
@@ -99,8 +101,9 @@ async def shutdown(app: FastAPI) -> None:
     for conn in state.broker_manager.all_connections():
         try:
             await conn.bridge.stop()
-        except Exception:  # noqa: BLE001
-            pass
+        except (ConnectionError, RuntimeError, OSError) as exc:
+            # bridge 子进程可能在父进程退出前已自杀；不阻断
+            log.debug("bridge %s 关停异常（已忽略）：%s", conn.id, exc)
 
     log.info("qmt_work stopped")
 

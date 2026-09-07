@@ -333,7 +333,9 @@ class EltdxSource(DataSource):
                                 start += len(recs)
                                 if start > 20000:
                                     break
-                        except Exception:  # noqa: BLE001 单个分类枚举失败不影响整体
+                        except (ConnectionError, OSError, RuntimeError, ValueError) as exc:
+                            # 单个分类枚举失败不影响整体：记录调试级日志，避免全量失败时无从排查
+                            log.debug("eltdx 枚举分类失败（已跳过）：%s", exc)
                             continue
                     # 2.2) 用 stock_profile_table 批量取证券简称。一次几百上千条，全市场约数
                     #      秒；分批 + 逐批容错，避免单条脏数据拖垮整张名称表。
@@ -349,7 +351,9 @@ class EltdxSource(DataSource):
                                     continue
                                 nm = (getattr(row, "name", "") or "").strip()
                                 m[f"{fc[2:]}.{fc[:2].upper()}"] = _normalize_name(nm)
-                        except Exception:  # noqa: BLE001
+                        except (AttributeError, TypeError, ValueError) as exc:
+                            # 单批 stock_profile_table 失败：本批中文名缺失，2.3 步会兜底填空串
+                            log.debug("eltdx stock_profile_table 批次失败（已跳过）：%s", exc)
                             continue
                     # 2.3) 兜底：未取得中文名的已枚举代码也入库（保证可搜索 / is_ready 为真）
                     for cd, ex, _ in ent:

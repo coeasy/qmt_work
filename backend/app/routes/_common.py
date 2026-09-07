@@ -4,6 +4,7 @@
 统一从此处导入 ok/err/_need/_call 与共享符号，避免循环依赖、保持单一真相来源。
 """
 import asyncio
+import logging
 
 from fastapi import Request, WebSocket, WebSocketDisconnect
 
@@ -13,6 +14,8 @@ from app.state import state
 from xtquant_client.base import BrokerError
 from xtquant_client.manager import ConnectionConfig  # noqa: F401  (re-export for routes: broker.py)
 from xtquant_client.registry import get_profile, list_profiles  # noqa: F401  (re-export for routes: broker.py)
+
+log = logging.getLogger("qmt_work.routes.common")
 
 
 def ok(data) -> dict:
@@ -41,9 +44,9 @@ def audit_log(actor: str, action: str, target: str, params: dict | None = None,
     """
     try:
         state.db.audit(actor, action, target, params or {}, result, ip)
-    except Exception:  # noqa: BLE001
+    except (AttributeError, OSError, RuntimeError) as exc:
         # 审计失败不阻断业务路径（仅丢一条审计记录，可观测性降级）
-        pass
+        log.debug("审计写入失败（已忽略）：%s.%s %s: %s", actor, action, target, exc)
 
 
 def _need(conn_id: str | None = None):

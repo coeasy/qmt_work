@@ -279,8 +279,9 @@ def agent_broker_name(body: dict, broker_id: str) -> str:
         accounts = _resolve_account(body.get("client_path", ""), "", "STOCK")["accounts"]
         if accounts and accounts[0].get("broker_name"):
             return f"{accounts[0]['broker_name']} QMT"
-    except Exception:  # noqa: BLE001
-        pass
+    except (FileNotFoundError, ValueError, KeyError, AttributeError) as exc:
+        # client_path 无效/QMT 未装/account 字段缺失：取账户名兜底
+        log.debug("_resolve_account 失败，回退到 profile.name：%s", exc)
     prof = get_profile(broker_id)
     if prof is not None:
         return prof.name
@@ -388,8 +389,9 @@ async def batch_remove_brokers(body: dict):
         try:
             state.broker_manager.remove(conn_id)
             removed.append(conn_id)
-        except Exception:  # noqa: BLE001
-            continue
+        except (KeyError, ConnectionError, RuntimeError) as exc:
+            # 单条删除失败：继续处理剩余项，整体不阻断
+            log.warning("删除连接 %s 失败，已跳过：%s", conn_id, exc)
     state.db.audit("broker", "broker.batch_remove", f"#{len(removed)}", {"ids": removed}, "ok")
     return ok({"removed": removed, "deleted": len(removed)})
 

@@ -2,9 +2,13 @@
 
 引擎实例由集成方注入 `state.paper_engine`（未注入时统一返回 503）。
 """
+import logging
+
 from fastapi import APIRouter
 
 from app.routes._common import err, ok, state
+
+log = logging.getLogger("qmt_work.routes.paper")
 
 router = APIRouter()
 
@@ -55,8 +59,9 @@ async def paper_order(body: dict):
             db.audit("paper", "paper.order", order["code"],
                      {"side": order["side"], "price": order["price"],
                       "volume": order["volume"]}, "filled")
-        except Exception:  # noqa: BLE001 审计失败不影响模拟撮合
-            pass
+        except (AttributeError, OSError, RuntimeError) as exc:
+            # 审计失败不影响模拟撮合：仅丢一条审计记录
+            log.debug("paper 审计写入失败（已忽略）：%s", exc)
     return ok(order)
 
 
