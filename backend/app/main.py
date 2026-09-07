@@ -182,13 +182,6 @@ def create_app() -> FastAPI:
             async with app_lifespan(app):
                 yield
 
-
-    @asynccontextmanager
-    async def combined_lifespan(app: FastAPI):
-        async with mcp_app.router.lifespan_context(mcp_app):
-            async with app_lifespan(app):
-                yield
-
     app = FastAPI(
         title="qmt_work 量化交易网关",
         version=__version__,
