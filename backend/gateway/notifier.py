@@ -33,6 +33,9 @@ from typing import Any
 
 import httpx
 
+# H3 敏感参数静态加密：落库前加密 secret/password/url/auth，读取时解密
+from app.crypto import decrypt_fields, encrypt_fields
+
 
 @dataclass
 class NotifyMessage:
@@ -128,7 +131,7 @@ class Notifier:
                 "FROM notifications ORDER BY id")
             for r in rows:
                 try:
-                    r["params"] = json.loads(r.get("params_json") or "{}")
+                    r["params"] = decrypt_fields(json.loads(r.get("params_json") or "{}"))
                 except Exception:  # noqa: BLE001
                     r["params"] = {}
             self._cache = rows
@@ -297,7 +300,7 @@ class Notifier:
             "created_at, updated_at FROM notifications ORDER BY id")
         for r in rows:
             try:
-                r["params"] = json.loads(r.pop("params_json", "{}"))
+                r["params"] = decrypt_fields(json.loads(r.pop("params_json", "{}")))
             except Exception:  # noqa: BLE001
                 r["params"] = {}
         return rows
@@ -308,7 +311,7 @@ class Notifier:
             "created_at, updated_at FROM notifications WHERE id=?", (nid,))
         if row:
             try:
-                row["params"] = json.loads(row.pop("params_json", "{}"))
+                row["params"] = decrypt_fields(json.loads(row.pop("params_json", "{}")))
             except Exception:  # noqa: BLE001
                 row["params"] = {}
         return row
@@ -320,7 +323,8 @@ class Notifier:
             "enabled": 1 if data.get("enabled", True) else 0,
             "events": data.get("events", "*"),
             "template": data.get("template", "{{title}}\n{{body}}"),
-            "params_json": json.dumps(data.get("params", {}), ensure_ascii=False),
+            "params_json": json.dumps(encrypt_fields(data.get("params", {})),
+                                      ensure_ascii=False),
             "updated_at": _now_iso(),
         }
         if "id" in data and data["id"]:
