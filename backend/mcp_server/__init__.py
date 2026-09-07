@@ -5,7 +5,7 @@
 """
 from fastmcp import FastMCP
 
-from app.state import state
+from core.state import state
 from mcp_server.auto_expose import register_auto_tools
 from tools.account import register_account_tools
 from tools.algo import register_algo_tools
