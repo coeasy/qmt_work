@@ -589,6 +589,9 @@ def create_app() -> FastAPI:
         lambda: state.rate_limiter))
     app.middleware("http")(make_rate_limit_middleware(limiter))
     # X-Request-ID 链路追踪（最外层，确保 auth/rate_limit 及路由日志都带请求号）
+    # 响应信封兜底：包在 request_id 之外（内层），所有 /api/v1/* 端点自动符合 {code:0,data} 契约
+    from app.middleware.envelope import EnvelopeMiddleware
+    app.add_middleware(EnvelopeMiddleware)
     app.middleware("http")(request_id_middleware)
     # CORS（P1）：可配置跨域来源（QMT_CORS_ORIGINS 逗号分隔；空=不启用，仅同源）。
     # 置于最后添加 = 最外层，确保 OPTIONS 预检请求不被鉴权/限流拦截。
