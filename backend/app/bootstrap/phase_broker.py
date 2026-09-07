@@ -11,8 +11,8 @@ import asyncio
 import logging
 import time
 
-from app.config import settings
-from app.state import state
+from core.config import settings
+from core.state import state
 from fastapi import FastAPI
 from xtquant_client.manager import ConnectionConfig
 

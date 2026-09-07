@@ -622,7 +622,7 @@ _manager: Optional[DataSourceManager] = None
 
 
 def _default_broker_factory(conn_id: Optional[str]):
-    from app.state import state
+    from core.state import state
     if state.broker_manager is None:
         return None
     b = state.broker_manager.bridge(conn_id)

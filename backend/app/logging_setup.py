@@ -11,7 +11,7 @@ import logging
 import logging.handlers
 import os
 
-from app.config import settings
+from core.config import settings
 
 _FILE_FMT = "%(asctime)s %(levelname)s %(name)s [%(request_id)s] %(message)s"
 _CONSOLE_FMT = "%(asctime)s %(levelname)s %(name)s [%(request_id)s] %(message)s"

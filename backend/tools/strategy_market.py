@@ -7,7 +7,7 @@ import uuid
 import zipfile
 from datetime import datetime, timezone
 
-from app.state import state
+from core.state import state
 from tools.strategy_gen import _TEMPLATES, save_qmt_strategy
 
 # 策略市场表名（state.db 自管建表）

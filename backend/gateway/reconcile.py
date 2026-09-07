@@ -210,7 +210,7 @@ class OrderReconciler:
                 try:
                     iv = interval
                     try:
-                        from app.state import state
+                        from core.state import state
                         if state.runtime_config is not None:
                             iv = state.runtime_config.reconcile_interval
                     except Exception:  # noqa: BLE001

@@ -68,7 +68,7 @@ async def market_export(body: Dict[str, Any]):
         if fmt == "json":
             return ok({"format": "json", "content": to_json(rows),
                        "filename": f"{safe_name}.json", "count": len(rows)})
-        from app.config import settings
+        from core.config import settings
         out_dir = Path(str(settings.db_path)).parent / "exports"
         out_dir.mkdir(parents=True, exist_ok=True)
         path = out_dir / f"{safe_name}.xlsx"

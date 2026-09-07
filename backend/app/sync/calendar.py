@@ -58,7 +58,7 @@ _CALENDAR_MAX_YEAR = 2027  # 内置表覆盖的最后一年
 def _config_extra(kind: str) -> set[str]:
     """runtime_config 追加项：market.calendar.{holidays,workdays}（逗号分隔）。"""
     try:
-        from app.state import state
+        from core.state import state
         rc = getattr(state, "runtime_config", None)
         raw = (rc.get(f"market.calendar.{kind}") or "") if rc else ""
         return {s.strip() for s in str(raw).replace("，", ",").split(",") if s.strip()}

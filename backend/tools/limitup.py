@@ -194,7 +194,7 @@ class LimitUpMonitor:
                     return
             # 阶段 0-B（F7）：经统一入口提交，携带完整风控（熔断/频率/持仓比例/黑白名单/
             # 日额度），不再直接 gateway.place_order 绕过。auto_confirm=True 跳过人工 TOTP。
-            from app.state import state
+            from core.state import state
             res = await state.signal_router.submit(
                 code, "buy", vol, float(limit_price), "limit",
                 source="limitup", remark="打板自动买入", auto_confirm=True)
@@ -215,7 +215,7 @@ class LimitUpMonitor:
 
     @staticmethod
     def _audit(action: str, target: str, params: dict, result: str) -> None:
-        from app.state import state
+        from core.state import state
         if state.db is not None:
             try:
                 state.db.audit("limitup", action, target, params, result)
@@ -231,7 +231,7 @@ class LimitUpMonitor:
 
 
 def _monitor():
-    from app.state import state
+    from core.state import state
     if state.limitup_monitor is None:
         raise BrokerError("涨停监控未初始化")
     return state.limitup_monitor

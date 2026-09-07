@@ -27,7 +27,7 @@ from typing import Awaitable, Callable
 
 from fastapi import FastAPI
 
-from app.state import state
+from core.state import state
 
 log = logging.getLogger("qmt_work.bootstrap")
 

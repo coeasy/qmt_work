@@ -12,7 +12,7 @@ from xtquant_client.base import BrokerError
 from app.datasource.registry import get_hub
 from app.db import get_db
 from app.services.market.common import BOARD_MF_SEM
-from app.state import MSG_NO_BROKER, state
+from core.state import MSG_NO_BROKER, state
 
 log = logging.getLogger("qmt_work.market")
 

@@ -130,7 +130,7 @@ class TargetPortfolioEngine:
 
 
 def _engine():
-    from app.state import state
+    from core.state import state
     if state.signal_router is None:
         from xtquant_client.base import BrokerError
         raise BrokerError("信号路由未初始化")

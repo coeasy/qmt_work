@@ -300,7 +300,7 @@ class ConditionOrderEngine:
                 log.warning("condition loop error: %s", exc)
             interval = float(self._cfg.get("interval", 2.0))
             try:
-                from app.state import state
+                from core.state import state
                 if state.runtime_config is not None:
                     interval = state.runtime_config.condition_interval
             except Exception:  # noqa: BLE001
@@ -367,7 +367,7 @@ class ConditionOrderEngine:
             self._emit({"type": "condition_triggered", "data": self._view(o)})
         # 阶段 0-B（F6）：统一经 SignalRouter.submit()，由它完成风控 + 幂等 + 审计 + 真实下单。
         try:
-            from app.state import state
+            from core.state import state
             sr = state.signal_router
             price = o["price"] if (o["price_type"] == "limit" and o["price"] > 0) else last_price
             if sr is None:
@@ -498,7 +498,7 @@ class ConditionOrderEngine:
 
 
 def _engine():
-    from app.state import state
+    from core.state import state
     if state.condition_engine is None:
         raise BrokerError("条件单引擎未初始化")
     return state.condition_engine

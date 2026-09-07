@@ -436,7 +436,7 @@ class StrategyRuntime:
             else:
                 # 实盘：经统一下单入口，携带完整风控（熔断/单笔/频率/黑白名单/日额度）。
                 # auto_confirm=True：已授权策略单跳过人工 TOTP 挂起，但仍过风控。
-                from app.state import state
+                from core.state import state
                 res = await state.signal_router.submit(
                     code, direction, volume, price, "limit",
                     source=f"bot:{run_id}", broker_id=run.get("conn_id") or "",

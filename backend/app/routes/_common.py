@@ -9,8 +9,8 @@ import logging
 from fastapi import Request, WebSocket, WebSocketDisconnect
 
 from app import crypto  # noqa: F401  (re-export for routes: config.py/signal.py)
-from app.config import settings
-from app.state import state
+from core.config import settings
+from core.state import state
 from xtquant_client.base import BrokerError
 from xtquant_client.manager import ConnectionConfig  # noqa: F401  (re-export for routes: broker.py)
 from xtquant_client.registry import get_profile, list_profiles  # noqa: F401  (re-export for routes: broker.py)
@@ -28,7 +28,7 @@ def err(code: int, message: str, extra=None) -> dict:
 
 
 # 无券商连接的统一 503 文案（单一真相源在 app/state.py；零 mock 降级口径见 README）。
-from app.state import MSG_NO_BROKER  # noqa: E402  (re-export 供各路由域使用)
+from core.state import MSG_NO_BROKER  # noqa: E402  (re-export 供各路由域使用)
 
 
 def no_broker() -> dict:

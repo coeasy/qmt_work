@@ -14,12 +14,12 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
-from app.config import BASE_DIR, settings
+from core.config import BASE_DIR, settings
 from app.logging_setup import setup_logging
 from app.middleware.envelope import EnvelopeMiddleware
 from app.middleware.request_id import request_id_middleware
 from app.routes import router
-from app.state import state
+from core.state import state
 from app.version import __version__
 from gateway.auth import make_auth_middleware
 from gateway.rate_limit import RateLimiter, make_rate_limit_middleware

@@ -35,7 +35,7 @@ class Signal:
 class SignalRouter:
     def __init__(self, manager, risk=None, db=None, wal=None, notifier=None, on_event=None,
                  runtime_config=None):
-        from app.config import settings
+        from core.config import settings
         self._manager = manager
         self._risk = risk
         self._db = db

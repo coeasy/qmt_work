@@ -50,7 +50,7 @@ class BrokerHealthMonitor:
                 log.warning("broker health loop error: %s", exc)
             interval = self._check_interval
             try:
-                from app.state import state
+                from core.state import state
                 if state.runtime_config is not None:
                     interval = state.runtime_config.health_check_interval
             except Exception:  # noqa: BLE001

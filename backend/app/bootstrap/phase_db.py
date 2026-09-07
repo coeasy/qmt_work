@@ -11,9 +11,9 @@ from __future__ import annotations
 
 import logging
 
-from app.config import settings
+from core.config import settings
 from app.db import init_db
-from app.state import state
+from core.state import state
 from fastapi import FastAPI
 
 log = logging.getLogger("qmt_work.bootstrap.db")

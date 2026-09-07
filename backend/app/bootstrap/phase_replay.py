@@ -9,7 +9,7 @@ import asyncio
 import json
 import logging
 
-from app.state import state
+from core.state import state
 from fastapi import FastAPI
 
 log = logging.getLogger("qmt_work.bootstrap.replay")
@@ -78,7 +78,7 @@ def _replay_algos() -> None:
 async def setup(app: FastAPI) -> dict:
     _replay_algos()
 
-    from app.config import settings
+    from core.config import settings
     from gateway.reconcile import OrderReconciler
     state.reconciler = OrderReconciler(
         state.broker_manager, wal=state.wal, db=state.db,

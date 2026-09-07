@@ -58,7 +58,7 @@ def _normalize_name(nm: str) -> str:
 def _cache_dir() -> Path:
     """返回运行时数据目录（与 app.db 同目录）。"""
     try:
-        from app.config import settings
+        from core.config import settings
         d = Path(str(settings.db_path)).parent
     except Exception:  # noqa: BLE001
         d = Path("data")

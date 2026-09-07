@@ -11,7 +11,7 @@ from . import get_bridge
 
 
 def _audit(action: str, target: str, params: dict, result: str):
-    from app.state import state
+    from core.state import state
     if state.db is not None:
         try:
             state.db.audit("trading", action, target, params, result)

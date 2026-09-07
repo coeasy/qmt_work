@@ -18,7 +18,7 @@ from app.services.market.common import (
     TTL,
     configured_indices,
 )
-from app.state import state
+from core.state import state
 
 
 def _now() -> str:

@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 import logging
 
-from app.state import state
+from core.state import state
 from fastapi import FastAPI
 from sync import SyncEngine, WSManager
 
@@ -31,7 +31,7 @@ async def setup(app: FastAPI) -> dict:
             log.warning("load risk config failed, use defaults: %s", exc)
 
     # 行情共享总线（默认内存；配置 redis 时跨进程共享）
-    from app.config import settings
+    from core.config import settings
     from gateway.quote_bus import create_quote_bus
     state.quote_bus = create_quote_bus(
         redis_url=settings.quote_bus_redis_url,

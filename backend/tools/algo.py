@@ -412,7 +412,7 @@ class AlgoEngine:
         retries = 3
         window = 1.0
         try:
-            from app.state import state as _st
+            from core.state import state as _st
             if getattr(_st, "runtime_config", None) is not None:
                 window = float(_st.runtime_config.get("algo.confirm_timeout") or 3.0)
                 retries = max(1, int(_st.runtime_config.get("algo.confirm_retries") or 5))
@@ -460,7 +460,7 @@ class AlgoEngine:
             # 阶段 0-B（F6）：经统一下单入口提交，携带完整风控（熔断/单笔/频率/黑白名单/
             # 日额度），不再直接 gateway.place_order 绕过。auto_confirm=True：已授权算法单
             # 跳过人工 TOTP 挂起，但仍走风控校验。
-            from app.state import state
+            from core.state import state
             res = await state.signal_router.submit(
                 job["code"], job["direction"], vol, price, price_type,
                 source=f"algo_{job['algo']}", remark=job.get("remark", ""),
@@ -481,7 +481,7 @@ class AlgoEngine:
                      "ts": time.strftime("%H:%M:%S")}
             job["children"].append(child)
             self._emit({"type": "algo_slice", "data": {"algo_id": aid, **child}})
-            from app.state import state as _st
+            from core.state import state as _st
             if _st.db is not None:
                 try:
                     _st.db.audit("algo", "algo.slice", f"{aid}:{job['code']}",
@@ -497,7 +497,7 @@ class AlgoEngine:
 
 
 def _engine():
-    from app.state import state
+    from core.state import state
     if state.algo_engine is None:
         raise BrokerError("算法单引擎未初始化")
     return state.algo_engine

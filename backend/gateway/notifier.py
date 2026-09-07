@@ -34,7 +34,7 @@ from typing import Any
 import httpx
 
 # H3 敏感参数静态加密：落库前加密 secret/password/url/auth，读取时解密
-from app.crypto import decrypt_fields, encrypt_fields
+from core.crypto import decrypt_fields, encrypt_fields
 
 
 @dataclass

@@ -10,7 +10,7 @@ from . import get_bridge
 
 
 def _audit(action: str, target: str, params: dict, result: str):
-    from app.state import state
+    from core.state import state
     if state.db is not None:
         try:
             state.db.audit("position", action, target, params, result)
@@ -66,7 +66,7 @@ def register_position_tools(mcp, risk):
             return plan
         # 阶段 0-B（F6）：统一经 SignalRouter.submit()，由它完成
         # 风控(check_order) + 幂等 + 审计 + 真实下单，杜绝绕过风控直接 place_order。
-        from app.state import state
+        from core.state import state
         sr = state.signal_router
         if sr is None:
             raise BrokerError("信号路由器未初始化")

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 
-from app.state import state
+from core.state import state
 from fastapi import FastAPI
 
 log = logging.getLogger("qmt_work.bootstrap.misc")

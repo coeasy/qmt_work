@@ -101,7 +101,7 @@ class LogAlertHandler(logging.Handler):
 
 def setup_log_alert(root: logging.Logger) -> None:
     """若配置了日志告警 webhook，则挂载 LogAlertHandler。"""
-    from app.config import settings
+    from core.config import settings
     webhook = (settings.log_alert_webhook or "").strip()
     if not webhook:
         return
