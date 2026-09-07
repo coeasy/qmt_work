@@ -7,6 +7,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import contextlib
 import os
 import sqlite3
 import threading
@@ -27,6 +28,63 @@ _AUDIT_HASH_FIELDS = ("actor", "api_key_id", "action", "target",
 
 _lock = threading.Lock()
 _audit_lock = threading.Lock()
+
+
+class _RWLock:
+    """读写锁（M3）：读共享、写独占、写优先防饥饿。
+
+    背景：原实现所有读写共用一把 threading.Lock —— WAL 虽让 SQLite 层面
+    读写可并发，但应用层互斥把读也串行化了，长事务（行情微批写盘/备份）
+    期间所有查询排队。现拆为读写锁：查询走 read（共享），写/迁移/备份走
+    write（独占）。
+
+    安全前提：共享连接并发读要求 sqlite3 serialized 模式（threadsafety>=3，
+    CPython 默认满足）。若运行环境 threadsafety<3，read() 自动降级为独占，
+    行为与旧实现完全一致。
+    """
+
+    def __init__(self, concurrent_reads: bool = True):
+        self._cond = threading.Condition()
+        self._readers = 0
+        self._writer = False
+        self._writers_waiting = 0
+        self._concurrent = concurrent_reads
+
+    @contextlib.contextmanager
+    def read(self):
+        if not self._concurrent:
+            with self.write():
+                yield
+            return
+        with self._cond:
+            while self._writer or self._writers_waiting:
+                self._cond.wait()
+            self._readers += 1
+        try:
+            yield
+        finally:
+            with self._cond:
+                self._readers -= 1
+                if self._readers == 0:
+                    self._cond.notify_all()
+
+    @contextlib.contextmanager
+    def write(self):
+        with self._cond:
+            self._writers_waiting += 1
+            while self._writer or self._readers:
+                self._cond.wait()
+            self._writers_waiting -= 1
+            self._writer = True
+        try:
+            yield
+        finally:
+            with self._cond:
+                self._writer = False
+                self._cond.notify_all()
+
+
+_rw = _RWLock(concurrent_reads=sqlite3.threadsafety >= 3)
 
 
 def now_iso() -> str:
@@ -60,6 +118,10 @@ class DB:
         self._conn = sqlite3.connect(str(path), check_same_thread=False,
                                      timeout=10.0)
         self._conn.row_factory = sqlite3.Row
+        # M3 读写分离：读走独立只读连接（WAL 允许「一写多读」并发；同一连接上
+        # 写提交会打断本连接未完成的读游标——这是原实现全量互斥的根因）。
+        # _ro=None 未初始化 / False=不可用（内存库等）→ 查询回退主连接写锁。
+        self._ro = None if str(path) != ":memory:" else False
         # WAL 模式：读写并发不互斥（审计/K线缓存/快照高频写时读不阻塞），
         # 崩溃恢复更稳；synchronous=NORMAL 在 WAL 下仍保证不丢已提交事务。
         try:
@@ -91,7 +153,7 @@ class DB:
         for version, sql in sorted(_MIGRATIONS):
             if version in done:
                 continue
-            with _lock:
+            with _rw.write():
                 # 显式事务包裹（含 DDL）：任一步失败即整体回滚
                 self._conn.execute("BEGIN")
                 try:
@@ -120,12 +182,12 @@ class DB:
                 continue
             for c in extras:
                 if c not in cols:
-                    with _lock:
+                    with _rw.write():
                         self._conn.execute(
                             f"ALTER TABLE {table} ADD COLUMN {c} TEXT DEFAULT ''")
 
     def execute(self, sql: str, params: tuple = ()) -> sqlite3.Cursor:
-        with _lock:
+        with _rw.write():
             cur = self._conn.execute(sql, params)
             self._conn.commit()
             return cur
@@ -134,13 +196,37 @@ class DB:
         """批量写（同锁 + 单事务提交），供本地数据仓等批量导入场景使用。"""
         if not seq:
             return
-        with _lock:
+        with _rw.write():
             self._conn.executemany(sql, seq)
             self._conn.commit()
 
+    def _read_conn(self):
+        """惰性创建只读连接（URI mode=ro）；失败置 False 永久回退主连接。"""
+        if self._ro is None:
+            try:
+                conn = sqlite3.connect(f"file:{self.path}?mode=ro", uri=True,
+                                       timeout=10.0)
+                conn.row_factory = sqlite3.Row
+                conn.execute("PRAGMA busy_timeout=5000")
+                self._ro = conn
+            except sqlite3.Error:
+                self._ro = False
+        return self._ro or None
+
     def query(self, sql: str, params: tuple = ()) -> list[dict]:
-        with _lock:
-            rows = self._conn.execute(sql, params).fetchall()
+        # M3 读写锁：查询共享持有（走 RO 连接），写事务期间读不再排队。
+        rows = None
+        with _rw.read():
+            ro = self._read_conn()
+            if ro is not None:
+                try:
+                    rows = ro.execute(sql, params).fetchall()
+                except sqlite3.Error:
+                    rows = None  # RO 连接异常：释放读锁后回退主连接
+        if rows is None:
+            # 回退路径：主连接上的读必须与写互斥（同连接写提交会打断读游标）
+            with _rw.write():
+                rows = self._conn.execute(sql, params).fetchall()
         return [dict(r) for r in rows]
 
     def query_one(self, sql: str, params: tuple = ()) -> dict | None:
@@ -150,7 +236,7 @@ class DB:
     def insert(self, table: str, data: dict) -> int:
         keys = list(data.keys())
         sql = f"INSERT INTO {table} ({','.join(keys)}) VALUES ({','.join('?' * len(keys))})"
-        with _lock:
+        with _rw.write():
             cur = self._conn.execute(sql, tuple(data.values()))
             self._conn.commit()
             return int(cur.lastrowid)
@@ -162,7 +248,7 @@ class DB:
         """
         keys = list(data.keys())
         sql = f"INSERT OR REPLACE INTO {table} ({','.join(keys)}) VALUES ({','.join('?' * len(keys))})"
-        with _lock:
+        with _rw.write():
             cur = self._conn.execute(sql, tuple(data.values()))
             self._conn.commit()
             return int(cur.lastrowid)
@@ -191,7 +277,7 @@ class DB:
     def executemany_in_txn(self, sql: str, seq) -> None:
         """单事务批量执行（一条 commit），用于行情写盘微批化，把「每 tick 一 commit」
         降为「每窗口一 commit」，显著降低高频订阅多标的时的 fsync/QPS 压力。"""
-        with _lock:
+        with _rw.write():
             self._conn.executemany(sql, seq or [])
             self._conn.commit()
 
@@ -209,7 +295,7 @@ class DB:
         if want < 1:
             want = 20
         removed = 0
-        with _lock:
+        with _rw.write():
             groups = self._conn.execute(
                 "SELECT code, dtype, COUNT(*) FROM market_cache "
                 "GROUP BY code, dtype HAVING COUNT(*) > ?", (want,)).fetchall()
@@ -247,7 +333,7 @@ class DB:
                 os.remove(tmp)
             dst_conn = sqlite3.connect(tmp)
             try:
-                with _lock:
+                with _rw.write():
                     self._conn.backup(dst_conn)
                 dst_conn.commit()
             finally:
