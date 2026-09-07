@@ -647,8 +647,8 @@ def get_manager() -> DataSourceManager:
     return _manager
 
 
-# 兼容别名：早期重构片段曾用 app.datasource.manager.{get_hub, MarketDataUnavailable,
-# MarketDataHub}；统一收敛到本模块后，这里保留别名以避免旧引用断链。
+# 统一入口：get_hub() 返回全局 DataSourceManager 单例（旧 app.datasource.manager
+# 兼容层已删除，全部引用收敛到本模块）。MarketDataHub 为历史别名，勿在新代码使用。
 get_hub = get_manager
 MarketDataHub = DataSourceManager
 MarketDataUnavailable = DataSourceUnavailable

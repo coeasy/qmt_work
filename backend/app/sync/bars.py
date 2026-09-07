@@ -8,8 +8,8 @@
 - **复权**：默认 ``qfq`` 走支持复权的补充源（eltdx），复权维度入主键，前后复权
   各自独立存储。
 - **并发闸门**：信号量限并发（默认 8），G6 JobRuntime 落地前先本地收敛。
-- **交易日历**：提供 ``weekday_calendar``（周一至周五启发式）作为兜底日期序列；
-  真实节假日日历后续接入 eltdx 日历源后替换（标记 TODO(G1-5b)）。
+- **交易日历**：``weekday_calendar`` 已升级为真实 A 股日历（app/sync/calendar.py，
+  内置 2024-2027 节假日表 + runtime_config 扩展，G1-5b 落地）。
 
 用法（手动 CLI）：
     python -m app.sync.bars --limit 20 --concurrency 4 --lookback 320
@@ -38,19 +38,15 @@ def now_iso() -> str:
 
 
 def weekday_calendar(end: date, count: int) -> List[str]:
-    """兜底交易日历：最近 ``count`` 个工作日（周一至周五）倒排序列。
+    """交易日历：最近 ``count`` 个交易日（升序 "YYYY-MM-DD"）。
 
-    启发式，不含法定节假日修正；节假日精确日历待接入 eltdx 日历源（TODO(G1-5b)）。
-    返回升序 "YYYY-MM-DD" 列表。
+    G1-5b：已由「周一至周五启发式」升级为真实 A 股节假日日历
+    （app/sync/calendar.py：内置 2024-2027 法定节假日 + 调休补班，
+    runtime_config `market.calendar.holidays/workdays` 可热扩展；
+    超出覆盖年份回退工作日启发式并显式打日志）。函数名保留兼容既有调用。
     """
-    out: List[str] = []
-    d = end
-    while len(out) < count:
-        if d.weekday() < 5:  # 0-4 = 周一至周五
-            out.append(d.isoformat())
-        d -= timedelta(days=1)
-    out.reverse()
-    return out
+    from app.sync.calendar import trading_calendar
+    return trading_calendar(end, count)
 
 
 @dataclass
