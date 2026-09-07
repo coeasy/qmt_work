@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../api.js";
 import { navToQuote } from "../lib/nav.js";
+import OrderTicketModal from "./ui/OrderTicketModal.jsx";
 import { useQuotes } from "../lib/quoteHub.jsx";
 import { peek as hubPeek, subscribe as hubSubscribe } from "../lib/dataHub.js";
 // 金额格式化统一走 lib/format.js（原本地副本已删除，避免第 3 份口径漂移）
@@ -176,6 +177,11 @@ export default function QuoteBoard() {
 
   const setSortKey = (k) => setSort((s) => (s.k === k ? { k, dir: -s.dir } : { k, dir: k === "code" || k === "name" ? 1 : -1 }));
 
+  const [ticket, setTicket] = useState(null);   // 快速下单弹窗（OrderTicketModal 统一封装）
+  const openTicket = (stock, side) => setTicket({
+    open: true, code: stock.code, name: stock.name || stock.code,
+    last: Number(stock.last) || undefined, side,
+  });
   const openStock = (code) => {
     // v3：nav 协议带参直达（多实例行情 tab 各看各的票，不再写 sessionStorage）
     navToQuote(code);
@@ -235,6 +241,11 @@ export default function QuoteBoard() {
                       <td className={`num ${r[g.k] == null ? "" : r[g.k] >= 0 ? "up" : "down"}`}>
                         {g.k === "amount" ? fmtAmount(r[g.k]) : (r[g.k] != null ? (r[g.k] >= 0 ? "+" : "") + Number(r[g.k]).toFixed(2) : "—")}
                       </td>
+                    
+                      <td style={{ whiteSpace: "nowrap" }} onClick={(e) => e.stopPropagation()}>
+                        <button className="btn-sm buy" onClick={() => openTicket(r, "buy")}>买</button>
+                        <button className="btn-sm sell" style={{ marginLeft: 4 }} onClick={() => openTicket(r, "sell")}>卖</button>
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -254,11 +265,12 @@ export default function QuoteBoard() {
                   {c.label}{sort.k === c.k ? (sort.dir < 0 ? " ▼" : " ▲") : ""}
                 </th>
               ))}
+              <th style={{ width: 96 }}>操作</th>
             </tr>
           </thead>
           <tbody>
             {sorted.length === 0 ? (
-              <tr><td colSpan={COLS.length} className="muted" style={{ textAlign: "center", padding: 20 }}>
+              <tr><td colSpan={COLS.length + 1} className="muted" style={{ textAlign: "center", padding: 20 }}>
                 {board === "watch" ? "自选股为空，可在底部「自选股」面板添加" : "无数据"}
               </td></tr>
             ) : sorted.map((r) => (
@@ -282,6 +294,11 @@ export default function QuoteBoard() {
           </tbody>
         </table>
       </div>
+      )}
+    {ticket?.open && (
+      <OrderTicketModal
+        open code={ticket.code} name={ticket.name} last={ticket.last}
+        defaultSide={ticket.side} onClose={() => setTicket(null)} />
       )}
     </div>
   );

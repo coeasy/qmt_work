@@ -45,6 +45,7 @@ const fmt = (v) => (v == null || Number.isNaN(Number(v)) ? "—" : Number(v));
 
 export default function Screen() {
   const [inds, setInds] = useState([]);
+  const [indsErr, setIndsErr] = useState("");
   const [rows, setRows] = useState([newRow()]);
   const [join, setJoin] = useState("and");
   const [filters, setFilters] = useState({
@@ -55,6 +56,7 @@ export default function Screen() {
   const [err, setErr] = useState("");
   const [boardName, setBoardName] = useState("");
   const [boards, setBoards] = useState([]);
+  const [boardsErr, setBoardsErr] = useState("");
   const [msg, setMsg] = useState("");
   // T5（G8 闭环）：自然语言输入（放量上涨 / RSI 超卖 / 均线金叉…）
   const [nlText, setNlText] = useState("");
@@ -94,11 +96,11 @@ export default function Screen() {
   const indById = useCallback((n) => inds.find((i) => i.name === n), [inds]);
 
   const loadBoards = useCallback(() => {
-    api.screenBoards().then((d) => setBoards(d.items || [])).catch(() => {});
+    api.screenBoards().then((d) => setBoards(d.items || [])).catch((e) => setBoardsErr(e.message || ""));
   }, []);
 
   useEffect(() => {
-    api.marketIndicators().then((d) => setInds(d.items || [])).catch(() => {});
+    api.marketIndicators().then((d) => setInds(d.items || [])).catch((e) => setIndsErr(e.message || ""));
     loadBoards();
   }, [loadBoards]);
 
@@ -290,6 +292,7 @@ export default function Screen() {
                 <>
                   <select className="ib-btn" value={r.name} onChange={(e) => onRowName(r, e.target.value)}>
                     {inds.map((i) => <option key={i.name} value={i.name}>{i.label}</option>)}
+                    {indsErr && <option disabled>{indsErr}</option>}
                   </select>
                   <select className="ib-btn" value={r.output} onChange={(e) => patchRow(r.id, { output: e.target.value })}>
                     {(spec && spec.outputs || []).map((o) => <option key={o} value={o}>{o.toUpperCase()}</option>)}
@@ -374,7 +377,7 @@ export default function Screen() {
       <div className="sc-boards">
         <div className="sc-title">已存动态板块</div>
         {boards.length === 0
-          ? <span className="sc-muted">（暂无，运行选股后可存为板块）</span>
+          ? <span className="sc-muted">{boardsErr ? `加载失败：${boardsErr}` : "（暂无，运行选股后可存为板块）"}</span>
           : <ul className="sc-board-list">{boards.map((b) => (
             <li key={b.kind}>{b.name} · {b.count} 只</li>
           ))}</ul>}

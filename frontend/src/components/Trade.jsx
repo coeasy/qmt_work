@@ -3,10 +3,13 @@ import { api } from "../api.js";
 import { useBroker } from "../BrokerContext.jsx";
 import { useServerEvents } from "../hooks/useSystemWS.js";
 import { consumePendingPrefill } from "../lib/trade.js";
+import { sendOrder as _sendOrder, precheckOrder as _precheckOrder } from "../lib/tradeApi.js";
 import { useActiveInterval } from "../hooks/useActiveInterval.js";
 import ConfirmTradeModal from "./ui/ConfirmTradeModal.jsx";
+
 import usePersistentState from "../lib/usePersistentState.js";
 import { t } from "../lib/i18n.js";
+import { orderStatus } from "../lib/format.js";
 
 // 手动交易面板：下单 / 持仓 / 委托 / 成交 / 条件单 / 目标仓位（全部真实接口，下单过风控）
 // v3：支持叶子 params 直达预填（navTo("trade", {params}) 协议通道），
@@ -15,6 +18,10 @@ export default function Trade({ params } = {}) {
   const { activeId, activeBroker } = useBroker();
   const [tab, setTab] = usePersistentState("trade:tab", "order");
   const [err, setErr] = useState("");
+  const [pendingCond, setPendingCond] = useState(null);
+
+  const [sigMode, setSigMode] = useState("live");
+  useEffect(() => { api.signalMode().then((d) => setSigMode(d?.mode ?? "live")).catch(() => {}); }, []);
   const [msg, setMsg] = useState(null);
   const [precheck, setPrecheck] = useState(null);
   // T3：金融操作二次确认（提交订单/撤单/条件单/调仓计划）
@@ -114,7 +121,7 @@ export default function Trade({ params } = {}) {
       onConfirm: async () => {
         setBusy(true);
         try {
-          await wrap(() => api.tradeOrder(form), `已提交：${form.direction === "buy" ? "买入" : "卖出"} ${form.code} ${form.volume} 股`);
+          await wrap(() => _sendOrder(form).then((x) => { load(); return x; }), `已提交：${form.direction === "buy" ? "买入" : "卖出"} ${form.code} ${form.volume} 股`);
         } finally { setBusy(false); setConfirm(null); }
       },
     });
@@ -122,11 +129,9 @@ export default function Trade({ params } = {}) {
   async function runPrecheck() {
     setPrecheck({ loading: true });
     try {
-      const r = await api.tradePrecheck({
-        code: form.code, direction: form.direction, volume: form.volume,
-        price: form.price_type === "limit" ? form.price : 0,
-      });
-      setPrecheck({ ok: r.allowed, reason: r.reason });
+      // 统一走 tradeApi 预检（字段归一化 + 错误翻译，与快速交易/网格同链路）
+      const pc = await _precheckOrder(form);
+      setPrecheck({ ok: pc.ok && pc.allowed !== false, reason: pc.reason });
     } catch (e) { setPrecheck({ ok: false, reason: e.message }); }
   }
   async function cancelOrder(oid) {
@@ -144,7 +149,7 @@ export default function Trade({ params } = {}) {
       onConfirm: async () => {
         setBusy(true);
         try {
-          await wrap(() => api.tradeCancel(oid), `已撤单：${oid}`);
+          await wrap(() => api.tradeCancel(oid), `已撤单：${oid}`); load();
         } finally { setBusy(false); setConfirm(null); }
       },
     });
@@ -170,7 +175,7 @@ export default function Trade({ params } = {}) {
     });
   }
   async function cancelCond(cid) {
-    await wrap(() => api.tradeConditionCancel(cid), "条件单已取消");
+    setPendingCond({ title: "确认取消条件单", rows: [{ k: "ID", v: cid }], note: "取消后不再触发。", onConfirm: async () => { setPendingCond(null); await wrap(() => api.tradeConditionCancel(cid), "条件单已取消"); } });
   }
   async function submitTarget() {
     // T3：调仓 = 真实下单，必须二次确认（无论是否勾选 do_trade，均展示将发生的动作）
@@ -206,6 +211,11 @@ export default function Trade({ params } = {}) {
   return (
     <div>
       <h2 className="page-title">{t(`page.trade.title`)}</h2>
+      {sigMode !== "live" && (
+        <span className="tag warn" style={{ marginLeft: 8 }}>
+          信号模式：{sigMode === "paper" ? "模拟盘（不会真实下单）" : "预演（不会真实下单）"}—— 切换请到「信号路由」页
+        </span>
+      )}
       <p className="page-sub">
         真实下单（过风控），订单/成交实时状态推送
         {activeBroker && <span className="muted"> · {activeBroker.broker_name} · {activeBroker.account_id || "—"}</span>}
@@ -279,7 +289,7 @@ export default function Trade({ params } = {}) {
                 <tr key={i}><td className="code">{o.order_id}</td><td className="code">{o.code}</td>
                   <td>{o.direction === "buy" ? "买入" : "卖出"}</td><td>{o.price}</td>
                   <td>{o.volume}</td><td>{o.dealt}</td>
-                  <td><span className="tag warn">{o.status}</span></td>
+                  <td>{(() => { const st = orderStatus(o.status); return <span className={`tag ${st.className || "warn"}`}>{st.label}</span>; })()}</td>
                   <td><button onClick={() => cancelOrder(o.order_id)}>撤单</button></td></tr>
               ))}
               {orders.length === 0 && <tr><td colSpan={8} className="muted">暂无委托</td></tr>}

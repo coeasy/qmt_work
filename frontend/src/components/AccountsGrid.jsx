@@ -229,7 +229,7 @@ function BatchOrder({ connOptions }) {
       ? rows.filter((r) => r.code).length
       : (broadcast.conn_ids || []).length;
     if (!n) return;
-    setConfirm({
+    const conf = {
       title: "批量下单确认",
       rows: [
         { k: "模式", v: mode === "explicit" ? `逐笔 ${n} 条` : `广播到 ${n} 个账户` },
@@ -240,7 +240,16 @@ function BatchOrder({ connOptions }) {
       note: "将对多个账户同时真实提交委托，请再次核对。",
       confirmText: "确认批量提交",
       onConfirm: async () => { await doSubmit(); setConfirm(null); },
-    });
+    };
+    // 逐行回显全部明细（此前只回显第一行参数，其余行差异在确认中不可见 —— P1-4）
+    if (mode === "explicit") {
+      conf.rows = conf.rows.concat(rows.slice(0, 12).map((r, i) => ({
+        k: `${r.code || "?"}${i === 0 ? "" : ` (#${i + 1})`}`,
+        v: `${r.direction === "buy" ? "买入" : "卖出"} ${r.volume} 股 @ ${r.price || "市价"}`,
+      })));
+      if (rows.length > 12) conf.note = `共 ${rows.length} 笔（仅列前 12）。` + conf.note;
+    }
+    setConfirm(conf);
   }
 
   return (

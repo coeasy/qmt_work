@@ -43,16 +43,36 @@ export default function Paper() {
   useEffect(() => { loadAll(); }, []);
   useActiveInterval(loadAll, 30000);   // T15 模拟盘近实时
 
+  const [confirmReset, setConfirmReset] = useState(null);
+
+  function requestReset() {
+    setConfirmReset({
+      title: "重置模拟盘",
+      rows: [{ k: "影响", v: "清空全部模拟持仓、委托与成交记录，资金恢复为初始值" }],
+      note: "该操作不可撤销。",
+      onConfirm: () => doReset(),
+    });
+  }
+  async function doReset() {
+    setConfirmReset(null);
+    const cap = window.prompt("初始资金（元）", "1000000");
+    if (cap == null) return;
+    await api.paperReset({ initial_capital: +cap || 1000000 });
+    loadAll();
+  }
+
   async function submitOrder() {
     setLoading(true); setMsg(null);
     try {
       if (!symbol) throw new Error("请输入股票代码");
-      if (!qty || qty < 100) throw new Error("数量至少 100 股（1 手）");
-      if (priceType === "LIMIT" && !price) throw new Error("限价单请输入价格");
-      const body = { symbol, side, priceType, qty: +qty };
-      if (priceType === "LIMIT") body.price = +price;
+      if (!qty || qty <= 0) throw new Error("数量必须为正整数");
+      if (qty % 100 !== 0) throw new Error("数量须为 100 的整数倍（1 手=100 股）");
+      if (!price) throw new Error("请输入委托价（模拟盘按给定价格立即全额成交，不支持市价/最优）");
+      // 字段对齐后端 app/routes/paper.py：code/side(buy|sell)/price_type(limit)/price/volume
+      const body = { code: symbol, side: side === "BUY" ? "buy" : "sell",
+                     price_type: "limit", price: +price, volume: +qty };
       await api.paperOrder(body);
-      setMsg({ ok: true, t: `模拟 ${side === "BUY" ? "买入" : "卖出"} ${symbol} ${qty} 股 ${priceType} 已提交` });
+      setMsg({ ok: true, t: `模拟 ${side === "BUY" ? "买入" : "卖出"} ${symbol} ${qty} 股 @ ${price} 已提交` });
       setSymbol(""); setQty(""); setPrice("");
       loadAll();
     } catch (e) {
@@ -62,18 +82,6 @@ export default function Paper() {
     }
   }
 
-  async function resetPaper() {
-    setLoading(true); setMsg(null);
-    try {
-      await api.paperReset();
-      setMsg({ ok: true, t: "模拟盘已重置" });
-      loadAll();
-    } catch (e) {
-      setMsg({ ok: false, t: e.message });
-    } finally {
-      setLoading(false);
-    }
-  }
 
   return (
     <div className="page">
@@ -89,7 +97,7 @@ export default function Paper() {
               {t.label}
             </button>
           ))}
-          <button className="btn-danger" onClick={resetPaper} style={{ marginLeft: "auto" }}>
+          <button className="btn-danger" onClick={requestReset} style={{ marginLeft: "auto" }}>
             重置模拟盘
           </button>
         </div>
@@ -115,8 +123,6 @@ export default function Paper() {
               <label>委托类型</label>
               <div className="btn-group">
                 <button className={priceType === "LIMIT" ? "active" : ""} onClick={() => setPriceType("LIMIT")}>限价</button>
-                <button className={priceType === "MARKET" ? "active" : ""} onClick={() => setPriceType("MARKET")}>市价</button>
-                <button className={priceType === "BEST" ? "active" : ""} onClick={() => setPriceType("BEST")}>最优</button>
               </div>
             </div>
             {priceType === "LIMIT" && (
@@ -155,6 +161,7 @@ export default function Paper() {
           {metrics ? <KVList data={metrics} /> : <EmptyState title="暂无指标数据" />}
         </div>
       )}
+      <ConfirmTradeModal pending={confirmReset} busy={loading} onClose={() => setConfirmReset(null)} risk="high" />
     </div>
   );
 }

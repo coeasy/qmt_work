@@ -9,6 +9,7 @@ import { getLocale, setLocale, t } from "../lib/i18n.js";
 export default function Settings() {
   const { brokers, connectedCount, activeBroker } = useBroker();
   const [keys, setKeys] = useState([]);
+  const [keysErr, setKeysErr] = useState("");
   const [newKey, setNewKey] = useState("");
   const [msg, setMsg] = useState(null);
   const [apiKeyLocal, setApiKeyLocal] = useState(getApiKey());
@@ -20,6 +21,7 @@ export default function Settings() {
   const [riskCfg, setRiskCfg] = useState(null);
   const [runtimeCfg, setRuntimeCfg] = useState(null);
   const [hist, setHist] = useState([]);
+  const [histErr, setHistErr] = useState("");
   const [riskDaily, setRiskDaily] = useState(null);
 
   useEffect(() => {
@@ -94,7 +96,8 @@ export default function Settings() {
       // 守护：/api-keys 可能是分页结构 {items:[...]} 或其他；统一为数组
       const r = await api.get("/api-keys");
       setKeys(Array.isArray(r) ? r : (Array.isArray(r?.items) ? r.items : (Array.isArray(r?.keys) ? r.keys : [])));
-    } catch {}
+      setKeysErr("");
+    } catch (e) { setKeysErr(e.message || "API Key 列表加载失败"); }
   }
   // 统一刷新机制：挂载加载 + 激活即刷新 + api_keys 作用域变更联动
   useListRefresh(load, { scope: "api_keys" });
@@ -153,7 +156,8 @@ export default function Settings() {
   }
 
   async function loadHist() {
-    try { setHist(await api.runtimeHistory()); } catch {}
+    try { setHist(await api.runtimeHistory()); setHistErr(""); }
+    catch (e) { setHistErr(e.message || "运行历史加载失败"); }
   }
   async function rollback(id) {
     try {
@@ -318,7 +322,7 @@ export default function Settings() {
                     <td><button className="ghost" onClick={() => rollback(h.id)}>回滚</button></td>
                   </tr>
                 ))}
-                {hist.length === 0 && <tr><td colSpan={7} className="muted">暂无变更历史</td></tr>}
+                {hist.length === 0 && <tr><td colSpan={7} className="muted">{histErr || "暂无变更历史"}</td></tr>}
               </tbody>
             </table>
           </details>
@@ -362,7 +366,7 @@ export default function Settings() {
                   </td>
                 </tr>
               ))}
-              {keys.length === 0 && <tr><td colSpan={8} className="muted">暂无 Key</td></tr>}
+              {keys.length === 0 && <tr><td colSpan={8} className="muted">{keysErr || "暂无 Key"}</td></tr>}
             </tbody>
           </table>
         </div>

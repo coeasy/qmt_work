@@ -78,10 +78,19 @@ describe("precheckOrder / sendOrder（后端调用 + 错误归一）", () => {
   it("sendOrder 字段非法 → 抛出（含 cause）", async () => {
     await expect(sendOrder({ code: "", volume: 100, price: 10 })).rejects.toThrow();
   });
-  it("sendOrder 幂等键自动生成", async () => {
+  it("sendOrder 未传幂等键时不自生成（交给后端滚动窗口内容哈希去重）", async () => {
     let captured;
     api.tradeOrder = async (b) => { captured = b; return { id: "x" }; };
     await sendOrder({ code: "600519.SH", volume: 100, price: 1500 });
-    expect(captured.idempotency_key).toMatch(/^qt:600519\.SH:buy:100:1500:limit:/);
+    // 2026-09 前端移除「内容+5s 时间桶」自生成键：桶边界会绕过后端
+    // single_flight 的滚动窗口去重，故仅透传显式幂等键
+    expect(captured.idempotency_key || '').toBe('');  // 归一层可能置空串
+  });
+
+  it("sendOrder 显式幂等键原样透传", async () => {
+    let captured;
+    api.tradeOrder = async (b) => { captured = b; return { id: "x" }; };
+    await sendOrder({ code: "600519.SH", volume: 100, price: 1500, idempotency_key: "explicit-key" });
+    expect(captured.idempotency_key).toBe("explicit-key");
   });
 });

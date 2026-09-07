@@ -108,7 +108,7 @@ export default function Webhooks() {
         </div>
         <div className="form-row" style={{ marginTop: 8 }}>
           <label className="checkbox">
-            <input type="checkbox" checked={form.enabled} onChange={(e) => setForm({ ...form, enabled: e.checked })} />
+            <input type="checkbox" checked={form.enabled} onChange={(e) => setForm({ ...form, enabled: e.target.checked })} />
             启用
           </label>
           <button className="btn-primary" onClick={saveWebhook} disabled={loading || !form.url}>

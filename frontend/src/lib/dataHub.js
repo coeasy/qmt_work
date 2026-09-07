@@ -75,6 +75,7 @@ export function subscribe(topic, fetcher, cb) {
 
 async function _run(topic, fetcher, cbs) {
   _coalesce.delete(topic);
+  if (!cbs || !cbs.length) return;   // 窗口内订阅者已全部退订：不再打源
   _lastReq.set(topic, Date.now());
   let data = null;
   let error = null;

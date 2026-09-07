@@ -1,11 +1,11 @@
-import { useState } from "react";
+import {useState, useEffect} from "react";
 import { api } from "../api.js";
 import { useServerEvents } from "../hooks/useSystemWS.js";
 import { useActiveInterval } from "../hooks/useActiveInterval.js";
 import { fmtAmount, fmtLimitDur } from "../lib/format.js";
-import { quickTradeNavigate } from "../lib/trade.js";
 import { peek as hubPeek, subscribe as hubSubscribe } from "../lib/dataHub.js";
 import ConfirmTradeModal from "./ui/ConfirmTradeModal.jsx";
+import OrderTicketModal from "./ui/OrderTicketModal.jsx";
 import usePersistentState from "../lib/usePersistentState.js";
 import { t } from "../lib/i18n.js";
 
@@ -19,6 +19,9 @@ export default function LimitUp() {
 
   // ---------- 涨停板（盘口扫描） ----------
   const [board, setBoard] = useState([]);
+
+  const [sigMode, setSigMode] = useState("live");
+  useEffect(() => { api.signalMode().then((d) => setSigMode(d?.mode ?? "live")).catch(() => {}); }, []);
   const [meta, setMeta] = useState({});
   const [sector, setSector] = useState("沪深A股");
   const [onlyLimit, setOnlyLimit] = useState(true);
@@ -76,13 +79,15 @@ export default function LimitUp() {
     { immediate: view === "board" },
   );
 
+  // 页内快速下单（统一下单弹窗 OrderTicketModal：预检 → 二次确认 → 真实委托，经 tradeApi）。
+  // 预填价语义保持：买入优先涨停价抢封板，卖出优先最新价（避免涨停价限卖提交失败）。
   function quickTrade(stock, direction) {
-    // 切到「交易」Hub 的手动交易子页，把代码 + 参考价 + 买卖方向带过去快速下单：
-    // 买入优先带涨停价（挂涨停抢封板），卖出优先带最新价（避免用涨停价限卖提交失败）。
-    const price = Number(stock.limit_price) > 0
-      ? (direction === "buy" ? Number(stock.limit_price) : Number(stock.last || stock.limit_price))
-      : (Number(stock.last) || undefined);
-    quickTradeNavigate(stock.code, price, direction);
+    setTicket({
+      open: true, code: stock.code, name: stock.name || stock.code,
+      last: Number(stock.last) || undefined,
+      limitPrice: Number(stock.limit_price) > 0 ? Number(stock.limit_price) : undefined,
+      side: direction,
+    });
   }
 
   // ---------- 打板监控（原有） ----------
@@ -90,6 +95,7 @@ export default function LimitUp() {
   const [code, setCode] = useState("");
   const [err, setErr] = useState("");
   const [confirm, setConfirm] = useState(null);   // T3 自动买入二次确认
+  const [ticket, setTicket] = useState(null);      // 快速下单弹窗 {open,code,name,last,limitPrice,side}
   const [params, setParams] = useState({
     limit_pct: 0.1, cutoff: "10:00", min_rise: 0.03,
     buy_volume: 0, do_trade: false, interval: 2,
@@ -122,8 +128,9 @@ export default function LimitUp() {
         title: "启动打板监控（含自动买入）",
         rows: [
           { k: "股票池", v: `${(st?.pool || []).length} 只` },
-          { k: "触发价", v: `${params.price_pct}%` },
-          { k: "时间窗", v: `${params.window_min} 分钟` },
+          { k: "涨停比例下限", v: `${params.limit_pct}` },
+          { k: "截止时间", v: params.cutoff },
+          { k: "最小涨幅", v: `${params.min_rise}` },
           { k: "买入量", v: `${params.buy_volume} 股` },
           { k: "检查间隔", v: `${params.interval}s` },
         ],
@@ -148,6 +155,11 @@ export default function LimitUp() {
   return (
     <div>
       <h2 className="page-title">{t(`page.limitup.title`)}</h2>
+      {sigMode !== "live" && (
+        <span className="tag warn" style={{ marginLeft: 8 }}>
+          信号模式：{sigMode === "paper" ? "模拟盘（不会真实下单）" : "预演（不会真实下单）"}—— 切换请到「信号路由」页
+        </span>
+      )}
       <div className="row" style={{ marginBottom: 12 }}>
         <button onClick={() => setView("board")}
                 style={view === "board" ? { background: "var(--accent)", color: "#fff" } : {}}>涨停板</button>
@@ -330,6 +342,13 @@ export default function LimitUp() {
       )}
 
       <ConfirmTradeModal pending={confirm} busy={false} onClose={() => setConfirm(null)} risk="high" />
+      {ticket?.open && (
+        <OrderTicketModal
+          open code={ticket.code} name={ticket.name}
+          last={ticket.last} limitPrice={ticket.limitPrice}
+          defaultSide={ticket.side}
+          onClose={() => setTicket(null)} />
+      )}
     </div>
   );
 }

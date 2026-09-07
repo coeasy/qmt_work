@@ -326,7 +326,30 @@ api.quoteBusStats = () => api.get("/quote-bus/stats");
 api.capabilitiesSummary = () => api.get("/capabilities/summary");
 // /metrics 返回 Prometheus text/plain（非 JSON），需原始文本读取
 api.metricsRaw = async () => {
-  const r = await fetch(`${BASE}/metrics`, { headers: _authHeaders() });
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
-  return await r.text();
+  // 与 _req 统一 15s 超时（此前无超时，后端 metrics 卡顿时系统状态页被永久挂起）
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 15000);
+  try {
+    const r = await fetch(`${BASE}/metrics`, { headers: _authHeaders(), signal: ctrl.signal });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    return await r.text();
+  } finally { clearTimeout(timer); }
 };
+
+// ---------------- 孤儿端点前端入口（2026-09 重构第三期补齐） ----------------
+// K 线批量导出 / 全量同步（数据中心 · 行情数据）
+api.klineExport = (body) => api.post("/market/kline/export", body);
+api.klineExportRead = (params) => api.get("/market/kline/export", params);
+api.klineSync = (body) => api.post("/market/kline/sync", body);
+// 统一导出（csv/json/xlsx，列定义复用标准模型字段名）
+api.marketExport = (body) => api.post("/market/export", body);
+// 因子清单 / 单因子计算（因子研究）
+api.factorsList = () => api.get("/factors");
+api.factorCompute = (body) => api.post("/factors/compute", body);
+// 任务运行时（信号与自动化）
+api.runtimeJobsList = (params) => api.get("/runtime/jobs", params);
+api.runtimeJobsSubmit = (body) => api.post("/runtime/jobs", body);
+api.runtimeJobDetail = (id) => api.get(`/runtime/jobs/${id}`);
+api.runtimeJobCancel = (id) => api.post(`/runtime/jobs/${id}/cancel`);
+// REST 行情订阅入口（数据中心 · 行情数据；与 WS 订阅共用引用计数）
+api.syncSubscribe = (codes) => api.post("/sync/subscribe", { codes });

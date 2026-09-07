@@ -15,10 +15,16 @@ export function normalizeOrderPayload(p) {
   const volume = Math.trunc(Number(p.volume) || 0);
   if (!Number.isFinite(volume) || volume <= 0) throw new Error("数量必须为正整数（手）");
   const px = Number(p.price);
-  if (!Number.isFinite(px) || px <= 0) throw new Error("价格必须大于 0");
-  const price = Math.round(px * 100) / 100;
   const price_type = p.price_type || "limit";
   if (!["limit", "market"].includes(price_type)) throw new Error("price_type 仅支持 limit / market");
+  // 市价单放行 price=0（后端风控用最新价估算，gateway/risk.py）；仅限价单强制 >0。
+  // 此前一刀切导致 Trade 页选「市价」必然被前端拒绝（比后端更严的误伤）。
+  if (price_type === "limit" && (!Number.isFinite(px) || px <= 0)) throw new Error("限价单价格必须大于 0");
+    // 价格精度按标的适配：ETF/债券（51/56/58/15/16 段）tick 为 0.001，股票 0.01
+  const tickDecimals = ["51", "56", "58", "15", "16"].includes(code.slice(0, 2)) ? 3 : 2;
+  const price = Number.isFinite(px) && px > 0 ? Number(px.toFixed(tickDecimals)) : 0;
+  // A 股整手校验（前端先给出友好文案，避免等后端 400）
+  if (volume % 100 !== 0) throw new Error("数量须为 100 的整数倍（A股一手=100股）");
   return {
     code,
     direction,
@@ -70,10 +76,10 @@ export async function precheckOrder(payload) {
 // 下单：自动归一化字段 + 幂等键
 export async function sendOrder(payload) {
   const body = normalizeOrderPayload(payload);
-  // 没传幂等键时按内容生成一个，5s 内同 key 不重复
-  if (!body.idempotency_key) {
-    body.idempotency_key = `qt:${body.code}:${body.direction}:${body.volume}:${body.price}:${body.price_type}:${Math.floor(Date.now() / 1000 / 5)}`;
-  }
+  // 幂等键策略：显式传入的 idempotency_key 原样透传；未传时不自生成 ——
+  // 此前按「内容 + 5s 时间桶」生成，桶边界（4.9s/5.1s）两侧会得到不同键，
+  // 反而覆盖掉后端 single_flight 的滚动窗口内容哈希去重（app/routes/trade.py，
+  // 同参数 5s 内只下一单，无桶边界问题）。交给后端兜底更稳。
   try {
     const r = await api.tradeOrder(body);
     return r;

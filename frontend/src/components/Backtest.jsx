@@ -19,6 +19,7 @@ export default function Backtest() {
   const [job, setJob] = useState(null);
   const [result, setResult] = useState(null);
   const [jobs, setJobs] = useState([]);
+  const [jobsErr, setJobsErr] = useState("");
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
   const [batchBusy, setBatchBusy] = useState(false);
@@ -31,7 +32,8 @@ export default function Backtest() {
   const [sweepParams, setSweepParams] = useState("ma_window:5,10,20|ma_fast:5,10|ma_slow:15,20,30");
 
   async function refreshJobs() {
-    try { setJobs(await api.get("/backtest/jobs")); } catch {}
+    try { setJobs(await api.get("/backtest/jobs")); setJobsErr(""); }
+    catch (e) { setJobsErr(e.message || "任务列表加载失败"); }
   }
   useEffect(() => { refreshJobs(); }, []);
 
@@ -329,7 +331,8 @@ export default function Backtest() {
                 <td>{Math.round((j.progress || 0) * 100)}%</td><td>{j.created_at}</td>
                 <td><button className="danger" onClick={() => deleteJob(j.id)}>删除</button></td></tr>
             ))}
-            {jobs.length === 0 && <tr><td colSpan={7} className="muted">暂无任务</td></tr>}
+            {jobs.length === 0 && <tr><td colSpan={7} className="muted">{jobsErr || "暂无任务"}</td></tr>}
+            {jobs.length > 0 && jobsErr && <tr><td colSpan={7} className="down">刷新失败：{jobsErr}</td></tr>}
           </tbody>
         </table>
       </div>

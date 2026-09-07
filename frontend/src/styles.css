@@ -1,6 +1,7 @@
 :root {
   --bg: #0f1420;
   --bg-2: #161c2c;
+  --bg-3: #1c2336;   /* 输入框/工具条等中间层底色（此前被 8 处引用却未定义，解析为透明） */
   --panel: #1b2333;
   --panel-2: #222c40;
   --border: #2c3850;
@@ -63,8 +64,8 @@ body {
 /* 卡片 */
 .grid { display: grid; gap: 16px; }
 .grid-2 { grid-template-columns: repeat(2, 1fr); }
-.grid-3 { grid-template-columns: repeat(3, 1fr); }
-.grid-4 { grid-template-columns: repeat(4, 1fr); }
+.grid-3 { grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }
+.grid-4 { grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }
 .card {
   background: var(--panel); border: 1px solid var(--border);
   border-radius: 10px; padding: 16px;
@@ -140,7 +141,8 @@ code { background: var(--bg-2); border: 1px solid var(--border); border-radius: 
   position: fixed; bottom: 24px; right: 24px; background: var(--panel-2);
   border: 1px solid var(--border); padding: 12px 16px; border-radius: 8px;
   max-width: 360px; z-index: 50; box-shadow: 0 8px 30px rgba(0,0,0,.4);
-}
+  display: flex; }
+.toast + .toast { margin-top: 6px; }
 .toast.err { border-color: var(--danger); }
 .toast.ok { border-color: var(--accent-2); }
 
@@ -947,7 +949,7 @@ input[type="checkbox"] { width: 15px; height: 15px; cursor: pointer; accent-colo
 .bd-tab:hover { color: var(--text); }
 .bd-tab.active { color: var(--text); background: var(--panel-2); border-color: var(--border); }
 .bd-body { display: grid; grid-template-columns: minmax(360px, 5fr) 7fr; gap: 12px; align-items: start; }
-.bd-list { max-height: calc(100vh - 230px); overflow: auto; padding: 0; }
+.bd-list { max-height: calc(100vh - 230px); min-height: 160px; overflow: auto; padding: 0; }
 .bd-table { width: 100%; border-collapse: collapse; font-size: 12px; }
 .bd-table th {
   position: sticky; top: 0; z-index: 1; background: var(--panel-2);
@@ -1198,3 +1200,14 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .gbadge.board { background: #d8822a; }
 .gbadge.bond { background: #1f9e8e; }
 .gbadge.other { background: #5a6470; }
+
+/* 统一弹窗底座（OrderTicketModal 等此前使用未定义类，2026-09 补齐） */
+.modal-mask { position: fixed; inset: 0; background: rgba(6,10,18,.62); z-index: 90;
+  display: flex; align-items: center; justify-content: center; }
+.modal { background: var(--bg-2, #161c2c); border: 1px solid var(--border, #2c3850);
+  border-radius: var(--radius-lg, 8px); padding: 16px; min-width: 320px; max-width: 92vw;
+  box-shadow: 0 12px 40px rgba(0,0,0,.45); }
+.otm-card .row { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
+.otm-pre { margin-top: 6px; font-size: 12px; }
+.otm-pre.ok { color: var(--up, #1bbf86); }
+.otm-pre.err { color: var(--down, #f0413e); }

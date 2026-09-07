@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { api } from "../api.js";
+import ConfirmTradeModal from "./ui/ConfirmTradeModal.jsx";
 import { useBatchSelection } from "../hooks/useBatchSelection.js";
 import BatchDeleteBar from "./BatchDeleteBar.jsx";
 import EmptyState from "./ui/EmptyState.jsx";
@@ -13,6 +14,10 @@ export default function TargetPortfolio() {
   const [msg, setMsg] = useState(null);
   const [loading, setLoading] = useState(false);
   const [plans, setPlans] = useState([]);
+  const [plansErr, setPlansErr] = useState("");
+  const [pendingSync, setPendingSync] = useState(null);   // 实盘同步二次确认
+  const [sigMode, setSigMode] = useState("live");
+  useEffect(() => { api.signalMode().then((d) => setSigMode(d?.mode ?? "live")).catch(() => {}); }, []);
   const [selectedPlan, setSelectedPlan] = useState(null);
   const [syncMode, setSyncMode] = useState("weight");
   const [dryRun, setDryRun] = useState(true);
@@ -28,7 +33,7 @@ export default function TargetPortfolio() {
   useListRefresh(loadPlans, { scope: "target_plans" });
 
   async function loadPlans() {
-    api.targetPlans().then(setPlans).catch(() => setPlans([]));
+    api.targetPlans().then(setPlans).catch((e) => setPlansErr(e.message || "持仓计划加载失败"));
   }
 
   async function savePlan() {
@@ -37,6 +42,8 @@ export default function TargetPortfolio() {
       if (!planName) throw new Error("请输入计划名称");
       const weights = JSON.parse(planWeights || "{}");
       if (!Object.keys(weights).length) throw new Error("请至少输入一个持仓权重");
+      const wsum = Object.values(weights).reduce((a, b) => a + Number(b || 0), 0);
+      if (Math.abs(wsum - 1) > 0.001) throw new Error(`权重之和应为 1，当前 ${wsum.toFixed(4)}（请修正后再保存）`);
       await api.targetCreatePlan({ name: planName, weights });
       setMsg({ ok: true, t: `持仓计划「${planName}」已保存` });
       setPlanName(""); setPlanWeights(""); loadPlans();
@@ -70,16 +77,50 @@ export default function TargetPortfolio() {
     finally { setBatchBusy(false); }
   }
 
+  async function buildSyncBody(isDryRun) {
+    const plan = plans.find((p) => p.id === selectedPlan);
+    if (!plan) throw new Error("计划不存在");
+    const body = { targets: plan.weights || plan.plan_weights || {}, mode: syncMode, dry_run: isDryRun };
+    if (totalCapital) body.total_capital = +totalCapital;
+    return body;
+  }
+
   async function syncPortfolio() {
     setLoading(true); setMsg(null);
     try {
       if (!selectedPlan) throw new Error("请选择持仓计划");
-      const plan = plans.find((p) => p.id === selectedPlan);
-      if (!plan) throw new Error("计划不存在");
-      const body = { targets: plan.weights || plan.plan_weights || {}, mode: syncMode, dry_run: dryRun };
-      if (totalCapital) body.total_capital = +totalCapital;
-      const r = await api.targetSync(body);
-      setMsg({ ok: true, t: `同步完成：差量 ${r.plan?.length || 0} 笔` });
+      if (!dryRun) {
+        // 实盘同步前置：强制先跑一次 dry_run，把差量明细摆进二次确认弹窗（P0-2，
+        // 此前实盘一键直发、预演明细不展示）。mode=value 后端未实现（权重会被当
+        // 股数执行、可能批量清仓），按钮已移除；此处兜底拒绝。
+        if (syncMode === "value") throw new Error("按金额模式暂未支持，请使用 按股数/按比例");
+        const preview = await api.targetSync(await buildSyncBody(true));
+        setPendingSync({
+          title: "确认实盘同步（目标持仓差量）",
+          rows: (preview.plan || []).slice(0, 12).map((x) => ({
+            k: `${x.code || x.symbol || "?"} ${x.direction === "sell" ? "卖出" : "买入"}`,
+            v: `${x.target_volume ?? x.volume ?? "?"} 股`,
+          })),
+          note: (preview.plan || []).length > 12
+            ? `共 ${preview.plan.length} 笔差量（仅列前 12），将经信号路由逐笔过风控提交。`
+            : `共 ${preview.plan.length} 笔差量，将经信号路由逐笔过风控提交。`,
+          onConfirm: doRealSync,
+        });
+        return;
+      }
+      const r = await api.targetSync(await buildSyncBody(true));
+      setMsg({ ok: true, t: `预演完成：差量 ${r.plan?.length || 0} 笔（未下单）` });
+    } catch (e) { setMsg({ ok: false, t: e.message }); }
+    finally { setLoading(false); }
+  }
+
+  async function doRealSync() {
+    setPendingSync(null); setLoading(true);
+    try {
+      const r = await api.targetSync(await buildSyncBody(false));
+      const pend = (r.executed || []).filter((x) => x.status === "pending_confirmation").length;
+      setMsg({ ok: true, t: `同步完成：差量 ${r.plan?.length || 0} 笔`
+        + (pend > 0 ? `，其中 ${pend} 笔达到确认阈值、待信号页人工确认！` : "") });
       loadPlans();
     } catch (e) { setMsg({ ok: false, t: e.message }); }
     finally { setLoading(false); }
@@ -89,6 +130,11 @@ export default function TargetPortfolio() {
     <div className="page">
       <div className="page-header">
         <h2>目标持仓差量同步</h2>
+        {sigMode !== 'live' && (
+          <span className='tag warn' style={{ marginLeft: 8 }}>
+            信号模式：{sigMode === 'paper' ? '模拟盘（不会真实下单）' : '预演（不会真实下单）'}—— 切换请到「信号路由」页
+          </span>
+        )}
         <p>设定目标权重 → 计算差量 → 自动下单调仓（支持 dry-run 预览）</p>
       </div>
 
@@ -115,7 +161,7 @@ export default function TargetPortfolio() {
       <div className="card" style={{ marginTop: 16 }}>
         <h3 style={{ marginBottom: 12 }}>持仓计划列表</h3>
         <BatchDeleteBar count={bsel.selected.length} onDelete={batchDelete} onClear={bsel.clear} busy={batchBusy} label="计划" />
-        {!plans.length ? <EmptyState title="暂无持仓计划" /> : (
+        {!plans.length ? <EmptyState title={plansErr || "暂无持仓计划"} /> : (
           <div style={{ overflowX: "auto" }}>
             <table className="table">
               <thead><tr>
@@ -154,13 +200,13 @@ export default function TargetPortfolio() {
             <label>模式</label>
             <div className="btn-group">
               <button className={syncMode === "volume" ? "active" : ""} onClick={() => setSyncMode("volume")}>按股数</button>
-              <button className={syncMode === "value" ? "active" : ""} onClick={() => setSyncMode("value")}>按金额</button>
+              
               <button className={syncMode === "weight" ? "active" : ""} onClick={() => setSyncMode("weight")}>按比例</button>
             </div>
           </div>
           <div className="form-field">
             <label className="checkbox">
-              <input type="checkbox" checked={dryRun} onChange={(e) => setDryRun(e.checked)} />
+              <input type="checkbox" checked={dryRun} onChange={(e) => setDryRun(e.target.checked)} />
               模拟运行（不实际下单）
             </label>
           </div>
@@ -169,7 +215,9 @@ export default function TargetPortfolio() {
           {loading ? "同步中…" : "执行差量同步"}
         </button>
         {selectedPlan && <p className="muted" style={{ marginTop: 8 }}>
-          已选计划：{plans.find((p) => p.id === selectedPlan)?.name} · {syncMode} 模式 · {dryRun ? "预览" : "实盘"}
+          已选计划：{plans.find((p) => p.id === selectedPlan)?.name} · {syncMode}
+      <ConfirmTradeModal pending={pendingSync} busy={loading}
+        onClose={() => setPendingSync(null)} risk="high" /> 模式 · {dryRun ? "预览" : "实盘"}
         </p>}
       </div>
     </div>

@@ -13,13 +13,14 @@ export default function Reconcile() {
   const [loading, setLoading] = useState(false);
   const [connId, setConnId] = useState("");
   const [lastResult, setLastResult] = useState(null);
+  const [lastErr, setLastErr] = useState("");
   const [walStats, setWalStats] = useState(null);
 
   useEffect(() => { loadAll(); }, []);
   useActiveInterval(loadAll, 30000);   // T15 WAL 统计近实时
 
   async function loadAll() {
-    api.reconcileLast().then(setLastResult).catch(() => setLastResult(null));
+    api.reconcileLast().then(setLastResult).catch((e) => setLastErr(e.message || "对账记录加载失败"));
     api.reconcileWalStats().then(setWalStats).catch(() => setWalStats(null));
   }
 
@@ -62,7 +63,7 @@ export default function Reconcile() {
 
       <div className="card" style={{ marginTop: 16 }}>
         <h3 style={{ marginBottom: 12 }}>最近一次对账结果</h3>
-        {lastResult ? <KVList data={lastResult} /> : <EmptyState title="暂无对账记录" />}
+        {lastResult ? <KVList data={lastResult} /> : <EmptyState title={lastErr || "暂无对账记录"} />}
       </div>
 
       <div className="card" style={{ marginTop: 16 }}>

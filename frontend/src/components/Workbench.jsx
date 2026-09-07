@@ -81,11 +81,16 @@ export default function Workbench() {
             setDragId={setDragId}
             onClick={() => dispatch({ type: "ACTIVATE", tabId: t.id })}
             onMiddleClose={() => dispatch({ type: "CLOSE_TAB", tabId: t.id })}
-            onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); setMenuTab({ id: t.id, x: e.clientX, y: e.clientY }); setLayoutMenu(false); }}
+            onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); setMenuTab({ id: t.id, x: Math.min(e.clientX, window.innerWidth - 220), y: Math.min(e.clientY, window.innerHeight - 260) }); setLayoutMenu(false); }}
             onMove={(from, to) => dispatch({ type: "MOVE_TAB", from, to })}
           />
         ))}
         <div className="wb-tabs-tools">
+          <button
+            className="wb-tools-btn wb-cmd-btn"
+            title="命令面板（Ctrl+K / Ctrl+B）：快速跳转任意功能页、执行命令"
+            onClick={(e) => { e.stopPropagation(); window.dispatchEvent(new CustomEvent("cmd:toggle")); }}
+          >⌘ 命令</button>
           <button
             className="wb-tools-btn"
             title={state.tabs.length >= MAX_TABS ? `已达上限 ${MAX_TABS} 个` : "新建窗口（复制当前页为新实例）"}

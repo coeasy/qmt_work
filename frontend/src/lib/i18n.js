@@ -207,6 +207,10 @@ export function registerDict(locale, entries) {
 export function t(key, params) {
   const dict = _dicts[_locale] || _dicts.zh || {};
   let s = dict[key] != null ? dict[key] : key;
+  if (dict[key] == null && import.meta.env && import.meta.env.DEV) {
+    // dev 告警：缺 key 静默回退会让 i18n 漂移不可见（生产不受影响）
+    console.warn("[i18n] missing key:", _locale, key);
+  }
   if (params) {
     for (const [k, v] of Object.entries(params)) {
       s = String(s).replace(new RegExp(`\\{${k}\\}`, "g"), String(v));
