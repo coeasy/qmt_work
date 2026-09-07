@@ -9,6 +9,7 @@ import { peek as hubPeek, subscribe as hubSubscribe } from "../lib/dataHub.js";
 // 金额格式化统一走 lib/format.js（原本地副本已删除，避免第 3 份口径漂移）
 import { fmtAmount } from "../lib/format.js";
 import usePersistentState from "../lib/usePersistentState.js";
+import { on as onEvent, off as offEvent } from "../lib/eventBus";
 
 const WATCH_KEY = "qmt_work.watchlist.v1";
 
@@ -75,12 +76,12 @@ export default function QuoteBoard() {
 
   // F6：外部事件切到指定视图
   useEffect(() => {
-    const onSwitch = (e) => {
-      const k = e.detail;
+    const onSwitch = (detail) => {
+      const k = detail;
       if (k === "watch" || k === "sector" || k === "rank") setBoard(k);
     };
-    window.addEventListener("qb:switch", onSwitch);
-    return () => window.removeEventListener("qb:switch", onSwitch);
+    onEvent("qb:switch", onSwitch);
+    return () => offEvent("qb:switch", onSwitch);
   }, []);
 
   // 板块列表
@@ -131,8 +132,8 @@ export default function QuoteBoard() {
       try { list = JSON.parse(localStorage.getItem(WATCH_KEY) || "[]"); } catch { list = []; }
       setCodes(list);
     };
-    window.addEventListener("qmt:watch:update", reload);
-    return () => window.removeEventListener("qmt:watch:update", reload);
+    onEvent("qmt:watch:update", reload);
+    return () => offEvent("qmt:watch:update", reload);
   }, [board]);
 
   // 批量快照首屏 + QuoteHub 全局单连接增量（替代自建裸 WS：无重连、绕过多路复用的历史问题）

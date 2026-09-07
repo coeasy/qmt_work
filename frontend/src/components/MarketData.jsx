@@ -42,6 +42,7 @@ import MfPanel from "./marketdata/MfPanel.jsx";
 import LinkPanel from "./marketdata/LinkPanel.jsx";
 import { useMfSummary } from "../hooks/useMfSummary.js";
 import { useBoardLink } from "../hooks/useBoardLink.js";
+import { on as onEvent, off as offEvent } from "../lib/eventBus";
 
 // 旧版遗留的悬空引用（fmtPct 未定义，涨跌幅一渲染就会 ReferenceError）——根治为别名
 const fmtPct = formatPct;
@@ -276,8 +277,8 @@ export default function MarketData({ params, leafId, tabId, dispatch } = {}) {
   /* ---------- F5 切分时↔K线 ---------- */
   useEffect(() => {
     const onToggle = () => setPeriod((p) => (p === "tick" ? "1d" : "tick"));
-    window.addEventListener("sa:toggle-period", onToggle);
-    return () => window.removeEventListener("sa:toggle-period", onToggle);
+    onEvent("sa:toggle-period", onToggle);
+    return () => offEvent("sa:toggle-period", onToggle);
   }, []);
 
   /* ---------- F10 聚焦闪烁 ---------- */
@@ -290,8 +291,8 @@ export default function MarketData({ params, leafId, tabId, dispatch } = {}) {
         setTimeout(() => el.classList.remove("sa-f10-flash"), 1200);
       }
     };
-    window.addEventListener("sa:focus-f10", onFocus);
-    return () => window.removeEventListener("sa:focus-f10", onFocus);
+    onEvent("sa:focus-f10", onFocus);
+    return () => offEvent("sa:focus-f10", onFocus);
   }, []);
 
   /* ---------- 派生：TDX 同款色块（红涨绿跌） ---------- */

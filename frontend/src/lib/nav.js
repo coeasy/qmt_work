@@ -6,6 +6,7 @@
 //   detail 统一为对象，携带实例参数与打开方式；旧字符串调用点由兼容层自动归一化，
 //   因此 MenuBar / CommandPalette / Dashboard 等调用点无需同步修改。
 import { PAGES, DEFAULT_PAGE, resolveKey, aliasTab, KEY_ALIAS } from "../pagesRegistry.jsx";
+import { emit as emitEvent } from "./eventBus";
 
 export const OPEN_IN = {
   AUTO: "auto",          // 智能路由（默认）
@@ -45,7 +46,7 @@ export function normalizeNavDetail(detail) {
 export function navTo(pageKey, { params = {}, openIn = OPEN_IN.AUTO } = {}) {
   const norm = normalizeNavDetail({ pageKey, params, openIn });
   if (!norm) return false;
-  window.dispatchEvent(new CustomEvent("nav", { detail: norm }));
+  emitEvent("nav", norm);
   return true;
 }
 

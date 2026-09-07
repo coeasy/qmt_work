@@ -21,6 +21,7 @@ import { normalizeNavDetail, OPEN_IN, navTo } from "../lib/nav.js";
 import { useQuotes } from "../lib/quoteHub.jsx";
 // G5：为每个 Pane 提供激活态，供 useActiveInterval 在后台时停止定时器
 import { PaneActiveContext } from "../hooks/useActiveInterval.js";
+import { emit, on as onEvent, off as offEvent } from "../lib/eventBus";
 
 export default function Workbench() {
   const { state, dispatch, activeTab, aliveIds } = useWorkspace();
@@ -31,13 +32,13 @@ export default function Workbench() {
 
   // nav 事件 → store（全站唯一监听点）
   useEffect(() => {
-    const onNav = (e) => {
-      const norm = normalizeNavDetail(e.detail);
+    const onNav = (detail) => {
+      const norm = normalizeNavDetail(detail);
       if (!norm) return;
       dispatch({ type: "OPEN", pageKey: norm.pageKey, params: norm.params, openIn: norm.openIn });
     };
-    window.addEventListener("nav", onNav);
-    return () => window.removeEventListener("nav", onNav);
+    onEvent("nav", onNav);
+    return () => offEvent("nav", onNav);
   }, [dispatch]);
 
   // 点击任意处关闭弹层菜单
@@ -89,7 +90,7 @@ export default function Workbench() {
           <button
             className="wb-tools-btn wb-cmd-btn"
             title="命令面板（Ctrl+K / Ctrl+B）：快速跳转任意功能页、执行命令"
-            onClick={(e) => { e.stopPropagation(); window.dispatchEvent(new CustomEvent("cmd:toggle")); }}
+            onClick={(e) => { e.stopPropagation(); emit("cmd:toggle"); }}
           >⌘ 命令</button>
           <button
             className="wb-tools-btn"

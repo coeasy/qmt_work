@@ -5,6 +5,7 @@ import BatchDeleteBar from "./BatchDeleteBar.jsx";
 import { useBroker } from "../BrokerContext.jsx";
 import { useListRefresh, notifyListChanged } from "../lib/listRefresh.js";
 import { getLocale, setLocale, t } from "../lib/i18n.js";
+import { emit } from "../lib/eventBus";
 
 export default function Settings() {
   const { brokers, connectedCount, activeBroker } = useBroker();
@@ -191,7 +192,7 @@ export default function Settings() {
           <span className={`tag ${connectedCount ? "ok" : "fail"}`}>{connectedCount} 个在线</span>
           {activeBroker && <span className="tag run">活跃：{activeBroker.broker_name} · {activeBroker.account_id || "—"}</span>}
           <span className="muted">共 {brokers.length} 个已配置连接</span>
-          <button className="ghost" onClick={() => window.dispatchEvent(new CustomEvent("nav", { detail: "brokers" }))}>
+          <button className="ghost" onClick={() => emit("nav", "brokers")}>
             前往「券商连接」管理
           </button>
         </div>

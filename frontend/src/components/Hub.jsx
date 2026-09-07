@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { on as onEvent, off as offEvent } from "../lib/eventBus";
 
 /* 通用 Hub 容器：把一个领域下的多个页面合并到同一个顶层入口，
    内部用子页签切换。未激活的子组件会被卸载（停止其轮询/定时器）。
@@ -29,12 +30,12 @@ export default function Hub({ tabs, initial, hubKey }) {
   }, [initial, tabs]);
   // 支持外部「快速交易」等场景切换子页签（见 lib/trade.js 的 quickTradeNavigate）
   useEffect(() => {
-    const onSwitch = (e) => {
-      const d = e.detail || {};
+    const onSwitch = (detail) => {
+      const d = detail || {};
       if (hubKey && d.hub === hubKey && d.tab) setActive(d.tab);
     };
-    window.addEventListener("hub:switch", onSwitch);
-    return () => window.removeEventListener("hub:switch", onSwitch);
+    onEvent("hub:switch", onSwitch);
+    return () => offEvent("hub:switch", onSwitch);
   }, [hubKey]);
   const cur = tabs.find((t) => t.key === active) || tabs[0];
   if (!cur) return null;

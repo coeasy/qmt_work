@@ -10,6 +10,7 @@ import ConfirmTradeModal from "./ui/ConfirmTradeModal.jsx";
 import usePersistentState from "../lib/usePersistentState.js";
 import { t } from "../lib/i18n.js";
 import { orderStatus } from "../lib/format.js";
+import { on as onEvent, off as offEvent } from "../lib/eventBus";
 
 // 手动交易面板：下单 / 持仓 / 委托 / 成交 / 条件单 / 目标仓位（全部真实接口，下单过风控）
 // v3：支持叶子 params 直达预填（navTo("trade", {params}) 协议通道），
@@ -63,8 +64,8 @@ export default function Trade({ params } = {}) {
 
   // 从涨停板 / 行情等页面「快速交易」带单过来：填充代码+涨停价并切到下单页
   useEffect(() => {
-    const onPrefill = (e) => {
-      const d = e.detail || {};
+    const onPrefill = (detail) => {
+      const d = detail || {};
       if (!d.code) return;
       setForm((f) => ({
         ...f, code: d.code,
@@ -74,8 +75,8 @@ export default function Trade({ params } = {}) {
       }));
       setTab("order");
     };
-    window.addEventListener("trade:prefill", onPrefill);
-    return () => window.removeEventListener("trade:prefill", onPrefill);
+    onEvent("trade:prefill", onPrefill);
+    return () => offEvent("trade:prefill", onPrefill);
   }, []);
 
   // 若在挂载前就有人调用了 quickTradeNavigate（pending 已写入），立即消费，避免竞态丢单

@@ -3,6 +3,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { PAGE_TREE } from "../pagesRegistry.jsx";
 import { navTo, navToQuote } from "../lib/nav.js";
 import { t } from "../lib/i18n.js";
+import { on as onEvent, off as offEvent } from "../lib/eventBus";
 
 export default function CommandPalette() {
   const [open, setOpen] = useState(false);
@@ -45,11 +46,11 @@ export default function CommandPalette() {
   useEffect(() => {
     const onToggle = () => { setOpen((o) => !o); setQ(""); setIdx(0); };
     const onClose = () => setOpen(false);
-    window.addEventListener("cmd:toggle", onToggle);
-    window.addEventListener("cmd:close", onClose);
+    onEvent("cmd:toggle", onToggle);
+    onEvent("cmd:close", onClose);
     return () => {
-      window.removeEventListener("cmd:toggle", onToggle);
-      window.removeEventListener("cmd:close", onClose);
+      offEvent("cmd:toggle", onToggle);
+      offEvent("cmd:close", onClose);
     };
   }, []);
 

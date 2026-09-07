@@ -7,6 +7,7 @@ import Ticker from "./Ticker.jsx";
 import GlobalSearch from "./GlobalSearch.jsx";
 import { PAGES, KEY_ALIAS } from "../pagesRegistry.jsx";
 import { t } from "../lib/i18n.js";
+import { emit } from "../lib/eventBus";
 
 // 9 个主菜单（按 TDX 习惯顺序）：系统 / 行情 / 分析 / 交易 / 策略 / 组合 / 研究 / 信号 / 账户 / 运维
 const MENUS = [
@@ -34,7 +35,7 @@ export default function MenuBar() {
 
   useEffect(() => () => { if (closeTimer.current) clearTimeout(closeTimer.current); }, []);
 
-  const open = (key) => { window.dispatchEvent(new CustomEvent("nav", { detail: key })); setOpenIdx(-1); };
+  const open = (key) => { emit("nav", key); setOpenIdx(-1); };
 
   return (
     <div className="topbar">

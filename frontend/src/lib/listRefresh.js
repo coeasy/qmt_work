@@ -17,15 +17,14 @@
 //       watchlist     —— 自选股（localStorage 双写之外的主动通知通道）
 import { useEffect, useRef } from "react";
 import { useActiveInterval } from "../hooks/useActiveInterval.js";
+import { emit as emitEvent, on as onEvent, off as offEvent } from "./eventBus";
 
 const EVT = "qmt:list-changed";
 
 export function notifyListChanged(scopes) {
   const arr = Array.isArray(scopes) ? scopes : [scopes];
   if (!arr.length) return;
-  try {
-    window.dispatchEvent(new CustomEvent(EVT, { detail: { scopes: arr, ts: Date.now() } }));
-  } catch { /* noop */ }
+  emitEvent(EVT, { scopes: arr, ts: Date.now() });
 }
 
 const normScope = (s) => (Array.isArray(s) ? s.join("\u0001") : (s || ""));
@@ -44,13 +43,13 @@ export function useListRefresh(loadFn, opts = {}) {
   useEffect(() => {
     const scopes = scopeKey ? scopeKey.split("\u0001") : [];
     if (!scopes.length) return undefined;
-    const on = (e) => {
-      if (e.detail && Array.isArray(e.detail.scopes)
-          && e.detail.scopes.some((x) => scopes.includes(x))) {
+    const handler = (detail) => {
+      if (detail && Array.isArray(detail.scopes)
+          && detail.scopes.some((x) => scopes.includes(x))) {
         fnRef.current();
       }
     };
-    window.addEventListener(EVT, on);
-    return () => window.removeEventListener(EVT, on);
+    onEvent(EVT, handler);
+    return () => offEvent(EVT, handler);
   }, [scopeKey]);
 }

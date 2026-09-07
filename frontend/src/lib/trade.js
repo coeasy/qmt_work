@@ -4,16 +4,15 @@
 //   · 否则打开/激活交易实例，params 由 Pane 直达组件
 // 兼容兜底保留 trade:prefill 事件 + pending（Trade Hub 子页切换仍依赖事件）。
 import { navTo } from "./nav.js";
+import { emit as emitEvent } from "./eventBus";
 
 export function quickTradeNavigate(code, price, direction = "buy") {
   const payload = { code, price: price ? Number(price) : undefined, direction };
   // pending 兜底：Trade 尚未挂载时也能在挂载瞬间读到，避免竞态丢单
   window.__prefillTrade = payload;
   navTo("trade", { params: payload });
-  window.dispatchEvent(new CustomEvent("hub:switch", {
-    detail: { hub: "trade", tab: "trade" },
-  }));
-  window.dispatchEvent(new CustomEvent("trade:prefill", { detail: payload }));
+  emitEvent("hub:switch", { hub: "trade", tab: "trade" });
+  emitEvent("trade:prefill", payload);
 }
 
 export function consumePendingPrefill() {

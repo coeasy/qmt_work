@@ -9,6 +9,7 @@
 import { createContext, useContext, useEffect, useState } from "react";
 
 import { api } from "../api.js";
+import { emit as emitEvent, on as onEvent } from "./eventBus";
 
 const _specCache = { spec: null, ts: 0 };
 const TTL = 5 * 60 * 1000;   // 5min（规范低频变化）
@@ -53,14 +54,12 @@ export function useChartSpec() {
 export const CHART_INDICATOR_EVENT = "qmt:chart:indicator";
 
 export function broadcastIndicatorChange(main, sub) {
-  window.dispatchEvent(new CustomEvent(CHART_INDICATOR_EVENT, { detail: { main, sub } }));
+  emitEvent(CHART_INDICATOR_EVENT, { main, sub });
 }
 
 // 监听联动事件（组件内 useEffect 调用，返回退订函数）
 export function onIndicatorChange(handler) {
-  const fn = (e) => handler(e.detail || {});
-  window.addEventListener(CHART_INDICATOR_EVENT, fn);
-  return () => window.removeEventListener(CHART_INDICATOR_EVENT, fn);
+  return onEvent(CHART_INDICATOR_EVENT, (detail) => handler(detail || {}));
 }
 
 // 从 spec 取主/副图指标选项列表（含本地「无」回退）

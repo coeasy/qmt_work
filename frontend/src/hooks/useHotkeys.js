@@ -7,6 +7,7 @@
 import { useEffect } from "react";
 import { PAGE_TREE } from "../pagesRegistry.jsx";
 import { navTo, navToQuote } from "../lib/nav.js";
+import { emit } from "../lib/eventBus";
 
 export function useHotkeys() {
   useEffect(() => {
@@ -18,25 +19,25 @@ export function useHotkeys() {
       const mod = e.ctrlKey || e.metaKey;
       if (mod && (e.key === "k" || e.key === "K")) {
         e.preventDefault();
-        window.dispatchEvent(new CustomEvent("cmd:toggle"));
+        emit("cmd:toggle");
         return;
       }
       if (mod && (e.key === "b" || e.key === "B")) {
         // 旧版此处切换左侧功能树；功能树已移除，改为唤起命令面板（与 Ctrl+K 一致）
         e.preventDefault();
-        window.dispatchEvent(new CustomEvent("cmd:toggle"));
+        emit("cmd:toggle");
         return;
       }
       if (e.key === "Escape") {
-        window.dispatchEvent(new CustomEvent("cmd:close"));
-        window.dispatchEvent(new CustomEvent("help:close"));
+        emit("cmd:close");
+        emit("help:close");
         return;
       }
       if (e.altKey && /^[1-9]$/.test(e.key)) {
         const g = PAGE_TREE[Number(e.key) - 1];
         if (g && g.items[0]) {
           e.preventDefault();
-          window.dispatchEvent(new CustomEvent("nav", { detail: g.items[0].key }));
+          emit("nav", g.items[0].key);
         }
         return;
       }
@@ -46,7 +47,7 @@ export function useHotkeys() {
       const k = e.key;
       if (k === "F1") {
         e.preventDefault();
-        window.dispatchEvent(new CustomEvent("help:toggle"));
+        emit("help:toggle");
         return;
       }
       if (k === "F3") {
@@ -62,24 +63,24 @@ export function useHotkeys() {
       }
       if (k === "F5") {
         e.preventDefault();
-        window.dispatchEvent(new CustomEvent("sa:toggle-period"));
+        emit("sa:toggle-period");
         return;
       }
       if (k === "F6") {
         e.preventDefault();
-        window.dispatchEvent(new CustomEvent("nav", { detail: "quoteboard" }));
+        emit("nav", "quoteboard");
         // 综合排名 = 自选风格入口
-        window.dispatchEvent(new CustomEvent("qb:switch", { detail: "watch" }));
+        emit("qb:switch", "watch");
         return;
       }
       if (k === "F10") {
         e.preventDefault();
-        window.dispatchEvent(new CustomEvent("sa:focus-f10"));
+        emit("sa:focus-f10");
         return;
       }
       if (k === "F12") {
         e.preventDefault();
-        window.dispatchEvent(new CustomEvent("nav", { detail: "trade" }));
+        emit("nav", "trade");
         return;
       }
     };

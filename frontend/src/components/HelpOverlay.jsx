@@ -1,6 +1,7 @@
 // 帮助层（F1）：列出快捷键与功能分组，便于通达信式键盘流上手。
 import { useEffect, useState } from "react";
 import { PAGE_TREE } from "../pagesRegistry.jsx";
+import { on as onEvent, off as offEvent } from "../lib/eventBus";
 
 const SHORTCUTS = [
   { k: "Ctrl/Cmd + K", d: "打开命令面板（模糊跳页 / 代码直达个股）" },
@@ -21,11 +22,11 @@ export default function HelpOverlay() {
   useEffect(() => {
     const onToggle = () => setOpen((o) => !o);
     const onClose = () => setOpen(false);
-    window.addEventListener("help:toggle", onToggle);
-    window.addEventListener("help:close", onClose);
+    onEvent("help:toggle", onToggle);
+    onEvent("help:close", onClose);
     return () => {
-      window.removeEventListener("help:toggle", onToggle);
-      window.removeEventListener("help:close", onClose);
+      offEvent("help:toggle", onToggle);
+      offEvent("help:close", onClose);
     };
   }, []);
 

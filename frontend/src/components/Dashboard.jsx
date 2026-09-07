@@ -5,6 +5,7 @@ import { useSystemStatus, useServerEvents } from "../hooks/useSystemWS.js";
 import { useActiveInterval } from "../hooks/useActiveInterval.js";
 import Chart from "./Chart.jsx";
 import { t } from "../lib/i18n.js";
+import { emit } from "../lib/eventBus";
 
 export default function Dashboard() {
   const { activeId, activeBroker } = useBroker();
@@ -83,7 +84,7 @@ export default function Dashboard() {
       {noBroker && (
         <div className="empty-state">
           <p>尚未连接券商客户端。所有账户 / 行情 / 交易均依赖真实券商 SDK。</p>
-          <button onClick={() => window.dispatchEvent(new CustomEvent("nav", { detail: "brokers" }))}>
+          <button onClick={() => emit("nav", "brokers")}>
             前往「券商连接」添加并连接
           </button>
         </div>

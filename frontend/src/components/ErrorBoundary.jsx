@@ -1,4 +1,5 @@
 import { Component } from "react";
+import { emit } from "../lib/eventBus";
 
 /** 全局错误边界：页面渲染异常时展示兜底 UI，避免白屏（P1 前端健壮性）。 */
 export default class ErrorBoundary extends Component {
@@ -22,7 +23,7 @@ export default class ErrorBoundary extends Component {
           <p className="muted" style={{ whiteSpace: "pre-wrap" }}>{this.state.message}</p>
           <div className="btn-row">
             <button onClick={this.reset}>重试</button>
-            <button className="ghost" onClick={() => window.dispatchEvent(new CustomEvent("nav", { detail: "dashboard" }))}>
+            <button className="ghost" onClick={() => emit("nav", "dashboard")}>
               返回仪表盘
             </button>
           </div>

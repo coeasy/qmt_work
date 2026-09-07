@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { api } from "../api.js";
 import { navToQuote } from "../lib/nav.js";
 import { useSystemStatus, useServerEvents } from "../hooks/useSystemWS.js";
+import { emit } from "../lib/eventBus";
 
 const TABS = [
   { key: "watch", label: "自选股" },
@@ -54,14 +55,14 @@ export default function BottomDock() {
     const nw = watch.includes(c) ? watch : [...watch, c];
     setWatch(nw);
     try { localStorage.setItem(WATCH_KEY, JSON.stringify(nw)); } catch { /* noop */ }
-    window.dispatchEvent(new CustomEvent("qmt:watch:update"));   // T2 双写同步广播
+    emit("qmt:watch:update");   // T2 双写同步广播
     setWatchInput("");
   }
   function rmWatch(c) {
     const nw = watch.filter((x) => x !== c);
     setWatch(nw);
     try { localStorage.setItem(WATCH_KEY, JSON.stringify(nw)); } catch { /* noop */ }
-    window.dispatchEvent(new CustomEvent("qmt:watch:update"));   // T2 双写同步广播
+    emit("qmt:watch:update");   // T2 双写同步广播
   }
   const openQuote = (code) => navToQuote(code);
 

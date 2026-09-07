@@ -2,6 +2,7 @@
 // 全部内容单行排布，避免换行。
 import { useBroker } from "../BrokerContext.jsx";
 import { useQuoteHub } from "../lib/quoteHub.jsx";
+import { emit } from "../lib/eventBus";
 
 const WS_LABEL = {
   connected: { txt: "行情实时", cls: "ok" },
@@ -14,7 +15,7 @@ export default function BrokerBar() {
   const { brokers, activeId, activeBroker, connectedCount, setActive } = useBroker();
   const hub = useQuoteHub();
   const ws = WS_LABEL[hub.state] || WS_LABEL.offline;
-  const nav = (k) => window.dispatchEvent(new CustomEvent("nav", { detail: k }));
+  const nav = (k) => emit("nav", k);
 
   return (
     <div className="status-bar">
