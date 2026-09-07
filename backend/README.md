@@ -18,7 +18,7 @@ python run.py    # http://127.0.0.1:21118
 
 ```bash
 python tests/smoke2.py    # 22 项 → PASS
-python -m pytest          # 单测 → 121 passed
+python -m pytest          # 单测 → 570+ passed
 ```
 
 ## 打包为 EXE
@@ -50,6 +50,6 @@ python build_exe.py
 | `gateway/` | 鉴权 / 限流 / 风控 / 审计 / 脱敏 / K 线缓存 / metrics / webhook |
 | `backtest/` | 回测作业队列（含向量化 + 参数扫描） |
 | `paper/` | 模拟盘引擎 |
-| `scheduler/` | 定时任务 + 分布式调度 |
+| `app/runtime/` | 任务运行时（runtime jobs，含取消/进度查询） |
 | `tools/` | 因子 / 策略 / 算法 / 涨停 / 条件单 / 参考数据 |
 | `tests/` | 单测 + 冒烟测试 |

@@ -73,3 +73,6 @@ _scratch_decode.py
 frontend/render_smoke.mjs
 /tests/
 frontend/tests/render_smoke_v3.mjs
+
+# 本地测试依赖隔离目录（embedded python pip --target，不入库）
+.venv-test/

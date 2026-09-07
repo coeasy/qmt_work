@@ -231,7 +231,7 @@ qmt_work/
 ├─ frontend/             # React + Vite + Electron（7 大中心 / 21 顶层页 / 31 个能力入口）
 │  ├─ src/
 │  │  ├─ App.jsx         # 路由入口
-│  │  ├─ api.js          # 统一 REST 客户端（167 个方法）
+│  │  ├─ api.js          # 统一 REST 客户端（170+ 个封装方法 + 5 个通用方法）
 │  │  ├─ pagesRegistry.jsx # 页面注册表（菜单/功能树/命令面板单一真源）
 │  │  ├─ components/     # 页面组件
 │  │  │  ├─ Dashboard.jsx      # 仪表盘
