@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-from app.routes._common import _call, _need, audit_log, err, ok
+from app.routes._common import _call, _need, audit_log, err, no_broker, ok
 
 # --- stdlib imports injected by fix_route_imports ---
 
@@ -19,7 +19,7 @@ async def rebalance(body: dict):
         return err(400, "targets 不能为空")
     b = _need(body.get("conn_id") or None)
     if b is None:
-        return err(503, "未连接任何券商客户端。")
+        return no_broker()
     cash = await _call(b, b.gateway.get_cash)
     if isinstance(cash, dict) and cash.get("code"):
         return cash

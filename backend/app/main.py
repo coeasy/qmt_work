@@ -474,7 +474,7 @@ def create_app() -> FastAPI:
         # 8. 多源行情补充源预热：best-effort 后台加载（当前为 eltdx/TDX 公共行情）。
         # 不阻塞启动；首请求若尚未就绪会自动惰性加载。仅作非商业场景行情补充源。
         try:
-            from app.datasource.manager import get_hub
+            from app.datasource.registry import get_hub
             asyncio.create_task(get_hub().warmup_all())
             log.info("行情数据源预热任务已提交（后台）")
         except Exception as exc:  # noqa: BLE001

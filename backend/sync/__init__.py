@@ -129,7 +129,7 @@ class SyncEngine:
                     log.warning("quote latency high %s: %.0fms", code, latency)
                 get_metrics().record_quote_latency(latency)
                 try:
-                    from app import state as _state
+                    from app.state import state as _state
                     if _state.alert_engine is not None:
                         _state.alert_engine.evaluate_metric("quote_latency", latency, {"code": code})
                 except Exception:  # noqa: BLE001
@@ -143,13 +143,22 @@ class SyncEngine:
         # 使 WS 推送 / latest_quotes / 前端面板均能直接显示中文名。O(1) 字典查找，高频安全。
         if not data.get("name"):
             try:
-                from app.datasource.manager import get_hub
+                from app.datasource.registry import get_hub
                 _nm = get_hub().lookup_name(code)
                 if _nm:
                     data["name"] = _nm
             except Exception:  # noqa: BLE001
                 pass
         self.latest_quotes[code] = data
+        # 模拟盘盯市接线（此前 process_quote 从未被行情流调用，浮盈只能拉式刷新）：
+        # 仅当模拟盘持有该标的仓位时才逐 tick 注入，避免无谓开销。
+        try:
+            from app.state import state as _state
+            pe = getattr(_state, "paper_engine", None)
+            if pe is not None and pe.positions.get(code):
+                pe.process_quote(code, data.get("last"))
+        except Exception as exc:  # noqa: BLE001
+            log.debug("paper mark-to-market failed %s: %s", code, exc)
         # 行情总线分发（内存 / Redis 多进程共享）
         if self._quote_bus:
             try:

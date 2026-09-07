@@ -412,7 +412,7 @@ class AlgoEngine:
         retries = 3
         window = 1.0
         try:
-            from app import state as _st
+            from app.state import state as _st
             if getattr(_st, "runtime_config", None) is not None:
                 window = float(_st.runtime_config.get("algo.confirm_timeout") or 3.0)
                 retries = max(1, int(_st.runtime_config.get("algo.confirm_retries") or 5))

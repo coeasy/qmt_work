@@ -6,10 +6,11 @@ from app.middleware.request_id import _request_id_ctx
 from app.routes._common import WebSocket, WebSocketDisconnect, _ws_authorized, state
 
 # --- stdlib imports injected by fix_route_imports ---
-
-
+import logging
 
 router = APIRouter()
+
+log = logging.getLogger("qmt_work.ws")
 
 @router.websocket("/ws")
 async def ws_endpoint(ws: WebSocket):
@@ -29,6 +30,8 @@ async def ws_endpoint(ws: WebSocket):
         except WebSocketDisconnect:
             state.ws_manager.disconnect(cid)
         except Exception:
+            # 裸吞会让客户端异常（消息解析/处理器错误）完全不可见，此处补一条警告日志。
+            log.exception("ws client %s crashed", cid)
             state.ws_manager.disconnect(cid)
     finally:
         _request_id_ctx.reset(token)

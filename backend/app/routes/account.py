@@ -4,7 +4,7 @@ import time
 
 from fastapi import APIRouter
 
-from app.routes._common import BrokerError, _call, _need, err, ok, state
+from app.routes._common import BrokerError, _call, _need, err, no_broker, ok, state
 
 router = APIRouter()
 
@@ -13,7 +13,7 @@ async def account_status(conn_id: str = ""):
     """获取account / status（GET /account/status）。"""
     b = _need(conn_id or None)
     if b is None:
-        return err(503, "未连接任何券商客户端：请到「券商连接」页添加并连接券商。")
+        return no_broker()
     cash = await _call(b, b.gateway.get_cash)
     if isinstance(cash, dict) and cash.get("code"):
         return cash
@@ -36,7 +36,7 @@ async def account_aggregate():
     """多账户聚合视图：遍历所有已连接券商账户，汇总资产/持仓/委托/成交。"""
     conns = [c for c in state.broker_manager.all_connections() if c.connected]
     if not conns:
-        return err(503, "未连接任何券商客户端：请到「券商连接」页添加并连接券商。")
+        return no_broker()
     accounts = []
     positions_by_code: dict[str, dict] = {}
     total_assets = total_cash = total_mv = 0.0
@@ -95,7 +95,7 @@ async def account_slippage(code: str = "600519.SH", conn_id: str = ""):
     """滑点分析（EzQmt cal_deal_comm：成交价 vs 当日 open/close/avg 基点差）。"""
     b = _need(conn_id or None)
     if b is None:
-        return err(503, "未连接任何券商客户端。")
+        return no_broker()
     deals = await _call(b, b.gateway.get_deals)
     if isinstance(deals, dict) and deals.get("code"):
         return deals

@@ -24,6 +24,15 @@ def err(code: int, message: str, extra=None) -> dict:
     return {"code": code, "message": message, "data": extra if extra is not None else None}
 
 
+# 无券商连接的统一 503 文案（单一真相源在 app/state.py；零 mock 降级口径见 README）。
+from app.state import MSG_NO_BROKER  # noqa: E402  (re-export 供各路由域使用)
+
+
+def no_broker() -> dict:
+    """无可用券商连接时的统一 503 信封。"""
+    return err(503, MSG_NO_BROKER)
+
+
 def audit_log(actor: str, action: str, target: str, params: dict | None = None,
               result: str = "ok", ip: str = "") -> None:
     """统一写审计（T10）：D4 hash 链 + E4 脱敏，DB 未就绪时静默跳过（绝不阻断业务）。
@@ -40,6 +49,18 @@ def audit_log(actor: str, action: str, target: str, params: dict | None = None,
 def _need(conn_id: str | None = None):
     """取指定/活跃 bridge；无连接返回 None（调用方返回 503）。"""
     return state.broker_manager.bridge(conn_id)
+
+
+def envelope_ok(res):
+    """把券商网关原始返回值（list / dict）统一包成 {code:0, data} 业务信封。
+
+    前端 ``api`` 客户端强制要求 ``{code:0, data}`` 形态，否则 ``j.code !== 0``
+    抛错导致列表界面空白。``_call`` 在超时 / BrokerError 时已返回 err 信封
+    （int 型 code!=0），此处识别并原样放行，避免双层信封或损坏 503 文案。
+    """
+    if isinstance(res, dict) and isinstance(res.get("code"), int) and res.get("code") != 0:
+        return res
+    return ok(res)
 
 
 async def _call(b, fn, *args, timeout: float = 12.0):

@@ -10,6 +10,8 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import asyncio  # noqa: E402
+
 import pytest  # noqa: E402
 from fastapi import FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
@@ -217,3 +219,44 @@ def test_api_503_when_engine_missing():
     assert c.get("/api/v1/paper/account").json()["code"] == 503
     assert c.post("/api/v1/paper/order", json={}).json()["code"] == 503
     state.paper_engine = old
+
+
+# ---------------- 行情流盯市接线（sync.SyncEngine.on_event → process_quote） ----------------
+def test_sync_engine_feeds_paper_mark_to_market(engine):
+    """此前 process_quote 在生产代码零调用（盯市半通）：行情流必须驱动模拟盘盯市价。"""
+    from types import SimpleNamespace
+
+    from sync import SyncEngine
+
+    engine.submit_order("600519.SH", "buy", 100.0, 1000)
+    se = SyncEngine(None, None)
+
+    import app.state as state_mod
+    old = state_mod.state.paper_engine
+    state_mod.state.paper_engine = engine
+    try:
+        asyncio.run(se.on_event({"type": "quote", "data": {
+            "code": "600519.SH", "last": 110.0, "name": "贵州茅台"}}))
+        # 盯市价被行情 tick 刷新（浮盈 = (110-100)×1000 - 佣金）
+        pos = engine.get_positions()[0]
+        assert pos["last_price"] == pytest.approx(110.0)
+        assert pos["unrealized_pnl"] == pytest.approx(10_000.0, abs=1.0)
+    finally:
+        state_mod.state.paper_engine = old
+
+
+def test_sync_engine_skips_paper_when_no_position(engine):
+    """未持仓标的不注入（无谓开销防护），且行情事件仍正常进入 latest_quotes。"""
+    from sync import SyncEngine
+
+    se = SyncEngine(None, None)
+    import app.state as state_mod
+    old = state_mod.state.paper_engine
+    state_mod.state.paper_engine = engine
+    try:
+        asyncio.run(se.on_event({"type": "quote", "data": {
+            "code": "000001.SZ", "last": 12.5, "name": "平安银行"}}))
+        assert se.latest_quotes["000001.SZ"]["last"] == 12.5
+        assert engine.last_prices.get("000001.SZ") is None
+    finally:
+        state_mod.state.paper_engine = old

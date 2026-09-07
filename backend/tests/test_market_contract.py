@@ -61,6 +61,13 @@ def _reachable():
         return False
 
 
+# CI/离线环境守卫：本文件全部用例依赖本地 21118 后端存活（真实链路契约测试，零 mock）。
+# 此前 _reachable() 只覆盖 standalone 模式，pytest 模式下后端不可达会直接 FAIL（CI 变红）；
+# 现补模块级 skipif，后端不可达时整模块 skip（G1-5b 收尾完善，2026-09-06）。
+import pytest  # noqa: E402
+
+pytestmark = pytest.mark.skipif(not _reachable(), reason=f"后端不可达：{BASE}")
+
 def _env_ok(resp):
     return isinstance(resp, dict) and resp.get("code") == 0 and "data" in resp
 

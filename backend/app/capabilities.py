@@ -28,7 +28,6 @@ _DENY_TOOL_PATHS = (
     "/api/v1/health",
     "/api/v1/metrics",
     "/api/v1/capabilities",
-    "/api/v1/scheduler",
     "/api/v1/webhooks",
     "/api/v1/ws",
     "/api/v1/api-keys",
@@ -64,9 +63,6 @@ _MARKET_NAME_OVERRIDES = {
     "/api/v1/market/quote": "get_quote",
     "/api/v1/market/kline": "get_kline",
     "/api/v1/market/search": "search_stocks",
-    "/api/v1/market/stock_list": "get_stock_list",
-    "/api/v1/market/full_tick": "get_full_tick",
-    "/api/v1/market/tick": "get_tick",
 }
 
 # 参数类型若含以下关键字，说明 handler 依赖请求对象/依赖注入/文件等，

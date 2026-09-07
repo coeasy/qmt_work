@@ -1,9 +1,37 @@
 from fastapi import APIRouter
 
-from app.routes._common import _call, _need, err, ok, state
+from app.routes._common import _call, _need, err, no_broker, ok, state, envelope_ok
 from gateway.idempotency import single_flight
 
 # --- stdlib imports injected by fix_route_imports ---
+
+from app.datasource.registry import get_manager
+
+
+def _enrich_names(rows):
+    """用 eltdx 名称表 O(1) 兜底富化券商返回的裸代码 name（持仓/委托/成交常只剩代码）。
+
+    仅当 name 缺失或回退成代码本身时查表补全；查不到保持原值，绝不伪造。
+    """
+    if not isinstance(rows, list):
+        return rows
+    try:
+        mgr = get_manager()
+    except Exception:  # noqa: BLE001
+        return rows
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        code = r.get("code") or r.get("stock_code") or r.get("symbol") or ""
+        if not code:
+            continue
+        nm = r.get("name")
+        bare = str(code).split(".")[0].upper()
+        if not nm or str(nm).upper() in (bare, str(code).upper()):
+            looked = mgr.lookup_name(code)
+            if looked:
+                r["name"] = looked
+    return rows
 
 
 router = APIRouter()
@@ -13,7 +41,7 @@ async def trade_order(body: dict):
     """创建/提交trade / order（POST /trade/order）。"""
     b = _need()
     if b is None:
-        return err(503, "未连接任何券商客户端：请到「券商连接」页添加并连接券商。")
+        return no_broker()
     code = str(body.get("code", "")).strip().upper()
     direction = (body.get("direction") or "buy").lower()
     volume = int(body.get("volume", 0))
@@ -52,7 +80,7 @@ async def trade_cancel(body: dict):
     """创建/提交trade / cancel（POST /trade/cancel）。"""
     b = _need()
     if b is None:
-        return err(503, "未连接任何券商客户端：请到「券商连接」页添加并连接券商。")
+        return no_broker()
     oid = str(body.get("order_id", ""))
     if not oid:
         return err(400, "order_id 必填")
@@ -65,31 +93,34 @@ async def trade_positions(symbol: str = ""):
     """获取trade / positions（GET /trade/positions）。"""
     b = _need()
     if b is None:
-        return err(503, "未连接任何券商客户端：请到「券商连接」页添加并连接券商。")
-    return await _call(b, b.gateway.get_positions, symbol or None)
+        return no_broker()
+    res = await _call(b, b.gateway.get_positions, symbol or None)
+    return envelope_ok(_enrich_names(res)) if isinstance(res, list) else res
 
 @router.get("/trade/orders")
 async def trade_orders():
     """获取trade / orders（GET /trade/orders）。"""
     b = _need()
     if b is None:
-        return err(503, "未连接任何券商客户端：请到「券商连接」页添加并连接券商。")
-    return await _call(b, b.gateway.get_orders)
+        return no_broker()
+    res = await _call(b, b.gateway.get_orders)
+    return envelope_ok(_enrich_names(res)) if isinstance(res, list) else res
 
 @router.get("/trade/deals")
 async def trade_deals():
     """获取trade / deals（GET /trade/deals）。"""
     b = _need()
     if b is None:
-        return err(503, "未连接任何券商客户端：请到「券商连接」页添加并连接券商。")
-    return await _call(b, b.gateway.get_deals)
+        return no_broker()
+    res = await _call(b, b.gateway.get_deals)
+    return envelope_ok(_enrich_names(res)) if isinstance(res, list) else res
 
 @router.post("/trade/target")
 async def trade_target(body: dict):
     """创建/提交trade / target（POST /trade/target）。"""
     b = _need()
     if b is None:
-        return err(503, "未连接任何券商客户端：请到「券商连接」页添加并连接券商。")
+        return no_broker()
     from tools.position import order_target_position
     try:
         return ok(await order_target_position(

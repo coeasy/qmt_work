@@ -108,3 +108,22 @@ def test_sync_many_concurrency_bounded(store):
     asyncio.run(s.sync_many(codes))
     assert state["peak"] <= 3, f"并发峰值 {state['peak']} 超闸门 3"
     assert state["peak"] >= 1
+
+
+# ---------------- 交易日历（G1-5b：内置节假日表） ----------------
+def test_calendar_excludes_holidays():
+    from datetime import date as _d
+    from app.sync.calendar import is_trading_day
+    # 2025-10-01 国庆休市（周四，工作日但为节假日）
+    assert is_trading_day(_d(2025, 10, 1)) is False
+    # 2025-10-09 节后首个交易日（周四）
+    assert is_trading_day(_d(2025, 10, 9)) is True
+    # 调休补班周末（2025-09-28 周日为交易日）
+    assert is_trading_day(_d(2025, 9, 28)) is True
+
+
+def test_weekday_calendar_now_holiday_accurate():
+    # weekday_calendar 已升级为真实日历：国庆周不再返回休市日
+    days = weekday_calendar(date(2025, 10, 9), count=3)
+    assert days == ["2025-10-09"] or "2025-10-01" not in days
+    assert all(d not in ("2025-10-01", "2025-10-02", "2025-10-03") for d in days)

@@ -105,7 +105,7 @@ class MarketSync:
         except Exception as exc:  # noqa: BLE001
             log.warning("market sync list series failed: %s", exc)
             return
-        codes = sorted({s["code"] for s in series if s.get("period") in ("1d", "1w", "1mon")})
+        codes = sorted({s["code"] for s in series if s.get("period") in ("1d", "1w", "1mo")})
         if not codes:
             log.info("market sync: no cached series to refresh")
             return

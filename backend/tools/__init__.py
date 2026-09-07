@@ -6,8 +6,8 @@ K 线在无券商连接时回退到 eltdx(TDX 公共行情) 数据源。
 """
 import logging
 
-from app.datasource.manager import get_hub
-from app.state import state
+from app.datasource.registry import get_hub
+from app.state import MSG_NO_BROKER_EXC, state
 from xtquant_client.base import BrokerError, BrokerNotConnectedError
 
 log = logging.getLogger("qmt_work.tools")
@@ -17,8 +17,7 @@ def get_bridge(conn_id: str | None = None):
     """返回指定/活跃券商连接 bridge；无连接时抛 BrokerNotConnectedError。"""
     b = state.broker_manager.bridge(conn_id)
     if b is None:
-        raise BrokerNotConnectedError(
-            "当前未连接任何券商客户端：请到「券商连接」页添加并连接券商（国金/华鑫/银河等 MiniQMT）。")
+        raise BrokerNotConnectedError(MSG_NO_BROKER_EXC)
     return b
 
 

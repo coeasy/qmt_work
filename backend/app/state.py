@@ -7,6 +7,14 @@
 from xtquant_client.manager import BrokerManager
 
 
+# 无券商连接的统一文案（503 响应与异常共用；app/routes/_common.no_broker 引用此处）。
+MSG_NO_BROKER = "未连接任何券商客户端：请到「券商连接」页添加并连接券商。"
+
+# 异常语境变体（require_bridge/get_bridge 抛出用；含客户端形态提示，与 503 响应文案区分）。
+MSG_NO_BROKER_EXC = ("当前未连接任何券商客户端：请到「券商连接」页添加并连接券商"
+                     "（国金/华鑫/银河等 MiniQMT）。")
+
+
 class AppState:
     db = None
     broker_manager = BrokerManager()
@@ -43,8 +51,7 @@ class AppState:
         from xtquant_client.base import BrokerNotConnectedError
         b = self.broker_manager.bridge(conn_id)
         if b is None:
-            raise BrokerNotConnectedError(
-                "当前未连接任何券商客户端：请到「券商连接」页添加并连接券商（国金/华鑫/银河等 MiniQMT）。")
+            raise BrokerNotConnectedError(MSG_NO_BROKER_EXC)
         return b
 
 
