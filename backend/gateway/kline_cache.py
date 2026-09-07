@@ -134,22 +134,28 @@ class KlineCache:
         """dt 是否属于今年（写入热表）：仅按年份比较，不依赖日期字符串格式。"""
         return KlineCache._year_of(dt) >= time.localtime().tm_year
 
-    def _where(self, table: str, code: str, period: str) -> str:
+    def _where(self, table: str, code: str, period: str, adjust: str = "") -> str:
+        # M6：复权维度入唯一键后，读路径必须按 adjust 过滤，
+        # 否则 qfq/hfq/原始价三份数据混排（同一 dt 多根 K 线）。
         return (f"SELECT dt, open, high, low, close, volume, amount, adjust FROM {table} "
-                f"WHERE code=? AND period=? ORDER BY dt DESC")
+                f"WHERE code=? AND period=? AND adjust=? ORDER BY dt DESC")
 
-    def get(self, code: str, period: str, count: int) -> list[dict]:
-        """取最近 count 根（今年热表优先 + 历史归档补足），按时间升序返回。"""
+    def get(self, code: str, period: str, count: int, adjust: str = "") -> list[dict]:
+        """取最近 count 根（今年热表优先 + 历史归档补足），按时间升序返回。
+
+        adjust: ''=券商原始价 / qfq / hfq —— 只返回该复权维度的数据。
+        """
         if self.db is None:
             return []
         count = max(1, int(count))
-        hot = self.db.query(self._where(self._HOT, code, period) + " LIMIT ?",
-                            (code, period, count))
+        adj = adjust or ""
+        hot = self.db.query(self._where(self._HOT, code, period, adj) + " LIMIT ?",
+                            (code, period, adj, count))
         need = count - len(hot)
         arch: list[dict] = []
         if need > 0:
-            arch = self.db.query(self._where(self._ARCHIVE, code, period) + " LIMIT ?",
-                                 (code, period, need))
+            arch = self.db.query(self._where(self._ARCHIVE, code, period, adj) + " LIMIT ?",
+                                 (code, period, adj, need))
         rows = _rows_from(arch + hot)
         rows.sort(key=lambda x: str(x["time"] or ""))
         return rows
@@ -189,15 +195,16 @@ class KlineCache:
                 arch_rows)
         return len(hot_rows)
 
-    def last_fetch(self, code: str, period: str) -> float:
+    def last_fetch(self, code: str, period: str, adjust: str = "") -> float:
         if self.db is None:
             return 0.0
+        adj = adjust or ""
         row = self.db.query_one(
             f"SELECT MAX(fetched_at) AS f FROM {self._HOT} "
-            "WHERE code=? AND period=?", (code, period))
+            "WHERE code=? AND period=? AND adjust=?", (code, period, adj))
         a = self.db.query_one(
             f"SELECT MAX(fetched_at) AS f FROM {self._ARCHIVE} "
-            "WHERE code=? AND period=?", (code, period))
+            "WHERE code=? AND period=? AND adjust=?", (code, period, adj))
         return max(float((row or {}).get("f") or 0.0),
                    float((a or {}).get("f") or 0.0))
 
@@ -232,17 +239,18 @@ class KlineCache:
         return age <= self.ttl_for(period)
 
     # ---------------- 阶段 3：异步变体（事件循环内回源/写缓存不阻塞） ----------------
-    async def aget(self, code: str, period: str, count: int) -> list[dict]:
+    async def aget(self, code: str, period: str, count: int, adjust: str = "") -> list[dict]:
         if self.db is None:
             return []
         count = max(1, int(count))
-        hot = await self.db.aquery(self._where(self._HOT, code, period) + " LIMIT ?",
-                                   (code, period, count))
+        adj = adjust or ""
+        hot = await self.db.aquery(self._where(self._HOT, code, period, adj) + " LIMIT ?",
+                                   (code, period, adj, count))
         need = count - len(hot)
         arch: list[dict] = []
         if need > 0:
-            arch = await self.db.aquery(self._where(self._ARCHIVE, code, period) + " LIMIT ?",
-                                        (code, period, need))
+            arch = await self.db.aquery(self._where(self._ARCHIVE, code, period, adj) + " LIMIT ?",
+                                        (code, period, adj, need))
         rows = _rows_from(arch + hot)
         rows.sort(key=lambda x: str(x["time"] or ""))
         return rows
@@ -277,15 +285,16 @@ class KlineCache:
                 arch_rows)
         return len(hot_rows)
 
-    async def alast_fetch(self, code: str, period: str) -> float:
+    async def alast_fetch(self, code: str, period: str, adjust: str = "") -> float:
         if self.db is None:
             return 0.0
+        adj = adjust or ""
         row = await self.db.aquery_one(
-            f"SELECT MAX(fetched_at) AS f FROM {self._HOT} WHERE code=? AND period=?",
-            (code, period))
+            f"SELECT MAX(fetched_at) AS f FROM {self._HOT} WHERE code=? AND period=? AND adjust=?",
+            (code, period, adj))
         a = await self.db.aquery_one(
-            f"SELECT MAX(fetched_at) AS f FROM {self._ARCHIVE} WHERE code=? AND period=?",
-            (code, period))
+            f"SELECT MAX(fetched_at) AS f FROM {self._ARCHIVE} WHERE code=? AND period=? AND adjust=?",
+            (code, period, adj))
         return max(float((row or {}).get("f") or 0.0), float((a or {}).get("f") or 0.0))
 
     async def alast_adjust(self, code: str, period: str) -> str:
@@ -299,81 +308,96 @@ class KlineCache:
                 return row["adjust"]
         return ""
 
-    async def acount(self, code: str, period: str) -> int:
+    async def acount(self, code: str, period: str, adjust: str = "") -> int:
         if self.db is None:
             return 0
+        adj = adjust or ""
         row = await self.db.aquery_one(
-            f"SELECT COUNT(1) AS c FROM {self._HOT} WHERE code=? AND period=?",
-            (code, period))
+            f"SELECT COUNT(1) AS c FROM {self._HOT} WHERE code=? AND period=? AND adjust=?",
+            (code, period, adj))
         a = await self.db.aquery_one(
-            f"SELECT COUNT(1) AS c FROM {self._ARCHIVE} WHERE code=? AND period=?",
-            (code, period))
+            f"SELECT COUNT(1) AS c FROM {self._ARCHIVE} WHERE code=? AND period=? AND adjust=?",
+            (code, period, adj))
         return int((row or {}).get("c") or 0) + int((a or {}).get("c") or 0)
 
-    async def ais_fresh(self, code: str, period: str, count: int) -> bool:
-        if await self.acount(code, period) < count:
+    async def ais_fresh(self, code: str, period: str, count: int, adjust: str = "") -> bool:
+        if await self.acount(code, period, adjust) < count:
             return False
-        age = time.time() - await self.alast_fetch(code, period)
+        age = time.time() - await self.alast_fetch(code, period, adjust)
         return age <= self.ttl_for(period)
 
     # ---------------- 组合入口 ----------------
     async def get_or_fetch(self, code: str, period: str, count: int, fetcher,
-                           force: bool = False) -> dict:
+                           force: bool = False, adjust: str = "") -> dict:
         """缓存优先取 K 线；未命中/过期时回源券商并写缓存。
 
         fetcher: async (code, period, count) -> list[dict]
+        adjust: 本请求的复权维度（''=原始价 / qfq / hfq）。缓存读写均按该维度
+        隔离（M6：唯一键含 adjust 后三份数据各行其道，读路径不再混排）。
         返回 {"bars": [...], "source": cache|broker|cache_stale, "cached_at": float|None}
         """
         count = max(1, int(count))
+        adj = adjust or ""
         # 阶段 3：事件循环内回源/读缓存走 a* 变体（线程池），不阻塞事件循环
-        if not force and await self.ais_fresh(code, period, count):
+        if not force and await self.ais_fresh(code, period, count, adj):
             self.hits += 1
-            return {"bars": await self.aget(code, period, count), "source": "cache",
-                    "cached_at": await self.alast_fetch(code, period)}
+            return {"bars": await self.aget(code, period, count, adj), "source": "cache",
+                    "cached_at": await self.alast_fetch(code, period, adj)}
         try:
             bars = await fetcher(code, period, count) or []
             if bars:
                 self.misses += 1
-                # 复用序列既有复权标记，避免普通抓取（adjust="")覆盖已有 qfq/hfq 数据
-                await self.aput(code, period, bars,
-                                adjust=await self.alast_adjust(code, period))
+                # M6 修正：按本请求的复权维度落库（券商原始价=''）。
+                # 旧逻辑复用 alast_adjust 会把原始价错标成 qfq/hfq；
+                # 唯一键含 adjust 后各维度独立存储，无需再互相"保护"。
+                await self.aput(code, period, bars, adjust=adj)
                 return {"bars": bars, "source": "broker", "cached_at": time.time()}
             # 券商返回空：若有缓存则降级供给
-            cached = await self.aget(code, period, count)
+            cached = await self.aget(code, period, count, adj)
             if cached:
                 self.stale_serves += 1
                 return {"bars": cached, "source": "cache_stale",
-                        "cached_at": await self.alast_fetch(code, period),
+                        "cached_at": await self.alast_fetch(code, period, adj),
                         "note": "券商返回空数据，回退到本地历史缓存"}
             self.misses += 1
             return {"bars": [], "source": "broker", "cached_at": None}
         except Exception as exc:  # noqa: BLE001
-            cached = await self.aget(code, period, count)
+            cached = await self.aget(code, period, count, adj)
             if cached:
                 self.stale_serves += 1
                 log.warning("kline fetch failed, serve stale cache %s: %s", code, exc)
                 return {"bars": cached, "source": "cache_stale",
-                        "cached_at": await self.alast_fetch(code, period),
+                        "cached_at": await self.alast_fetch(code, period, adj),
                         "note": f"券商取数失败（{exc}），回退到本地历史缓存"}
             raise
 
     # ---------------- 导出到本地指定目录（CSV/JSON，供离线分析/回测归档） ----------------
     def _read_all_bars(self, code: str, period: str, count: int = 0) -> list[dict]:
-        """读取某序列全部（或最近 count 根）K 线（热表+归档合并），按时间升序。"""
+        """读取某序列全部（或最近 count 根）K 线（热表+归档合并），按时间升序。
+
+        导出场景读全部复权维度（M6 唯一键含 adjust），按 (adjust, dt) 去重防御。
+        """
         if self.db is None:
             return []
         count = max(0, int(count or 0))
         if count > 0:
             raw = self.get(code, period, count)
         else:
-            rows = self.db.query(self._where(self._HOT, code, period), (code, period))
-            rows += self.db.query(self._where(self._ARCHIVE, code, period), (code, period))
+            rows = self.db.query(
+                f"SELECT dt, open, high, low, close, volume, amount, adjust "
+                f"FROM {self._HOT} WHERE code=? AND period=? ORDER BY dt DESC",
+                (code, period))
+            rows += self.db.query(
+                f"SELECT dt, open, high, low, close, volume, amount, adjust "
+                f"FROM {self._ARCHIVE} WHERE code=? AND period=? ORDER BY dt DESC",
+                (code, period))
             raw = _rows_from(rows)
-            # 热/归档正常不应有重复时间点（年度归档已搬移）；防御性去重
+            # 同一 (adjust, dt) 唯一；跨维度去重只看 (time, adjust)
             seen: set = set()
             dedup = []
-            for b in sorted(raw, key=lambda x: str(x["time"] or "")):
-                t = str(b.get("time") or "")
+            for b in sorted(raw, key=lambda x: (str(x.get("adjust") or ""),
+                                                str(x["time"] or ""))):
+                t = (str(b.get("time") or ""), str(b.get("adjust") or ""))
                 if t in seen:
                     continue
                 seen.add(t)

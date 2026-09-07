@@ -452,6 +452,47 @@ CREATE TABLE IF NOT EXISTS strategy_market (
     tags_json TEXT DEFAULT '[]', created_at TEXT, downloads INTEGER DEFAULT 0
 );
 """),
+    (18, """
+-- M6 复权维度入唯一键：kline_cache/kline_archive 原 UNIQUE(code,period,dt)
+-- 不含 adjust，qfq/hfq/原始价三份数据互相覆盖（INSERT OR REPLACE 互相挤掉），
+-- 且 get_or_fetch 曾用 last_adjust 复用标记——把券商原始价错标成 qfq。
+-- 重建两表：UNIQUE(code, period, adjust, dt)，三份数据各行其道；
+-- 存量行原样迁移（历史行 adjust 本就是最后一次写入者的标记）。
+ALTER TABLE kline_cache RENAME TO kline_cache_old;
+CREATE TABLE kline_cache (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    code TEXT NOT NULL,
+    period TEXT NOT NULL DEFAULT '1d',
+    dt TEXT NOT NULL,
+    open REAL, high REAL, low REAL, close REAL,
+    volume REAL, amount REAL,
+    fetched_at REAL DEFAULT 0,
+    adjust TEXT DEFAULT '',
+    UNIQUE(code, period, adjust, dt)
+);
+INSERT INTO kline_cache (code,period,dt,open,high,low,close,volume,amount,fetched_at,adjust)
+    SELECT code,period,dt,open,high,low,close,volume,amount,fetched_at,adjust
+    FROM kline_cache_old;
+DROP TABLE kline_cache_old;
+CREATE INDEX IF NOT EXISTS idx_kline_cache_lookup ON kline_cache(code, period, adjust, dt);
+ALTER TABLE kline_archive RENAME TO kline_archive_old;
+CREATE TABLE kline_archive (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    code TEXT NOT NULL,
+    period TEXT NOT NULL DEFAULT '1d',
+    dt TEXT NOT NULL,
+    open REAL, high REAL, low REAL, close REAL,
+    volume REAL, amount REAL,
+    fetched_at REAL DEFAULT 0,
+    adjust TEXT DEFAULT '',
+    UNIQUE(code, period, adjust, dt)
+);
+INSERT INTO kline_archive (code,period,dt,open,high,low,close,volume,amount,fetched_at,adjust)
+    SELECT code,period,dt,open,high,low,close,volume,amount,fetched_at,adjust
+    FROM kline_archive_old;
+DROP TABLE kline_archive_old;
+CREATE INDEX IF NOT EXISTS idx_kline_archive_lookup ON kline_archive(code, period, adjust, dt);
+"""),
 ]
 
 

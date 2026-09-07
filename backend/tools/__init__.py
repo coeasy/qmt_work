@@ -99,7 +99,8 @@ async def fetch_kline_cached(code: str, period: str = "1d", count: int = 250,
 
     # 有缓存层：券商优先（命中缓存直接返，不触达回退）
     try:
-        res = await cache.get_or_fetch(code, period, count, _fetch_broker, force=force)
+        res = await cache.get_or_fetch(code, period, count, _fetch_broker,
+                                       force=force, adjust=adjust or "")
     except Exception as exc:  # noqa: BLE001
         fb = await _fallback_eltdx(f"券商异常 {exc}")
         if fb is not None:
