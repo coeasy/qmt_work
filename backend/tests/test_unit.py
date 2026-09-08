@@ -14,7 +14,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from gateway.risk import RiskManager  # noqa: E402
 from tools.backtest import run_backtest_engine  # noqa: E402
-from tools.condition_order import ConditionOrderEngine, _safe_int, _today, _tomorrow  # noqa: E402
+from engines.condition_order import ConditionOrderEngine, _safe_int, _today, _tomorrow  # noqa: E402
 from xtquant_client.xtp import _resolve_xtquant_path  # noqa: E402
 
 
@@ -819,7 +819,7 @@ def test_alert_cooldown():
 
 # ---------------- 算法单拆单（B1） ----------------
 def test_algo_slice_plan():
-    from tools.algo import AlgoEngine
+    from engines.algo import AlgoEngine
     eng = AlgoEngine(manager=None)
     # 等分拆单：1000 股 4 片 → 每片 250（100 的整数倍）
     slices = eng._plan_slices(1000, 4)
@@ -1052,8 +1052,8 @@ def test_kline_rollover_moves_stale_hot_rows():
         _cleanup(db, d)
 
 
-def test_kline_adjust_preserved_on_refetch():
-    """普通抓取回写不覆盖已有复权标记（get_or_fetch 复用现存 adjust）。"""
+def test_kline_adjust_dimension_isolation():
+    """M6：复权维度入唯一键后各维度独立存储——原始价抓取不复用、也不覆盖 qfq 行。"""
     import asyncio as _a
 
     from gateway.kline_cache import KlineCache
@@ -1067,11 +1067,17 @@ def test_kline_adjust_preserved_on_refetch():
         async def _fetcher(c, p, n):
             return [{"time": this_y, "open": 11.0, "high": 11.5, "low": 10.8,
                      "close": 11.2, "volume": 100, "amount": 1100.0}]
+        # adjust=''（券商原始价）抓取：按本请求维度独立落库，不复用现存 qfq 标记
         _a.run(kc.get_or_fetch("000001.SZ", "1d", 1, _fetcher, force=True))
-        row = db.query_one("SELECT adjust, open FROM kline_cache "
+        raw = db.query_one("SELECT adjust, open FROM kline_cache "
+                           "WHERE code='000001.SZ' AND period='1d' AND adjust=''")
+        qfq = db.query_one("SELECT adjust, open FROM kline_cache "
+                           "WHERE code='000001.SZ' AND period='1d' AND adjust='qfq'")
+        assert raw["open"] == 11.0         # 原始价按本请求维度落库
+        assert qfq["open"] == 10.0         # qfq 行未被覆盖（旧逻辑会误标为原始价）
+        cnt = db.query_one("SELECT COUNT(1) c FROM kline_cache "
                            "WHERE code='000001.SZ' AND period='1d'")
-        assert row["adjust"] == "qfq"      # 复权标记未被覆盖
-        assert row["open"] == 11.0         # 数据已刷新
+        assert cnt["c"] == 2               # 两维度并存，各存各的
     finally:
         _cleanup(db, d)
 
@@ -1184,7 +1190,7 @@ def test_config_auto_generate_frozen():
     数据库/日志默认解析到 exe 同目录；修改配置文件后新实例读到新值。"""
     from pathlib import Path
 
-    from app import config as cfg
+    from core import config as cfg
 
     fake_dir = tempfile.mkdtemp(prefix="qmt_cfg_")
     old_frozen = getattr(sys, "frozen", None)
@@ -1225,7 +1231,7 @@ def test_config_priority_env_over_json(tmp_path, monkeypatch):
     """优先级：环境变量(QMT_*) > exe 同目录 JSON 配置。"""
     from pathlib import Path
 
-    from app import config as cfg
+    from core import config as cfg
 
     fake_dir = str(tmp_path)
     old_frozen = getattr(sys, "frozen", None)
@@ -2053,7 +2059,7 @@ def test_strategy_eval_no_code_column_regression():
     双标的 ma_cross 模拟「一只金叉」：断言评估全程无 error 日志
     （旧 bug 会刷「评估失败：no such column: code」）且金叉标的产生下单调用。
     """
-    from tools.strategy_runtime import StrategyRuntime
+    from engines.strategy_runtime import StrategyRuntime
 
     db, d = _tmp_db()
     try:
@@ -2121,7 +2127,7 @@ def test_limitup_cutoff_minutes_comparison():
 def test_strategy_runtime_uses_shared_minutes():
     """N2 回归：strategy_runtime 与 limitup 共用 tools.ashare 的同一分钟口径。"""
     from tools.ashare import now_minutes, parse_minutes
-    from tools.strategy_runtime import _now_minutes, _parse_minutes
+    from engines.strategy_runtime import _now_minutes, _parse_minutes
     assert _parse_minutes("9:30") == parse_minutes("9:30") == 570
     assert _now_minutes() == now_minutes()
 
@@ -2141,7 +2147,7 @@ def test_signal_pending_ttl_prune(monkeypatch):
 
 def test_limit_first_seen_prune_bounded():
     """P2-4：涨停首见字典有界化——超上限剔除跨日残留。"""
-    from tools.limitup import _LIMIT_FIRST_SEEN, _LIMIT_SEEN_MAX, _prune_limit_first_seen
+    from engines.limitup import _LIMIT_FIRST_SEEN, _LIMIT_SEEN_MAX, _prune_limit_first_seen
     now = 5_000_000.0
     _LIMIT_FIRST_SEEN.clear()
     # 填充超过上限的条目，其中一半为过期残留

@@ -208,18 +208,6 @@ class KlineCache:
         return max(float((row or {}).get("f") or 0.0),
                    float((a or {}).get("f") or 0.0))
 
-    def last_adjust(self, code: str, period: str) -> str:
-        """读取序列最近一根的复权标记（qfq/hfq/''），用于抓取刷新时复用。"""
-        if self.db is None:
-            return ""
-        for table in (self._HOT, self._ARCHIVE):
-            row = self.db.query_one(
-                f"SELECT adjust FROM {table} WHERE code=? AND period=? "
-                "AND adjust!='' ORDER BY dt DESC LIMIT 1", (code, period))
-            if row and row.get("adjust"):
-                return row["adjust"]
-        return ""
-
     def count(self, code: str, period: str) -> int:
         if self.db is None:
             return 0
@@ -296,17 +284,6 @@ class KlineCache:
             f"SELECT MAX(fetched_at) AS f FROM {self._ARCHIVE} WHERE code=? AND period=? AND adjust=?",
             (code, period, adj))
         return max(float((row or {}).get("f") or 0.0), float((a or {}).get("f") or 0.0))
-
-    async def alast_adjust(self, code: str, period: str) -> str:
-        if self.db is None:
-            return ""
-        for table in (self._HOT, self._ARCHIVE):
-            row = await self.db.aquery_one(
-                f"SELECT adjust FROM {table} WHERE code=? AND period=? "
-                "AND adjust!='' ORDER BY dt DESC LIMIT 1", (code, period))
-            if row and row.get("adjust"):
-                return row["adjust"]
-        return ""
 
     async def acount(self, code: str, period: str, adjust: str = "") -> int:
         if self.db is None:
