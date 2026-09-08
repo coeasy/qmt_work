@@ -176,7 +176,7 @@ def test_metrics_calmar_present():
 
 # ================= VWAP 真实分布降级 =================
 def test_vwap_plan_profile_source():
-    from tools.algo import AlgoEngine
+    from engines.algo import AlgoEngine
     # 提供真实分时量分布 -> source=profile
     plan, src = AlgoEngine._plan_vwap(10_000, 5, [100, 200, 300, 200, 100])
     assert src == "profile"
@@ -222,8 +222,8 @@ def test_backtest_vectorized_parity():
 
 # ================= 模拟盘 A 股规则（整手 + T+1） =================
 def test_paper_t1_and_lot():
-    import paper.paper_engine as pe
-    from paper.paper_engine import PaperEngine, _today_date
+    import engines.paper_engine as pe
+    from engines.paper_engine import PaperEngine, _today_date
 
     eng = PaperEngine(initial_capital=1_000_000.0)
     # 控制「今天」：买入日为 D1
