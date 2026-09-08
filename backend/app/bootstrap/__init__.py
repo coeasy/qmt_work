@@ -22,12 +22,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from contextlib import asynccontextmanager
 from typing import Awaitable, Callable
 
 from fastapi import FastAPI
 
-from core.state import state
 
 log = logging.getLogger("qmt_work.bootstrap")
 

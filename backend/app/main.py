@@ -16,7 +16,6 @@ from fastapi.staticfiles import StaticFiles
 
 from core.config import BASE_DIR, settings
 from app.logging_setup import setup_logging
-from app.middleware.envelope import EnvelopeMiddleware
 from app.middleware.request_id import request_id_middleware
 from app.routes import router
 from core.state import state
