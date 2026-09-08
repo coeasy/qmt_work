@@ -8,12 +8,12 @@ from fastmcp import FastMCP
 from core.state import state
 from mcp_server.auto_expose import register_auto_tools
 from tools.account import register_account_tools
-from tools.algo import register_algo_tools
+from engines.algo import register_algo_tools
 from tools.analysis import register_analysis_tools
 from tools.backtest import register_backtest_tools
-from tools.condition_order import register_condition_tools
+from engines.condition_order import register_condition_tools
 from tools.factor_research import register_research_tools
-from tools.limitup import register_limitup_tools
+from engines.limitup import register_limitup_tools
 from tools.market import register_market_tools
 from tools.position import register_position_tools
 from tools.rebalance import register_rebalance_tools

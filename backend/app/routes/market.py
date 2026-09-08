@@ -371,7 +371,7 @@ async def market_limitup(sector: str = "沪深A股", min_pct: float = 9.5,
     if b is None:
         return no_broker()
     try:
-        from tools.limitup import scan_limit_up
+        from engines.limitup import scan_limit_up
         rows = await scan_limit_up(b, sector, min_pct, only_limit, limit, sort)
     except BrokerError as exc:
         return err(503, str(exc))
@@ -384,7 +384,7 @@ async def market_breadth():
     if b is None:
         return no_broker()
     try:
-        from tools.limitup import market_breadth as _mb
+        from engines.limitup import market_breadth as _mb
         return ok(await _mb(b))
     except BrokerError as exc:
         return err(503, str(exc))

@@ -17,7 +17,7 @@ from fastapi import FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 from app.db import DB  # noqa: E402
-from paper.paper_engine import PaperEngine  # noqa: E402
+from engines.paper_engine import PaperEngine  # noqa: E402
 
 
 @pytest.fixture()
@@ -61,7 +61,7 @@ def test_buy_twice_average_cost(engine):
 
 
 def test_sell_realizes_pnl_and_clears_position(engine):
-    import paper.paper_engine as pe
+    import engines.paper_engine as pe
     orig = pe._today_date
     pe._today_date = lambda: "2024-01-01"          # 买入日 D1
     engine.submit_order("600519.SH", "buy", 100.0, 1000)
@@ -83,7 +83,7 @@ def test_sell_realizes_pnl_and_clears_position(engine):
 
 
 def test_partial_sell_keeps_position(engine):
-    import paper.paper_engine as pe
+    import engines.paper_engine as pe
     orig = pe._today_date
     pe._today_date = lambda: "2024-01-01"
     engine.submit_order("600519.SH", "buy", 100.0, 2000)
@@ -121,7 +121,7 @@ def test_invalid_orders_raise(engine):
 
 
 def test_metrics(engine):
-    import paper.paper_engine as pe
+    import engines.paper_engine as pe
     orig = pe._today_date
     pe._today_date = lambda: "2024-01-01"          # 买入日 D1
     engine.submit_order("600519.SH", "buy", 100.0, 1000)

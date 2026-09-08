@@ -13,7 +13,7 @@ from app.state import state
 from gateway.idempotency import single_flight
 from gateway.risk import RiskManager, normalize_direction
 from gateway.signal_router import SignalRouter
-from tools.algo import AlgoEngine
+from engines.algo import AlgoEngine
 
 
 # ---------------- fakes ----------------

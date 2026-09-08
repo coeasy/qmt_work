@@ -69,7 +69,7 @@ async def setup(app: FastAPI) -> dict:
     state.backtest_queue.on_event(state.ws_manager.broadcast)
 
     # 模拟盘引擎
-    from paper.paper_engine import PaperEngine
+    from engines.paper_engine import PaperEngine
     state.paper_engine = PaperEngine().init(state.db)
 
     def _paper_ref_close(code: str):
@@ -91,7 +91,7 @@ async def setup(app: FastAPI) -> dict:
     log.info("paper trading engine ready")
 
     # 策略运行时
-    from tools.strategy_runtime import StrategyRuntime
+    from engines.strategy_runtime import StrategyRuntime
     state.strategy_runtime = StrategyRuntime(state)
     restored = state.strategy_runtime.restore()
     log.info("strategy runtime ready: restored %d running instance(s)", restored)

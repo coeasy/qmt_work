@@ -94,9 +94,9 @@ async def setup(app: FastAPI) -> dict:
     app.state._pump_task = _pump_task
 
     # 涨停监控 + 算法单引擎 + 条件单引擎 + 订单守护
-    from tools.algo import AlgoEngine
-    from tools.condition_order import ConditionOrderEngine
-    from tools.limitup import LimitUpMonitor
+    from engines.algo import AlgoEngine
+    from engines.condition_order import ConditionOrderEngine
+    from engines.limitup import LimitUpMonitor
     state.limitup_monitor = LimitUpMonitor(state.broker_manager, state.risk,
                                            state.ws_manager.broadcast, wal=state.wal)
     state.algo_engine = AlgoEngine(state.broker_manager, state.risk,

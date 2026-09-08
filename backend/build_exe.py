@@ -34,6 +34,11 @@ HIDDEN = [
     # app.main 经 uvicorn 字符串在运行时加载，PyInstaller 不会自动收集，需显式声明
     "app", "app.config", "app.db", "app.state", "app.routes", "app.main",
     "app.logging_setup",
+    # core 层：P1-2 (M1) 下沉的共享内核（配置/状态/加密），app 原路径为 re-export shim
+    "core", "core.config", "core.state", "core.crypto",
+    # engines 层：P1-6 (M8) 归位的交易引擎，tools.*/paper.paper_engine 为 re-export shim
+    "engines", "engines.algo", "engines.limitup", "engines.condition_order",
+    "engines.strategy_runtime", "engines.paper_engine",
     "sync", "backtest", "mcp_server", "gateway",
     "gateway.auth", "gateway.rate_limit", "gateway.risk",
     "gateway.apikey", "gateway.totp", "gateway.metrics", "gateway.notifier",
