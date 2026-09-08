@@ -2,10 +2,7 @@
 
 import logging
 import os
-import re
 import sys
-import threading
-from datetime import datetime
 
 
 log = logging.getLogger("qmt_work")

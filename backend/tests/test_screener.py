@@ -11,7 +11,7 @@ from app.screener.engine import list_saved_boards, save_as_board, scan
 
 @pytest.fixture()
 def store(tmp_path):
-    from app.datasource.local_store import LocalStore
+    from datasource.local_store import LocalStore
     from core.db import DB
     db = DB(tmp_path / "test_screen.db")
     st = LocalStore(db)
@@ -124,7 +124,7 @@ def test_scan_limit(store):
 
 
 def test_scan_empty_warehouse(tmp_path):
-    from app.datasource.local_store import LocalStore
+    from datasource.local_store import LocalStore
     from core.db import DB
     db = DB(tmp_path / "empty.db")
     st = LocalStore(db)

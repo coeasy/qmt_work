@@ -4,14 +4,14 @@
 """
 import pytest
 
-from app.datasource.degrade import envelope, local_bars, local_boards, local_stock_list
-from app.datasource.models import Bar, BoardItem, StockInfo
-from app.datasource.result import DataResult
+from datasource.degrade import envelope, local_bars, local_boards, local_stock_list
+from datasource.models import Bar, BoardItem, StockInfo
+from datasource.result import DataResult
 
 
 @pytest.fixture()
 def store(tmp_path):
-    from app.datasource.local_store import LocalStore
+    from datasource.local_store import LocalStore
     from core.db import DB
     db = DB(tmp_path / "test_degrade.db")
     yield LocalStore(db)

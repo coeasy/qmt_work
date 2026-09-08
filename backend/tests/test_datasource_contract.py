@@ -7,8 +7,8 @@ import asyncio
 
 import pytest
 
-from app.datasource.base import DataSource
-from app.datasource.models import (
+from datasource.base import DataSource
+from datasource.models import (
     Bar,
     BoardItem,
     InstrumentInfo,
@@ -16,7 +16,7 @@ from app.datasource.models import (
     Quote,
     StockInfo,
 )
-from app.datasource.result import DataResult
+from datasource.result import DataResult
 
 
 # ---- 1. 标准模型：对齐 eltdx 真实返回（camelCase） -------------------------

@@ -23,13 +23,10 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
-import re
 import threading
 import time
-from datetime import datetime, timedelta
-from pathlib import Path
+from datetime import datetime
 from typing import Optional
 
 try:  # 可选依赖：商用部署禁止安装 eltdx（Research-Only 许可）
@@ -39,10 +36,10 @@ except ImportError:  # pragma: no cover - 取决于部署环境是否安装
     TdxClient = None  # type: ignore[assignment,misc]
     _HAS_ELTDX = False
 
-from app.datasource.base import DataSource
-from app.datasource.board import classify_board, limit_ratio
-from app.datasource.periods import to_eltdx_period
-from app.datasource.eltdx_utils import (  # noqa: F401
+from datasource.base import DataSource
+from datasource.board import classify_board, limit_ratio
+from datasource.periods import to_eltdx_period
+from datasource.eltdx_utils import (  # noqa: F401
     _EXCH_PFX, _NAME_CACHE, _INDUSTRY_CACHE, _FW2HW, _INDEX_FALLBACK_NAMES,
     _f, _normalize_name, _cache_dir, _name_cache_path, _industry_cache_path,
     _num, _to_eltdx, _to_qmt, _map_period, _map_adjust, _load_json_cache, _save_json_cache,
@@ -942,7 +939,7 @@ class EltdxSource(DataSource):
         contain = []
         # 拼音首字母匹配（q 为纯字母且非 6 位代码形态时启用；名称含字母的除外）
         if ql.isalpha() and not q.isdigit():
-            from app.datasource.pinyin import matches_initials
+            from datasource.pinyin import matches_initials
             for code, name in self.__class__._name_map.items():
                 if len(exact) + len(contain) >= limit:
                     break

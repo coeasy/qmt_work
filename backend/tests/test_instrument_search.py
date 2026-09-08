@@ -12,8 +12,8 @@ import asyncio
 
 import pytest
 
-from app.datasource.instrument import classify_instrument
-from app.datasource.pinyin import matches_initials, pinyin_initials
+from datasource.instrument import classify_instrument
+from datasource.pinyin import matches_initials, pinyin_initials
 from app.routes import market as mk
 
 
@@ -381,7 +381,7 @@ class TestEltdxEtfMerge:
     @pytest.fixture()
     def src(self, monkeypatch):
         """隔离类级状态的 EltdxSource 实例（保存/恢复，避免污染其他用例）。"""
-        from app.datasource import eltdx_source as es
+        from datasource import eltdx_source as es
         saved = (dict(es.EltdxSource._name_map), dict(es.EltdxSource._search_index))
         es.EltdxSource._name_map.clear()
         es.EltdxSource._search_index.clear()
@@ -404,7 +404,7 @@ class TestEltdxEtfMerge:
         assert src._name_map["513090.SH"] == "香港证券ETF"
         # 无新增项时不触发持久化
         calls = []
-        from app.datasource import eltdx_source as es
+        from datasource import eltdx_source as es
         monkeypatch.setattr(es, "_save_json_cache",
                             lambda path, data: calls.append(path))
         src._merge_into_name_map(self.ETFS)

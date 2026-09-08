@@ -265,7 +265,7 @@ def test_calc_dispatch_dict_bars(prices):
 
 
 def test_calc_dispatch_bar_models(prices):
-    from app.datasource.models import Bar
+    from datasource.models import Bar
     bars = [Bar(time=f"2026082{i % 9 + 1}", open=h, high=h, low=l, close=c, volume=1000)
             for i, (h, l, c) in enumerate(zip(prices["highs"], prices["lows"],
                                               prices["closes"]))]
@@ -362,7 +362,7 @@ def test_zscore_zero_std_nan():
 
 
 def test_calc_new_factor_with_bar_models(prices):
-    from app.datasource.models import Bar
+    from datasource.models import Bar
     bars = [Bar(time=f"2026082{i % 9 + 1}", open=h, high=h, low=l, close=c, volume=1000)
             for i, (h, l, c) in enumerate(zip(prices["highs"], prices["lows"],
                                               prices["closes"]))]

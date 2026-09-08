@@ -62,6 +62,12 @@ HIDDEN = [
     # P1-7 (M13)：factor_research 拆分后的三组能力模块（factor_research.py 为入口 re-export）
     "tools.factor_research", "tools.factor_stats", "tools.factor_ic",
     "tools.factor_backtest",
+    # P1-2 收尾（M1）：数据源层从 app/datasource 提升为顶层包，供 tools/sync/backtest 消费
+    "datasource", "datasource.registry", "datasource.local_store",
+    "datasource.eltdx_source", "datasource.eltdx_utils", "datasource.models",
+    "datasource.base", "datasource.board", "datasource.degrade",
+    "datasource.instrument", "datasource.periods", "datasource.result",
+    "datasource.pinyin",
     "tools.strategy_market", "tools.strategy_runtime",
     "app.routes.strategy_run",
     "paper", "paper.paper_engine",

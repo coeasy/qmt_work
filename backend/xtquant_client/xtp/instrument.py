@@ -1,7 +1,6 @@
 """合约：名称表 / 涨跌停 / 板块 / 日历 / 财务 / L2（InstrumentMixin，自原 xtp.py 逐行搬移）。"""
 
 from ..base import BrokerNotConnectedError, BrokerSDKError
-from ._common import log
 
 
 

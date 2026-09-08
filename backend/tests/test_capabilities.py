@@ -7,7 +7,6 @@
 3. 自动暴露生成器确实补齐缺口，且无重复工具名，且不覆盖已有手工 tool。
 4. 漂移门禁：每个 agent_visible 的 GET 端点都有对应 MCP tool（新增路由即自动可用）。
 """
-import pytest
 
 from app.capabilities import (
     agent_visible_reads,

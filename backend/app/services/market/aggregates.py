@@ -6,10 +6,9 @@
 import asyncio
 from datetime import datetime
 
-from app.datasource.registry import get_hub
+from datasource.registry import get_hub
 from app.services.market.common import (
     BOARD_MF_SEM,
-    ETF_LIST_TTL,
     ETF_QUOTE_CAP,
     ETF_QUOTE_SEM,
     INDICES_SEM,

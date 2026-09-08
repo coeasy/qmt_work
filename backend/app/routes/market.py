@@ -7,10 +7,10 @@ from datetime import datetime
 from fastapi import APIRouter
 from pydantic import BaseModel
 
-from app.datasource.board import classify_board
-from app.datasource.instrument import with_exchange_suffix
-from app.datasource.registry import MarketDataUnavailable, get_hub
-from app.datasource.periods import (
+from datasource.board import classify_board
+from datasource.instrument import with_exchange_suffix
+from datasource.registry import MarketDataUnavailable, get_hub
+from datasource.periods import (
     UnknownPeriodError,
     UnsupportedPeriodError,
     all_periods,
@@ -31,6 +31,9 @@ from app.services.market import (
 )
 from app.services.market import aggregates as msvc
 from app.services.market import kline_io
+# 这两个常量定义在 common.py；此前经 aggregates 隐式 re-export 使用，
+# 2026-09-08 改为从源头直接导入，消除「删掉 aggregates 的未使用导入就断」的脆弱耦合。
+from app.services.market.common import ETF_LIST_TTL, ETF_QUOTE_CAP
 
 log = logging.getLogger("qmt_work.market")
 
@@ -103,7 +106,7 @@ async def market_resolve(q: str, limit: int = 8):
         except Exception:  # noqa: BLE001
             det = None
         name = (det or {}).get("name") or ""
-        from app.datasource.instrument import classify_instrument
+        from datasource.instrument import classify_instrument
         cls = classify_instrument(code, name)
         candidates.append({"code": code, "name": name, "type": cls["type"],
                            "exchange": cls["exchange"], "board": cls["board"],
@@ -325,7 +328,7 @@ async def market_kline(code: str, period: str = "1d", count: int = 250,
     # 彻底无源返回：券商 + eltdx(TDX) 均无数据时，G1-6 先试本地数据仓兜底
     # （stale 明示、as_of 标数据截至时间、降级≠造假）；本地也无数据才 503。
     if not bars and not res.get("source"):
-        from app.datasource.degrade import envelope, local_bars
+        from datasource.degrade import envelope, local_bars
         dres = local_bars(code, period=period, adjust=adj or "")
         if dres is not None:
             return ok(envelope(
@@ -459,8 +462,8 @@ async def market_board_kline(code: str, period: str = "1d", count: int = 60,
 
 @router.get("/market/etfs")
 async def market_etfs(limit: int = 0, with_quote: bool = False,
-                      quote_limit: int = msvc.ETF_QUOTE_CAP, source: str = "auto",
-                      ttl: int = msvc.ETF_LIST_TTL):
+                      quote_limit: int = ETF_QUOTE_CAP, source: str = "auto",
+                      ttl: int = ETF_LIST_TTL):
     """ETF 全市场清单（代码段 51/56/58/15/16）。"""
     try:
         return ok(await msvc.etfs(limit, with_quote=with_quote,

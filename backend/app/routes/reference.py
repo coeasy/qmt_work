@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-from app.routes._common import _call, _need, err, no_broker, envelope_ok
+from app.routes._common import _call, _need, no_broker, envelope_ok
 
 # --- stdlib imports injected by fix_route_imports ---
 

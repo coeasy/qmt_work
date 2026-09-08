@@ -4,7 +4,7 @@ import threading
 
 from datetime import datetime
 
-from ..base import BrokerError, BrokerNotConnectedError, BrokerSDKError
+from ..base import BrokerError, BrokerSDKError
 from ._common import _dget, _direction_from_order_type, _pick, _shell_attr, log
 
 

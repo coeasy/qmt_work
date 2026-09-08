@@ -1,5 +1,4 @@
 """响应信封兜底中间件单元测试（R3 重构）。"""
-import json
 
 import pytest
 from fastapi import FastAPI

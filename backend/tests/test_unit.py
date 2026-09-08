@@ -1529,7 +1529,6 @@ def test_db_backup_consistency_api():
     """阶段 3：sqlite backup API 生成一致备份（单文件、可打开、含 schema_migrations）。"""
     from pathlib import Path
 
-    from core.db import DB
 
     db, d = _tmp_db()
     try:

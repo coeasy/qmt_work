@@ -22,7 +22,6 @@ from xtquant_client.order_status import (
     CANCELLED,
     FILLED,
     REJECTED,
-    UNKNOWN,
     normalize_order_status,
 )
 from xtquant_client.xtp import XTPQuantAdapter

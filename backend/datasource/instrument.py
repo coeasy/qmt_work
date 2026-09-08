@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from app.datasource.board import classify_board
+from datasource.board import classify_board
 
 # 类型 → 展示标签（前端徽章文案的单一真源，i18n 前端另有英文）
 TYPE_LABELS = {

@@ -3,11 +3,11 @@
 统一导出 DataSource 抽象、板块归类工具，以及多源编排中心
 `DataSourceManager`（见 app.datasource.registry）。
 """
-from app.datasource.base import DataSource
-from app.datasource.board import classify_board, limit_ratio
-from app.datasource.degrade import envelope, local_bars, local_boards, local_stock_list
-from app.datasource.local_store import LocalStore, get_store
-from app.datasource.models import (
+from datasource.base import DataSource
+from datasource.board import classify_board, limit_ratio
+from datasource.degrade import envelope, local_bars, local_boards, local_stock_list
+from datasource.local_store import LocalStore, get_store
+from datasource.models import (
     Bar,
     BoardItem,
     BoardKline,
@@ -19,7 +19,7 @@ from app.datasource.models import (
     QuoteLevel,
     StockInfo,
 )
-from app.datasource.registry import (
+from datasource.registry import (
     DataSourceManager,
     DataSourceUnavailable,
     MarketDataHub,
@@ -27,7 +27,7 @@ from app.datasource.registry import (
     get_hub,
     get_manager,
 )
-from app.datasource.result import DataResult
+from datasource.result import DataResult
 
 __all__ = [
     "DataSource", "classify_board", "limit_ratio",

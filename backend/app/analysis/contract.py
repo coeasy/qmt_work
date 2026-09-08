@@ -12,9 +12,9 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List
 
-from app.datasource.result import DataResult
+from datasource.result import DataResult
 
 log = logging.getLogger("qmt_work.analysis.contract")
 

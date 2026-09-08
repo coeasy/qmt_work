@@ -10,7 +10,7 @@ import logging
 import time
 from typing import Any, Callable, Dict, List, Optional
 
-from app.datasource.local_store import LocalStore, get_store
+from datasource.local_store import LocalStore, get_store
 from app.screener.conditions import evaluate
 
 log = logging.getLogger("qmt_work.screener.engine")

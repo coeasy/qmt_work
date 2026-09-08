@@ -73,7 +73,7 @@ async def probe_one(src, raw_period):
 
 
 async def main():
-    from app.datasource.eltdx_source import EltdxSource
+    from datasource.eltdx_source import EltdxSource
 
     src = EltdxSource()
     print(f"标的: {CODE}  数据源: {type(src).__name__}")

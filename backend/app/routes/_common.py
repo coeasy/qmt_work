@@ -6,7 +6,10 @@
 import asyncio
 import logging
 
-from fastapi import Request, WebSocket, WebSocketDisconnect
+# Request / WebSocketDisconnect 本模块未直接使用，但下游路由（如 routes/signal.py）
+# 经 `from app.routes._common import Request, ...` 间接导入。ruff 会误判为 F401，
+# 删除即断下游导入链 —— 故显式 noqa 保留。改动前请全仓 grep 下游 `from ..._common import`。
+from fastapi import Request, WebSocket, WebSocketDisconnect  # noqa: F401
 
 from app import crypto  # noqa: F401  (re-export for routes: config.py/signal.py)
 from core.config import settings

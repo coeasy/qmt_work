@@ -5,9 +5,9 @@
 """
 import asyncio
 
-from app.datasource.base import DataSource
-from app.datasource.board import classify_board, limit_ratio
-from app.datasource.registry import DataSourceManager
+from datasource.base import DataSource
+from datasource.board import classify_board, limit_ratio
+from datasource.registry import DataSourceManager
 
 
 class FakeBroker:
@@ -159,7 +159,7 @@ def test_classify_and_limit():
 def test_merge_quote_derives_change_pct():
     """broker 原始快照不带 change/change_pct（eltdx 已在源内算）——
     _merge_quote 必须从 last/昨收统一推导，否则券商连接后指数条全空涨跌幅。"""
-    from app.datasource.registry import DataSourceManager as _DSM
+    from datasource.registry import DataSourceManager as _DSM
     merged = _DSM._merge_quote(
         {"code": "000001.SH", "last": 10.0, "lastClose": 8.0}, "000001.SH",
         classify_board("000001.SH"), {}, "broker")

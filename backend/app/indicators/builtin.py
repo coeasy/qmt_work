@@ -15,7 +15,7 @@ MA 用 cumsum 差分；仅递归类（EMA/KDJ/RSI 的 k,d/avg 递推）保留 O(
 """
 from __future__ import annotations
 
-from typing import List, Optional, Sequence
+from typing import Optional, Sequence
 
 import numpy as np
 

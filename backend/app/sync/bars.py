@@ -21,11 +21,11 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 from typing import Awaitable, Callable, List, Optional, Sequence
 
-from app.datasource.local_store import LocalStore, get_store
-from app.datasource.registry import get_hub
+from datasource.local_store import LocalStore, get_store
+from datasource.registry import get_hub
 
 log = logging.getLogger("qmt_work.sync.bars")
 
@@ -180,7 +180,7 @@ class BarsSyncer:
                               progress_cb: Optional[Callable[[int, int, str], None]] = None
                               ) -> SyncSummary:
         """同步全市场股票列表（先刷列表，再按需同步 K 线）。"""
-        from app.datasource.registry import get_hub as _hub
+        from datasource.registry import get_hub as _hub
         items = await _hub().get_stock_list(source="auto")
         if not items:
             return SyncSummary(started=now_iso(), finished=now_iso(),

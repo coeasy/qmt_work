@@ -6,7 +6,7 @@ import time
 
 from fastapi import APIRouter
 
-from app.routes._common import BrokerError, ConnectionConfig, err, get_profile, list_profiles, ok, state
+from app.routes._common import BrokerError, ConnectionConfig, err, get_profile, ok, state
 
 log = logging.getLogger("qmt_work.broker")
 
@@ -22,7 +22,7 @@ async def auto_detect_brokers():
     **自动发现的资金账号**（从 userdata[(_mini)]/users/<登录>/Config.xml 读取，可免手填）。
     前端据此一键填入「添加券商连接」表单。
     """
-    from xtquant_client.discovery import discover, discover_accounts, guess_broker_id_by_name
+    from xtquant_client.discovery import discover, discover_accounts
     try:
         cands = await asyncio.to_thread(discover)
         for c in cands:

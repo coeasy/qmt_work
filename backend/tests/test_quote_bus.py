@@ -6,7 +6,6 @@
 import time
 
 import fakeredis
-import pytest
 
 from gateway.quote_bus import (
     InMemoryQuoteBus,

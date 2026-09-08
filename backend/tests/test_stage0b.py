@@ -5,7 +5,6 @@
 - 引擎收敛测试直接 patch `state.signal_router` 为 spy，验证引擎不再直连 gateway.place_order。
 """
 import asyncio
-import time
 
 import pytest
 

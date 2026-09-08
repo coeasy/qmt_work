@@ -24,7 +24,7 @@ from typing import Any
 
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
-from starlette.responses import Response, JSONResponse
+from starlette.responses import Response
 
 log = logging.getLogger("qmt_work.envelope")
 

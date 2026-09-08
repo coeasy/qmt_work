@@ -10,9 +10,9 @@
 """
 import asyncio
 import json
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter
 
 from app.routes._common import audit_log, err, ok
 from app.screener.engine import list_saved_boards, save_as_board, scan

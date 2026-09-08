@@ -6,7 +6,7 @@ K 线在无券商连接时回退到 eltdx(TDX 公共行情) 数据源。
 """
 import logging
 
-from app.datasource.registry import get_hub
+from datasource.registry import get_hub
 from core.state import MSG_NO_BROKER_EXC, state
 from xtquant_client.base import BrokerError, BrokerNotConnectedError
 
@@ -38,7 +38,7 @@ async def fetch_kline_cached(code: str, period: str = "1d", count: int = 250,
     2. 空结果 = 失败：券商返回空列表属于「成功但无数据」，同样必须回退 eltdx，
        否则用户看到空白图表而无任何错误提示。
     """
-    from app.datasource.instrument import with_exchange_suffix
+    from datasource.instrument import with_exchange_suffix
     code = with_exchange_suffix(code)
 
     async def _fetch_broker(c: str, p: str, n: int):

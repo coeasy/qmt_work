@@ -228,7 +228,7 @@ class BacktestQueue:
 def _record_backtest_metric(status: str) -> None:
     """可观测性：回测任务计数（指标收集器缺失时安全跳过）。"""
     try:
-        from app.state import state
+        from core.state import state
         m = getattr(state, "metrics", None)
         if m is not None and hasattr(m, "record_backtest"):
             m.record_backtest(status)

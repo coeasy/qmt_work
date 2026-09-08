@@ -6,8 +6,8 @@ import asyncio
 import logging
 import time
 
-from app.datasource.instrument import classify_instrument
-from app.datasource.pinyin import matches_initials, pinyin_initials
+from datasource.instrument import classify_instrument
+from datasource.pinyin import matches_initials, pinyin_initials
 
 log = logging.getLogger("qmt_work.market")
 

@@ -14,10 +14,10 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, List, Optional
+from typing import Optional
 
-from app.datasource.local_store import LocalStore, get_store
-from app.datasource.result import DataResult
+from datasource.local_store import LocalStore, get_store
+from datasource.result import DataResult
 
 log = logging.getLogger("qmt_work.datasource.degrade")
 

@@ -12,7 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from app.datasource.periods import to_eltdx_period
+from datasource.periods import to_eltdx_period
 
 log = logging.getLogger("qmt_work.datasource.eltdx")
 

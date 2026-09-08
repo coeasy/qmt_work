@@ -9,7 +9,7 @@ from datetime import datetime
 
 from xtquant_client.base import BrokerError
 
-from app.datasource.registry import get_hub
+from datasource.registry import get_hub
 from core.db import get_db
 from app.services.market.common import BOARD_MF_SEM
 from core.state import MSG_NO_BROKER, state
@@ -252,7 +252,7 @@ async def crawl_market(body: dict) -> dict:
             bars = await asyncio.wait_for(b.call(b.gateway.get_kline, code, period, days), 12)
         except asyncio.TimeoutError as exc:
             raise TimeoutError(
-                f"券商响应超时（>12s），请检查券商客户端是否已连接并登录") from exc
+                "券商响应超时（>12s），请检查券商客户端是否已连接并登录") from exc
         if isinstance(bars, dict) and bars.get("code"):
             return bars
         if cache is None:

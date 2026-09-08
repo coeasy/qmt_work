@@ -21,7 +21,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from app.datasource.periods import (  # noqa: E402
+from datasource.periods import (  # noqa: E402
     CANONICAL_PERIODS,
     TICK_PERIOD,
     UnknownPeriodError,
@@ -170,7 +170,7 @@ def _gap_days(bars):
 
 
 def _try_fetch():
-    from app.datasource.eltdx_source import EltdxSource
+    from datasource.eltdx_source import EltdxSource
     return EltdxSource()
 
 

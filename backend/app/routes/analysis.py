@@ -91,7 +91,7 @@ async def market_analysis_scripts_list():
 async def market_analysis_run(body: Dict[str, Any]):
     """执行分析脚本：{name, params?, data: DataResult 兼容结构}。"""
     from app.analysis.contract import run
-    from app.datasource.result import DataResult
+    from datasource.result import DataResult
     name = (body or {}).get("name")
     data_raw = (body or {}).get("data") or {}
     if not name:

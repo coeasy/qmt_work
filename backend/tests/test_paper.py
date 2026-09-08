@@ -224,7 +224,6 @@ def test_api_503_when_engine_missing():
 # ---------------- 行情流盯市接线（sync.SyncEngine.on_event → process_quote） ----------------
 def test_sync_engine_feeds_paper_mark_to_market(engine):
     """此前 process_quote 在生产代码零调用（盯市半通）：行情流必须驱动模拟盘盯市价。"""
-    from types import SimpleNamespace
 
     from sync import SyncEngine
 

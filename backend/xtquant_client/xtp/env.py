@@ -8,7 +8,6 @@ from dataclasses import dataclass, field
 
 from ._common import (
     _candidate_roots,
-    _is_system_dir,
     _load_xtquant_from,
     _normalize,
     _resolve_xtquant_path,

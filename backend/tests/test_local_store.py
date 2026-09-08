@@ -5,8 +5,8 @@
 """
 import pytest
 
-from app.datasource.local_store import LocalStore
-from app.datasource.models import Bar, BoardItem, StockInfo
+from datasource.local_store import LocalStore
+from datasource.models import Bar, BoardItem, StockInfo
 
 
 @pytest.fixture()

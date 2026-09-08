@@ -5,7 +5,7 @@ from gateway.idempotency import single_flight
 
 # --- stdlib imports injected by fix_route_imports ---
 
-from app.datasource.registry import get_manager
+from datasource.registry import get_manager
 
 
 def _enrich_names(rows):

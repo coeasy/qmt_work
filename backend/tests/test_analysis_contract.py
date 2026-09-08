@@ -7,14 +7,13 @@ import asyncio
 import pytest
 
 from app.analysis.contract import (
-    AnalysisOutput,
     AnalysisScript,
     get_script,
     list_scripts,
     register,
     run,
 )
-from app.datasource.result import DataResult
+from datasource.result import DataResult
 from app.routes.analysis import market_analysis_run, market_analysis_scripts_list
 from app.routes.datahub import datahub_policies
 from app.routes.indicators import market_chart_spec

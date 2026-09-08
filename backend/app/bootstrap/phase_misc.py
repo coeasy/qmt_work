@@ -22,7 +22,7 @@ async def setup(app: FastAPI) -> dict:
              state.market_sync.enabled, state.market_sync.sync_time)
 
     try:
-        from app.datasource.registry import get_hub
+        from datasource.registry import get_hub
         import asyncio
         asyncio.create_task(get_hub().warmup_all())
         log.info("行情数据源预热任务已提交（后台）")

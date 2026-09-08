@@ -10,7 +10,7 @@ import traceback
 
 sys.path.insert(0, ".")
 
-from app.datasource.eltdx_source import EltdxSource  # noqa: E402
+from datasource.eltdx_source import EltdxSource  # noqa: E402
 
 src = EltdxSource()
 

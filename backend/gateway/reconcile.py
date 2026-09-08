@@ -15,12 +15,9 @@ import asyncio
 import logging
 import time
 from datetime import datetime
-from typing import Any
 
 from xtquant_client.order_status import (
-    CANCELLED,
     FILLED,
-    REJECTED,
     UNKNOWN,
     is_active,
     normalize_order_status,

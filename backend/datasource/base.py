@@ -10,7 +10,7 @@
 from abc import ABC, abstractmethod
 from typing import ClassVar, List, Optional
 
-from app.datasource.models import (
+from datasource.models import (
     Bar,
     InstrumentInfo,
     Quote,

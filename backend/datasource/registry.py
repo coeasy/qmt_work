@@ -20,10 +20,10 @@ import asyncio
 import time
 from typing import Optional
 
-from app.datasource.base import DataSource
-from app.datasource.board import classify_board, limit_ratio
-from app.datasource.instrument import with_exchange_suffix
-from app.datasource.periods import (
+from datasource.base import DataSource
+from datasource.board import classify_board, limit_ratio
+from datasource.instrument import with_exchange_suffix
+from datasource.periods import (
     UnknownPeriodError,
     adjust_allowed_periods,
     normalize_period,
@@ -638,7 +638,7 @@ def get_manager() -> DataSourceManager:
     m.register_broker(_default_broker_factory)
     # 注册 eltdx（若可用）；缺失依赖时静默跳过，系统回退到纯券商模式。
     try:
-        from app.datasource.eltdx_source import EltdxSource
+        from datasource.eltdx_source import EltdxSource
         m.register(EltdxSource())
     except Exception as exc:  # noqa: BLE001
         log.warning("eltdx 数据源注册跳过（依赖缺失）：%s", exc)

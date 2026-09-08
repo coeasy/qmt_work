@@ -3,7 +3,7 @@ import asyncio
 import logging
 from datetime import datetime
 
-from app.datasource.instrument import classify_instrument, with_exchange_suffix
+from datasource.instrument import classify_instrument, with_exchange_suffix
 
 log = logging.getLogger("qmt_work.market")
 

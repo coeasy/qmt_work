@@ -13,7 +13,7 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Tuple
 
 # 规则：(正则, 说明, 构建函数(text, match) -> 条件节点)
 _RULES: List[Tuple[re.Pattern, str, Any]] = []

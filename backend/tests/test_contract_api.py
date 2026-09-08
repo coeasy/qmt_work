@@ -16,9 +16,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.routes._common import err, ok
-from app.routes._common import state as _common_state
 from xtquant_client.registry import (
-    BrokerProfile,
     Registry,
     create_adapter,
     get_profile,
