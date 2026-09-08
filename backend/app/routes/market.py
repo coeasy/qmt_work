@@ -546,7 +546,7 @@ async def market_moneyflow_replay(code: str, date: str = "", limit: int = 500):
     """资金流回放：取 code 的历史快照序列（按 ts 升序）。date=YYYY-MM-DD 可选过滤某日。"""
     if not code:
         return err(400, "缺少 code")
-    from app.db import get_db
+    from core.db import get_db
     return ok(kline_io.moneyflow_replay(get_db(), code, date=date, limit=limit))
 
 

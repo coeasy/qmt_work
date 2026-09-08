@@ -36,6 +36,8 @@ HIDDEN = [
     "app.logging_setup",
     # core 层：P1-2 (M1) 下沉的共享内核（配置/状态/加密），app 原路径为 re-export shim
     "core", "core.config", "core.state", "core.crypto",
+    # core 层下沉的 DB 单例 / 迁移账本 / 脱敏 / 请求身份（app 原路径为 shim）
+    "core.db", "core.db_migrations", "core.masking", "core.auth_identity",
     # engines 层：P1-6 (M8) 归位的交易引擎，tools.*/paper.paper_engine 为 re-export shim
     "engines", "engines.algo", "engines.limitup", "engines.condition_order",
     "engines.strategy_runtime", "engines.paper_engine",

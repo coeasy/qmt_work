@@ -891,7 +891,7 @@ def test_risk_daily_rollover():
 
 # ---------------- E4 敏感信息脱敏 ----------------
 def test_masking_value_and_account():
-    from gateway.masking import mask_account, mask_value
+    from core.masking import mask_account, mask_value
     assert mask_value("qmt-dev-key") == "qmt***ey"
     assert mask_value("1234567") == "***"                 # 长度 < 8 全掩码
     assert mask_value("12345678") == "123***78"
@@ -900,7 +900,7 @@ def test_masking_value_and_account():
 
 
 def test_masking_dict_recursive():
-    from gateway.masking import mask_dict
+    from core.masking import mask_dict
     d = {"api_key": "qmt-dev-key", "token": "tok123456789",
          "account_id": "8801234567", "code": "600519.SH",
          "nested": {"secret": "s3cr3t", "keep": "visible"},
@@ -917,7 +917,7 @@ def test_masking_dict_recursive():
 
 
 def test_masking_text():
-    from gateway.masking import mask_text
+    from core.masking import mask_text
     out = mask_text("api_key=qmt-dev-key Authorization: Bearer mysecret123456")
     assert "qmt***ey" in out and "qmt-dev-key" not in out
     assert "mysecret123456" not in out
@@ -928,7 +928,7 @@ def test_masking_text():
 def _mk_db(tmp):
     from pathlib import Path
 
-    from app.db import DB
+    from core.db import DB
     return DB(Path(tmp) / "test.db")
 
 
@@ -1165,7 +1165,7 @@ def test_runtime_config_persists():
 
 # ---------------- D4 审计 hash 链 ----------------
 def test_audit_chain_hash_and_verify():
-    from app.db import audit_chain_hash
+    from core.db import audit_chain_hash
     db, d = _tmp_db()
     try:
         db.audit("admin", "a1", "t1", {"k": "v"}, "ok")
@@ -1482,7 +1482,7 @@ def test_db_migrate_transactional_rollback(monkeypatch):
     """阶段 3：迁移任一步失败即整体回滚——不留下半成品 schema，也不写版本号。"""
     from pathlib import Path
 
-    import app.db as db_mod
+    import core.db as db_mod
 
     # 构造两条迁移：v10 成功建表；v11 中间含一条非法语句（触发失败）
     fake_migrations = [
@@ -1529,7 +1529,7 @@ def test_db_backup_consistency_api():
     """阶段 3：sqlite backup API 生成一致备份（单文件、可打开、含 schema_migrations）。"""
     from pathlib import Path
 
-    from app.db import DB
+    from core.db import DB
 
     db, d = _tmp_db()
     try:

@@ -8,7 +8,6 @@
 - 每密钥独立限流（rate_limit>0 时覆盖全局配额）
 """
 import hmac
-from contextvars import ContextVar
 
 from fastapi import Request
 from fastapi.responses import JSONResponse
@@ -21,7 +20,9 @@ _LOOPBACK = {"127.0.0.1", "::1", "localhost"}
 # DB.audit() 写审计时统一读取（路由层几十处 state.db.audit 调用方零改动）。
 # 值为主密钥用 "master"、子密钥用 api_keys 行 id 字符串、未鉴权（loopback/公共路径）为 ""。
 # uvicorn 每个 HTTP 请求在独立 task 中处理（context 全新拷贝），无跨请求串号风险。
-current_api_key_id: ContextVar[str] = ContextVar("current_api_key_id", default="")
+# P1-2 (M1)：身份 ContextVar 下沉至 core.auth_identity（core/db.py 审计链需要读取，
+# 若留在 gateway 会造成 core → gateway 反向依赖）。此处 re-export 兼容存量 import。
+from core.auth_identity import current_api_key_id  # noqa: F401,E402
 
 
 def is_loopback(request) -> bool:

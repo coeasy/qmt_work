@@ -16,7 +16,7 @@ import pytest  # noqa: E402
 from fastapi import FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
-from app.db import DB  # noqa: E402
+from core.db import DB  # noqa: E402
 from engines.paper_engine import PaperEngine  # noqa: E402
 
 

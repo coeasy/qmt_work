@@ -267,7 +267,7 @@ def backtest_runner(params: dict) -> Runner:
         import json
         import time as _time
 
-        from app.db import get_db
+        from core.db import get_db
 
         db = get_db()
         bid = db.insert("backtests", {

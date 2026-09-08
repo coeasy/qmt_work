@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 
 from core.config import settings
-from app.db import init_db
+from core.db import init_db
 from core.state import state
 from fastapi import FastAPI
 

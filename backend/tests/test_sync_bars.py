@@ -14,7 +14,7 @@ from app.sync.bars import BarsSyncer, SyncSummary, weekday_calendar
 @pytest.fixture()
 def store(tmp_path):
     from app.datasource.local_store import LocalStore
-    from app.db import DB
+    from core.db import DB
     db = DB(tmp_path / "test_sync.db")
     yield LocalStore(db)
     db._conn.close()

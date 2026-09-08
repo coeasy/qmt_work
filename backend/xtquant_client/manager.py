@@ -12,7 +12,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 
-from app.db import get_db
+from core.db import get_db
 
 from .base import BrokerAdapter
 from .gateway import XTQuantBridge

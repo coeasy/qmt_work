@@ -11,7 +11,7 @@ from app.datasource.models import Bar, BoardItem, StockInfo
 
 @pytest.fixture()
 def store(tmp_path):
-    from app.db import DB
+    from core.db import DB
     db = DB(tmp_path / "test_local.db")
     yield LocalStore(db)
     db._conn.close()
@@ -123,7 +123,7 @@ def test_clear(store):
 
 # ---- 迁移 v16 ---------------------------------------------------------------
 def test_migration_v16_creates_tables(tmp_path):
-    from app.db import DB
+    from core.db import DB
     db = DB(tmp_path / "mig.db")
     tables = {r["name"] for r in db.query(
         "SELECT name FROM sqlite_master WHERE type='table'")}

@@ -5,7 +5,7 @@
 - 月度收益：按自然月聚合净值
 所有数据来自券商真实账户/成交/行情，无假数据。
 """
-from app.db import get_db
+from core.db import get_db
 
 from . import get_bridge
 

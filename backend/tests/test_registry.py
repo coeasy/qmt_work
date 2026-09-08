@@ -3,7 +3,7 @@ import os
 import tempfile
 from pathlib import Path
 
-from app.db import DB
+from core.db import DB
 from xtquant_client.registry import BrokerProfile, Registry
 
 

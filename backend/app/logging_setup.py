@@ -47,7 +47,7 @@ def setup_logging(level: int = logging.INFO) -> None:
 
     # E4：敏感信息脱敏过滤器（api_key / token / secret / Bearer 等一律掩码）
     try:
-        from gateway.masking import SensitiveFilter
+        from core.masking import SensitiveFilter
         sensitive = SensitiveFilter()
     except Exception:  # noqa: BLE001
         sensitive = None

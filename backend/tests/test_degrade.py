@@ -12,7 +12,7 @@ from app.datasource.result import DataResult
 @pytest.fixture()
 def store(tmp_path):
     from app.datasource.local_store import LocalStore
-    from app.db import DB
+    from core.db import DB
     db = DB(tmp_path / "test_degrade.db")
     yield LocalStore(db)
     db._conn.close()
