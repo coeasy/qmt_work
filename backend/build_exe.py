@@ -59,6 +59,9 @@ HIDDEN = [
     "tools.backtest", "tools.rebalance", "tools.analysis",
     "tools.limitup", "tools.algo", "tools.strategy_gen", "tools.reference",
     "tools.condition_order", "tools.position", "tools.factors",
+    # P1-7 (M13)：factor_research 拆分后的三组能力模块（factor_research.py 为入口 re-export）
+    "tools.factor_research", "tools.factor_stats", "tools.factor_ic",
+    "tools.factor_backtest",
     "tools.strategy_market", "tools.strategy_runtime",
     "app.routes.strategy_run",
     "paper", "paper.paper_engine",
