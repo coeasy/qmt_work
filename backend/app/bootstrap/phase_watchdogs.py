@@ -15,9 +15,10 @@ from __future__ import annotations
 import asyncio
 import logging
 
+from fastapi import FastAPI
+
 from core.config import settings
 from core.state import state
-from fastapi import FastAPI
 
 log = logging.getLogger("qmt_work.bootstrap.watchdogs")
 
@@ -40,8 +41,9 @@ async def setup(app: FastAPI) -> dict:
     # 系统状态广播
     async def _system_broadcast_loop():
         import time
-        from gateway.trading_session import default_session
+
         from app.version import __version__
+        from gateway.trading_session import default_session
         while True:
             await asyncio.sleep(5.0)
             if state.ws_manager is None:

@@ -3,5 +3,8 @@
 新代码请直接 `from engines.algo import ...`；本文件仅为存量引用保留。
 """
 from engines.algo import *  # noqa: F401,F403
-from engines.algo import AlgoEngine, register_algo_tools  # noqa: F401
-from engines.algo import _engine  # noqa: F401  (私有 API，测试与内部调用兼容)
+from engines.algo import (  # noqa: F401
+    AlgoEngine,
+    _engine,  # noqa: F401  (私有 API，测试与内部调用兼容)
+    register_algo_tools,
+)

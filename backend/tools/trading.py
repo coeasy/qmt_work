@@ -7,6 +7,9 @@ import asyncio
 import threading
 import time
 
+from core.state import state
+from gateway.execution import ExecutionService
+
 from . import get_bridge
 
 
@@ -61,6 +64,7 @@ def _idempotent_lock(key: str) -> "asyncio.Lock":
 
 
 def register_trading_tools(mcp, risk):
+    execution = ExecutionService(risk=risk, db=state.db)
     @mcp.tool()
     async def place_order(
         code: str,
@@ -84,21 +88,9 @@ def register_trading_tools(mcp, risk):
                 dup["duplicated"] = True
                 return dup
             b = get_bridge(broker_id or None)
-            ok, reason = risk.check_order(code, price if price > 0 else 100.0,
-                                          volume, direction)
-            params = {"code": code, "direction": direction, "volume": volume,
-                      "price": price, "price_type": price_type,
-                      "strategy": strategy_name, "remark": remark,
-                      "broker_id": broker_id}
-            if not ok:
-                _audit("order.rejected", code, params, reason)
-                return {"ok": False, "reason": reason}
-            result = await b.call_locked(
-                b.gateway.place_order, code, direction, price_type, price, volume,
-                strategy_name, remark)
-            result["ok"] = True
-            _audit("order.submitted", code, params,
-                   f"order_id={result.get('order_id')}")
+            result = await execution.place_order(
+                b, code, direction, volume, price, price_type,
+                strategy_name, remark, risk=risk)
             _idempotent_set(idempotency_key, result)
             return result
 
@@ -118,19 +110,14 @@ def register_trading_tools(mcp, risk):
     async def cancel_order(order_id: str, broker_id: str = "") -> dict:
         """撤单。"""
         b = get_bridge(broker_id or None)
-        result = await b.call_locked(b.gateway.cancel_order, order_id)
-        _audit("order.cancel", order_id, {"broker_id": broker_id}, "ok")
-        return result
+        return await execution.cancel_order(b, order_id)
 
     @mcp.tool()
     async def cancel_order_price(order_id: str, deviation: float = 0.01,
                                  broker_id: str = "") -> dict:
         """超价撤单（偏离最新价超过 deviation 撤）。"""
         b = get_bridge(broker_id or None)
-        result = await b.call_locked(b.gateway.cancel_order_price, order_id, deviation)
-        _audit("order.cancel_price", order_id,
-               {"deviation": deviation, "broker_id": broker_id}, "ok")
-        return result
+        return await execution.cancel_order_price(b, order_id, deviation)
 
     @mcp.tool()
     async def query_position(broker_id: str = "", symbol: str = "") -> list[dict]:

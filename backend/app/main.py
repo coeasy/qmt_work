@@ -14,12 +14,12 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
-from core.config import BASE_DIR, settings
 from app.logging_setup import setup_logging
 from app.middleware.request_id import request_id_middleware
 from app.routes import router
-from core.state import state
 from app.version import __version__
+from core.config import BASE_DIR, settings
+from core.state import state
 from gateway.auth import make_auth_middleware
 from gateway.rate_limit import RateLimiter, make_rate_limit_middleware
 from gateway.risk import RiskManager
@@ -148,12 +148,12 @@ def create_app() -> FastAPI:
                    phase_watchdogs → phase_replay → phase_misc
     停机逆序：见 app/bootstrap/shutdown.py
     """
-    from app.bootstrap import phase_db, phase_broker, phase_engines
-    from app.bootstrap import phase_watchdogs, phase_replay, phase_misc
+    from app.bootstrap import phase_broker, phase_db, phase_engines, phase_misc, phase_replay, phase_watchdogs
     from app.bootstrap.shutdown import shutdown as _shutdown
 
     @asynccontextmanager
     async def app_lifespan(app: FastAPI):
+        state.begin_startup()
         # 6 阶段顺序启动
         phases = [
             ("db",        phase_db.setup),
@@ -164,14 +164,19 @@ def create_app() -> FastAPI:
             ("misc",      phase_misc.setup),
         ]
         for name, fn in phases:
+            state.mark_phase(name, "starting")
             try:
                 await fn(app)
+                state.mark_phase(name, "ready")
                 log.info("bootstrap phase %s done", name)
             except Exception as exc:  # noqa: BLE001
+                state.mark_phase(name, "error")
                 log.exception("bootstrap phase %s failed: %s", name, exc)
+        state.mark_ready()
         try:
             yield
         finally:
+            state.begin_shutdown()
             # 优雅停机（逆序关闭所有引擎/服务）
             await _shutdown(app)
 

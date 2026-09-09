@@ -19,24 +19,29 @@ from datasource.models import (
     QuoteLevel,
     StockInfo,
 )
+from datasource.providers import ProviderCatalog, ProviderDescriptor, provider_catalog
 from datasource.registry import (
     DataSourceManager,
     DataSourceUnavailable,
     MarketDataHub,
     MarketDataUnavailable,
+    UnsupportedDataSource,
     get_hub,
     get_manager,
 )
 from datasource.result import DataResult
+from datasource.snapshots import DatasetSnapshotStore, ReconcileResult, reconcile_bars
 
 __all__ = [
     "DataSource", "classify_board", "limit_ratio",
-    "DataSourceManager", "DataSourceUnavailable", "get_manager",
+    "DataSourceManager", "DataSourceUnavailable", "UnsupportedDataSource", "get_manager",
     "get_hub", "MarketDataHub", "MarketDataUnavailable",
     # G1 统一数据契约
     "Quote", "QuoteLevel", "Bar", "InstrumentInfo", "StockInfo",
     "BoardItem", "EtfInfo", "BoardKline", "Moneyflow", "MoneyflowPoint",
     "DataResult",
+    "DatasetSnapshotStore", "ReconcileResult", "reconcile_bars",
+    "ProviderCatalog", "ProviderDescriptor", "provider_catalog",
     # G1-4 本地数据仓
     "LocalStore", "get_store",
     # G1-6 降级策略

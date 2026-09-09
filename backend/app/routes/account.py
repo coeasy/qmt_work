@@ -5,6 +5,7 @@ import time
 from fastapi import APIRouter
 
 from app.routes._common import BrokerError, _call, _need, err, no_broker, ok, state
+from gateway.execution import get_execution_service
 
 router = APIRouter()
 
@@ -260,21 +261,17 @@ async def account_batch_order(body: dict):
             rec["detail"] = "连接不存在或未连接"
             results.append(rec)
             continue
-        okc, reason = state.risk.check_order(
-            o["code"], o["price"] if o["price"] > 0 else 100.0, o["volume"], o["direction"])
-        if not okc:
-            rec["detail"] = f"风控拒绝：{reason}"
-            results.append(rec)
-            continue
-        res = await _call(b, b.gateway.place_order, o["code"], o["direction"],
-                          o["price_type"], o["price"], o["volume"], "batch", "")
-        if isinstance(res, dict) and res.get("code", 0) == 0:
+        res = await get_execution_service().place_order(
+            b, o["code"], o["direction"], o["volume"], o["price"],
+            o["price_type"], "batch", "", risk=state.risk)
+        if isinstance(res, dict) and res.get("ok", False):
             rec["status"] = "submitted"
             rec["order_id"] = res.get("order_id")
             rec["detail"] = "ok"
             ok_count += 1
         else:
-            rec["detail"] = (res.get("message") if isinstance(res, dict) else str(res))
+            rec["detail"] = (res.get("reason") or res.get("message")
+                              if isinstance(res, dict) else str(res))
         results.append(rec)
     state.db.audit("trading", "account.batch_order", "", {"count": len(orders),
                    "ok": ok_count}, "ok")
@@ -310,13 +307,14 @@ async def account_batch_cancel(body: dict):
             rec["detail"] = "连接不存在或未连接"
             results.append(rec)
             continue
-        res = await _call(b, b.gateway.cancel_order, t["order_id"])
-        if isinstance(res, dict) and res.get("code", 0) == 0:
+        res = await get_execution_service().cancel_order(b, t["order_id"])
+        if isinstance(res, dict) and res.get("ok", False):
             rec["status"] = "canceled"
             rec["detail"] = "ok"
             ok_count += 1
         else:
-            rec["detail"] = (res.get("message") if isinstance(res, dict) else str(res))
+            rec["detail"] = (res.get("message") or res.get("reason")
+                              if isinstance(res, dict) else str(res))
         results.append(rec)
     return ok({"total": len(targets), "ok": ok_count, "results": results})
 

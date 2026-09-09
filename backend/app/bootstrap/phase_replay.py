@@ -9,8 +9,9 @@ import asyncio
 import json
 import logging
 
-from core.state import state
 from fastapi import FastAPI
+
+from core.state import state
 
 log = logging.getLogger("qmt_work.bootstrap.replay")
 

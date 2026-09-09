@@ -6,18 +6,18 @@
 import asyncio
 from datetime import datetime
 
-from datasource.registry import get_hub
 from app.services.market.common import (
     BOARD_MF_SEM,
     ETF_QUOTE_CAP,
     ETF_QUOTE_SEM,
     INDICES_SEM,
     ROTATION_SEM,
-    ServiceError,
     TTL,
+    ServiceError,
     configured_indices,
 )
 from core.state import state
+from datasource.registry import get_hub
 
 
 def _now() -> str:

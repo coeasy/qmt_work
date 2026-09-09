@@ -17,6 +17,10 @@ xtquant 包自动发现（无需用户手动安装）：
 原函数对象；子模块内部对可 patch 符号的调用一律经 ``_common._shell_attr`` 在
 壳模块上动态查找，保证补丁可见。
 """
+# This package is intentionally a compatibility re-export shell. The star
+# imports preserve old import paths and monkeypatch targets; F405 is expected
+# for the names listed in the explicit public surface below.
+# ruff: noqa: F405
 import logging  # noqa: F401  兼容原模块属性面
 import os  # noqa: F401
 import re  # noqa: F401
@@ -30,14 +34,13 @@ from ..base import (  # noqa: F401  兼容原模块属性面
     BrokerNotConnectedError,
     BrokerSDKError,
 )
-
 from ._common import *  # noqa: F401,F403
+from .account import *  # noqa: F401,F403
+from .adapter import *  # noqa: F401,F403
 from .env import *  # noqa: F401,F403
+from .instrument import *  # noqa: F401,F403
 from .quotes import *  # noqa: F401,F403
 from .trading import *  # noqa: F401,F403
-from .account import *  # noqa: F401,F403
-from .instrument import *  # noqa: F401,F403
-from .adapter import *  # noqa: F401,F403
 
 __all__ = [
     'log',

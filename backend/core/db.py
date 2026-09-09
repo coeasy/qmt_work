@@ -4,10 +4,10 @@
   （旧库自动升级，无需手工删库）。
 """
 import asyncio
+import contextlib
 import hashlib
 import json
 import logging
-import contextlib
 import os
 import sqlite3
 import threading
@@ -18,9 +18,8 @@ log = logging.getLogger("qmt_work.db")
 
 # 迁移与扩展列定义拆至 app/db_migrations.py（2026-09 第三期）；
 # 模块级名字保持 _MIGRATIONS/_EXTRA_COLUMNS，既有 monkeypatch（tests/test_unit.py）不受影响。
-from core.db_migrations import EXTRA_COLUMNS as _EXTRA_COLUMNS, MIGRATIONS as _MIGRATIONS
-
-
+from core.db_migrations import EXTRA_COLUMNS as _EXTRA_COLUMNS  # noqa: E402
+from core.db_migrations import MIGRATIONS as _MIGRATIONS  # noqa: E402
 
 # 参与审计 hash 计算的字段（顺序固定，改动会使旧链失效）
 _AUDIT_HASH_FIELDS = ("actor", "api_key_id", "action", "target",

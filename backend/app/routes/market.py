@@ -7,9 +7,25 @@ from datetime import datetime
 from fastapi import APIRouter
 from pydantic import BaseModel
 
+from app.routes._common import BrokerError, _call, _need, envelope_ok, err, no_broker, ok, state
+from app.services.market import (
+    QUOTES_FILL_SEM,
+    ServiceError,
+    build_analysis,
+    enrich_search_row,
+    kline_io,
+    normalize_code,
+    perf_from_bars,
+    perf_stale,
+    quote_error,
+)
+from app.services.market import aggregates as msvc
+
+# 这两个常量定义在 common.py；此前经 aggregates 隐式 re-export 使用，
+# 2026-09-08 改为从源头直接导入，消除「删掉 aggregates 的未使用导入就断」的脆弱耦合。
+from app.services.market.common import ETF_LIST_TTL, ETF_QUOTE_CAP
 from datasource.board import classify_board
 from datasource.instrument import with_exchange_suffix
-from datasource.registry import MarketDataUnavailable, get_hub
 from datasource.periods import (
     UnknownPeriodError,
     UnsupportedPeriodError,
@@ -18,26 +34,23 @@ from datasource.periods import (
     spec,
     to_eltdx_period,
 )
-from app.routes._common import BrokerError, _call, _need, err, no_broker, ok, state, envelope_ok
-from app.services.market import (
-    QUOTES_FILL_SEM,
-    ServiceError,
-    build_analysis,
-    enrich_search_row,
-    normalize_code,
-    perf_from_bars,
-    perf_stale,
-    quote_error,
+from datasource.providers import provider_catalog
+from datasource.registry import (
+    DataSourceUnavailable,
+    MarketDataUnavailable,
+    UnsupportedDataSource,
+    get_hub,
 )
-from app.services.market import aggregates as msvc
-from app.services.market import kline_io
-# 这两个常量定义在 common.py；此前经 aggregates 隐式 re-export 使用，
-# 2026-09-08 改为从源头直接导入，消除「删掉 aggregates 的未使用导入就断」的脆弱耦合。
-from app.services.market.common import ETF_LIST_TTL, ETF_QUOTE_CAP
 
 log = logging.getLogger("qmt_work.market")
 
 router = APIRouter()
+
+
+@router.get("/market/providers")
+async def market_providers():
+    """Provider 能力目录：只把真实注册的实现标记为 active。"""
+    return ok(provider_catalog.describe())
 
 # 兼容别名：既有单测/调用方仍以 routes.market 引用（重构 P1-1 保持行为与符号兼容）
 _normalize_code = normalize_code
@@ -172,6 +185,8 @@ async def market_quote(code: str, conn_id: str = "", source: str = "auto"):
     """
     try:
         q = await get_hub().get_quote(code, source=source, conn_id=conn_id or None)
+    except UnsupportedDataSource as exc:
+        return err(400, str(exc))
     except MarketDataUnavailable:
         return err(*quote_error(code, source))
     if not q or not isinstance(q, dict) or q.get("last") is None:
@@ -249,6 +264,8 @@ async def market_stock_info(code: str, conn_id: str = "", source: str = "auto"):
 
     try:
         det = await get_hub().get_instrument_detail(code, source=source, conn_id=conn_id or None)
+    except UnsupportedDataSource as exc:
+        return err(400, str(exc))
     except MarketDataUnavailable:
         # 全部源不可用：板块按代码前缀推断，绝不伪造数值。
         info["note"] = "未连接券商且 TDX 行情源不可用，板块按代码前缀推断"
@@ -275,6 +292,7 @@ async def market_sources():
     active = next((n for n in m._auto_chain if h.get(n, {}).get("available")), None)
     return ok({
         "sources": m.list_sources(),
+        "source_capabilities": m.describe_sources(),
         "auto_chain": m._auto_chain,
         "health": h,
         "active": active,
@@ -322,7 +340,9 @@ async def market_kline(code: str, period: str = "1d", count: int = 250,
                                        broker_id=conn_id or None, force=force,
                                        source=source,
                                        adjust=adj or None)
-    except BrokerError as exc:
+    except UnsupportedDataSource as exc:
+        return err(400, str(exc))
+    except (BrokerError, DataSourceUnavailable) as exc:
         return err(503, str(exc))
     bars = res.get("bars") or []
     # 彻底无源返回：券商 + eltdx(TDX) 均无数据时，G1-6 先试本地数据仓兜底
@@ -577,6 +597,19 @@ async def kline_sync_status():
         "config": rc.all().get("market.sync.enabled") if rc else None,
     }
     return ok(info)
+
+
+@router.get("/market/datasets/snapshots")
+async def dataset_snapshots(dataset_id: str = "cn_equity_daily", limit: int = 20):
+    """查询历史数据集快照；只返回已落库的版本/校验/质量元数据。"""
+    from core.db import get_db
+    rows = get_db().query(
+        "SELECT id,dataset_id,version,provider_id,batch_id,as_of,coverage_start,"
+        "coverage_end,row_count,checksum,quality_state,manifest_json,created_at "
+        "FROM dataset_snapshots WHERE dataset_id=? ORDER BY created_at DESC LIMIT ?",
+        (dataset_id, max(1, min(int(limit), 200))),
+    )
+    return ok({"dataset_id": dataset_id, "items": rows})
 
 
 @router.get("/market/kline/cache")

@@ -138,7 +138,8 @@ class AlgoEngine:
                 vol = int(child.get("volume") or 0)
                 if oid and filled < vol:  # 未完全成交的子单需要撤
                     try:
-                        await b.call(b.gateway.cancel_order, oid)
+                        from gateway.execution import get_execution_service
+                        await get_execution_service().cancel_order(b, oid)
                     except Exception as exc:  # noqa: BLE001
                         log.warning("algo %s 撤子单 %s 失败: %s", algo_id, oid, exc)
         return {"algo_id": algo_id, "status": job["status"]}
@@ -472,7 +473,8 @@ class AlgoEngine:
             if filled <= 0 and price_type == "limit" and res.get("order_id"):
                 try:
                     if hasattr(b.gateway, "cancel_order"):
-                        await b.call(b.gateway.cancel_order, res["order_id"])
+                        from gateway.execution import get_execution_service
+                        await get_execution_service().cancel_order(b, res["order_id"])
                 except Exception:  # noqa: BLE001
                     pass
             job["done"] += filled

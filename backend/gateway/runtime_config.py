@@ -61,6 +61,14 @@ class RuntimeConfig:
                              "每日刷新触发时间 HH:MM（收盘后，默认 16:00）"),
         "market.sync.interval": (60.0, float, 10.0,
                                  "定时更新检查循环间隔（秒），热更新生效"),
+        "market.eod.enabled": (False, bool, False,
+                                "是否启用每日全市场 EOD 持久化同步"),
+        "market.eod.time": ("18:00", str, "",
+                             "EOD 同步触发时间 HH:MM；启动后超过时间自动补跑"),
+        "market.eod.limit": (0, int, 0,
+                              "EOD 同步股票数上限，0 表示全市场"),
+        "market.eod.retry": (3, int, 1,
+                              "EOD 失败批次最大重试次数"),
         # ---- 指数清单（R8/B4 配置化：改顶部指数条无需改代码重发版）----
         "market.indices.list": ("", str, "",
                                 "顶部指数条清单（逗号分隔 QMT 代码，如 000001.SH,399001.SZ；"

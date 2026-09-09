@@ -3,7 +3,6 @@
 import os
 import re
 import sys
-
 from dataclasses import dataclass, field
 
 from ._common import (

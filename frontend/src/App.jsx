@@ -12,6 +12,7 @@
 //     导航统一收敛到三条通道：顶菜单下拉 / GlobalSearch / 命令面板（Ctrl+K 或 Ctrl+B）。
 import { useEffect } from "react";
 import { BrokerProvider } from "./BrokerContext.jsx";
+import { PlatformProvider } from "./PlatformContext.jsx";
 import ErrorBoundary from "./components/ErrorBoundary.jsx";
 import BrokerBar from "./components/BrokerBar.jsx";
 import MenuBar from "./components/MenuBar.jsx";
@@ -32,26 +33,28 @@ export default function App() {
 
   return (
     <BrokerProvider>
-      <QuoteHubProvider>
-        <ChartConfigProvider>
-          <WorkspaceProvider>
-          <ErrorBoundary>
-            <div className="tdx-app">
-              <MenuBar />
-              <BrokerBar />
-              <div className="tdx-body">
-                <div className="tdx-main">
-                  <Workbench />
+      <PlatformProvider>
+        <QuoteHubProvider>
+          <ChartConfigProvider>
+            <WorkspaceProvider>
+              <ErrorBoundary>
+                <div className="tdx-app">
+                  <MenuBar />
+                  <BrokerBar />
+                  <div className="tdx-body">
+                    <div className="tdx-main">
+                      <Workbench />
+                    </div>
+                  </div>
+                  <BottomDock />
+                  <CommandPalette />
+                  <HelpOverlay />
                 </div>
-              </div>
-              <BottomDock />
-              <CommandPalette />
-              <HelpOverlay />
-            </div>
-          </ErrorBoundary>
-          </WorkspaceProvider>
-        </ChartConfigProvider>
-      </QuoteHubProvider>
+              </ErrorBoundary>
+            </WorkspaceProvider>
+          </ChartConfigProvider>
+        </QuoteHubProvider>
+      </PlatformProvider>
     </BrokerProvider>
   );
 }

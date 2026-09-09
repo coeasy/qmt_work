@@ -280,9 +280,11 @@ class SignalRouter:
         if b is None:
             return {"ok": False, "reason": "未连接券商客户端", "mode": "live"}
         try:
-            res = await b.call_locked(
-                b.gateway.place_order, sig.code, sig.side, sig.price_type,
-                sig.price, sig.volume, sig.source, sig.remark)
+            from gateway.execution import ExecutionService
+            res = await ExecutionService(risk=self._risk, db=self._db).place_order(
+                b, sig.code, sig.side, sig.volume, sig.price, sig.price_type,
+                sig.source, sig.remark, risk=self._risk,
+                audit_action="signal.live")
             # 阶段 0-B（F13）：绝不把失败/未确认的下单粉饰成成功。
             # 柜台未返回委托号（超时 unknown）或明确拒单 → ok=False。
             oid = res.get("order_id") if isinstance(res, dict) else None

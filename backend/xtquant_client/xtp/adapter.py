@@ -4,7 +4,7 @@ import os
 import threading
 
 from ..base import BrokerAdapter, BrokerNotConnectedError, BrokerSDKError
-from ._common import _load_trader_api, _load_xtquant_from, _resolve_xtquant_path, log, _shell_attr
+from ._common import _load_trader_api, _load_xtquant_from, _resolve_xtquant_path, _shell_attr, log
 from .account import AccountMixin
 from .env import (
     QmtVersionProfile,

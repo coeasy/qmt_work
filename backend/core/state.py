@@ -6,7 +6,6 @@
 """
 from xtquant_client.manager import BrokerManager
 
-
 # 无券商连接的统一文案（503 响应与异常共用；app/routes/_common.no_broker 引用此处）。
 MSG_NO_BROKER = "未连接任何券商客户端：请到「券商连接」页添加并连接券商。"
 
@@ -45,6 +44,27 @@ class AppState:
     market_sync = None       # 行情缓存定时维护：今年热数据收盘后刷新 + 跨年归档
     started_at: float = 0.0  # 进程启动时间戳（健康检查用）
     latest_quotes: dict = {}
+    # 生命周期状态机：启动阶段可观测，未完成核心阶段不得宣称 ready。
+    phase_status: dict[str, str] = {}
+    lifecycle_ready: bool = False
+    lifecycle_stopping: bool = False
+
+    def begin_startup(self) -> None:
+        self.phase_status = {}
+        self.lifecycle_ready = False
+        self.lifecycle_stopping = False
+
+    def mark_phase(self, name: str, status: str) -> None:
+        self.phase_status[name] = status
+
+    def mark_ready(self) -> bool:
+        required = ("db", "engines", "watchdogs", "replay", "misc")
+        self.lifecycle_ready = all(self.phase_status.get(n) == "ready" for n in required)
+        return self.lifecycle_ready
+
+    def begin_shutdown(self) -> None:
+        self.lifecycle_stopping = True
+        self.lifecycle_ready = False
 
     def require_bridge(self, conn_id: str | None = None):
         """返回指定/活跃 bridge；无可用连接时抛 BrokerNotConnectedError。"""

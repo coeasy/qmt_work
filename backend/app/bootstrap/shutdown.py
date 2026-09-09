@@ -10,9 +10,10 @@ from __future__ import annotations
 import asyncio
 import logging
 
+from fastapi import FastAPI
+
 from core.config import settings
 from core.state import state
-from fastapi import FastAPI
 
 log = logging.getLogger("qmt_work.bootstrap.shutdown")
 

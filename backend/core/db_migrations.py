@@ -493,6 +493,86 @@ INSERT INTO kline_archive (code,period,dt,open,high,low,close,volume,amount,fetc
 DROP TABLE kline_archive_old;
 CREATE INDEX IF NOT EXISTS idx_kline_archive_lookup ON kline_archive(code, period, adjust, dt);
 """),
+    (19, """
+-- Phase 2 数据溯源：每根本地 K 线必须能够追溯到 provider/batch，且保留
+-- 质量状态与内容校验值。旧库用 ADD COLUMN 增量升级，不改变既有主键与数据。
+ALTER TABLE local_bars ADD COLUMN provider_id TEXT DEFAULT '';
+ALTER TABLE local_bars ADD COLUMN batch_id TEXT DEFAULT '';
+ALTER TABLE local_bars ADD COLUMN checksum TEXT DEFAULT '';
+ALTER TABLE local_bars ADD COLUMN schema_version TEXT DEFAULT '1';
+ALTER TABLE local_bars ADD COLUMN quality_state TEXT DEFAULT 'unknown';
+CREATE INDEX IF NOT EXISTS idx_local_bars_provenance
+    ON local_bars(provider_id, batch_id, dt);
+"""),
+    (20, """
+-- Phase 6 Durable JobRuntime：任务状态、租约、心跳和 checkpoint 持久化。
+CREATE TABLE IF NOT EXISTS runtime_jobs (
+    id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,
+    name TEXT NOT NULL DEFAULT '',
+    priority INTEGER NOT NULL DEFAULT 5,
+    status TEXT NOT NULL DEFAULT 'queued',
+    progress INTEGER NOT NULL DEFAULT 0,
+    message TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT '',
+    started_at TEXT,
+    finished_at TEXT,
+    result_json TEXT,
+    error TEXT,
+    params_json TEXT NOT NULL DEFAULT '{}',
+    lease_owner TEXT NOT NULL DEFAULT '',
+    lease_until REAL,
+    heartbeat_at REAL,
+    checkpoint_json TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_runtime_jobs_status ON runtime_jobs(status, priority, created_at);
+"""),
+    (21, """
+-- Phase 5-7 data plane：交易所日历与可复现 Dataset Snapshot 元数据。
+CREATE TABLE IF NOT EXISTS exchange_calendar (
+    market TEXT NOT NULL,
+    exchange TEXT NOT NULL,
+    trade_date TEXT NOT NULL,
+    session TEXT NOT NULL DEFAULT 'regular',
+    calendar_source TEXT NOT NULL DEFAULT '',
+    calendar_version TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (market, exchange, trade_date, session)
+);
+CREATE INDEX IF NOT EXISTS idx_exchange_calendar_date
+    ON exchange_calendar(exchange, trade_date);
+CREATE TABLE IF NOT EXISTS dataset_snapshots (
+    id TEXT PRIMARY KEY,
+    dataset_id TEXT NOT NULL,
+    version TEXT NOT NULL,
+    provider_id TEXT NOT NULL DEFAULT '',
+    batch_id TEXT NOT NULL DEFAULT '',
+    as_of TEXT NOT NULL DEFAULT '',
+    coverage_start TEXT NOT NULL DEFAULT '',
+    coverage_end TEXT NOT NULL DEFAULT '',
+    row_count INTEGER NOT NULL DEFAULT 0,
+    checksum TEXT NOT NULL DEFAULT '',
+    quality_state TEXT NOT NULL DEFAULT 'unknown',
+    manifest_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT ''
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_dataset_snapshot_version
+    ON dataset_snapshots(dataset_id, version);
+CREATE INDEX IF NOT EXISTS idx_dataset_snapshot_batch
+    ON dataset_snapshots(provider_id, batch_id, created_at);
+"""),
+    (22, """
+-- Phase 9 Plugin Kernel：仅保存声明式清单与状态，不保存插件可访问的原始 DB/密钥。
+CREATE TABLE IF NOT EXISTS plugin_catalog (
+    id TEXT PRIMARY KEY,
+    version TEXT NOT NULL,
+    manifest_json TEXT NOT NULL,
+    state TEXT NOT NULL DEFAULT 'installed',
+    checksum TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_plugin_catalog_state ON plugin_catalog(state);
+"""),
 ]
 
 

@@ -35,6 +35,14 @@ class DataSource(ABC):
     #: 例：{"last_price": "last"} 表示源用 last_price 承载最新价。
     alias_dict: ClassVar[dict] = {}
 
+    #: Provider 能力声明；路由只应选择已声明且已实现的能力，不能按 provider 名称猜测。
+    capabilities: ClassVar[frozenset[str]] = frozenset({
+        "quote", "kline", "instrument_detail", "stock_list",
+    })
+
+    def capability_manifest(self) -> dict:
+        return {"provider": self.name, "capabilities": sorted(self.capabilities)}
+
     @abstractmethod
     async def get_quote(self, code: str) -> dict:
         """实时盘口快照，返回结构与 `xtp._norm_quote` 一致：

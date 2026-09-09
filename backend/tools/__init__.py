@@ -6,8 +6,8 @@ K 线在无券商连接时回退到 eltdx(TDX 公共行情) 数据源。
 """
 import logging
 
-from datasource.registry import get_hub
 from core.state import MSG_NO_BROKER_EXC, state
+from datasource.registry import get_hub
 from xtquant_client.base import BrokerError, BrokerNotConnectedError
 
 log = logging.getLogger("qmt_work.tools")
@@ -40,6 +40,12 @@ async def fetch_kline_cached(code: str, period: str = "1d", count: int = 250,
     """
     from datasource.instrument import with_exchange_suffix
     code = with_exchange_suffix(code)
+    # 缓存编排也必须遵守 source 契约；否则未知 source 会落入默认券商路径，
+    # 或显式券商请求在复权失败时被错误改成 TDX。
+    source = get_hub().validate_source(source)
+    # 缓存编排也必须遵守 source 契约；否则未知 source 会落入默认券商路径，
+    # 或显式券商请求在复权失败时被错误改成 TDX。
+    source = get_hub().validate_source(source)
 
     async def _fetch_broker(c: str, p: str, n: int):
         b = get_bridge(broker_id or None)
@@ -50,14 +56,16 @@ async def fetch_kline_cached(code: str, period: str = "1d", count: int = 250,
             c, p, n, source="eltdx", conn_id=broker_id, adjust=adjust)
         return bars, src
 
-    # 显式复权：券商不支持，直接走 TDX 复权源（失败再回退券商原始价）
-    if adjust in ("qfq", "hfq") and period.lower() in ("1d", "day", "1w", "week", "1mon", "mon", "month"):
+    # auto/TDX 的显式复权走支持复权的源；显式 broker 不得静默改源。
+    if source in ("auto", "eltdx") and adjust in ("qfq", "hfq") and period.lower() in ("1d", "day", "1w", "week", "1mon", "mon", "month"):
         try:
             bars, src = await _fetch_eltdx(code, period, count)
             await _persist(code, period, bars, adjust)
             return {"bars": bars, "source": src, "cached_at": None}
         except Exception as exc:  # noqa: BLE001
-            log.warning("eltdx 复权K线失败，回退券商原始K线: %s", exc)
+            if source == "eltdx":
+                raise
+            log.warning("eltdx 复权K线失败，auto 链继续尝试券商: %s", exc)
 
     cache = getattr(state, "kline_cache", None)
 
@@ -81,7 +89,8 @@ async def fetch_kline_cached(code: str, period: str = "1d", count: int = 250,
         await _persist(code, period, bars, adjust)
         return {"bars": bars, "source": src, "cached_at": None}
 
-    if cache is None:
+    # kline_cache 不含 provider 维度；显式 broker 不能命中此前由 TDX 写入的缓存。
+    if cache is None or source == "broker":
         # 无缓存层：直接回源券商，auto 时异常回退 eltdx
         try:
             res = await _fetch_broker(code, period, count)

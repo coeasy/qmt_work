@@ -6,7 +6,6 @@ from ..base import BrokerNotConnectedError, BrokerSDKError
 from ._common import _dget, _normalize_kline_period, log
 
 
-
 class QuotesMixin:
 
 

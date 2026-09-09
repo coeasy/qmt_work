@@ -12,9 +12,9 @@ import asyncio
 
 import pytest
 
+from app.routes import market as mk
 from datasource.instrument import classify_instrument
 from datasource.pinyin import matches_initials, pinyin_initials
-from app.routes import market as mk
 
 
 # ============================ 拼音首字母（GBK 区间法） ============================

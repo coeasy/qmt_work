@@ -25,6 +25,9 @@ hiddenimports = (
     collect_submodules("app")
     + collect_submodules("sync")
     + collect_submodules("xtquant_client")
+    + collect_submodules("connectors")
+    + collect_submodules("plugins")
+    + collect_submodules("datasource")
     + [
         "uvicorn", "uvicorn.server", "uvicorn.lifespan", "uvicorn.logging",
         "uvicorn.loops.auto", "uvicorn.protocols.http.auto",

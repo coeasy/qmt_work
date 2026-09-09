@@ -13,10 +13,10 @@ from app.analysis.contract import (
     register,
     run,
 )
-from datasource.result import DataResult
 from app.routes.analysis import market_analysis_run, market_analysis_scripts_list
 from app.routes.datahub import datahub_policies
 from app.routes.indicators import market_chart_spec
+from datasource.result import DataResult
 
 
 def test_contract_has_portfolio_summary():

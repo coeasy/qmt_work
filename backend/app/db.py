@@ -6,5 +6,4 @@
 新代码请直接 `from core.db import ...`；本文件仅为存量引用保留。
 """
 from core.db import *  # noqa: F401,F403
-from core.db import DB, audit_chain_hash, get_db, init_db  # noqa: F401
-from core.db import _RWLock, _db  # noqa: F401
+from core.db import DB, _db, _RWLock, audit_chain_hash, get_db, init_db  # noqa: F401  # noqa: F401

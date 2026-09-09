@@ -11,6 +11,7 @@ userdata_mini（极速版）/ userdata（完整版大客户端）双数据目录
 2) 安装目录扫描：常见券商安装位置 + 盘符顶层 *QMT* 目录（≤2 层）
 """
 import logging
+import ntpath
 import os
 import re
 import subprocess
@@ -308,6 +309,10 @@ def _root_from_exe(exe_path: str) -> str | None:
     """由进程 exe 路径推导客户端根（根/bin.x64/XtMiniQmt.exe -> 根）。"""
     if not exe_path:
         return None
+    if "\\" in exe_path or re.match(r"^[A-Za-z]:", exe_path):
+        d = ntpath.dirname(exe_path)
+        b = ntpath.basename(d).strip().lower()
+        return ntpath.dirname(d) if b in ("bin.x64", "bin", "bin32", "bin_x64") else d
     d = os.path.dirname(os.path.abspath(exe_path))
     b = os.path.basename(d).strip().lower()
     if b in ("bin.x64", "bin", "bin32", "bin_x64"):

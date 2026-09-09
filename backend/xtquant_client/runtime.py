@@ -325,7 +325,7 @@ def select_runtime(xtquant_site: str | None,
     if not broker_abis:
         return None
     host = host_python_minor()
-    if (not prefer_bridge) and host in broker_abis:
+    if bundled is None and (not prefer_bridge) and host in broker_abis:
         return {"python_exe": sys.executable, "abi": host, "mode": "in_process"}
     if bundled is None:
         bundled = discover_bundled_runtimes()

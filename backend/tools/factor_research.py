@@ -21,14 +21,11 @@ from typing import Dict, List, Optional, Tuple  # noqa: F401
 from xtquant_client.base import BrokerNotConnectedError
 
 from . import fetch_kline_cached
-from .factors import _EXTRA_FIELDS, compute_factor, from_kline
-from .factor_stats import (  # noqa: F401
-    _clean_pairs,
-    _mean,
-    _pearson,
-    _rank_avg,
-    _spearman,
-    _stdev,
+from .factor_backtest import (  # noqa: F401
+    _normalize_weights,
+    attribute_pnl,
+    run_portfolio_backtest,
+    walk_forward,
 )
 from .factor_ic import (  # noqa: F401
     factor_correlation,
@@ -37,12 +34,15 @@ from .factor_ic import (  # noqa: F401
     ic_statistics,
     quantile_analysis,
 )
-from .factor_backtest import (  # noqa: F401
-    _normalize_weights,
-    attribute_pnl,
-    run_portfolio_backtest,
-    walk_forward,
+from .factor_stats import (  # noqa: F401
+    _clean_pairs,
+    _mean,
+    _pearson,
+    _rank_avg,
+    _spearman,
+    _stdev,
 )
+from .factors import _EXTRA_FIELDS, compute_factor, from_kline
 
 # ============================================================================
 # 异步薄封装：取真实 K 线 → 调用纯函数
