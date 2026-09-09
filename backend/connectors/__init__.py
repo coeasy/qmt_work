@@ -1,5 +1,6 @@
 """Platform-neutral connector ports and lifecycle supervision (V9 Phase 8)."""
 
+from .http import HttpTradingConnector
 from .ports import (
     AccountSnapshot,
     ConnectorDescriptor,
@@ -16,5 +17,5 @@ from .supervisor import ConnectionSupervisor
 __all__ = [
     "AccountSnapshot", "ConnectorDescriptor", "ConnectorError", "ConnectorPort",
     "ConnectorState", "ConnectionSupervisor", "InstrumentId", "OrderRequest",
-    "PositionSnapshot", "QmtConnector",
+    "PositionSnapshot", "QmtConnector", "HttpTradingConnector",
 ]

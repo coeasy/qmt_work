@@ -692,6 +692,11 @@ def get_manager() -> DataSourceManager:
         provider_catalog.register(source)
     except Exception as exc:  # noqa: BLE001
         log.warning("eltdx 数据源注册跳过（依赖缺失）：%s", exc)
+    from datasource.providers import provider_catalog
+    from datasource.public_sources import SinaSource, TencentSource
+    for source in (SinaSource(), TencentSource()):
+        m.register(source)
+        provider_catalog.register(source)
     m.set_auto_chain(["broker", "eltdx"])
     _manager = m
     return _manager
