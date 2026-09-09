@@ -63,6 +63,9 @@ jobs:
       - name: Frontend className diff gate
         run: python scripts/check_frontend_classnames.py
 
+      - name: Execution architecture gate
+        run: python ../scripts/check_execution_architecture.py
+
   lint:
     name: Lint (ruff — real-bug gate)
     runs-on: ubuntu-latest

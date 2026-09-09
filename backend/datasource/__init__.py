@@ -19,6 +19,7 @@ from datasource.models import (
     QuoteLevel,
     StockInfo,
 )
+from datasource.providers import ProviderCatalog, ProviderDescriptor, provider_catalog
 from datasource.registry import (
     DataSourceManager,
     DataSourceUnavailable,
@@ -40,6 +41,7 @@ __all__ = [
     "BoardItem", "EtfInfo", "BoardKline", "Moneyflow", "MoneyflowPoint",
     "DataResult",
     "DatasetSnapshotStore", "ReconcileResult", "reconcile_bars",
+    "ProviderCatalog", "ProviderDescriptor", "provider_catalog",
     # G1-4 本地数据仓
     "LocalStore", "get_store",
     # G1-6 降级策略

@@ -560,6 +560,19 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_dataset_snapshot_version
 CREATE INDEX IF NOT EXISTS idx_dataset_snapshot_batch
     ON dataset_snapshots(provider_id, batch_id, created_at);
 """),
+    (22, """
+-- Phase 9 Plugin Kernel：仅保存声明式清单与状态，不保存插件可访问的原始 DB/密钥。
+CREATE TABLE IF NOT EXISTS plugin_catalog (
+    id TEXT PRIMARY KEY,
+    version TEXT NOT NULL,
+    manifest_json TEXT NOT NULL,
+    state TEXT NOT NULL DEFAULT 'installed',
+    checksum TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_plugin_catalog_state ON plugin_catalog(state);
+"""),
 ]
 
 

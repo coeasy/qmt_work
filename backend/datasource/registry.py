@@ -686,7 +686,10 @@ def get_manager() -> DataSourceManager:
     # 注册 eltdx（若可用）；缺失依赖时静默跳过，系统回退到纯券商模式。
     try:
         from datasource.eltdx_source import EltdxSource
-        m.register(EltdxSource())
+        source = EltdxSource()
+        m.register(source)
+        from datasource.providers import provider_catalog
+        provider_catalog.register(source)
     except Exception as exc:  # noqa: BLE001
         log.warning("eltdx 数据源注册跳过（依赖缺失）：%s", exc)
     m.set_auto_chain(["broker", "eltdx"])

@@ -34,6 +34,7 @@ from datasource.periods import (
     spec,
     to_eltdx_period,
 )
+from datasource.providers import provider_catalog
 from datasource.registry import (
     DataSourceUnavailable,
     MarketDataUnavailable,
@@ -44,6 +45,12 @@ from datasource.registry import (
 log = logging.getLogger("qmt_work.market")
 
 router = APIRouter()
+
+
+@router.get("/market/providers")
+async def market_providers():
+    """Provider 能力目录：只把真实注册的实现标记为 active。"""
+    return ok(provider_catalog.describe())
 
 # 兼容别名：既有单测/调用方仍以 routes.market 引用（重构 P1-1 保持行为与符号兼容）
 _normalize_code = normalize_code
