@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 
 from connectors.ports import ConnectorDescriptor, ConnectorState, InstrumentId, OrderRequest
@@ -30,14 +32,12 @@ def test_order_request_rejects_invalid_real_command():
         request.validate()
 
 
-@pytest.mark.asyncio
-async def test_supervisor_isolates_failed_connector():
+def test_supervisor_isolates_failed_connector():
     supervisor = ConnectionSupervisor()
     good = _Connector(connected=False)
     bad = _Connector(connected=False, fail=True)
     supervisor.register("good", good)
     supervisor.register("bad", bad)
-    statuses = await supervisor.start_all()
+    statuses = asyncio.run(supervisor.start_all())
     assert [s.state for s in statuses] == [ConnectorState.CONNECTED, ConnectorState.FAILED]
     assert supervisor.status("bad").last_error == "SDK unavailable"
-
