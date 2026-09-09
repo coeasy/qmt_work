@@ -9,10 +9,10 @@ import asyncio
 import pytest
 
 from app.state import state
+from engines.algo import AlgoEngine
 from gateway.idempotency import single_flight
 from gateway.risk import RiskManager, normalize_direction
 from gateway.signal_router import SignalRouter
-from engines.algo import AlgoEngine
 
 
 # ---------------- fakes ----------------

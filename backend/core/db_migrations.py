@@ -493,6 +493,17 @@ INSERT INTO kline_archive (code,period,dt,open,high,low,close,volume,amount,fetc
 DROP TABLE kline_archive_old;
 CREATE INDEX IF NOT EXISTS idx_kline_archive_lookup ON kline_archive(code, period, adjust, dt);
 """),
+    (19, """
+-- Phase 2 数据溯源：每根本地 K 线必须能够追溯到 provider/batch，且保留
+-- 质量状态与内容校验值。旧库用 ADD COLUMN 增量升级，不改变既有主键与数据。
+ALTER TABLE local_bars ADD COLUMN provider_id TEXT DEFAULT '';
+ALTER TABLE local_bars ADD COLUMN batch_id TEXT DEFAULT '';
+ALTER TABLE local_bars ADD COLUMN checksum TEXT DEFAULT '';
+ALTER TABLE local_bars ADD COLUMN schema_version TEXT DEFAULT '1';
+ALTER TABLE local_bars ADD COLUMN quality_state TEXT DEFAULT 'unknown';
+CREATE INDEX IF NOT EXISTS idx_local_bars_provenance
+    ON local_bars(provider_id, batch_id, dt);
+"""),
 ]
 
 

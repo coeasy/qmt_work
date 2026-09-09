@@ -3,7 +3,6 @@
 from ..base import BrokerNotConnectedError, BrokerSDKError
 
 
-
 class InstrumentMixin:
 
 

@@ -16,7 +16,10 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BACKEND = os.path.join(ROOT, "backend")
 FRONTEND = os.path.join(ROOT, "frontend")
 
-EXPECTED_TESTS = 592
+# Keep the gate tied to the current checked-in test inventory.  This is a
+# count contract, not a pass-rate bypass: every collected test still runs in
+# CI and any collection drift fails the job.
+EXPECTED_TESTS = 609
 EXPECTED_COMPONENTS = 48
 
 
@@ -40,6 +43,8 @@ def count_frontend_components() -> int:
 
 
 def main() -> int:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
     ok = True
 
     tests = collect_backend_tests()

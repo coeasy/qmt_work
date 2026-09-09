@@ -1,12 +1,11 @@
+# --- stdlib imports injected by fix_route_imports ---
+import logging
 import uuid
 
 from fastapi import APIRouter
 
 from app.middleware.request_id import _request_id_ctx
 from app.routes._common import WebSocket, WebSocketDisconnect, _ws_authorized, state
-
-# --- stdlib imports injected by fix_route_imports ---
-import logging
 
 router = APIRouter()
 

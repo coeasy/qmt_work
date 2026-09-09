@@ -24,6 +24,7 @@ from datasource.registry import (
     DataSourceUnavailable,
     MarketDataHub,
     MarketDataUnavailable,
+    UnsupportedDataSource,
     get_hub,
     get_manager,
 )
@@ -31,7 +32,7 @@ from datasource.result import DataResult
 
 __all__ = [
     "DataSource", "classify_board", "limit_ratio",
-    "DataSourceManager", "DataSourceUnavailable", "get_manager",
+    "DataSourceManager", "DataSourceUnavailable", "UnsupportedDataSource", "get_manager",
     "get_hub", "MarketDataHub", "MarketDataUnavailable",
     # G1 统一数据契约
     "Quote", "QuoteLevel", "Bar", "InstrumentInfo", "StockInfo",

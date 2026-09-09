@@ -2,4 +2,4 @@
 
 新代码请直接 `from core.state import ...`；本文件仅为存量引用保留。
 """
-from core.state import AppState, MSG_NO_BROKER, MSG_NO_BROKER_EXC, state  # noqa: F401
+from core.state import MSG_NO_BROKER, MSG_NO_BROKER_EXC, AppState, state  # noqa: F401

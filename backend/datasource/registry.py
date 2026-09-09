@@ -73,6 +73,21 @@ class DataSourceUnavailable(Exception):
     """请求的数据源均不可用（auto 全链失败 / 显式源缺失）。"""
 
 
+class UnsupportedDataSource(DataSourceUnavailable):
+    """调用方显式指定了未注册的数据源。
+
+    这是配置/能力错误，不是允许回退到 auto 的运行时缺数；单独类型便于 REST/MCP
+    入口返回明确的 400，而不会把用户要求的 source 静默改成另一来源。
+    """
+
+    def __init__(self, source: str, available: list[str]):
+        self.source = source
+        self.available = available
+        super().__init__(
+            f"未注册的数据源: {source}；可用数据源: {', '.join(available) or '无'}"
+        )
+
+
 class _BoundBrokerSource:
     """把单个券商连接包装成 DataSource 形态（仅行情/基础数据，无交易）。
 
@@ -206,6 +221,17 @@ class DataSourceManager:
             return None
         return self._broker_factory(conn_id)
 
+    def _validate_source(self, source: str) -> str:
+        """校验 source；只有 auto 才允许回退链，显式未知源必须立即报错。"""
+        want = (source or "auto").strip().lower()
+        if want in ("auto", "broker") or want in self._plugins:
+            return want
+        raise UnsupportedDataSource(want, self.list_sources())
+
+    def validate_source(self, source: str = "auto") -> str:
+        """公开的 source 能力校验入口，供缓存/REST 编排层复用。"""
+        return self._validate_source(source)
+
     @staticmethod
     def _merge_quote(raw: dict, code: str, board: dict, detail: dict,
                      src: str, industry: str = "", concepts=None) -> dict:
@@ -240,6 +266,7 @@ class DataSourceManager:
     # ---------- 行情快照 ----------
     async def get_quote(self, code: str, source: str = "auto",
                         conn_id: Optional[str] = None) -> Optional[dict]:
+        source = self._validate_source(source)
         # 代码规范化（唯一入口）：券商只认 600519.SH，eltdx 名称表也以带后缀代码为键。
         # 传裸代码会让券商静默返空、eltdx 查不到中文名——两处都表现为「无数据」。
         code = with_exchange_suffix(code)
@@ -294,6 +321,7 @@ class DataSourceManager:
     # ---------- 合约基础信息 ----------
     async def get_instrument_detail(self, code: str, source: str = "auto",
                                     conn_id: Optional[str] = None) -> Optional[dict]:
+        source = self._validate_source(source)
         # 同上：统一补交易所后缀，否则 eltdx 名称表（键为 600519.SH）查不到中文名，
         # 券商侧也只回空壳 —— 界面就会把个股名显示成一串代码。
         code = with_exchange_suffix(code)
@@ -371,13 +399,14 @@ class DataSourceManager:
 
         复权（qfq/hfq）券商不支持，自动改走支持复权的补充源（eltdx）。
         """
+        source = self._validate_source(source)
         # 周期判定引用契约常量（第三份硬编码已消除）。
         # 注意：旧常量不含 canonical "1mo"，导致月线+qfq 时不会改走支持复权的补充源。
         try:
             _canon = normalize_period(period)
         except UnknownPeriodError:
             _canon = None
-        if adjust in ("qfq", "hfq") and _canon in adjust_allowed_periods():
+        if source == "auto" and adjust in ("qfq", "hfq") and _canon in adjust_allowed_periods():
             for name in self._auto_chain:
                 if name == "broker":
                     continue
@@ -419,6 +448,7 @@ class DataSourceManager:
                           source: str = "auto") -> Optional[dict]:
         """当日分时曲线（价格+均价+分钟量）。按 auto 链遍历补充源（跳过券商），
         全部无数据返回 None。"""
+        source = self._validate_source(source)
         for name in self._auto_chain:
             if name == "broker":
                 continue
@@ -441,7 +471,7 @@ class DataSourceManager:
         - 具体源名（如 eltdx）：只用该源。
         - "auto"/空：按 _auto_chain 顺序回退（跳过券商）。
         """
-        want = (source or "auto").lower().strip()
+        want = self._validate_source(source)
         if want == "broker":
             return []
         if want in ("", "auto"):
@@ -517,6 +547,7 @@ class DataSourceManager:
     # ---------- 全市场股票列表（名称来源） ----------
     async def get_stock_list(self, source: str = "auto",
                              conn_id: Optional[str] = None) -> Optional[list]:
+        source = self._validate_source(source)
         if source in self._plugins:
             return await self._call_source(source, self._plugins[source].get_stock_list())
         if source == "broker":
@@ -654,6 +685,6 @@ MarketDataHub = DataSourceManager
 MarketDataUnavailable = DataSourceUnavailable
 
 
-__all__ = ["DataSourceManager", "DataSourceUnavailable", "get_manager",
+__all__ = ["DataSourceManager", "DataSourceUnavailable", "UnsupportedDataSource", "get_manager",
            "get_hub", "MarketDataHub", "MarketDataUnavailable",
            "classify_board", "limit_ratio"]

@@ -7,7 +7,7 @@ import asyncio
 
 from datasource.base import DataSource
 from datasource.board import classify_board, limit_ratio
-from datasource.registry import DataSourceManager
+from datasource.registry import DataSourceManager, UnsupportedDataSource
 
 
 class FakeBroker:
@@ -104,6 +104,30 @@ def test_auto_falls_back_to_eltdx():
 def test_explicit_source():
     async def c():
         assert (await _m().get_quote("X.SH", source="eltdx"))["source"] == "eltdx"
+    asyncio.run(c())
+
+
+def test_unknown_explicit_source_does_not_fallback():
+    async def c():
+        try:
+            await _m().get_quote("X.SH", source="missing-provider")
+        except UnsupportedDataSource as exc:
+            assert exc.source == "missing-provider"
+        else:  # pragma: no cover - guard against accidental auto fallback
+            raise AssertionError("unknown explicit source must not enter auto chain")
+    asyncio.run(c())
+
+
+def test_explicit_broker_failure_does_not_fallback():
+    async def c():
+        assert await _m(broker_fail=True).get_quote("X.SH", source="broker") is None
+    asyncio.run(c())
+
+
+def test_explicit_kline_broker_failure_does_not_fallback():
+    async def c():
+        bars, src = await _m(broker_fail=True).get_kline("X.SH", source="broker")
+        assert bars is None and src is None
     asyncio.run(c())
 
 

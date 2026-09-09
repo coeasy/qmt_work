@@ -13,7 +13,6 @@
 """
 import asyncio
 
-
 from app.routes import analysis as _an
 from app.routes import datahub as _dh
 from app.routes import indicators as _ind

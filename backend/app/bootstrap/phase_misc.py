@@ -8,8 +8,9 @@ from __future__ import annotations
 
 import logging
 
-from core.state import state
 from fastapi import FastAPI
+
+from core.state import state
 
 log = logging.getLogger("qmt_work.bootstrap.misc")
 
@@ -22,8 +23,9 @@ async def setup(app: FastAPI) -> dict:
              state.market_sync.enabled, state.market_sync.sync_time)
 
     try:
-        from datasource.registry import get_hub
         import asyncio
+
+        from datasource.registry import get_hub
         asyncio.create_task(get_hub().warmup_all())
         log.info("行情数据源预热任务已提交（后台）")
     except Exception as exc:  # noqa: BLE001

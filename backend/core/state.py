@@ -6,7 +6,6 @@
 """
 from xtquant_client.manager import BrokerManager
 
-
 # 无券商连接的统一文案（503 响应与异常共用；app/routes/_common.no_broker 引用此处）。
 MSG_NO_BROKER = "未连接任何券商客户端：请到「券商连接」页添加并连接券商。"
 

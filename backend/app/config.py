@@ -2,5 +2,11 @@
 
 新代码请直接 `from core.config import ...`；本文件仅为存量引用保留。
 """
-from core.config import BASE_DIR, Settings, ensure_config_file, exe_dir  # noqa: F401
-from core.config import config_file, settings  # noqa: F401
+from core.config import (  # noqa: F401  # noqa: F401
+    BASE_DIR,
+    Settings,
+    config_file,
+    ensure_config_file,
+    exe_dir,
+    settings,
+)

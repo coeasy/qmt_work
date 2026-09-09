@@ -1,6 +1,7 @@
 from fastapi import APIRouter
 
 from app.routes._common import _call, _need, audit_log, err, no_broker, ok
+from gateway.execution import get_execution_service
 
 # --- stdlib imports injected by fix_route_imports ---
 
@@ -58,8 +59,9 @@ async def rebalance(body: dict):
                 break
             direction = "buy" if diff > 0 else "sell"
             if do_trade:
-                res = await b.call_locked(b.gateway.place_order, code, direction, "limit",
-                                           last, volume, "rebalance", f"rebal-{code}")
+                res = await get_execution_service().place_order(
+                    b, code, direction, volume, last, "limit", "rebalance",
+                    f"rebal-{code}")
                 orders.append({"code": code, "direction": direction, "volume": volume,
                                "price": last, "order": res})
             else:

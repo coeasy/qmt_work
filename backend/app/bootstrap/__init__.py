@@ -26,7 +26,6 @@ from typing import Awaitable, Callable
 
 from fastapi import FastAPI
 
-
 log = logging.getLogger("qmt_work.bootstrap")
 
 # 阶段函数签名：async def fn(app) -> dict  返回 dict 暴露给后续阶段

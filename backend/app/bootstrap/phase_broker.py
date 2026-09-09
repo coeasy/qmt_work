@@ -11,9 +11,10 @@ import asyncio
 import logging
 import time
 
+from fastapi import FastAPI
+
 from core.config import settings
 from core.state import state
-from fastapi import FastAPI
 from xtquant_client.manager import ConnectionConfig
 
 log = logging.getLogger("qmt_work.bootstrap.broker")

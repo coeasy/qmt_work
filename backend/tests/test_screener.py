@@ -11,8 +11,8 @@ from app.screener.engine import list_saved_boards, save_as_board, scan
 
 @pytest.fixture()
 def store(tmp_path):
-    from datasource.local_store import LocalStore
     from core.db import DB
+    from datasource.local_store import LocalStore
     db = DB(tmp_path / "test_screen.db")
     st = LocalStore(db)
     # 三只确定性标的：UP 单边上涨 / DOWN 单边下跌 / FLAT 横盘（time 递增唯一，
@@ -124,8 +124,8 @@ def test_scan_limit(store):
 
 
 def test_scan_empty_warehouse(tmp_path):
-    from datasource.local_store import LocalStore
     from core.db import DB
+    from datasource.local_store import LocalStore
     db = DB(tmp_path / "empty.db")
     st = LocalStore(db)
     with pytest.raises(RuntimeError):

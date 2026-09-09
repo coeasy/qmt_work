@@ -1,6 +1,7 @@
+import logging
+
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
-import logging
 
 from app.routes._common import err, ok, state
 from app.version import __version__

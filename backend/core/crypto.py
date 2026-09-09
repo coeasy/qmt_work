@@ -6,6 +6,7 @@ LLM API Key 等敏感配置落库前加密，读取时内存解密。
 import base64
 import logging
 import os
+import shutil
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
@@ -28,10 +29,11 @@ def _harden_key_file(path) -> None:
         else:
             import subprocess
             me = os.environ.get("USERNAME", "")
-            if me:
-                subprocess.run(
-                    ["icacls", str(path), "/inheritance:r",
-                     "/grant:r", f"{me}:F", "SYSTEM:F"],
+            icacls = shutil.which("icacls")
+            if me and icacls:
+                subprocess.run(  # noqa: S603
+                    [icacls, str(path), "/inheritance:r",
+                     "/grant:r", f"{me}:F", "SYSTEM:F"],  # noqa: S607
                     capture_output=True, timeout=5)
     except Exception as exc:  # noqa: BLE001 权限加固失败不阻断启动，仅告警
         log.warning("密钥文件权限加固失败 %s: %s", path, exc)

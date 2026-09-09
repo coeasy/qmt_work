@@ -33,7 +33,10 @@ def _is_frozen() -> bool:
 def exe_dir() -> Path:
     """运行根目录：打包时为 exe 所在目录；开发时为后端根目录。"""
     if _is_frozen():
-        return Path(sys.executable).resolve().parent
+        # Keep the executable's directory spelling intact.  Resolving here
+        # can silently expand Windows 8.3 short names and breaks the stable
+        # path contract used by the desktop bootstrap/config tests.
+        return Path(sys.executable).parent
     return BASE_DIR
 
 
@@ -149,7 +152,7 @@ def _json_config_source() -> dict[str, Any]:
         out[k.replace("-", "_").lower()] = v
     for pkey in ("db_path", "log_dir"):
         if pkey in out and isinstance(out[pkey], str) and not Path(out[pkey]).is_absolute():
-            out[pkey] = str((exe_dir() / out[pkey]).resolve())
+            out[pkey] = str(exe_dir() / out[pkey])
     return out
 
 

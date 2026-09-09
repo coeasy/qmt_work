@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import List
 
@@ -55,6 +56,38 @@ WORKDAYS: set[str] = {
 _CALENDAR_MAX_YEAR = 2027  # 内置表覆盖的最后一年
 
 
+@dataclass(frozen=True)
+class CalendarCoverage:
+    """日历结果的覆盖声明，禁止调用方把启发式日期当成精确日历。"""
+
+    start_year: int
+    end_year: int
+    exact: bool
+    source: str
+
+
+class ExchangeCalendarPort:
+    """交易所日历端口（Phase 2 SSOT）。
+
+    当前实现由内置法定节假日表 + runtime_config 组成；券商/交易所日历接入后可
+    替换此端口而不改变同步器调用方式。超出内置覆盖范围仍可计算工作日，但通过
+    ``coverage`` 明确标记 ``exact=False``，上层不得把它宣称为交易所精确结果。
+    """
+
+    def coverage(self, d: date) -> CalendarCoverage:
+        exact = d.year <= _CALENDAR_MAX_YEAR
+        return CalendarCoverage(
+            start_year=min(2024, d.year), end_year=_CALENDAR_MAX_YEAR,
+            exact=exact, source="builtin+runtime_config" if exact else "weekday-fallback",
+        )
+
+    def is_trading_day(self, d: date) -> bool:
+        return is_trading_day(d)
+
+    def trading_calendar(self, end: date, count: int) -> List[str]:
+        return trading_calendar(end, count)
+
+
 def _config_extra(kind: str) -> set[str]:
     """runtime_config 追加项：market.calendar.{holidays,workdays}（逗号分隔）。"""
     try:
@@ -88,3 +121,13 @@ def trading_calendar(end: date, count: int) -> List[str]:
         d -= timedelta(days=1)
     out.reverse()
     return out
+
+
+# 进程内唯一日历端口；函数保留以兼容现有调用方。
+exchange_calendar = ExchangeCalendarPort()
+
+
+__all__ = [
+    "CalendarCoverage", "ExchangeCalendarPort", "exchange_calendar",
+    "HOLIDAYS", "WORKDAYS", "is_trading_day", "trading_calendar",
+]

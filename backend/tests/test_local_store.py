@@ -54,9 +54,29 @@ def test_bars_adjust_isolated(store):
 def test_get_bars_limit_and_range(store):
     store.upsert_bars("600519.SH", _bars(5))
     assert len(store.get_bars("600519.SH", limit=2)) == 2
-    assert [b.time for b in store.get_bars("600519.SH", limit=2)] == ["20260826", "20260827"]
+    assert [b.time for b in store.get_bars("600519.SH", limit=2)] == ["20260829", "20260830"]
     got = store.get_bars("600519.SH", start="20260827", end="20260828")
     assert [b.time for b in got] == ["20260827", "20260828"]
+
+
+def test_get_bars_latest_n_with_date_window(store):
+    store.upsert_bars("600519.SH", _bars(6))
+    got = store.get_bars("600519.SH", start="20260827", end="20260831", limit=2)
+    assert [b.time for b in got] == ["20260830", "20260831"]
+
+
+def test_bars_provenance_is_persisted(store):
+    store.upsert_bars("600519.SH", _bars(1), provider_id="baostock",
+                      batch_id="eod-20260828", schema_version="bars.v2",
+                      quality_state="validated")
+    rows = store._db.query(
+        "SELECT provider_id,batch_id,checksum,schema_version,quality_state "
+        "FROM local_bars WHERE code=?", ("600519.SH",))
+    assert rows[0]["provider_id"] == "baostock"
+    assert rows[0]["batch_id"] == "eod-20260828"
+    assert len(rows[0]["checksum"]) == 64
+    assert rows[0]["schema_version"] == "bars.v2"
+    assert rows[0]["quality_state"] == "validated"
 
 
 def test_latest_dt(store):

@@ -17,8 +17,8 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from core.db import DB
 from app.state import state
+from core.db import DB
 from tools import strategy_market as sm
 
 _BUILTIN = ["ma_cross", "macd", "rsi", "limitup"]

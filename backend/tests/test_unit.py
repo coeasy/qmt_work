@@ -12,9 +12,9 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from engines.condition_order import ConditionOrderEngine, _safe_int, _today, _tomorrow  # noqa: E402
 from gateway.risk import RiskManager  # noqa: E402
 from tools.backtest import run_backtest_engine  # noqa: E402
-from engines.condition_order import ConditionOrderEngine, _safe_int, _today, _tomorrow  # noqa: E402
 from xtquant_client.xtp import _resolve_xtquant_path  # noqa: E402
 
 
@@ -2125,8 +2125,8 @@ def test_limitup_cutoff_minutes_comparison():
 
 def test_strategy_runtime_uses_shared_minutes():
     """N2 回归：strategy_runtime 与 limitup 共用 tools.ashare 的同一分钟口径。"""
-    from tools.ashare import now_minutes, parse_minutes
     from engines.strategy_runtime import _now_minutes, _parse_minutes
+    from tools.ashare import now_minutes, parse_minutes
     assert _parse_minutes("9:30") == parse_minutes("9:30") == 570
     assert _now_minutes() == now_minutes()
 

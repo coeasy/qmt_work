@@ -11,10 +11,11 @@ from __future__ import annotations
 
 import logging
 
+from fastapi import FastAPI
+
 from core.config import settings
 from core.db import init_db
 from core.state import state
-from fastapi import FastAPI
 
 log = logging.getLogger("qmt_work.bootstrap.db")
 

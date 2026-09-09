@@ -254,15 +254,15 @@ def serve_adapter(adapter, stdin=None, stdout=None,
         # 让主端 BridgeAdapter 拿到与直连态一致的真实版本与能力（任何 QMT 版本通用）。
         if method == "get_version_profile":
             _write(stdout, {"id": rid, "ok": True,
-                            "result": getattr(adapter, "version_profile")().to_dict()})
+                            "result": adapter.version_profile().to_dict()})
             return
         if method == "get_capabilities":
             _write(stdout, {"id": rid, "ok": True,
-                            "result": getattr(adapter, "capabilities")()})
+                            "result": adapter.capabilities()})
             return
         if method == "probe":
             _write(stdout, {"id": rid, "ok": True,
-                            "result": getattr(adapter, "probe")()})
+                            "result": adapter.probe()})
             return
         fn = getattr(adapter, method, None)
         if fn is None or not callable(fn):

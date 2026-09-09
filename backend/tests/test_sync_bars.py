@@ -13,8 +13,8 @@ from app.sync.bars import BarsSyncer, SyncSummary, weekday_calendar
 
 @pytest.fixture()
 def store(tmp_path):
-    from datasource.local_store import LocalStore
     from core.db import DB
+    from datasource.local_store import LocalStore
     db = DB(tmp_path / "test_sync.db")
     yield LocalStore(db)
     db._conn.close()
@@ -113,6 +113,7 @@ def test_sync_many_concurrency_bounded(store):
 # ---------------- 交易日历（G1-5b：内置节假日表） ----------------
 def test_calendar_excludes_holidays():
     from datetime import date as _d
+
     from app.sync.calendar import is_trading_day
     # 2025-10-01 国庆休市（周四，工作日但为节假日）
     assert is_trading_day(_d(2025, 10, 1)) is False
@@ -127,3 +128,10 @@ def test_weekday_calendar_now_holiday_accurate():
     days = weekday_calendar(date(2025, 10, 9), count=3)
     assert days == ["2025-10-09"] or "2025-10-01" not in days
     assert all(d not in ("2025-10-01", "2025-10-02", "2025-10-03") for d in days)
+
+
+def test_exchange_calendar_port_declares_coverage():
+    from app.sync.calendar import exchange_calendar
+
+    assert exchange_calendar.coverage(date(2026, 8, 30)).exact is True
+    assert exchange_calendar.coverage(date(2028, 1, 3)).exact is False

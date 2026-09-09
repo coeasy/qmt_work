@@ -14,12 +14,12 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
-from core.config import BASE_DIR, settings
 from app.logging_setup import setup_logging
 from app.middleware.request_id import request_id_middleware
 from app.routes import router
-from core.state import state
 from app.version import __version__
+from core.config import BASE_DIR, settings
+from core.state import state
 from gateway.auth import make_auth_middleware
 from gateway.rate_limit import RateLimiter, make_rate_limit_middleware
 from gateway.risk import RiskManager
@@ -148,8 +148,7 @@ def create_app() -> FastAPI:
                    phase_watchdogs → phase_replay → phase_misc
     停机逆序：见 app/bootstrap/shutdown.py
     """
-    from app.bootstrap import phase_db, phase_broker, phase_engines
-    from app.bootstrap import phase_watchdogs, phase_replay, phase_misc
+    from app.bootstrap import phase_broker, phase_db, phase_engines, phase_misc, phase_replay, phase_watchdogs
     from app.bootstrap.shutdown import shutdown as _shutdown
 
     @asynccontextmanager

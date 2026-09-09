@@ -2,8 +2,8 @@
 
 import logging
 import os
+import re
 import sys
-
 
 log = logging.getLogger("qmt_work")
 
@@ -111,6 +111,10 @@ _SYSTEM_DIR_NAMES = {
 
 def _is_system_dir(d: str) -> bool:
     """路径是否为盘符根或系统目录（不应作为递归搜索的父级）。"""
+    # ``os.path`` follows the host OS; recognize Windows drive roots too so
+    # discovery helpers remain deterministic when exercised on Linux CI.
+    if re.match(r"^[A-Za-z]:[\\/]*$", d or ""):
+        return True
     parent = os.path.dirname(d)
     if parent == d:  # 盘符根 C:\ 等
         return True

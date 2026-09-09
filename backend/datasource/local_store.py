@@ -14,13 +14,15 @@
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import threading
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Union
 
-from datasource.models import Bar, BoardItem, StockInfo
 from core.db import DB, get_db
+from datasource.models import Bar, BoardItem, StockInfo
 
 log = logging.getLogger("qmt_work.datasource.local_store")
 
@@ -55,24 +57,46 @@ class LocalStore:
         bars: List[Union[Bar, dict]],
         period: str = "1d",
         adjust: str = "",
+        provider_id: str = "",
+        batch_id: str = "",
+        schema_version: str = "1",
+        quality_state: str = "unknown",
     ) -> int:
-        """批量写入 / 覆盖 K 线（INSERT OR REPLACE，同 (code,period,adjust,dt) 幂等）。"""
+        """批量写入 / 覆盖 K 线并保存 provider/batch 溯源信息。
+
+        ``checksum`` 是单行规范化内容的 SHA-256，不是对缺失字段的估算；它只用于
+        重复同步和多源对账时发现内容变化。旧调用方不传溯源参数时仍可写入，但质量
+        状态会明确保留为 ``unknown``，不会被伪标成 validated。
+        """
         rows: List[tuple] = []
         for b in bars:
             d = b.model_dump() if isinstance(b, Bar) else dict(b)
+            values = {
+                "time": str(d.get("time", "")),
+                "open": _num(d.get("open")),
+                "high": _num(d.get("high")),
+                "low": _num(d.get("low")),
+                "close": _num(d.get("close")),
+                "volume": _num(d.get("volume")),
+                "amount": _num(d.get("amount")),
+            }
+            checksum = hashlib.sha256(
+                json.dumps(values, ensure_ascii=False, sort_keys=True,
+                           separators=(",", ":")).encode("utf-8")
+            ).hexdigest()
             rows.append((
-                code, period, adjust, str(d.get("time", "")),
-                _num(d.get("open")), _num(d.get("high")), _num(d.get("low")),
-                _num(d.get("close")), _num(d.get("volume")), _num(d.get("amount")),
-                _now(),
+                code, period, adjust, values["time"], values["open"], values["high"],
+                values["low"], values["close"], values["volume"], values["amount"],
+                _now(), provider_id, batch_id, checksum, schema_version, quality_state,
             ))
         if not rows:
             return 0
         with self._lock:
             self._db.executemany(
                 "INSERT OR REPLACE INTO local_bars "
-                "(code,period,adjust,dt,open,high,low,close,volume,amount,fetched_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?)", rows)
+                "(code,period,adjust,dt,open,high,low,close,volume,amount,fetched_at,"
+                "provider_id,batch_id,checksum,schema_version,quality_state) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", rows)
         return len(rows)
 
     def get_bars(
@@ -94,10 +118,14 @@ class LocalStore:
         if end:
             sql += " AND dt <= ?"
             params.append(end)
-        sql += " ORDER BY dt ASC"
         if limit and limit > 0:
-            sql += " LIMIT ?"
+            # latest-N 的语义是「窗口内最近 N 根」，不能先升序 LIMIT 而返回最早数据。
+            sql += " ORDER BY dt DESC LIMIT ?"
             params.append(int(limit))
+            rows = self._db.query(sql, tuple(params))
+            rows.reverse()
+            return [Bar.model_validate(r) for r in rows]
+        sql += " ORDER BY dt ASC"
         rows = self._db.query(sql, tuple(params))
         return [Bar.model_validate(r) for r in rows]
 

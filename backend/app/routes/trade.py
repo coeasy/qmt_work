@@ -1,11 +1,11 @@
 from fastapi import APIRouter
 
-from app.routes._common import _call, _need, err, no_broker, ok, state, envelope_ok
-from gateway.idempotency import single_flight
+from app.routes._common import _call, _need, envelope_ok, err, no_broker, ok, state
 
 # --- stdlib imports injected by fix_route_imports ---
-
 from datasource.registry import get_manager
+from gateway.execution import get_execution_service
+from gateway.idempotency import single_flight
 
 
 def _enrich_names(rows):
@@ -52,22 +52,12 @@ async def trade_order(body: dict):
         return err(400, "code 必填")
     if direction not in ("buy", "sell"):
         return err(400, "direction 须为 buy/sell")
-    params = {"code": code, "direction": direction, "volume": volume,
-              "price": price, "price_type": price_type,
-              "strategy": body.get("strategy_name", "manual"),
-              "remark": body.get("remark", ""), "broker_id": ""}
-
     async def _run():
-        okc, reason = state.risk.check_order(code, price, volume, direction, price_type)
-        if not okc:
-            state.db.audit("trading", "order.rejected", code, params, reason)
-            return err(400, f"风控拒绝：{reason}")
-        res = await _call(b, b.gateway.place_order, code, direction, price_type,
-                          price, volume, "manual", body.get("remark", ""))
-        if isinstance(res, dict) and res.get("code", 0) != 0:
-            return res
-        state.db.audit("trading", "order.submitted", code, params,
-                       f"order_id={res.get('order_id')}")
+        res = await get_execution_service().place_order(
+            b, code, direction, volume, price, price_type, "manual",
+            body.get("remark", ""), risk=state.risk)
+        if isinstance(res, dict) and not res.get("ok", True):
+            return err(400, f"风控/执行拒绝：{res.get('reason') or res.get('message') or res}")
         return ok(res)
 
     # 幂等：显式 idempotency_key（前端/重试传）优先；否则按委托内容哈希去重，
@@ -84,8 +74,7 @@ async def trade_cancel(body: dict):
     oid = str(body.get("order_id", ""))
     if not oid:
         return err(400, "order_id 必填")
-    res = await _call(b, b.gateway.cancel_order, oid)
-    state.db.audit("trading", "order.cancel", oid, {}, "ok")
+    res = await get_execution_service().cancel_order(b, oid)
     return ok(res)
 
 @router.get("/trade/positions")

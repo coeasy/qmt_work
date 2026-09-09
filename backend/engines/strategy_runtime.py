@@ -45,10 +45,10 @@ def _parse_minutes(s: str) -> Optional[int]:
 # MA/MACD/RSI 实现统一到 tools/indicators.py。下面这些函数保留为薄包装，
 # 既不破坏本地 import 路径，也方便旧测试/调用方继续使用。
 
-from tools.indicators import last_signal_for as _last_signal_for  # noqa: F401
-from tools.indicators import ma_cross_last as _ma_signal  # noqa: F401
-from tools.indicators import macd_last as _macd_signal  # noqa: F401
-from tools.indicators import rsi_last as _rsi_signal  # noqa: F401
+from tools.indicators import last_signal_for as _last_signal_for  # noqa: E402, F401
+from tools.indicators import ma_cross_last as _ma_signal  # noqa: E402, F401
+from tools.indicators import macd_last as _macd_signal  # noqa: E402, F401
+from tools.indicators import rsi_last as _rsi_signal  # noqa: E402, F401
 
 
 def _ema(vals, n: int):

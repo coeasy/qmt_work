@@ -1,12 +1,10 @@
 """交易：下单 / 撤单 / 委托与成交查询 / 回调闭环（TradingMixin，自原 xtp.py 逐行搬移）。"""
 
 import threading
-
 from datetime import datetime
 
 from ..base import BrokerError, BrokerSDKError
 from ._common import _dget, _direction_from_order_type, _pick, _shell_attr, log
-
 
 
 class TradingMixin:
