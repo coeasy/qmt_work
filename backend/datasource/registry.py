@@ -95,6 +95,7 @@ class _BoundBrokerSource:
     """
 
     name = "broker"
+    capabilities = frozenset({"quote", "kline", "instrument_detail"})
 
     def __init__(self, bridge):
         self._b = bridge
@@ -166,6 +167,21 @@ class DataSourceManager:
         if self._broker_factory is not None:
             out.append("broker")
         out.extend(self._plugins.keys())
+        return out
+
+    def describe_sources(self) -> dict[str, dict]:
+        """返回 active provider 的能力画像，供前端/MCP capability router 使用。"""
+        out: dict[str, dict] = {}
+        if self._broker_factory is not None:
+            out["broker"] = {
+                "provider": "broker", "active": True,
+                "capabilities": sorted(_BoundBrokerSource.capabilities),
+            }
+        for name, src in self._plugins.items():
+            manifest = (src.capability_manifest()
+                        if hasattr(src, "capability_manifest") else {
+                            "provider": name, "capabilities": []})
+            out[name] = {**manifest, "active": True}
         return out
 
     # ---------- 熔断 ----------

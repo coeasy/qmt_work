@@ -285,6 +285,7 @@ async def market_sources():
     active = next((n for n in m._auto_chain if h.get(n, {}).get("available")), None)
     return ok({
         "sources": m.list_sources(),
+        "source_capabilities": m.describe_sources(),
         "auto_chain": m._auto_chain,
         "health": h,
         "active": active,

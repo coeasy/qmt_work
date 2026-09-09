@@ -107,6 +107,14 @@ def test_explicit_source():
     asyncio.run(c())
 
 
+def test_provider_capability_manifest():
+    m = _m()
+    details = m.describe_sources()
+    assert details["eltdx"]["active"] is True
+    assert "quote" in details["eltdx"]["capabilities"]
+    assert "broker" in details
+
+
 def test_unknown_explicit_source_does_not_fallback():
     async def c():
         try:
