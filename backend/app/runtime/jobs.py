@@ -305,7 +305,26 @@ def sync_runner(params: dict) -> Runner:
             if attempt < attempts:
                 job["report"](0, f"第 {attempt} 次失败，准备重试")
                 await asyncio.sleep(min(30.0, 2.0 ** (attempt - 1)))
-        return summary.to_dict() if summary is not None else {}
+        result = summary.to_dict() if summary is not None else {}
+        # EOD/全市场同步只有在本地批次实际写入后才发布 snapshot；部分失败明确
+        # 标成 partial，研究/回测不能把它当成完整数据集使用。
+        try:
+            from core.db import get_db
+            from datasource.snapshots import DatasetSnapshotStore
+            quality = ("complete" if not summary.failed and summary.bars_written > 0
+                       else "partial" if summary.bars_written > 0 else "empty")
+            snap = DatasetSnapshotStore(get_db()).publish_local_bars(
+                "cn_equity_daily", str(params.get("batch_id") or summary.finished),
+                str(params.get("provider_id") or "auto"),
+                str(params.get("batch_id") or summary.finished),
+                quality_state=quality,
+                manifest={"summary": result, "period": "1d",
+                          "adjust": params.get("adjust", "qfq")})
+            result["dataset_snapshot"] = snap
+        except Exception as exc:  # noqa: BLE001
+            # Snapshot 发布失败不能伪装成完整同步；保留同步结果并显式告警。
+            result["dataset_snapshot_error"] = str(exc)
+        return result
 
     return _run
 

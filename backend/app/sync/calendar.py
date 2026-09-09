@@ -66,6 +66,10 @@ class CalendarCoverage:
     source: str
 
 
+class CalendarCoverageError(ValueError):
+    """请求范围超出精确交易所日历覆盖，禁止静默用工作日近似。"""
+
+
 class ExchangeCalendarPort:
     """交易所日历端口（Phase 2 SSOT）。
 
@@ -75,9 +79,9 @@ class ExchangeCalendarPort:
     """
 
     def coverage(self, d: date) -> CalendarCoverage:
-        exact = d.year <= _CALENDAR_MAX_YEAR
+        exact = 2024 <= d.year <= _CALENDAR_MAX_YEAR
         return CalendarCoverage(
-            start_year=min(2024, d.year), end_year=_CALENDAR_MAX_YEAR,
+            start_year=2024, end_year=_CALENDAR_MAX_YEAR,
             exact=exact, source="builtin+runtime_config" if exact else "weekday-fallback",
         )
 
@@ -86,6 +90,26 @@ class ExchangeCalendarPort:
 
     def trading_calendar(self, end: date, count: int) -> List[str]:
         return trading_calendar(end, count)
+
+    def require_exact(self, start: date, end: date) -> None:
+        if not self.coverage(start).exact or not self.coverage(end).exact:
+            raise CalendarCoverageError(
+                f"交易日历精确覆盖范围为 2024-{_CALENDAR_MAX_YEAR}，"
+                f"请求 {start.isoformat()}..{end.isoformat()} 需要真实交易所日历源"
+            )
+
+    def persist(self, db, *, market: str = "CN", exchange: str = "SSE/SZSE",
+                start: date, end: date, version: str = "builtin-2024-2027") -> int:
+        """把当前 SSOT 结果落库，供 scheduler/backtest/research 共用。"""
+        self.require_exact(start, end)
+        rows = [(market, exchange, dt, "regular", "builtin+runtime_config", version)
+                for dt in trading_calendar(end, (end - start).days + 1)
+                if dt >= start.isoformat()]
+        db.executemany(
+            "INSERT OR REPLACE INTO exchange_calendar "
+            "(market,exchange,trade_date,session,calendar_source,calendar_version) "
+            "VALUES (?,?,?,?,?,?)", rows)
+        return len(rows)
 
 
 def _config_extra(kind: str) -> set[str]:
@@ -128,6 +152,6 @@ exchange_calendar = ExchangeCalendarPort()
 
 
 __all__ = [
-    "CalendarCoverage", "ExchangeCalendarPort", "exchange_calendar",
+    "CalendarCoverage", "CalendarCoverageError", "ExchangeCalendarPort", "exchange_calendar",
     "HOLIDAYS", "WORKDAYS", "is_trading_day", "trading_calendar",
 ]

@@ -592,6 +592,19 @@ async def kline_sync_status():
     return ok(info)
 
 
+@router.get("/market/datasets/snapshots")
+async def dataset_snapshots(dataset_id: str = "cn_equity_daily", limit: int = 20):
+    """查询历史数据集快照；只返回已落库的版本/校验/质量元数据。"""
+    from core.db import get_db
+    rows = get_db().query(
+        "SELECT id,dataset_id,version,provider_id,batch_id,as_of,coverage_start,"
+        "coverage_end,row_count,checksum,quality_state,manifest_json,created_at "
+        "FROM dataset_snapshots WHERE dataset_id=? ORDER BY created_at DESC LIMIT ?",
+        (dataset_id, max(1, min(int(limit), 200))),
+    )
+    return ok({"dataset_id": dataset_id, "items": rows})
+
+
 @router.get("/market/kline/cache")
 async def kline_cache_stats():
     """K 线缓存统计（行数/热表·归档/序列数/命中率）。"""

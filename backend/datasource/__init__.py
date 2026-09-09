@@ -29,6 +29,7 @@ from datasource.registry import (
     get_manager,
 )
 from datasource.result import DataResult
+from datasource.snapshots import DatasetSnapshotStore, ReconcileResult, reconcile_bars
 
 __all__ = [
     "DataSource", "classify_board", "limit_ratio",
@@ -38,6 +39,7 @@ __all__ = [
     "Quote", "QuoteLevel", "Bar", "InstrumentInfo", "StockInfo",
     "BoardItem", "EtfInfo", "BoardKline", "Moneyflow", "MoneyflowPoint",
     "DataResult",
+    "DatasetSnapshotStore", "ReconcileResult", "reconcile_bars",
     # G1-4 本地数据仓
     "LocalStore", "get_store",
     # G1-6 降级策略

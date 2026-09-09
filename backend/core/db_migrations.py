@@ -527,6 +527,39 @@ CREATE TABLE IF NOT EXISTS runtime_jobs (
 );
 CREATE INDEX IF NOT EXISTS idx_runtime_jobs_status ON runtime_jobs(status, priority, created_at);
 """),
+    (21, """
+-- Phase 5-7 data plane：交易所日历与可复现 Dataset Snapshot 元数据。
+CREATE TABLE IF NOT EXISTS exchange_calendar (
+    market TEXT NOT NULL,
+    exchange TEXT NOT NULL,
+    trade_date TEXT NOT NULL,
+    session TEXT NOT NULL DEFAULT 'regular',
+    calendar_source TEXT NOT NULL DEFAULT '',
+    calendar_version TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (market, exchange, trade_date, session)
+);
+CREATE INDEX IF NOT EXISTS idx_exchange_calendar_date
+    ON exchange_calendar(exchange, trade_date);
+CREATE TABLE IF NOT EXISTS dataset_snapshots (
+    id TEXT PRIMARY KEY,
+    dataset_id TEXT NOT NULL,
+    version TEXT NOT NULL,
+    provider_id TEXT NOT NULL DEFAULT '',
+    batch_id TEXT NOT NULL DEFAULT '',
+    as_of TEXT NOT NULL DEFAULT '',
+    coverage_start TEXT NOT NULL DEFAULT '',
+    coverage_end TEXT NOT NULL DEFAULT '',
+    row_count INTEGER NOT NULL DEFAULT 0,
+    checksum TEXT NOT NULL DEFAULT '',
+    quality_state TEXT NOT NULL DEFAULT 'unknown',
+    manifest_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT ''
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_dataset_snapshot_version
+    ON dataset_snapshots(dataset_id, version);
+CREATE INDEX IF NOT EXISTS idx_dataset_snapshot_batch
+    ON dataset_snapshots(provider_id, batch_id, created_at);
+"""),
 ]
 
 
