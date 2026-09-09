@@ -15,8 +15,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
+import uuid
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
@@ -25,6 +27,7 @@ log = logging.getLogger("qmt_work.runtime.jobs")
 #: kind -> 并发配额；全局并发上限
 QUOTA: Dict[str, int] = {"sync": 1, "screen": 1, "backtest": 2, "report": 2}
 GLOBAL_MAX = 4
+LEASE_SECONDS = 90.0
 
 Runner = Callable[[Dict[str, Any]], Awaitable[Any]]   # async (job) -> result
 
@@ -41,12 +44,89 @@ class JobSpec:
 class JobRuntime:
     """进程级单例任务运行时（见 get_runtime()）。"""
 
-    def __init__(self):
+    def __init__(self, db=None, owner: str = ""):
         self._jobs: Dict[str, dict] = {}
         self._queue: List[str] = []          # 排队 job id（按 priority 升序出队）
         self._running: Dict[str, str] = {}   # job_id -> kind
         self._seq = 0
         self._dispatcher: Optional[asyncio.Task] = None
+        self._db = db
+        self._owner = owner or uuid.uuid4().hex
+
+    def _persist(self, job: dict) -> None:
+        """把可序列化状态写入 durable ledger；runner/task 不落库。"""
+        if self._db is None:
+            return
+        self._db.upsert("runtime_jobs", {
+            "id": job["id"], "kind": job["kind"], "name": job["name"],
+            "priority": job["priority"], "status": job["status"],
+            "progress": job["progress"], "message": job["message"],
+            "created_at": job["created_at"], "started_at": job["started_at"],
+            "finished_at": job["finished_at"],
+            "result_json": json.dumps(job["result"], ensure_ascii=False, default=str),
+            "error": job["error"],
+            "params_json": json.dumps(job["params"], ensure_ascii=False, default=str),
+            "lease_owner": job.get("lease_owner", ""),
+            "lease_until": job.get("lease_until"),
+            "heartbeat_at": job.get("heartbeat_at"),
+            "checkpoint_json": json.dumps(job.get("checkpoint") or {},
+                                           ensure_ascii=False, default=str),
+        })
+
+    def attach_db(self, db) -> None:
+        """挂载持久账本并执行 startup catch-up。"""
+        self._db = db
+        rows = db.query(
+            "SELECT * FROM runtime_jobs WHERE status IN ('queued','running') "
+            "ORDER BY priority, created_at")
+        for row in rows:
+            if row["id"] in self._jobs:
+                continue
+            try:
+                params = json.loads(row.get("params_json") or "{}")
+            except (TypeError, ValueError):
+                params = {}
+            runner_factory = {
+                "sync": sync_runner, "screen": screen_runner,
+                "backtest": backtest_runner,
+            }.get(row["kind"])
+            if runner_factory is None:
+                # 未知 runner 不伪造恢复：保留明确失败状态供运维处理。
+                db.execute("UPDATE runtime_jobs SET status=?, error=? WHERE id=?",
+                           ("failed", "无法恢复未知任务类型", row["id"]))
+                continue
+            job = {
+                "id": row["id"], "seq": self._seq + 1, "kind": row["kind"],
+                "name": row["name"], "priority": row["priority"],
+                "status": "queued", "progress": row["progress"],
+                "message": "启动补跑：重新获取租约", "created_at": row["created_at"],
+                "started_at": None, "finished_at": None, "result": None,
+                "error": None, "params": params, "task": None,
+                "checkpoint": json.loads(row.get("checkpoint_json") or "{}"),
+                "lease_owner": "", "lease_until": None, "heartbeat_at": None,
+            }
+            job["report"] = self._make_report(job)
+            job["checkpoint_fn"] = self._make_checkpoint(job)
+            job["runner"] = runner_factory(params)
+            self._seq += 1
+            self._jobs[job["id"]] = job
+            self._queue.append(job["id"])
+            self._persist(job)
+
+    def _make_report(self, job: dict):
+        def _report(pct: int, msg: str) -> None:
+            job["progress"] = max(0, min(100, int(pct)))
+            job["message"] = msg
+            job["heartbeat_at"] = time.time()
+            self._persist(job)
+        return _report
+
+    def _make_checkpoint(self, job: dict):
+        def _checkpoint(payload: dict) -> None:
+            job["checkpoint"] = dict(payload or {})
+            job["heartbeat_at"] = time.time()
+            self._persist(job)
+        return _checkpoint
 
     # ---------------- 提交与查询 ----------------
     def submit(self, spec: JobSpec) -> str:
@@ -70,14 +150,16 @@ class JobRuntime:
             "task": None,
         }
 
-        def _report(pct: int, msg: str) -> None:
-            job["progress"] = max(0, min(100, int(pct)))
-            job["message"] = msg
-
-        job["report"] = _report
+        job["checkpoint"] = {}
+        job["lease_owner"] = ""
+        job["lease_until"] = None
+        job["heartbeat_at"] = None
+        job["report"] = self._make_report(job)
+        job["checkpoint_fn"] = self._make_checkpoint(job)
         job["runner"] = spec.runner
         self._jobs[job_id] = job
         self._queue.append(job_id)
+        self._persist(job)
         self._ensure_dispatcher()
         return job_id
 
@@ -86,7 +168,8 @@ class JobRuntime:
         if job is None:
             return None
         self._ensure_dispatcher()   # 循环内访问时确保派发器存活
-        return {k: v for k, v in job.items() if k not in ("task", "runner", "report")}
+        return {k: v for k, v in job.items()
+                if k not in ("task", "runner", "report", "checkpoint_fn")}
 
     def list(self) -> List[dict]:
         jobs = [self.get(j) for j in self._jobs if self.get(j)]
@@ -103,11 +186,13 @@ class JobRuntime:
             job["status"] = "canceled"
             job["finished_at"] = self._now()
             job["message"] = "已取消（未开始）"
+            self._persist(job)
             return True
         task = job.get("task")
         if task is not None and not task.done():
             task.cancel()
             job["message"] = "取消中…"
+            self._persist(job)
             return True
         return False
 
@@ -145,6 +230,10 @@ class JobRuntime:
             job["status"] = "running"
             job["started_at"] = self._now()
             job["message"] = "执行中"
+            job["lease_owner"] = self._owner
+            job["lease_until"] = time.time() + LEASE_SECONDS
+            job["heartbeat_at"] = time.time()
+            self._persist(job)
             task = asyncio.create_task(self._run(job))
             job["task"] = task
             # 不 await：job 任务并行跑，完成后回调清理 _running，循环继续派发
@@ -167,6 +256,9 @@ class JobRuntime:
             log.warning("任务 %s 失败：%s", job["id"], exc)
         finally:
             job["finished_at"] = self._now()
+            job["lease_owner"] = ""
+            job["lease_until"] = None
+            self._persist(job)
 
     @staticmethod
     def _now() -> str:
@@ -200,10 +292,20 @@ def sync_runner(params: dict) -> Runner:
         syncer = BarsSyncer(
             concurrency=int(params.get("concurrency") or 8),
             lookback=int(params.get("lookback") or 320),
+            provider_id=str(params.get("provider_id") or "auto"),
+            batch_id=str(params.get("batch_id") or "") or None,
         )
-        summary = await syncer.sync_stock_list(
-            limit=int(params.get("limit") or 0) or None, progress_cb=_cb)
-        return summary.to_dict()
+        attempts = max(1, int(params.get("max_attempts") or 1))
+        summary = None
+        for attempt in range(1, attempts + 1):
+            summary = await syncer.sync_stock_list(
+                limit=int(params.get("limit") or 0) or None, progress_cb=_cb)
+            if not summary.failed:
+                break
+            if attempt < attempts:
+                job["report"](0, f"第 {attempt} 次失败，准备重试")
+                await asyncio.sleep(min(30.0, 2.0 ** (attempt - 1)))
+        return summary.to_dict() if summary is not None else {}
 
     return _run
 

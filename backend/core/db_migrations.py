@@ -504,6 +504,29 @@ ALTER TABLE local_bars ADD COLUMN quality_state TEXT DEFAULT 'unknown';
 CREATE INDEX IF NOT EXISTS idx_local_bars_provenance
     ON local_bars(provider_id, batch_id, dt);
 """),
+    (20, """
+-- Phase 6 Durable JobRuntime：任务状态、租约、心跳和 checkpoint 持久化。
+CREATE TABLE IF NOT EXISTS runtime_jobs (
+    id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,
+    name TEXT NOT NULL DEFAULT '',
+    priority INTEGER NOT NULL DEFAULT 5,
+    status TEXT NOT NULL DEFAULT 'queued',
+    progress INTEGER NOT NULL DEFAULT 0,
+    message TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT '',
+    started_at TEXT,
+    finished_at TEXT,
+    result_json TEXT,
+    error TEXT,
+    params_json TEXT NOT NULL DEFAULT '{}',
+    lease_owner TEXT NOT NULL DEFAULT '',
+    lease_until REAL,
+    heartbeat_at REAL,
+    checkpoint_json TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_runtime_jobs_status ON runtime_jobs(status, priority, created_at);
+"""),
 ]
 
 

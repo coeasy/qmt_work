@@ -22,6 +22,10 @@ log = logging.getLogger("qmt_work.bootstrap.db")
 
 async def setup(app: FastAPI) -> dict:
     state.db = init_db(settings.db_path)
+    # Durable JobRuntime 在 DB 阶段挂载；若进程曾在任务执行中退出，运行时会
+    # 把可恢复任务重新放入队列，并保留 lease/heartbeat/checkpoint 证据。
+    from app.runtime.jobs import get_runtime
+    get_runtime().attach_db(state.db)
 
     # 券商档案注册表挂接 DB（热插拔档案落库 + 加载已持久化档案）
     from xtquant_client.registry import registry as broker_registry

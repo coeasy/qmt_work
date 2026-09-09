@@ -481,7 +481,8 @@ class StrategyRuntime:
             if bridge is None:
                 self._log(run_id, "warn", f"{code} 撤单失败：未连接券商", "")
                 return
-            await bridge.call(bridge.gateway.cancel_order, oid)
+            from gateway.execution import get_execution_service
+            await get_execution_service().cancel_order(bridge, oid)
             self._log(run_id, "info", f"{code} 在途单 {oid} 超时撤单", "")
         except Exception as exc:  # noqa: BLE001
             self._log(run_id, "warn", f"{code} 撤单失败：{exc}", "")

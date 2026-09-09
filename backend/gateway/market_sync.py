@@ -26,6 +26,13 @@ class MarketSync:
         self.interval = interval
         self._task: asyncio.Task | None = None
         self._last_run_date: str | None = None
+        self._eod_last_run_date: str | None = getattr(state, "_eod_last_run_date", None)
+        db = getattr(state, "db", None)
+        if not self._eod_last_run_date and db is not None:
+            row = db.query_one("SELECT value FROM local_sync_meta WHERE key=?",
+                               ("eod_last_run_date",))
+            self._eod_last_run_date = row.get("value") if row else None
+        self._eod_job_id: str | None = None
 
     @property
     def enabled(self) -> bool:
@@ -34,6 +41,14 @@ class MarketSync:
     @property
     def sync_time(self) -> str:
         return str(self.cfg.get("market.sync.time") or "16:00")
+
+    @property
+    def eod_enabled(self) -> bool:
+        return bool(self.cfg.get("market.eod.enabled"))
+
+    @property
+    def eod_time(self) -> str:
+        return str(self.cfg.get("market.eod.time") or "18:00")
 
     async def start(self):
         # 启动即做一次跨年归档维护（幂等，热表小，成本可忽略）
@@ -78,13 +93,11 @@ class MarketSync:
 
     async def _tick(self):
         await self._rollover()
-        if not self.enabled:
-            return
         today = time.strftime("%Y-%m-%d")
-        if self._last_run_date == today:
-            return
         now_hm = time.strftime("%H:%M")
-        if now_hm < self.sync_time:
+        hot_due = self.enabled and self._last_run_date != today and now_hm >= self.sync_time
+        eod_due = self.eod_enabled and self._eod_last_run_date != today and now_hm >= self.eod_time
+        if not hot_due and not eod_due:
             return
         # 仅交易日触发（用券商真实日历，失败静默回退为周末规则）
         try:
@@ -93,8 +106,38 @@ class MarketSync:
                 return
         except Exception:  # noqa: BLE001
             pass
-        self._last_run_date = today
-        await self._refresh_hot()
+        if hot_due:
+            self._last_run_date = today
+            await self._refresh_hot()
+        if eod_due:
+            await self._schedule_eod(today, now_hm)
+
+    async def _schedule_eod(self, today: str, now_hm: str) -> None:
+        """提交 durable EOD 任务；超过触发时间的启动属于 misfire catch-up。"""
+        if not self.eod_enabled or now_hm < self.eod_time:
+            return
+        if self._eod_last_run_date == today:
+            return
+        from app.runtime.jobs import JobSpec, get_runtime, sync_runner
+        current = get_runtime().get(self._eod_job_id) if self._eod_job_id else None
+        if current and current["status"] in ("queued", "running"):
+            return
+        params = {
+            "limit": int(self.cfg.get("market.eod.limit") or 0),
+            "concurrency": 8, "lookback": 320, "adjust": "qfq",
+            "provider_id": "auto", "batch_id": f"eod-{today}",
+            "max_attempts": int(self.cfg.get("market.eod.retry") or 3),
+        }
+        self._eod_job_id = get_runtime().submit(JobSpec(
+            kind="sync", name=f"EOD 全市场同步 {today}",
+            runner=sync_runner(params), priority=2, params=params))
+        self._eod_last_run_date = today
+        self.state._eod_last_run_date = today
+        db = getattr(self.state, "db", None)
+        if db is not None:
+            db.execute("INSERT OR REPLACE INTO local_sync_meta(key,value,updated_at) "
+                       "VALUES (?,?,datetime('now'))", ("eod_last_run_date", today))
+        log.info("EOD sync scheduled: %s", self._eod_job_id)
 
     async def _refresh_hot(self):
         kc = getattr(self.state, "kline_cache", None)

@@ -53,6 +53,9 @@ async def health_check():
         "service": "qmt_work", "version": __version__, "uptime_seconds": uptime,
         "db": db_ok, "brokers": brokers, "engines": engines,
         "trading_session": trading, "checks": checks,
+        "lifecycle": {"ready": state.lifecycle_ready,
+                       "stopping": state.lifecycle_stopping,
+                       "phases": dict(state.phase_status)},
     })
 
 
@@ -92,8 +95,11 @@ async def ready_check():
         "version": __version__,
         "uptime_seconds": int(_t.time() - state.started_at) if state.started_at else 0,
         "db": db_ok, "started": started, "engines": engines,
+        "lifecycle": {"ready": state.lifecycle_ready,
+                       "stopping": state.lifecycle_stopping,
+                       "phases": dict(state.phase_status)},
     }
-    if not ready:
+    if not ready or not state.lifecycle_ready:
         return JSONResponse(status_code=503, content=err(503, "not ready", detail))
     return ok(detail)
 

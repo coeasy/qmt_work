@@ -20,6 +20,7 @@ import argparse
 import asyncio
 import logging
 import time
+import uuid
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from typing import Awaitable, Callable, List, Optional, Sequence
@@ -96,6 +97,8 @@ class BarsSyncer:
         lookback: int = 320,
         period: str = "1d",
         adjust: str = "qfq",
+        provider_id: str = "auto",
+        batch_id: Optional[str] = None,
     ):
         self._store = store or get_store()
         self._fetch = fetch_bars or self._default_fetch
@@ -103,6 +106,8 @@ class BarsSyncer:
         self._lookback = int(lookback)
         self._period = period
         self._adjust = adjust
+        self._provider_id = provider_id
+        self._batch_id = batch_id or f"bars-{uuid.uuid4().hex}"
         self._sem = asyncio.Semaphore(self._concurrency)
 
     # ------------------------------------------------------------------
@@ -132,7 +137,11 @@ class BarsSyncer:
                 return SyncOutcome(code=code, error="源无数据（非交易时段或代码不受支持）")
             try:
                 n = self._store.upsert_bars(code, bars, period=self._period,
-                                            adjust=self._adjust)
+                                            adjust=self._adjust,
+                                            provider_id=self._provider_id,
+                                            batch_id=self._batch_id,
+                                            schema_version="bars.v2",
+                                            quality_state="raw")
             except Exception as exc:  # noqa: BLE001
                 return SyncOutcome(code=code, error=f"落库失败：{exc}")
             return SyncOutcome(code=code, ok=True, bars_written=n)

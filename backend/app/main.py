@@ -153,6 +153,7 @@ def create_app() -> FastAPI:
 
     @asynccontextmanager
     async def app_lifespan(app: FastAPI):
+        state.begin_startup()
         # 6 阶段顺序启动
         phases = [
             ("db",        phase_db.setup),
@@ -163,14 +164,19 @@ def create_app() -> FastAPI:
             ("misc",      phase_misc.setup),
         ]
         for name, fn in phases:
+            state.mark_phase(name, "starting")
             try:
                 await fn(app)
+                state.mark_phase(name, "ready")
                 log.info("bootstrap phase %s done", name)
             except Exception as exc:  # noqa: BLE001
+                state.mark_phase(name, "error")
                 log.exception("bootstrap phase %s failed: %s", name, exc)
+        state.mark_ready()
         try:
             yield
         finally:
+            state.begin_shutdown()
             # 优雅停机（逆序关闭所有引擎/服务）
             await _shutdown(app)
 
