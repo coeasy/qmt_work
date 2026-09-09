@@ -1,3 +1,4 @@
+from datasource.optional_sources import BaoStockSource, TstdxSource
 from datasource.providers import ProviderCatalog
 from datasource.public_sources import SinaSource, TencentSource
 
@@ -22,3 +23,8 @@ def test_provider_catalog_requires_explicit_registration():
 def test_public_sources_have_real_capability_contracts():
     assert SinaSource().capabilities == TencentSource().capabilities
     assert "quote" in SinaSource().capabilities
+
+
+def test_optional_provider_contracts_fail_closed_without_sdk():
+    assert "kline" in TstdxSource.capabilities
+    assert "kline" in BaoStockSource.capabilities

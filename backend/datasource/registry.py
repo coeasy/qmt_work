@@ -697,6 +697,12 @@ def get_manager() -> DataSourceManager:
     for source in (SinaSource(), TencentSource()):
         m.register(source)
         provider_catalog.register(source)
+    from datasource.optional_sources import BaoStockSource, TstdxSource
+    for source_cls in (TstdxSource, BaoStockSource):
+        if source_cls.available():
+            source = source_cls()
+            m.register(source)
+            provider_catalog.register(source)
     m.set_auto_chain(["broker", "eltdx"])
     _manager = m
     return _manager

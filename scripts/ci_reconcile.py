@@ -19,7 +19,7 @@ FRONTEND = os.path.join(ROOT, "frontend")
 # Keep the gate tied to the current checked-in test inventory.  This is a
 # count contract, not a pass-rate bypass: every collected test still runs in
 # CI and any collection drift fails the job.
-EXPECTED_TESTS = 624
+EXPECTED_TESTS = 625
 EXPECTED_COMPONENTS = 48
 
 
