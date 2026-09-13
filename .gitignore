@@ -67,6 +67,23 @@ frontend/release*/
 frontend/vite.config.js.timestamp-*.mjs
 .test_port.txt
 r4_git_status.txt
+
+# ---------- 一次性排查/探针落盘产物（不入库） ----------
+_file_list*.txt
+_*_out.txt
+backend/tests/_verify_out.txt
+backend/_smoke_srv.log
+.workbuddy-ai/
+
+# ---------- 运行期数据 / 缓存 ----------
+backend/wal.jsonl
+frontend/.vite-node/
+frontend/vitest.config.js.timestamp-*.mjs
+
+# ---------- 一次性渲染探针（已被 frontend/tests/render_smoke_all.mjs 取代） ----------
+frontend/tests_*.mjs
+# 已废弃组件（.dead 后缀标记，勿入库）
+frontend/src/components/*.dead
 _tmp_test/
 _scratch_decode.py
 # 一次性 / 孤立渲染探针（已被 frontend/tests/render_smoke_market.mjs 取代）

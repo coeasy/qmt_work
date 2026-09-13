@@ -1,0 +1,69 @@
+{
+  "empty_semantics": "source_all_failed=503; zero_hit=200&count=0",
+  "expr_query_params": [],
+  "provenance_keys": [
+    "provider_used",
+    "source_policy",
+    "degraded",
+    "degraded_reason",
+    "fallback_tried",
+    "as_of",
+    "local_fallback",
+    "provider_policy_version",
+    "count_online",
+    "count_local",
+    "count_total",
+    "universe",
+    "universe_provider",
+    "universe_degraded",
+    "prefilter",
+    "screening_mode"
+  ],
+  "response_keys": [
+    "count",
+    "total_scanned",
+    "elapsed_ms",
+    "sort_by",
+    "conditions",
+    "results",
+    "provenance",
+    "degraded",
+    "degraded_reason",
+    "fallback_tried",
+    "provider_policy_version",
+    "dataset_snapshot_id",
+    "fundamentals"
+  ],
+  "screen_query_params": [
+    "adjust",
+    "conditions",
+    "fields",
+    "limit",
+    "max_codes",
+    "max_price",
+    "min_price",
+    "offline",
+    "period",
+    "prefilter",
+    "sort_by",
+    "sort_desc",
+    "source_policy",
+    "universe"
+  ],
+  "source_policy_values": [
+    "auto",
+    "prefer_qmt",
+    "qmt_only",
+    "local_only",
+    "explicit:<id>"
+  ],
+  "universe_kinds": [
+    "all",
+    "sector",
+    "index",
+    "custom",
+    "saved_board",
+    "screen_result",
+    "holdings"
+  ]
+}

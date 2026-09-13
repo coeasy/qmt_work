@@ -25,7 +25,7 @@ import sys
 
 import uvicorn
 
-from app.config import settings
+from core.config import settings
 
 log = logging.getLogger("qmt_work")
 _MAX_PORT_RETRY = int(os.environ.get("QMT_PORT_SCAN", "10") or 10)
@@ -196,15 +196,15 @@ def _write_port_file(port: int) -> None:
 
 
 if __name__ == "__main__":
-    from app.config import config_file, settings
+    from core.config import config_file, settings
     from app.logging_setup import setup_logging
     setup_logging()
-    # 配置文件：打包(frozen)模式由 app.config 导入时自动生成；开发模式只提示路径
+    # 配置文件：打包(frozen)模式由 core.config 导入时自动生成；开发模式只提示路径
     cfg_path = config_file()
     if cfg_path.exists():
         log.info("配置文件：%s（已存在）", cfg_path)
     elif getattr(sys, "frozen", False):
-        from app.config import ensure_config_file
+        from core.config import ensure_config_file
         ensure_config_file()
         log.info("配置文件：%s（已自动生成）", cfg_path)
     else:

@@ -17,7 +17,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.capabilities import agent_visible_reads, tool_name_for
-from app.config import settings
+from core.config import settings
 from gateway.risk import RiskManager
 from mcp_server import build_mcp
 
@@ -51,6 +51,25 @@ def main() -> int:
         for path, name in missing:
             print(f"    {path} -> 期望 tool: {name}")
         return 1
+
+    # ---- Phase 1（Tier-0）：MCP 工具清单基线 diff（静默删除 = 0）----
+    base_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                             "tests", "contracts", "mcp_tools.json")
+    if os.path.exists(base_path):
+        import json
+        with open(base_path, encoding="utf-8") as fh:
+            baseline = set(json.load(fh))
+        removed = sorted(baseline - registered)
+        if removed:
+            print(f"[capability-drift] FAIL: MCP 工具基线被静默删除/改名: {removed}")
+            return 1
+        added = sorted(registered - baseline)
+        print(f"[capability-drift] 基线 diff: 删除=0 新增={len(added)}{(' ' + str(added)) if added else ''}")
+        if added:
+            print("[capability-drift] 提示: 请运行 scripts/gen_contracts.py 刷新基线后一并提交")
+    else:
+        print("[capability-drift] WARN: 无 mcp_tools.json 基线（运行 scripts/gen_contracts.py 生成）")
+
     print("[capability-drift] PASS: 所有 agent_visible 端点均已暴露为 MCP tool")
     return 0
 

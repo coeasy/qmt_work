@@ -40,8 +40,8 @@ vi.mock("../hooks/useBatchSelection.js", () => ({
 }));
 vi.mock("./BatchDeleteBar.jsx", () => ({ default: () => null }));
 
-import Trade from "../Trade.jsx";
-import Brokers from "../Brokers.jsx";
+import Trade from "../../features/trading/Trade.jsx";
+import Brokers from "../../features/system/Brokers.jsx";
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 

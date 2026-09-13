@@ -14,16 +14,39 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import time
+from datetime import datetime
 
 log = logging.getLogger("qmt_work.market_sync")
 
 
+def _sh_now() -> datetime:
+    """统一按 Asia/Shanghai（交易所所在地）取当前本地时间（naive datetime）。
+
+    V9 §14.4：EOD 触发必须锚定交易所日历时区，而非宿主机本地时区——
+    否则跨时区部署（UTC 服务器/海外 VPS）会在错误的时刻触发收盘同步。
+    tzdata 缺失时回退主机本地时间（行为与旧版一致，不阻断）。
+    测试打桩点：monkeypatch `gateway.market_sync._sh_now`。
+    """
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.now(ZoneInfo("Asia/Shanghai")).replace(tzinfo=None)
+    except Exception:  # noqa: BLE001
+        return datetime.now()
+
+
 class MarketSync:
-    def __init__(self, state, runtime_config, interval: float = 60.0):
+    def __init__(self, state, runtime_config, interval: float = 60.0,
+                 job_runtime=None, sync_job_factory=None):
+        """V10 A3：删除 gateway→app 的反向 import。
+
+        ``job_runtime``（JobRuntime store）与 ``sync_job_factory(params)``（返回 JobSpec
+        的工厂）由 app 层装配时注入；未注入则 EOD 自动触发降级为 no-op（非致命）。
+        """
         self.state = state
         self.cfg = runtime_config
         self.interval = interval
+        self._job_runtime = job_runtime
+        self._sync_job_factory = sync_job_factory
         self._task: asyncio.Task | None = None
         self._last_run_date: str | None = None
         self._eod_last_run_date: str | None = getattr(state, "_eod_last_run_date", None)
@@ -93,8 +116,9 @@ class MarketSync:
 
     async def _tick(self):
         await self._rollover()
-        today = time.strftime("%Y-%m-%d")
-        now_hm = time.strftime("%H:%M")
+        sh = _sh_now()
+        today = sh.strftime("%Y-%m-%d")
+        now_hm = sh.strftime("%H:%M")
         hot_due = self.enabled and self._last_run_date != today and now_hm >= self.sync_time
         eod_due = self.eod_enabled and self._eod_last_run_date != today and now_hm >= self.eod_time
         if not hot_due and not eod_due:
@@ -118,8 +142,11 @@ class MarketSync:
             return
         if self._eod_last_run_date == today:
             return
-        from app.runtime.jobs import JobSpec, get_runtime, sync_runner
-        current = get_runtime().get(self._eod_job_id) if self._eod_job_id else None
+        # V10 A3：不再反向 import app.runtime.jobs；依赖注入
+        if self._job_runtime is None or self._sync_job_factory is None:
+            log.warning("EOD 自动触发未接线（job_runtime/sync_job_factory 缺失），跳过")
+            return
+        current = self._job_runtime.get(self._eod_job_id) if self._eod_job_id else None
         if current and current["status"] in ("queued", "running"):
             return
         params = {
@@ -128,9 +155,7 @@ class MarketSync:
             "provider_id": "auto", "batch_id": f"eod-{today}",
             "max_attempts": int(self.cfg.get("market.eod.retry") or 3),
         }
-        self._eod_job_id = get_runtime().submit(JobSpec(
-            kind="sync", name=f"EOD 全市场同步 {today}",
-            runner=sync_runner(params), priority=2, params=params))
+        self._eod_job_id = self._job_runtime.submit(self._sync_job_factory(params))
         self._eod_last_run_date = today
         self.state._eod_last_run_date = today
         db = getattr(self.state, "db", None)
@@ -169,7 +194,7 @@ class MarketSync:
             batch = codes[i:i + 30]
             await asyncio.gather(*(_one(c) for c in batch))
         # 停机前记录到日志（含 last_run 供前端状态展示）
-        self.state._market_sync_last = {"date": time.strftime("%Y-%m-%d %H:%M:%S"),
+        self.state._market_sync_last = {"date": _sh_now().strftime("%Y-%m-%d %H:%M:%S"),
                                         "codes": len(codes), "ok": results["ok"],
                                         "fail": results["fail"]}
         log.info("market sync refresh: codes=%s ok=%s fail=%s",

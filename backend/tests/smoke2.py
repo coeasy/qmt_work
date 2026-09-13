@@ -13,6 +13,7 @@ import asyncio
 import json
 import os
 import sqlite3
+import sys
 
 import websockets
 
@@ -23,6 +24,8 @@ DB_PATH = os.environ.get("QMT_DB_PATH", "data/app.db")
 
 passed = 0
 failed = 0
+skipped = 0
+HAS_BROKER = False
 
 
 def check(name, cond, detail=""):
@@ -35,32 +38,54 @@ def check(name, cond, detail=""):
         print(f"  [FAIL] {name}  {detail}")
 
 
+def skip(name, reason):
+    """前置条件不满足时显式跳过，而不是伪装成失败。
+
+    典型场景：本脚本直接连本机默认 data/app.db，开发机上常有真实券商连接记录，
+    此时「未连接券商 -> 503」这组断言的前提不成立——断言本身没错，是环境不对。
+    503 零 mock 语义的权威验证请用 scripts/client_start_test.py --target client
+    （独立 profile 目录、零券商记录，实测 25/25）。
+    """
+    global skipped
+    skipped += 1
+    print(f"  [SKIP] {name}  {reason}")
+
+
+def _json(resp):
+    """响应体可能不是 JSON（后端未就绪时是空体）——直接 r.json() 会抛
+    JSONDecodeError 让整个冒烟中断，掩盖真正的失败点。这里兜底成空 dict。"""
+    try:
+        return resp.json()
+    except Exception:
+        return {"code": -1, "message": f"非 JSON 响应 HTTP {resp.status_code}"}
+
+
 async def get(path):
     import httpx
     async with httpx.AsyncClient(timeout=10) as cli:
         r = await cli.get(BASE + path)
-        return r.status_code, r.json()
+        return r.status_code, _json(r)
 
 
 async def post(path, body=None):
     import httpx
     async with httpx.AsyncClient(timeout=10) as cli:
         r = await cli.post(BASE + path, json=body or {})
-        return r.status_code, r.json()
+        return r.status_code, _json(r)
 
 
 async def put(path, body=None):
     import httpx
     async with httpx.AsyncClient(timeout=10) as cli:
         r = await cli.put(BASE + path, json=body or {})
-        return r.status_code, r.json()
+        return r.status_code, _json(r)
 
 
 async def delete(path):
     import httpx
     async with httpx.AsyncClient(timeout=10) as cli:
         r = await cli.delete(BASE + path)
-        return r.status_code, r.json()
+        return r.status_code, _json(r)
 
 
 async def test_broker_profiles():
@@ -103,12 +128,20 @@ async def test_add_broker_unknown_client():
 
 
 async def test_account_no_broker():
+    global HAS_BROKER
     code, data = await get("/account/status")
+    if HAS_BROKER:
+        skip("未连接券商 -> 账户端点 code=503",
+             f"本实例已连真实券商（{code} {str(data)[:120]}），503 前提不成立")
+        return
     check("未连接券商 -> 账户端点 code=503", data.get("code") == 503, f"{code} {data}")
     check("503 提示含「券商连接」", "券商" in (data.get("message") or ""), str(data.get("message")))
 
 
 async def test_market_crawl_no_broker():
+    if HAS_BROKER:
+        skip("未连接券商 -> 行情爬取 code=503", "本实例已连真实券商，可正常爬取")
+        return
     code, data = await post("/market/crawl", {"codes": ["600519.SH"], "days": 5})
     check("未连接券商 -> 行情爬取 code=503", data.get("code") == 503, f"{code} {data}")
 
@@ -279,7 +312,20 @@ async def test_ready():
 
 
 async def main():
+    global HAS_BROKER
     print("=== smoke2 (real-broker mode) ===")
+    # 探测本实例是否已连真实券商：本脚本默认连开发机的 data/app.db，
+    # 开发机上常有真实连接记录，「未连接券商」这组断言的前提就不成立。
+    HAS_BROKER = False
+    try:
+        _c, _d = await get("/account/status")
+        HAS_BROKER = _c == 200 and ((_d.get("data") or {}).get("connected") is True
+                                    or _d.get("code") == 0)
+    except Exception:
+        HAS_BROKER = False
+    if HAS_BROKER:
+        print("  [i] 检测到本实例已连真实券商：503 零 mock 断言将跳过"
+              "（权威验证请用 scripts/client_start_test.py --target client，独立 profile）")
     await test_broker_profiles()
     await test_brokers_list()
     await test_add_broker_invalid()
@@ -294,11 +340,43 @@ async def main():
     await test_idempotent_concurrent()
     await test_mcp_handshake()
     await test_ready()
-    print(f"\n=== RESULT: {passed} passed, {failed} failed ===")
+    await cleanup_test_brokers()
+    print(f"\n=== RESULT: {passed} passed, {failed} failed, {skipped} skipped ===")
     return failed
 
 
+# 本脚本为验证「路径无效不假报已连接」会主动写入券商记录；若不回收，
+# 会持续污染开发机的 data/app.db（实测已累积 34 条，含 "nope QMT" /
+# "C:/no_such_qmt/userdata_mini" 等测试残留）。这里按标记精确回收，不动真实连接。
+TEST_BROKER_MARKERS = ("nope",)
+TEST_PATH_MARKERS = ("__not_a_real_path__", "C:/no_such_qmt", "C:\\no_such_qmt")
+
+
+async def cleanup_test_brokers():
+    import httpx
+    async with httpx.AsyncClient(timeout=10) as cli:
+        r = await cli.get(BASE + "/brokers")
+        if r.status_code != 200:
+            return
+        try:
+            conns = (r.json().get("data") or [])
+        except Exception:
+            return
+    n = 0
+    for c in conns:
+        if str(c.get("broker_id") or "") in TEST_BROKER_MARKERS or any(
+                m in str(c.get("client_path") or "") for m in TEST_PATH_MARKERS):
+            try:
+                _, d = await delete(f"/brokers/{c.get('conn_id')}")
+                if d.get("code") == 0:
+                    n += 1
+            except Exception:
+                pass
+    if n:
+        print(f"  [cleanup] 已回收本测试写入的券商记录 {n} 条")
+
+
 if __name__ == "__main__":
-    import sys
     rc = asyncio.run(main())
+    # 有失败必须带非零退出码，否则 CI 无法拦截（此前实测：3 条 FAIL 却 exit=0）。
     sys.exit(1 if rc else 0)

@@ -2,10 +2,11 @@ import {useState, useEffect} from "react";
 import { api } from "../api.js";
 import { useServerEvents } from "../hooks/useSystemWS.js";
 import { useActiveInterval } from "../hooks/useActiveInterval.js";
+import { WS_EVENTS } from "../shared/events";
 import { fmtAmount, fmtLimitDur } from "../lib/format.js";
 import { peek as hubPeek, subscribe as hubSubscribe } from "../lib/dataHub.js";
 import ConfirmTradeModal from "./ui/ConfirmTradeModal.jsx";
-import OrderTicketModal from "./ui/OrderTicketModal.jsx";
+import OrderTicketModal from "../features/trading/OrderTicketModal.jsx";
 import usePersistentState from "../lib/usePersistentState.js";
 import { t } from "../lib/i18n.js";
 
@@ -106,7 +107,7 @@ export default function LimitUp() {
   }
   useActiveInterval(load, 30000);
   // P2-2：limitup/limitup_order 事件驱动近实时刷新（触发/自动买入时立即更新），保留 30s 兜底轮询
-  useServerEvents(["limitup"], () => { loadBoard(); loadBreadth(); load(); });
+  useServerEvents([WS_EVENTS.LIMITUP], () => { loadBoard(); loadBreadth(); load(); });
 
   async function add() {
     const c = code.trim();

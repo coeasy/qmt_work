@@ -1,6 +1,7 @@
-from fastapi import APIRouter
+from core.context import AppContext, get_ctx
+from fastapi import APIRouter, Depends
 
-from app.routes._common import audit_log, err, ok, state
+from app.routes._common import audit_log, err, ok
 
 # --- stdlib imports injected by fix_route_imports ---
 
@@ -9,9 +10,9 @@ from app.routes._common import audit_log, err, ok, state
 router = APIRouter()
 
 @router.post("/algo/submit")
-async def algo_submit(body: dict):
+async def algo_submit(body: dict, ctx: AppContext = Depends(get_ctx)):
     """创建/提交algo / submit（POST /algo/submit）。"""
-    e = state.algo_engine
+    e = ctx.algo_engine
     if e is None:
         return err(503, "算法单引擎未初始化")
     try:
@@ -29,34 +30,34 @@ async def algo_submit(body: dict):
         return err(400, str(exc))
 
 @router.get("/algo")
-async def algo_list():
+async def algo_list(ctx: AppContext = Depends(get_ctx)):
     """获取algo（GET /algo）。"""
-    e = state.algo_engine
+    e = ctx.algo_engine
     if e is None:
         return err(503, "算法单引擎未初始化")
     return ok(e.list())
 
 @router.post("/algo/{algo_id}/pause")
-async def algo_pause(algo_id: str):
+async def algo_pause(algo_id: str, ctx: AppContext = Depends(get_ctx)):
     """创建/提交algo / pause（POST /algo/{algo_id}/pause）。"""
     try:
-        return ok(state.algo_engine.pause(algo_id))
+        return ok(ctx.algo_engine.pause(algo_id))
     except KeyError as exc:
         return err(404, str(exc))
 
 @router.post("/algo/{algo_id}/resume")
-async def algo_resume(algo_id: str):
+async def algo_resume(algo_id: str, ctx: AppContext = Depends(get_ctx)):
     """创建/提交algo / resume（POST /algo/{algo_id}/resume）。"""
     try:
-        return ok(state.algo_engine.resume(algo_id))
+        return ok(ctx.algo_engine.resume(algo_id))
     except KeyError as exc:
         return err(404, str(exc))
 
 @router.post("/algo/{algo_id}/cancel")
-async def algo_cancel(algo_id: str):
+async def algo_cancel(algo_id: str, ctx: AppContext = Depends(get_ctx)):
     """创建/提交algo / cancel（POST /algo/{algo_id}/cancel）。"""
     try:
-        return ok(state.algo_engine.cancel(algo_id))
+        return ok(ctx.algo_engine.cancel(algo_id))
     except KeyError as exc:
         return err(404, str(exc))
 

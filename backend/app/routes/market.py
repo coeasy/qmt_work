@@ -1,13 +1,14 @@
+from core.context import AppContext, get_ctx
 # --- stdlib imports injected by fix_route_imports ---
 import asyncio
 import logging
 import os
 from datetime import datetime
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
-from app.routes._common import BrokerError, _call, _need, envelope_ok, err, no_broker, ok, state
+from app.routes._common import BrokerError, _call, _need, envelope_ok, err, no_broker, ok
 from app.services.market import (
     QUOTES_FILL_SEM,
     ServiceError,
@@ -48,7 +49,7 @@ router = APIRouter()
 
 
 @router.get("/market/providers")
-async def market_providers():
+async def market_providers(ctx: AppContext = Depends(get_ctx)):
     """Provider 能力目录：只把真实注册的实现标记为 active。"""
     return ok(provider_catalog.describe())
 
@@ -60,7 +61,7 @@ _perf_stale = perf_stale
 
 
 @router.get("/market/search")
-async def market_search(q: str, limit: int = 20, include_boards: bool = True):
+async def market_search(q: str, limit: int = 20, include_boards: bool = True, ctx: AppContext = Depends(get_ctx)):
     """标的搜索：代码 / 中文名 / 拼音首字母 / 板块名 模糊匹配（零网络，基于本地缓存）。
 
     返回 {code:0, data:[{code, name, type, exchange, board, label, match, pinyin?}, ...]}：
@@ -100,7 +101,7 @@ async def market_search(q: str, limit: int = 20, include_boards: bool = True):
 
 
 @router.get("/market/resolve")
-async def market_resolve(q: str, limit: int = 8):
+async def market_resolve(q: str, limit: int = 8, ctx: AppContext = Depends(get_ctx)):
     """标的解析归一：任意输入（代码/带后缀/前缀式/名称/拼音）→ 标准 QMT 代码 + 候选。
 
     唯一命中 → resolved=true；多候选 → resolved=false + candidates（前端让用户选择）。
@@ -160,7 +161,7 @@ async def market_resolve(q: str, limit: int = 8):
 
 
 @router.get("/market/analysis")
-async def market_analysis(code: str, conn_id: str = "", source: str = "auto"):
+async def market_analysis(code: str, conn_id: str = "", source: str = "auto", ctx: AppContext = Depends(get_ctx)):
     """标的深度画像：单请求并发聚合 6 维（快照/画像/股本/表现/资金流/估值）。
 
     编排逻辑见 services/market/analysis.py；此处只做参数校验与信封包装。
@@ -175,7 +176,7 @@ async def market_analysis(code: str, conn_id: str = "", source: str = "auto"):
 
 
 @router.get("/market/quote")
-async def market_quote(code: str, conn_id: str = "", source: str = "auto"):
+async def market_quote(code: str, conn_id: str = "", source: str = "auto", ctx: AppContext = Depends(get_ctx)):
     """实时行情快照（最新价 / 涨跌幅 / 成交量 / 买卖五档 + 合约名称/涨跌停）。
 
     source:
@@ -199,7 +200,7 @@ async def market_quote(code: str, conn_id: str = "", source: str = "auto"):
 
 
 @router.post("/market/quotes")
-async def market_quotes(body: dict):
+async def market_quotes(body: dict, ctx: AppContext = Depends(get_ctx)):
     """批量行情快照（报价牌 / 综合排名命脉）。
 
     优先返回 SyncEngine.latest_quotes 缓存中已订阅的实时快照（零新增网络调用）；
@@ -215,7 +216,7 @@ async def market_quotes(body: dict):
     source = str(body.get("source") or "auto")
     conn_id = body.get("conn_id") or None
     m = get_hub()
-    se = getattr(state, "sync_engine", None)
+    se = getattr(ctx, "sync_engine", None)
     cache = getattr(se, "latest_quotes", None) or {}
     items: list = []
     missing: list = []
@@ -242,7 +243,7 @@ async def market_quotes(body: dict):
 
 
 @router.get("/market/stock-info")
-async def market_stock_info(code: str, conn_id: str = "", source: str = "auto"):
+async def market_stock_info(code: str, conn_id: str = "", source: str = "auto", ctx: AppContext = Depends(get_ctx)):
     """股票基本信息：名称 / 板块 / 交易所 / 涨跌停 / 昨收（供右侧面板）。
 
     source: auto（券商优先，失败回退 eltdx）/ broker / eltdx
@@ -282,7 +283,7 @@ async def market_stock_info(code: str, conn_id: str = "", source: str = "auto"):
     return ok(info)
 
 @router.get("/market/sources")
-async def market_sources():
+async def market_sources(ctx: AppContext = Depends(get_ctx)):
     """列出已注册行情数据源及其可用性（供前端「数据源」选择 / 健康展示）。
 
     返回 {sources:[name,...], auto_chain:[...], health:{name:{available,note}}, active:当前auto首源}。
@@ -300,7 +301,7 @@ async def market_sources():
 
 
 @router.get("/market/periods")
-async def market_periods():
+async def market_periods(ctx: AppContext = Depends(get_ctx)):
     """可用周期清单（契约驱动 UI 的数据源）。
 
     前端周期条据此渲染，并对 supported=false 的周期置灰 + tooltip 显示 reason。
@@ -312,7 +313,7 @@ async def market_periods():
 @router.get("/market/kline")
 async def market_kline(code: str, period: str = "1d", count: int = 250,
                        conn_id: str = "", force: bool = False, source: str = "auto",
-                       adj: str = ""):
+                       adj: str = "", ctx: AppContext = Depends(get_ctx)):
     """历史 K 线（C1 本地缓存优先；source: auto=券商优先回退eltdx / broker / eltdx）。
     adj: ''=不复权 / qfq=前复权 / hfq=后复权。券商 get_kline 不支持复权，显式复权时
     走 TDX 复权源，避免静默返回原始价误导用户。
@@ -369,7 +370,7 @@ async def market_kline(code: str, period: str = "1d", count: int = 250,
                "bars": bars})
 
 @router.get("/market/minutes")
-async def market_minutes(code: str, date: str = "", source: str = "auto"):
+async def market_minutes(code: str, date: str = "", source: str = "auto", ctx: AppContext = Depends(get_ctx)):
     """当日分时（1 分钟）曲线：价格线 + 均价线 + 分钟量，含昨收基准。
 
     date 为空取最新交易日分时；格式 YYYY-MM-DD 取历史分时。
@@ -388,7 +389,7 @@ async def market_minutes(code: str, date: str = "", source: str = "auto"):
 @router.get("/market/limitup")
 async def market_limitup(sector: str = "沪深A股", min_pct: float = 9.5,
                          only_limit: bool = True, limit: int = 200,
-                         sort: str = "change"):
+                         sort: str = "change", ctx: AppContext = Depends(get_ctx)):
     """涨停板：扫描板块内最新行情，列出涨停（或接近涨停）个股及最新数据，便于快速选股交易。"""
     b = _need()
     if b is None:
@@ -401,7 +402,7 @@ async def market_limitup(sector: str = "沪深A股", min_pct: float = 9.5,
     return ok({"sector": sector, "count": len(rows), "rows": rows})
 
 @router.get("/market/breadth")
-async def market_breadth():
+async def market_breadth(ctx: AppContext = Depends(get_ctx)):
     """市场广度统计：全市场/板块/主要指数涨跌停家数。"""
     b = _need()
     if b is None:
@@ -417,7 +418,7 @@ async def market_breadth():
 
 @router.get("/market/indices")
 async def market_indices(codes: str = "", source: str = "auto", ttl: int = 3,
-                         spark: bool = False, spark_days: int = 20):
+                         spark: bool = False, spark_days: int = 20, ctx: AppContext = Depends(get_ctx)):
     """主要指数聚合快照（顶部指数条数据源）。
 
     并发拉取，单只失败返回 null 并计入 errors，不因一只失败拖垮整条。
@@ -433,7 +434,7 @@ async def market_indices(codes: str = "", source: str = "auto", ttl: int = 3,
 
 @router.get("/market/boards")
 async def market_boards(kind: str = "industry", sort_by: str = "pct",
-                        limit: int = 50, source: str = "auto", ttl: int = 10):
+                        limit: int = 50, source: str = "auto", ttl: int = 10, ctx: AppContext = Depends(get_ctx)):
     """板块榜单（行业 881xxx / 概念 880xxx / 统计类 stat）。"""
     try:
         return ok(await msvc.boards(kind, sort_by=sort_by, limit=limit,
@@ -444,7 +445,7 @@ async def market_boards(kind: str = "industry", sort_by: str = "pct",
 
 @router.get("/market/board/constituents")
 async def market_board_constituents(code: str, limit: int = 100, page: int = 0,
-                                    source: str = "auto", ttl: int = 15):
+                                    source: str = "auto", ttl: int = 15, ctx: AppContext = Depends(get_ctx)):
     """板块成分股（真实板块成分，非全市场过滤）。"""
     try:
         return ok(await msvc.board_constituents(code, limit=limit, page=page,
@@ -455,7 +456,7 @@ async def market_board_constituents(code: str, limit: int = 100, page: int = 0,
 
 @router.get("/market/board/lookup")
 async def market_board_lookup(name: str, limit: int = 8, source: str = "auto",
-                              ttl: int = 600):
+                              ttl: int = 600, ctx: AppContext = Depends(get_ctx)):
     """板块名称 → 代码匹配（P1-8 深链稳化）。"""
     try:
         return ok(await msvc.board_lookup(name, limit=limit, source=source, ttl=ttl))
@@ -465,7 +466,7 @@ async def market_board_lookup(name: str, limit: int = 8, source: str = "auto",
 
 @router.get("/market/board/kline")
 async def market_board_kline(code: str, period: str = "1d", count: int = 60,
-                             source: str = "auto", ttl: int = 60):
+                             source: str = "auto", ttl: int = 60, ctx: AppContext = Depends(get_ctx)):
     """板块 / 指数 K 线（内部按 kind=index 取，避免 ProtocolError）。"""
     try:
         # 未知周期 UnknownPeriodError / 数据源不支持 UnsupportedPeriodError，
@@ -483,7 +484,7 @@ async def market_board_kline(code: str, period: str = "1d", count: int = 60,
 @router.get("/market/etfs")
 async def market_etfs(limit: int = 0, with_quote: bool = False,
                       quote_limit: int = ETF_QUOTE_CAP, source: str = "auto",
-                      ttl: int = ETF_LIST_TTL):
+                      ttl: int = ETF_LIST_TTL, ctx: AppContext = Depends(get_ctx)):
     """ETF 全市场清单（代码段 51/56/58/15/16）。"""
     try:
         return ok(await msvc.etfs(limit, with_quote=with_quote,
@@ -493,7 +494,7 @@ async def market_etfs(limit: int = 0, with_quote: bool = False,
 
 
 @router.get("/market/moneyflow")
-async def market_moneyflow(code: str, source: str = "auto"):
+async def market_moneyflow(code: str, source: str = "auto", ctx: AppContext = Depends(get_ctx)):
     """个股资金流（真实口径：快照内外盘 + 分钟级买卖力道 + 量比）。"""
     try:
         return ok(await msvc.moneyflow(code, source=source))
@@ -502,7 +503,7 @@ async def market_moneyflow(code: str, source: str = "auto"):
 
 
 @router.get("/market/capital")
-async def market_capital(codes: str, source: str = "auto", ttl: int = 300):
+async def market_capital(codes: str, source: str = "auto", ttl: int = 300, ctx: AppContext = Depends(get_ctx)):
     """批量流通股本 + 涨跌停价（换手率与涨跌停展示的真实口径来源）。"""
     try:
         return ok(await msvc.capital(codes, source=source, ttl=ttl))
@@ -512,7 +513,7 @@ async def market_capital(codes: str, source: str = "auto", ttl: int = 300):
 
 @router.get("/market/board/moneyflow")
 async def market_board_moneyflow(code: str, source: str = "auto",
-                                 top_n: int = 30, ttl: int = 30):
+                                 top_n: int = 30, ttl: int = 30, ctx: AppContext = Depends(get_ctx)):
     """板块资金流：聚合成分股当日主力净流入（外盘-内盘），真实口径。"""
     try:
         return ok(await msvc.board_moneyflow(code, source=source, top_n=top_n, ttl=ttl))
@@ -522,7 +523,7 @@ async def market_board_moneyflow(code: str, source: str = "auto",
 
 @router.get("/market/rotation")
 async def market_rotation(days: int = 5, kind: str = "industry",
-                          top_n: int = 40, source: str = "auto"):
+                          top_n: int = 40, source: str = "auto", ctx: AppContext = Depends(get_ctx)):
     """板块轮动：取板块榜 topN（按 |涨跌幅|），各取日K 计算每日%chg，返回矩阵供热力图。"""
     try:
         return ok(await msvc.rotation(days, kind=kind, top_n=top_n, source=source))
@@ -531,7 +532,7 @@ async def market_rotation(days: int = 5, kind: str = "industry",
 
 
 @router.get("/market/overview")
-async def market_overview(source: str = "auto", ttl: int = 10):
+async def market_overview(source: str = "auto", ttl: int = 10, ctx: AppContext = Depends(get_ctx)):
     """市场概览（E3）：统计类板块真实家数 + 主要指数快照 + 宽度趋势 + 两市成交额。"""
     try:
         return ok(await msvc.overview(source=source, ttl=ttl))
@@ -546,7 +547,7 @@ class _MoneyflowSnapshotReq(BaseModel):
 
 
 @router.post("/market/moneyflow/snapshot")
-async def market_moneyflow_snapshot(body: _MoneyflowSnapshotReq):
+async def market_moneyflow_snapshot(body: _MoneyflowSnapshotReq, ctx: AppContext = Depends(get_ctx)):
     """采集个股/板块资金流快照落库（G3）。body: {codes:[...]} 或 {board:"881319.SH"}。
     返回 {inserted, codes, ts}。"""
     codes = [str(c).strip() for c in (body.codes or []) if c][:300]
@@ -565,7 +566,7 @@ async def market_moneyflow_snapshot(body: _MoneyflowSnapshotReq):
 
 
 @router.get("/market/moneyflow/replay")
-async def market_moneyflow_replay(code: str, date: str = "", limit: int = 500):
+async def market_moneyflow_replay(code: str, date: str = "", limit: int = 500, ctx: AppContext = Depends(get_ctx)):
     """资金流回放：取 code 的历史快照序列（按 ts 升序）。date=YYYY-MM-DD 可选过滤某日。"""
     if not code:
         return err(400, "缺少 code")
@@ -578,12 +579,12 @@ start_moneyflow_collector = kline_io.start_moneyflow_collector
 
 
 @router.get("/market/kline/sync-status")
-async def kline_sync_status():
+async def kline_sync_status(ctx: AppContext = Depends(get_ctx)):
     """行情缓存定时更新状态（开关/触发时间/最近一次运行），供前端展示与配置。"""
-    ms = getattr(state, "market_sync", None)
+    ms = getattr(ctx, "market_sync", None)
     if ms is None:
         return ok({"initialized": False})
-    rc = getattr(state, "runtime_config", None)
+    rc = getattr(ctx, "runtime_config", None)
     info = {
         "initialized": True,
         "enabled": ms.enabled,
@@ -593,14 +594,14 @@ async def kline_sync_status():
             "enabled": "market.sync.enabled",
             "sync_time": "market.sync.time",
         },
-        "last_run": getattr(state, "_market_sync_last", None),
+        "last_run": getattr(ctx, "_market_sync_last", None),
         "config": rc.all().get("market.sync.enabled") if rc else None,
     }
     return ok(info)
 
 
 @router.get("/market/datasets/snapshots")
-async def dataset_snapshots(dataset_id: str = "cn_equity_daily", limit: int = 20):
+async def dataset_snapshots(dataset_id: str = "cn_equity_daily", limit: int = 20, ctx: AppContext = Depends(get_ctx)):
     """查询历史数据集快照；只返回已落库的版本/校验/质量元数据。"""
     from core.db import get_db
     rows = get_db().query(
@@ -613,19 +614,19 @@ async def dataset_snapshots(dataset_id: str = "cn_equity_daily", limit: int = 20
 
 
 @router.get("/market/kline/cache")
-async def kline_cache_stats():
+async def kline_cache_stats(ctx: AppContext = Depends(get_ctx)):
     """K 线缓存统计（行数/热表·归档/序列数/命中率）。"""
-    if state.kline_cache is None:
+    if ctx.kline_cache is None:
         return err(503, "K 线缓存未初始化")
-    return ok(await asyncio.to_thread(state.kline_cache.stats))
+    return ok(await asyncio.to_thread(ctx.kline_cache.stats))
 
 @router.delete("/market/kline/cache")
-async def kline_cache_clear(code: str = "", period: str = ""):
+async def kline_cache_clear(code: str = "", period: str = "", ctx: AppContext = Depends(get_ctx)):
     """清理 K 线缓存（可按 code / code+period 精确清理）。"""
-    if state.kline_cache is None:
+    if ctx.kline_cache is None:
         return err(503, "K 线缓存未初始化")
-    n = await asyncio.to_thread(state.kline_cache.clear, code=code, period=period)
-    state.db.audit("admin", "kline_cache.clear", code or "*",
+    n = await asyncio.to_thread(ctx.kline_cache.clear, code=code, period=period)
+    ctx.db.audit("admin", "kline_cache.clear", code or "*",
                    {"period": period}, f"deleted={n}")
     return ok({"deleted": n})
 
@@ -633,7 +634,7 @@ async def kline_cache_clear(code: str = "", period: str = ""):
 # ---------------- 历史 K 线导出到本地指定目录（CSV/JSON） ----------------
 
 @router.post("/market/kline/export")
-async def kline_export(body: dict):
+async def kline_export(body: dict, ctx: AppContext = Depends(get_ctx)):
     """批量导出历史 K 线到本地指定目录（CSV / JSON）。
 
     参数（body JSON）：
@@ -647,13 +648,13 @@ async def kline_export(body: dict):
 
     数据来自本地 K 线缓存（KlineCache），"快速"导出完全离线，无网络调用。
     """
-    if state.kline_cache is None:
+    if ctx.kline_cache is None:
         return err(503, "K 线缓存未初始化")
     try:
-        out = await kline_io.kline_export(state.kline_cache, body)
+        out = await kline_io.kline_export(ctx.kline_cache, body)
     except ValueError as exc:
         return err(400, str(exc))
-    state.db.audit("admin", "kline.export", body.get("dest_dir") or "",
+    ctx.db.audit("admin", "kline.export", body.get("dest_dir") or "",
                    {"format": body.get("format") or "csv",
                     "refresh": bool(body.get("refresh", False)),
                     "dest_dir": body.get("dest_dir") or ""},
@@ -663,7 +664,7 @@ async def kline_export(body: dict):
 
 @router.get("/market/kline/export")
 async def kline_export_read(dest_dir: str, code: str, period: str = "1d",
-                            format: str = "csv"):
+                            format: str = "csv", ctx: AppContext = Depends(get_ctx)):
     """读取本地导出目录中已导出的历史 K 线文件（离线/断线时也可用）。
 
     直接读磁盘文件，不依赖券商连接；文件不存在返回 404。
@@ -685,14 +686,14 @@ async def kline_export_read(dest_dir: str, code: str, period: str = "1d",
 # ---------------- 同步全部历史 K 线（日线+周线）到本地指定目录 ----------------
 
 @router.post("/market/kline/sync")
-async def kline_sync(body: dict):
+async def kline_sync(body: dict, ctx: AppContext = Depends(get_ctx)):
     """把一批股票的最新历史 K 线（含日线 1d、周线 1w）同步到本地指定目录。
 
     流程：确定股票集合 → 逐只回源券商拉取最新 K 线写入本地缓存 → 导出到 dest_dir。
     参数（body JSON）：dest_dir(必填)/codes/sector/periods/count/format/limit/conn_id。
     单只失败不中断整体（errors 列出）。真实行情，缺数据不伪造。
     """
-    if state.kline_cache is None:
+    if ctx.kline_cache is None:
         return err(503, "K 线缓存未初始化")
 
     async def _get_sector_stocks(sector: str, conn_id):
@@ -702,14 +703,14 @@ async def kline_sync(body: dict):
         return await _call(b, b.gateway.get_sector_stocks, sector) or []
 
     try:
-        out = await kline_io.kline_sync(state.kline_cache, body, _get_sector_stocks)
+        out = await kline_io.kline_sync(ctx.kline_cache, body, _get_sector_stocks)
     except ValueError as exc:
         return err(400, str(exc))
     except BrokerError as exc:
         return err(503, str(exc))
     except LookupError as exc:
         return err(404, str(exc))
-    state.db.audit("admin", "kline.sync", body.get("dest_dir") or "",
+    ctx.db.audit("admin", "kline.sync", body.get("dest_dir") or "",
                    {"format": body.get("format") or "csv",
                     "periods": out["periods"], "count": int(body.get("count") or 250),
                     "codes": out["codes_total"]},
@@ -720,7 +721,7 @@ async def kline_sync(body: dict):
 # ---------------- 行情爬虫（真实 K 线落库） ----------------
 
 @router.post("/market/crawl")
-async def crawl_market(body: dict):
+async def crawl_market(body: dict, ctx: AppContext = Depends(get_ctx)):
     """创建/提交market / crawl（POST /market/crawl）。"""
     try:
         return ok(await kline_io.crawl_market(body))
@@ -731,7 +732,7 @@ async def crawl_market(body: dict):
 # ---------------- LLM 配置（加密存储） ----------------
 
 @router.get("/market/l2")
-async def market_l2(code: str, count: int = 100):
+async def market_l2(code: str, count: int = 100, ctx: AppContext = Depends(get_ctx)):
     """获取market / l2（GET /market/l2）。"""
     b = _need()
     if b is None:

@@ -49,7 +49,7 @@ class LocalStore:
         self._lock = threading.Lock()
 
     # ------------------------------------------------------------------
-    # K 线（主键 code/period/adjust/dt）
+    # K 线（主键 code/period/adjust/dt/provider_id —— 多源隔离，V9 §10.3）
     # ------------------------------------------------------------------
     def upsert_bars(
         self,
@@ -108,30 +108,98 @@ class LocalStore:
         start: Optional[str] = None,
         end: Optional[str] = None,
     ) -> List[Bar]:
-        """按时间升序取本地 K 线 → 标准模型 ``Bar`` 列表（可只传 limit 取最近 N 根）。"""
-        sql = ("SELECT dt AS time, open, high, low, close, volume, amount "
-               "FROM local_bars WHERE code=? AND period=? AND adjust=?")
+        """按时间升序取本地 K 线 → 标准模型 ``Bar`` 列表（可只传 limit 取最近 N 根）。
+
+        V9 §10.3：多源 Raw 不互相覆盖（provider_id 入主键）后，同一 dt 可能存在
+        多个 provider 的行。读取即 Canonical 选主：按质量状态
+        （validated > complete > match > 其他）优先，其次优先具名 provider，
+        保证消费方每根 K 线只看到一条确定性的主值。
+        """
+        inner = ("SELECT dt, open, high, low, close, volume, amount, provider_id, "
+                 "quality_state, ROW_NUMBER() OVER (PARTITION BY dt ORDER BY "
+                 "CASE quality_state WHEN 'validated' THEN 0 WHEN 'complete' THEN 1 "
+                 "WHEN 'match' THEN 2 ELSE 3 END, (provider_id = '') DESC, provider_id"
+                 ") AS rn FROM local_bars WHERE code=? AND period=? AND adjust=?")
         params: List[Any] = [code, period, adjust]
         if start:
-            sql += " AND dt >= ?"
+            inner += " AND dt >= ?"
             params.append(start)
         if end:
-            sql += " AND dt <= ?"
+            inner += " AND dt <= ?"
             params.append(end)
+        sql = (f"SELECT dt AS time, open, high, low, close, volume, amount "
+               f"FROM ({inner}) WHERE rn=1")
         if limit and limit > 0:
             # latest-N 的语义是「窗口内最近 N 根」，不能先升序 LIMIT 而返回最早数据。
-            sql += " ORDER BY dt DESC LIMIT ?"
+            sql += " ORDER BY time DESC LIMIT ?"
             params.append(int(limit))
             rows = self._db.query(sql, tuple(params))
             rows.reverse()
             return [Bar.model_validate(r) for r in rows]
-        sql += " ORDER BY dt ASC"
+        sql += " ORDER BY time ASC"
         rows = self._db.query(sql, tuple(params))
         return [Bar.model_validate(r) for r in rows]
 
+    def get_bars_batch(
+        self,
+        codes: List[str],
+        period: str = "1d",
+        adjust: str = "",
+        limit: int = 250,
+    ) -> Dict[str, List[Bar]]:
+        """批量取多标的 K 线：单条 ``WHERE code IN (...)`` + 窗口函数选主，
+        分块 SQL 取回整批，替代逐只 ``get_bars`` 的 N 次循环（P3 / Phase B）。
+
+        设计目标：把「逐只循环 = N 次 SQL」降到「O(块数) 次 SQL」
+        （约 5000 只 → 6 块）。SQLite 变量上限安全分块（每块 900 只）。
+        Canonical 选主逻辑与 ``get_bars`` 完全一致（质量状态 + 具名 provider 优先），
+        每块内对每标的最近 ``limit`` 根按时间降序取头、升序返回。
+        """
+        if not codes:
+            return {}
+        seen: "dict[str, None]" = {}
+        for c in codes:
+            seen[str(c)] = None
+        uniq = list(seen.keys())
+        out: Dict[str, List[Bar]] = {c: [] for c in uniq}
+
+        _CHUNK = 900  # 低于 SQLite 默认变量上限，避免 "too many SQL variables"
+        for i in range(0, len(uniq), _CHUNK):
+            chunk = uniq[i:i + _CHUNK]
+            placeholders = ",".join("?" for _ in chunk)
+            inner = (
+                "SELECT code, dt, open, high, low, close, volume, amount, provider_id, "
+                "quality_state, ROW_NUMBER() OVER ("
+                "PARTITION BY code, dt ORDER BY "
+                "CASE quality_state WHEN 'validated' THEN 0 WHEN 'complete' THEN 1 "
+                "WHEN 'match' THEN 2 ELSE 3 END, (provider_id = '') DESC, provider_id"
+                ") AS rn FROM local_bars "
+                f"WHERE code IN ({placeholders}) AND period=? AND adjust=?"
+            )
+            if limit and limit > 0:
+                outer = (
+                    "SELECT code, dt AS time, open, high, low, close, volume, amount "
+                    "FROM (SELECT code, dt, open, high, low, close, volume, amount, "
+                    "ROW_NUMBER() OVER (PARTITION BY code ORDER BY dt DESC) AS rk "
+                    f"FROM ({inner}) WHERE rn=1) WHERE rk<=? ORDER BY code, time ASC"
+                )
+                params: List[Any] = list(chunk) + [period, adjust, int(limit)]
+            else:
+                outer = (
+                    "SELECT code, dt AS time, open, high, low, close, volume, amount "
+                    f"FROM ({inner}) WHERE rn=1 ORDER BY code, time ASC"
+                )
+                params = list(chunk) + [period, adjust]
+            rows = self._db.execute(outer, tuple(params)).fetchall()
+            for r in rows:
+                d = dict(r)
+                out.setdefault(d["code"], []).append(Bar.model_validate(d))
+        return out
+
     def count_bars(self, code: str, period: str = "1d", adjust: str = "") -> int:
+        # 多源隔离后同一 dt 可能有多行，覆盖度按「交易日数」计（DISTINCT dt）。
         rows = self._db.query(
-            "SELECT COUNT(*) AS n FROM local_bars "
+            "SELECT COUNT(DISTINCT dt) AS n FROM local_bars "
             "WHERE code=? AND period=? AND adjust=?", (code, period, adjust))
         return int(rows[0]["n"]) if rows else 0
 
@@ -140,6 +208,14 @@ class LocalStore:
         rows = self._db.query(
             "SELECT MAX(dt) AS m FROM local_bars "
             "WHERE code=? AND period=? AND adjust=?", (code, period, adjust))
+        return rows[0]["m"] if rows and rows[0]["m"] else None
+
+    def latest_bar_dt(self) -> Optional[str]:
+        """全市场 K 线最近一根日期（选股溯源 as_of 之用）。表不存在返回 None。"""
+        try:
+            rows = self._db.query("SELECT MAX(dt) AS m FROM local_bars")
+        except Exception:  # noqa: BLE001
+            return None
         return rows[0]["m"] if rows and rows[0]["m"] else None
 
     # ------------------------------------------------------------------

@@ -86,10 +86,7 @@ class JobRuntime:
                 params = json.loads(row.get("params_json") or "{}")
             except (TypeError, ValueError):
                 params = {}
-            runner_factory = {
-                "sync": sync_runner, "screen": screen_runner,
-                "backtest": backtest_runner,
-            }.get(row["kind"])
+            runner_factory = runner_factory_for(row["kind"])
             if runner_factory is None:
                 # 未知 runner 不伪造恢复：保留明确失败状态供运维处理。
                 db.execute("UPDATE runtime_jobs SET status=?, error=? WHERE id=?",
@@ -118,6 +115,9 @@ class JobRuntime:
             job["progress"] = max(0, min(100, int(pct)))
             job["message"] = msg
             job["heartbeat_at"] = time.time()
+            # P1-20：心跳续租（report/checkpoint 均视为存活信号）
+            if job.get("lease_until"):
+                job["lease_until"] = time.time() + LEASE_SECONDS
             self._persist(job)
         return _report
 
@@ -125,6 +125,8 @@ class JobRuntime:
         def _checkpoint(payload: dict) -> None:
             job["checkpoint"] = dict(payload or {})
             job["heartbeat_at"] = time.time()
+            if job.get("lease_until"):
+                job["lease_until"] = time.time() + LEASE_SECONDS
             self._persist(job)
         return _checkpoint
 
@@ -260,12 +262,60 @@ class JobRuntime:
             job["lease_until"] = None
             self._persist(job)
 
+    # ---------------- P1-20：lease reaper（租约收割） ----------------
+    def reap_expired(self, now: Optional[float] = None) -> list[str]:
+        """把租约过期仍标记 running 的 job 判定为 failed（进程崩溃残留）。
+
+        不伪造成功：reaper 只能宣告死亡，不能恢复执行；恢复走 attach_db 的
+        启动补跑路径（带 checkpoint）。返回被收割的 job id 列表。
+        """
+        now = time.time() if now is None else now
+        reaped: list[str] = []
+        for job in self._jobs.values():
+            if job["status"] != "running":
+                continue
+            lease_until = job.get("lease_until")
+            if lease_until is None or float(lease_until) > now:
+                continue
+            job["status"] = "failed"
+            job["error"] = "lease expired（租约过期：执行者失联，任务被判死）"
+            job["message"] = "租约过期"
+            job["finished_at"] = self._now()
+            task = job.get("task")
+            if task is not None and not task.done():
+                task.cancel()
+            self._running.pop(job["id"], None)
+            self._persist(job)
+            reaped.append(job["id"])
+        return reaped
+
+    def start_reaper(self, interval: float = 30.0) -> None:
+        """启动后台 reaper 循环（幂等）。"""
+
+        async def _loop() -> None:
+            while True:
+                await asyncio.sleep(max(5.0, float(interval)))
+                try:
+                    reaped = self.reap_expired()
+                    if reaped:
+                        log.warning("lease reaper 收割过期任务: %s", reaped)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("lease reaper tick failed: %s", exc)
+
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return    # 无运行循环：跳过（测试可手动调 reap_expired）
+        if getattr(self, "_reaper_task", None) is None or self._reaper_task.done():
+            self._reaper_task = asyncio.create_task(_loop())
+
     @staticmethod
     def _now() -> str:
         return time.strftime("%Y-%m-%dT%H:%M:%S%z")
 
 
 _runtime: Optional[JobRuntime] = None
+_RUNTIME_FACTORY: dict[str, Callable[[dict], Runner]] = {}
 _RLOCK = __import__("threading").Lock()
 
 
@@ -276,6 +326,18 @@ def get_runtime() -> JobRuntime:
             if _runtime is None:
                 _runtime = JobRuntime()
     return _runtime
+
+
+def register_runner_factory(kind: str, factory: Callable[[dict], Runner]) -> None:
+    """注册 kind -> runner 工厂（system.* JobKind 由 app/runtime/system_jobs 注册）。"""
+    _RUNTIME_FACTORY[kind] = factory
+
+
+def runner_factory_for(kind: str) -> Optional[Callable[[dict], Runner]]:
+    """按 kind 查 runner 工厂（内置 4 类 + 运行期注册的 system.*）。"""
+    return _RUNTIME_FACTORY.get(kind) or {
+        "sync": sync_runner, "screen": screen_runner, "backtest": backtest_runner,
+    }.get(kind)
 
 
 # ---------------- 内置 runner：sync / screen ----------------
@@ -318,6 +380,8 @@ def sync_runner(params: dict) -> Runner:
                 str(params.get("provider_id") or "auto"),
                 str(params.get("batch_id") or summary.finished),
                 quality_state=quality,
+                calendar_version=str(params.get("calendar_version") or ""),
+                adjustment_version=str(params.get("adjust") or "qfq"),
                 manifest={"summary": result, "period": "1d",
                           "adjust": params.get("adjust", "qfq")})
             result["dataset_snapshot"] = snap
@@ -379,6 +443,25 @@ def backtest_runner(params: dict) -> Runner:
         }
         job["report"](10, "拉取真实历史 K 线")
         kline, meta = await fetch_kline_async_meta(broker_id, symbol, count)
+        # V9 §10.4：回测结果挂 Dataset Snapshot 溯源（可复现研究）。
+        # 快照缺失/质量不达标不阻断回测（K 线可能来自券商直连而非本地仓），
+        # 但来源与质量必须显式随结果落库，不得静默无 provenance。
+        dataset_snapshot_id = ""
+        dataset_quality = ""
+        dataset_warning = ""
+        try:
+            from core.db import get_db
+            from datasource.snapshots import DatasetSnapshotStore, require_quality
+            snap = DatasetSnapshotStore(get_db()).latest("cn_equity_daily")
+            if snap:
+                dataset_snapshot_id = str(snap.get("id", ""))
+                dataset_quality = str(snap.get("quality_state", ""))
+                try:
+                    require_quality(snap)
+                except ValueError as exc:
+                    dataset_warning = str(exc)
+        except Exception:  # noqa: BLE001
+            pass
         job["report"](40, "运行回测引擎")
         res = await asyncio.to_thread(
             run_backtest_engine, symbol, kline, strategy, pr, capital,
@@ -398,9 +481,15 @@ def backtest_runner(params: dict) -> Runner:
             "initial_capital": capital,
             "metrics_json": json.dumps(res.get("metrics", {}), ensure_ascii=False),
             "trades_json": json.dumps(res.get("trades", []), ensure_ascii=False),
+            "dataset_snapshot_id": dataset_snapshot_id,
             "report_path": "", "created_at": _time.strftime("%Y-%m-%dT%H:%M:%S"),
         })
         res["id"] = bid
+        res["dataset_snapshot_id"] = dataset_snapshot_id
+        if dataset_quality:
+            res["dataset_quality"] = dataset_quality
+        if dataset_warning:
+            res.setdefault("warnings", []).append(dataset_warning)
         job["report"](100, "完成")
         return res
 

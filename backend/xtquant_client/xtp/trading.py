@@ -3,7 +3,7 @@
 import threading
 from datetime import datetime
 
-from ..base import BrokerError, BrokerSDKError
+from ..base import BrokerError
 from ._common import _dget, _direction_from_order_type, _pick, _shell_attr, log
 
 
@@ -252,13 +252,16 @@ class TradingMixin:
         return out
 
     def _query_stock_deals(self, trader, acc) -> list:
-        """查询成交记录，兼容有无 ``query_stock_deals`` 的 SDK 版本。
+        """查询成交记录，兼容有无 ``query_stock_trades`` / ``query_stock_deals`` 的 SDK 版本。
 
-        - 新 SDK：``trader.query_stock_deals(acc)``；
-        - 旧 SDK（xttrader）：无此方法，退化为「已成交订单」近似（仅用于成交展示，
-          真实成交回报仍以 on_stock_trade 回调为准，不会漏单 / 不会重复计）。
+        - 新 SDK（迅投新版）：``trader.query_stock_trades(acc)``；
+        - 旧 SDK（xttrader）：``query_stock_deals``，再退化为「已成交订单」近似。
+          真实成交回报仍以 on_stock_trade 回调为准，不会漏单 / 不会重复计。
         """
-        fn = getattr(trader, "query_stock_deals", None)
+        # 关键正确性修复（P0-13）：优先 query_stock_trades（迅投新版成交接口），
+        # 回退 query_stock_deals（旧版），最后才退化到「已成交订单」近似，保证
+        # 返回真实 trade_id / traded_price / traded_time。
+        fn = getattr(trader, "query_stock_trades", None) or getattr(trader, "query_stock_deals", None)
         if fn is not None:
             try:
                 return fn(acc) or []
@@ -307,8 +310,11 @@ class TradingMixin:
         # 阶段 0-A（C2/F2）：order_stock 失败返回 -1（truthy，不能 `if not` 判断），
         # 必须把 -1 显式判为失败并抛错，否则「下单失败被报成功」→ 审计记 ok、WAL 记 pending。
         if seq is None or seq == -1:
-            raise BrokerSDKError(
-                "xtquant",
+            # 语义修正：SDK 已就位（_require_trader 已通过），-1 是**券商柜台拒单**
+            # （资金不足 / 非交易时段 / 无交易权限 / 风控拦截），并非「缺少 SDK」。
+            # 旧实现抛 BrokerSDKError 会把可操作的拒单原因包装成「请安装 SDK」，
+            # 且经桥接跨进程重建后还会二次套娃（见 bridge_client._rebuild_error）。
+            raise BrokerError(
                 "下单失败：柜台返回 -1（资金不足/标的不在交易时段/无交易权限/风控拦截）")
         seq = int(seq)
         # 阶段 0-A：真实柜台 order_id 仅经 on_order_stock_response 回调下发，
@@ -324,9 +330,20 @@ class TradingMixin:
         trader, acc = self._require_trader()
         # order_id 可能是柜台真实 order_id（place_order 返回），直接传入；
         # seq 已通过 _seq_to_oid 映射为真实 id，无需再转换。
+        # 关键正确性修复（P0-12）：必须捕获 cancel_order_stock 的返回码
+        # （0=成功 / -1=失败），据此返回真实 ok 与 message，否则上层
+        # ExecutionService 永远判撤单成功（假成功）。
         with self._lock:
-            trader.cancel_order_stock(acc, int(order_id))
-        return {"order_id": str(order_id), "status": "cancel_submitted"}
+            ret = trader.cancel_order_stock(acc, int(order_id))
+        ok = (ret == 0)
+        code = int(ret) if isinstance(ret, (int, float)) else (-1 if not ok else 0)
+        return {
+            "ok": ok,
+            "code": code,
+            "message": "" if ok else f"撤单失败（柜台返回 {ret!r}）",
+            "order_id": str(order_id),
+            "status": "cancel_submitted" if ok else "cancel_failed",
+        }
 
     def _order_status(self, st: int, oid: str) -> str:
         # 阶段 0-A（F12）：统一走共享词汇表，消除三处各说各话。

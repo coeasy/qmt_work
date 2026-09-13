@@ -48,8 +48,12 @@ def test_market_order_risk_uses_real_quote():
         result = await ExecutionService(risk=risk).place_order(
             bridge, "600519.SH", "buy", 100, 0, "market")
         assert result["ok"] is True
+        # 风控用真实最新价估价
         assert risk.prices == [12.5]
-        assert bridge.gateway.calls[0][3] == 0
+        # P0-11：市价单（原始 price=0）必须把「真实估价」作为**保护价**传给柜台，
+        # 绝不能传 0（柜台会判废单）。gateway.place_order 形参序：
+        # (code, direction, price_type, price, volume, strategy, remark) → 索引 3 = price。
+        assert bridge.gateway.calls[0][3] == 12.5
 
     asyncio.run(run())
 

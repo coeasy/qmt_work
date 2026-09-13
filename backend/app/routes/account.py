@@ -1,16 +1,17 @@
+from core.context import AppContext, get_ctx
 # --- stdlib imports injected by fix_route_imports ---
 import asyncio
 import time
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
-from app.routes._common import BrokerError, _call, _need, err, no_broker, ok, state
+from app.routes._common import BrokerError, _call, _need, err, no_broker, ok
 from gateway.execution import get_execution_service
 
 router = APIRouter()
 
 @router.get("/account/status")
-async def account_status(conn_id: str = ""):
+async def account_status(conn_id: str = "", ctx: AppContext = Depends(get_ctx)):
     """获取account / status（GET /account/status）。"""
     b = _need(conn_id or None)
     if b is None:
@@ -33,9 +34,9 @@ async def account_status(conn_id: str = ""):
                "positions": pos})
 
 @router.get("/account/aggregate")
-async def account_aggregate():
+async def account_aggregate(ctx: AppContext = Depends(get_ctx)):
     """多账户聚合视图：遍历所有已连接券商账户，汇总资产/持仓/委托/成交。"""
-    conns = [c for c in state.broker_manager.all_connections() if c.connected]
+    conns = [c for c in ctx.broker_manager.all_connections() if c.connected]
     if not conns:
         return no_broker()
     accounts = []
@@ -85,14 +86,14 @@ async def account_aggregate():
     })
 
 @router.get("/account/pnl")
-async def account_pnl():
+async def account_pnl(ctx: AppContext = Depends(get_ctx)):
     """净值/月度收益（账户快照数据仓库；无数据时返回空序列）。"""
-    rows = state.db.query(
+    rows = ctx.db.query(
         "SELECT ts, net_value FROM account_snapshot ORDER BY ts DESC LIMIT 50")
     return ok({"net_value_series": [{"ts": r["ts"], "net_value": r["net_value"]} for r in reversed(rows)]})
 
 @router.get("/account/slippage")
-async def account_slippage(code: str = "600519.SH", conn_id: str = ""):
+async def account_slippage(code: str = "600519.SH", conn_id: str = "", ctx: AppContext = Depends(get_ctx)):
     """滑点分析（EzQmt cal_deal_comm：成交价 vs 当日 open/close/avg 基点差）。"""
     b = _need(conn_id or None)
     if b is None:
@@ -153,12 +154,12 @@ def _account_row(conn) -> dict:
 
 
 @router.get("/account/grid")
-async def account_grid():
+async def account_grid(ctx: AppContext = Depends(get_ctx)):
     """多券商 / 多账户统一看板：逐账户指标行 + 按标的汇总的持仓矩阵 + 总资产合计。
 
     未连接的账户亦列出（error 字段说明原因），便于统一运维视图。
     """
-    conns = state.broker_manager.all_connections()
+    conns = ctx.broker_manager.all_connections()
     if not conns:
         return err(503, "尚未添加任何券商连接：请到「券商连接」页添加券商。")
     rows = [_account_row(c) for c in conns]
@@ -236,8 +237,11 @@ def _expand_batch_orders(body: dict) -> list[dict]:
 
 
 @router.post("/account/batch/order")
-async def account_batch_order(body: dict):
-    """批量下单（跨账户统一执行）：每个订单独立走风控 + 对应连接下单。
+async def account_batch_order(body: dict, ctx: AppContext = Depends(get_ctx)):
+    """批量下单（跨账户统一执行）：经 BatchExecutionService → SignalRouter 统一链路。
+
+    V9 §6.2：批量不再形成独立执行旁路——每个子单都是一个完整意图
+    （ExecutionMode + 风控 + 幂等 + WAL + 审计）。
 
     body:
       {"orders":[{"conn_id","code","direction","volume","price","price_type"}]}
@@ -247,39 +251,18 @@ async def account_batch_order(body: dict):
     orders = _expand_batch_orders(body)
     if not orders:
         return err(400, "orders 或 conn_ids 至少提供一个")
-    results = []
-    ok_count = 0
-    for o in orders:
-        rec = {"conn_id": o["conn_id"], "code": o["code"], "direction": o["direction"],
-               "volume": o["volume"], "status": "rejected", "detail": ""}
-        if not o["code"] or o["direction"] not in ("buy", "sell") or o["volume"] <= 0:
-            rec["detail"] = "参数非法（code/direction/volume）"
-            results.append(rec)
-            continue
-        b = state.broker_manager.bridge(o["conn_id"] or None)
-        if b is None:
-            rec["detail"] = "连接不存在或未连接"
-            results.append(rec)
-            continue
-        res = await get_execution_service().place_order(
-            b, o["code"], o["direction"], o["volume"], o["price"],
-            o["price_type"], "batch", "", risk=state.risk)
-        if isinstance(res, dict) and res.get("ok", False):
-            rec["status"] = "submitted"
-            rec["order_id"] = res.get("order_id")
-            rec["detail"] = "ok"
-            ok_count += 1
-        else:
-            rec["detail"] = (res.get("reason") or res.get("message")
-                              if isinstance(res, dict) else str(res))
-        results.append(rec)
-    state.db.audit("trading", "account.batch_order", "", {"count": len(orders),
-                   "ok": ok_count}, "ok")
-    return ok({"total": len(orders), "ok": ok_count, "results": results})
+    if ctx.signal_router is None:
+        return err(503, "统一信号入口未初始化")
+    batch_id = str(body.get("batch_id", "") or f"b{int(time.time()*1000)}")
+    from gateway.batch_execution import get_batch_execution_service
+    summary = await get_batch_execution_service().submit_batch(orders, batch_id=batch_id)
+    ctx.db.audit("trading", "account.batch_order", "", {"count": len(orders),
+                   "ok": summary["ok"], "batch_id": batch_id}, "ok")
+    return ok(summary)
 
 
 @router.post("/account/batch/cancel")
-async def account_batch_cancel(body: dict):
+async def account_batch_cancel(body: dict, ctx: AppContext = Depends(get_ctx)):
     """批量撤单（跨账户）：items=[{conn_id,order_id}] 或 conn_ids+order_id 广播。"""
     items = body.get("items")
     if isinstance(items, list) and items:
@@ -302,7 +285,7 @@ async def account_batch_cancel(body: dict):
             rec["detail"] = "order_id 为空"
             results.append(rec)
             continue
-        b = state.broker_manager.bridge(t["conn_id"] or None)
+        b = ctx.broker_manager.bridge(t["conn_id"] or None)
         if b is None:
             rec["detail"] = "连接不存在或未连接"
             results.append(rec)
@@ -320,22 +303,22 @@ async def account_batch_cancel(body: dict):
 
 
 @router.post("/account/batch/reconnect")
-async def account_batch_reconnect(body: dict):
+async def account_batch_reconnect(body: dict, ctx: AppContext = Depends(get_ctx)):
     """批量重连指定账户（崩溃恢复 / 换会话后一键拉起）。"""
     cids = body.get("conn_ids") or []
     if isinstance(cids, str):
         cids = [cids]
     if not cids:
         # 默认重连所有已标记 active 的连接
-        cids = [c.cfg.conn_id for c in state.broker_manager.all_connections()
+        cids = [c.cfg.conn_id for c in ctx.broker_manager.all_connections()
                 if c.cfg.active]
 
     async def _one(cid: str) -> dict:
         rec = {"conn_id": cid, "status": "failed", "detail": ""}
         try:
             # 阶段 0-D（C7）：connect 同步阻塞（最坏 _ping 90s 超时），放线程池执行
-            await asyncio.to_thread(state.broker_manager.connect, cid)
-            conn = state.broker_manager._conns.get(cid)
+            await asyncio.to_thread(ctx.broker_manager.connect, cid)
+            conn = ctx.broker_manager._conns.get(cid)
             if conn and conn.connected:
                 rec["status"] = "connected"
                 rec["detail"] = "ok"

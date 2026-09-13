@@ -1,12 +1,13 @@
+from core.context import AppContext, get_ctx
 # --- stdlib imports injected by fix_route_imports ---
 import asyncio
 import logging
 import sys
 import time
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
-from app.routes._common import BrokerError, ConnectionConfig, err, get_profile, ok, state
+from app.routes._common import BrokerError, ConnectionConfig, err, get_profile, ok
 
 log = logging.getLogger("qmt_work.broker")
 
@@ -15,7 +16,7 @@ log = logging.getLogger("qmt_work.broker")
 router = APIRouter()
 
 @router.get("/brokers/auto-detect")
-async def auto_detect_brokers():
+async def auto_detect_brokers(ctx: AppContext = Depends(get_ctx)):
     """自动发现本机 QMT / MiniQMT 客户端（运行中进程 + 安装目录扫描），返回候选列表。
 
     候选含：客户端根、疑似券商档案、userdata_mini、xtquant 定位与可导入状态、
@@ -107,7 +108,7 @@ def _resolve_account(client_path: str, account_id: str, account_type: str = "STO
             "discovered": True, "accounts": accounts}
 
 @router.get("/brokers/runtimes")
-async def broker_runtimes():
+async def broker_runtimes(ctx: AppContext = Depends(get_ctx)):
     """ABI 运行时矩阵：主后端 Python、随包附带的桥接运行时、当前策略。
 
     供排障确认「哪些券商 xtquant ABI 可被进程内直连 / 桥接子进程覆盖」。
@@ -123,7 +124,7 @@ async def broker_runtimes():
 
 
 @router.post("/brokers/version-info")
-async def broker_version_info(body: dict):
+async def broker_version_info(body: dict, ctx: AppContext = Depends(get_ctx)):
     """QMT 客户端版本画像探测（不连接券商）：识别客户端类型 / 版本 / 能力矩阵。
 
     解决「全功能完整版 vs 仅部分功能的极速 MiniQMT」的识别与能力路由：
@@ -149,7 +150,7 @@ async def broker_version_info(body: dict):
 
 
 @router.get("/brokers/diagnostics")
-async def broker_diagnostics(deep: bool = False):
+async def broker_diagnostics(deep: bool = False, ctx: AppContext = Depends(get_ctx)):
     """端到端可观测性快照（排障 / 长时段稳定性观察用，不依赖真实券商）。
 
     默认浅层（快）：宿主 ABI、随包桥接运行时、各连接状态与行情泵健康。
@@ -172,9 +173,9 @@ async def broker_diagnostics(deep: bool = False):
         system = await asyncio.to_thread(discover_system_runtimes)
         payload["system_runtimes"] = {str(k): v for k, v in sorted(system.items())}
 
-    conns = state.broker_manager.all_connections()
+    conns = ctx.broker_manager.all_connections()
     for conn in conns:
-        active = (state.broker_manager._active_id == conn.cfg.conn_id)
+        active = (ctx.broker_manager._active_id == conn.cfg.conn_id)
         entry = {
             "conn_id": conn.cfg.conn_id,
             "name": conn.cfg.name,
@@ -210,7 +211,7 @@ def _runtime_plan_for(client_path: str):
 
 
 @router.get("/brokers/profiles")
-async def broker_profiles():
+async def broker_profiles(ctx: AppContext = Depends(get_ctx)):
     """获取brokers / profiles（GET /brokers/profiles）。"""
     from xtquant_client.registry import BROKER_PROFILES, registry
     builtin = {p.id for p in BROKER_PROFILES}
@@ -223,7 +224,7 @@ async def broker_profiles():
                 "status": getattr(p, "status", "active")} for p in registry.list()])
 
 @router.get("/brokers")
-async def list_brokers():
+async def list_brokers(ctx: AppContext = Depends(get_ctx)):
     """获取brokers（GET /brokers）。
 
     status_list() 内含磁盘/子进程 I/O，是同步阻塞调用。前端「连接管理」页每 15s
@@ -231,10 +232,10 @@ async def list_brokers():
     单次 ~47s → 请求堆积 → 任何页面都加载不出来）。此处统一丢进线程池，
     保证事件循环永远不被单个连接状态查询拖住。
     """
-    return ok(await asyncio.to_thread(state.broker_manager.status_list))
+    return ok(await asyncio.to_thread(ctx.broker_manager.status_list))
 
 @router.post("/brokers")
-async def add_broker(body: dict):
+async def add_broker(body: dict, ctx: AppContext = Depends(get_ctx)):
     """创建/提交brokers（POST /brokers）。"""
     target = _resolve_account(body.get("client_path", ""), body.get("account_id", ""),
                               body.get("account_type", "STOCK"))
@@ -262,7 +263,7 @@ async def add_broker(body: dict):
         # 阶段 0-D（C7）：add_connection(autoconnect=True) 会同步拉起子进程 + 握手
         # （最坏 _ping 90s 超时），放线程池执行，避免冻结 FastAPI 事件循环。
         conn = await asyncio.to_thread(
-            state.broker_manager.add_connection,
+            ctx.broker_manager.add_connection,
             cfg, bool(body.get("autoconnect", True)))
     except BrokerError as exc:
         return err(503, str(exc))
@@ -295,7 +296,7 @@ def agent_broker_name(body: dict, broker_id: str) -> str:
 
 
 @router.post("/brokers/test")
-async def test_broker(body: dict):
+async def test_broker(body: dict, ctx: AppContext = Depends(get_ctx)):
     """创建/提交brokers / test（POST /brokers/test）。"""
     target = _resolve_account(body.get("client_path", ""), body.get("account_id", ""),
                               body.get("account_type", "STOCK"))
@@ -307,7 +308,7 @@ async def test_broker(body: dict):
         session_id=int(body.get("session_id", 0) or 0),
         min_version=body.get("min_version", ""))
     # 阶段 0-D（C7）：test_connection 会临时拉起子进程（最坏 90s 超时），须放线程池。
-    res = await asyncio.to_thread(state.broker_manager.test_connection, cfg)
+    res = await asyncio.to_thread(ctx.broker_manager.test_connection, cfg)
     if isinstance(res, dict):
         res["account_id"] = target["account_id"]
         res["account_type"] = target["account_type"]
@@ -317,7 +318,7 @@ async def test_broker(body: dict):
 
 
 @router.post("/brokers/launch")
-async def launch_broker_client(body: dict):
+async def launch_broker_client(body: dict, ctx: AppContext = Depends(get_ctx)):
     """按模式启动 QMT 客户端主程序（full=完整版 XtItClient / mini=极速版 XtMiniQmt /
     quote=独立行情 miniquote）。GUI 程序立即返回，登录需用户在弹出的窗口中完成。"""
     from xtquant_client.xtp import launch_client
@@ -331,57 +332,57 @@ async def launch_broker_client(body: dict):
         return err(500, f"启动客户端失败：{exc}")
 
 @router.post("/brokers/{conn_id}/connect")
-async def connect_broker(conn_id: str):
+async def connect_broker(conn_id: str, ctx: AppContext = Depends(get_ctx)):
     """创建/提交brokers / connect（POST /brokers/{conn_id}/connect）。"""
     try:
         # 阶段 0-D（C7）：connect 同步 start() + test_connection()（最坏 90s），放线程池。
-        res = await asyncio.to_thread(state.broker_manager.connect, conn_id)
+        res = await asyncio.to_thread(ctx.broker_manager.connect, conn_id)
     except (KeyError, BrokerError) as exc:
-        state.db.audit("broker", "broker.connect_failed", conn_id, {}, str(exc))
+        ctx.db.audit("broker", "broker.connect_failed", conn_id, {}, str(exc))
         return err(503, str(exc))
     except Exception as exc:  # noqa: BLE001  探测抛 RuntimeError 等也记录
-        state.db.audit("broker", "broker.connect_failed", conn_id, {}, str(exc))
+        ctx.db.audit("broker", "broker.connect_failed", conn_id, {}, str(exc))
         return err(503, str(exc))
-    state.db.audit("broker", "broker.connect", conn_id,
+    ctx.db.audit("broker", "broker.connect", conn_id,
                    {"connected": res.get("connected")}, "ok")
     return ok(res)
 
 @router.post("/brokers/{conn_id}/disconnect")
-async def disconnect_broker(conn_id: str):
+async def disconnect_broker(conn_id: str, ctx: AppContext = Depends(get_ctx)):
     """创建/提交brokers / disconnect（POST /brokers/{conn_id}/disconnect）。"""
     try:
-        state.broker_manager.disconnect(conn_id)
-        state.db.audit("broker", "broker.disconnect", conn_id, {}, "ok")
+        ctx.broker_manager.disconnect(conn_id)
+        ctx.db.audit("broker", "broker.disconnect", conn_id, {}, "ok")
         return ok({"disconnected": conn_id})
     except Exception as exc:  # noqa: BLE001
-        state.db.audit("broker", "broker.disconnect_failed", conn_id, {}, str(exc))
+        ctx.db.audit("broker", "broker.disconnect_failed", conn_id, {}, str(exc))
         return err(500, str(exc))
 
 @router.post("/brokers/{conn_id}/active")
-async def set_active_broker(conn_id: str):
+async def set_active_broker(conn_id: str, ctx: AppContext = Depends(get_ctx)):
     """创建/提交brokers / active（POST /brokers/{conn_id}/active）。"""
     try:
-        state.broker_manager.set_active(conn_id)
+        ctx.broker_manager.set_active(conn_id)
     except KeyError as exc:
         return err(404, str(exc))
     except Exception as exc:  # noqa: BLE001
         return err(500, str(exc))
-    state.db.audit("broker", "broker.set_active", conn_id, {}, "ok")
+    ctx.db.audit("broker", "broker.set_active", conn_id, {}, "ok")
     return ok({"active": conn_id})
 
 @router.delete("/brokers/{conn_id}")
-async def remove_broker(conn_id: str):
+async def remove_broker(conn_id: str, ctx: AppContext = Depends(get_ctx)):
     """删除brokers（DELETE /brokers/{conn_id}）。"""
     try:
-        state.broker_manager.remove(conn_id)
-        state.db.audit("broker", "broker.remove", conn_id, {}, "ok")
+        ctx.broker_manager.remove(conn_id)
+        ctx.db.audit("broker", "broker.remove", conn_id, {}, "ok")
         return ok({"removed": conn_id})
     except Exception as exc:  # noqa: BLE001
-        state.db.audit("broker", "broker.remove_failed", conn_id, {}, str(exc))
+        ctx.db.audit("broker", "broker.remove_failed", conn_id, {}, str(exc))
         return err(500, str(exc))
 
 @router.post("/brokers/batch-delete")
-async def batch_remove_brokers(body: dict):
+async def batch_remove_brokers(body: dict, ctx: AppContext = Depends(get_ctx)):
     """创建/提交brokers / batch-delete（POST /brokers/batch-delete）。"""
     ids = [str(x) for x in (body.get("ids") or []) if x not in (None, "")]
     if not ids:
@@ -389,20 +390,20 @@ async def batch_remove_brokers(body: dict):
     removed = []
     for conn_id in ids:
         try:
-            state.broker_manager.remove(conn_id)
+            ctx.broker_manager.remove(conn_id)
             removed.append(conn_id)
         except (KeyError, ConnectionError, RuntimeError) as exc:
             # 单条删除失败：继续处理剩余项，整体不阻断
             log.warning("删除连接 %s 失败，已跳过：%s", conn_id, exc)
-    state.db.audit("broker", "broker.batch_remove", f"#{len(removed)}", {"ids": removed}, "ok")
+    ctx.db.audit("broker", "broker.batch_remove", f"#{len(removed)}", {"ids": removed}, "ok")
     return ok({"removed": removed, "deleted": len(removed)})
 
 @router.get("/brokers/{conn_id}/health")
-async def broker_health(conn_id: str):
+async def broker_health(conn_id: str, ctx: AppContext = Depends(get_ctx)):
     """获取brokers / health（GET /brokers/{conn_id}/health）。"""
-    if state.health_monitor is None:
+    if ctx.health_monitor is None:
         return err(503, "连接健康监控未初始化")
-    s = state.health_monitor.status(conn_id)
+    s = ctx.health_monitor.status(conn_id)
     if s is None:
         return err(404, f"未知连接：{conn_id}")
     return ok(s)

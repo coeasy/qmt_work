@@ -29,9 +29,25 @@ class BrokerSDKError(BrokerError):
 
     def __init__(self, sdk: str, extra: str = ""):
         self.sdk = sdk
+        self.extra = extra
         super().__init__(
             f"缺少券商 SDK：{sdk}。请在运行本后端的机器上安装（{extra or '参见券商文档'}），"
             f"且券商客户端需处于登录/可交易状态。")
+
+    @classmethod
+    def from_message(cls, message: str) -> "BrokerSDKError":
+        """以「完整可读消息」重建（跨进程桥接用）。
+
+        桥接子进程回传的是 `_safe_err(exc)`（完整文案），而不是构造参数。
+        若在客户端把它当 `sdk` 名再走双参构造，会产出
+        「缺少券商 SDK：<整段消息>。请…安装…」的套娃文案。此工厂方法跳过格式化，
+        原样保留消息。
+        """
+        obj = cls.__new__(cls)
+        obj.sdk = ""
+        obj.extra = ""
+        BrokerError.__init__(obj, message)
+        return obj
 
 
 class BrokerAdapter(ABC):

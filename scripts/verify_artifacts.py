@@ -26,6 +26,23 @@ def files(root: Path) -> list[Path]:
     return sorted(p for p in root.rglob("*") if p.is_file()) if root.exists() else []
 
 
+def _version() -> str:
+    """P2-28：版本单一来源 = 仓库根 VERSION 文件。"""
+    version_file = ROOT / "VERSION"
+    try:
+        return version_file.read_text(encoding="utf-8").strip()
+    except OSError:
+        return "unknown"
+
+
+def _toolchain() -> dict:
+    tc = ROOT / "TOOLCHAIN.json"
+    try:
+        return json.loads(tc.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
 def components() -> list[dict[str, str]]:
     result: list[dict[str, str]] = []
     lock = ROOT / "frontend" / "package-lock.json"
@@ -49,7 +66,7 @@ def main() -> int:
     parser.add_argument("--require-client", action="store_true")
     args = parser.parse_args()
     backend = ROOT / "backend" / "dist" / "qmt_work"
-    release = ROOT / "frontend" / "release"
+    release = ROOT / "frontend" / "dist-electron"
     artifact_paths = [p for p in files(backend) + files(release)
                       if p.name != "release-manifest.json"]
     if args.require_client and (not backend.exists() or not release.exists()):
@@ -62,6 +79,7 @@ def main() -> int:
     manifest = {
         "schema": "qmt_work.artifact-manifest.v1",
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "version": _version(),
         "source_revision": os.environ.get("GITHUB_SHA", "local"),
         "artifacts": [
             {"path": str(path.relative_to(ROOT)).replace("\\", "/"),
@@ -69,6 +87,7 @@ def main() -> int:
             for path in artifact_paths
         ],
         "sbom": components(),
+        "toolchain": _toolchain(),
     }
     release.mkdir(parents=True, exist_ok=True)
     output = release / "release-manifest.json"

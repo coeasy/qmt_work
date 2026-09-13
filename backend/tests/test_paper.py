@@ -165,16 +165,18 @@ def test_to_from_dict(engine):
 @pytest.fixture()
 def client(engine):
     import app.routes.paper as paper_routes
-    from app.state import state
-    state.paper_engine = engine
+    import core.context as ctx_mod
+    # V10：路由读 active_context().paper_engine；无 lifespan 时 _ACTIVE 为 None、
+    # active_context() 每次返回新实例，必须显式 set_active_context 才能被路由看到。
+    ctx = ctx_mod.AppContext()
+    ctx.paper_engine = engine
+    ctx_mod.set_active_context(ctx)
     app = FastAPI()
     app.include_router(paper_routes.router, prefix="/api/v1")
-    yield TestClient(app)
-    if hasattr(state, "paper_engine"):
-        try:
-            del state.paper_engine
-        except AttributeError:
-            state.paper_engine = None
+    try:
+        yield TestClient(app)
+    finally:
+        ctx_mod.set_active_context(None)
 
 
 def test_api_order_and_account(client):
@@ -210,15 +212,18 @@ def test_api_reset(client):
 
 def test_api_503_when_engine_missing():
     import app.routes.paper as paper_routes
-    from app.state import state
-    old = getattr(state, "paper_engine", None)
-    state.paper_engine = None
+    import core.context as ctx_mod
+    ctx = ctx_mod.AppContext()
+    ctx.paper_engine = None
+    ctx_mod.set_active_context(ctx)
     app = FastAPI()
     app.include_router(paper_routes.router, prefix="/api/v1")
-    c = TestClient(app)
-    assert c.get("/api/v1/paper/account").json()["code"] == 503
-    assert c.post("/api/v1/paper/order", json={}).json()["code"] == 503
-    state.paper_engine = old
+    try:
+        c = TestClient(app)
+        assert c.get("/api/v1/paper/account").json()["code"] == 503
+        assert c.post("/api/v1/paper/order", json={}).json()["code"] == 503
+    finally:
+        ctx_mod.set_active_context(None)
 
 
 # ---------------- 行情流盯市接线（sync.SyncEngine.on_event → process_quote） ----------------
@@ -230,7 +235,7 @@ def test_sync_engine_feeds_paper_mark_to_market(engine):
     engine.submit_order("600519.SH", "buy", 100.0, 1000)
     se = SyncEngine(None, None)
 
-    import app.state as state_mod
+    import core.state as state_mod
     old = state_mod.state.paper_engine
     state_mod.state.paper_engine = engine
     try:
@@ -249,7 +254,7 @@ def test_sync_engine_skips_paper_when_no_position(engine):
     from sync import SyncEngine
 
     se = SyncEngine(None, None)
-    import app.state as state_mod
+    import core.state as state_mod
     old = state_mod.state.paper_engine
     state_mod.state.paper_engine = engine
     try:

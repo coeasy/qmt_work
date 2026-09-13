@@ -3,7 +3,7 @@
 // 此前跨组件通信用 window CustomEvent：事件名是裸字符串散落 10+ 组件、
 // 数据流不可追踪、无法单测。本模块提供同语义的显式总线：
 //
-//   import { on, emit } from "../lib/eventBus";
+//   import { on, emit } from "./eventBus";
 //   const off = on("nav", (detail) => { ... });   // detail 即 CustomEvent.detail
 //   emit("nav", { pageKey: "quote" });            // 返回是否有订阅者
 //   off();                                        // 或 off("nav", fn)

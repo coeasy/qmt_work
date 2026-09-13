@@ -11,7 +11,7 @@ import pytest
 
 from gateway.order_watchdog import collect_stale
 from gateway.reconcile import OrderReconciler
-from xtquant_client.base import BrokerSDKError
+from xtquant_client.base import BrokerError
 from xtquant_client.order_status import (
     CANCELLED,
     FILLED,
@@ -96,7 +96,8 @@ def test_place_order_negative_one_raises():
     xtp_mod._ensure_xtconstant = lambda: type("X", (), {
         "STOCK_BUY": 0, "STOCK_SELL": 1, "LATEST_PRICE": 5, "FIX_PRICE": 6})()
     try:
-        with pytest.raises(BrokerSDKError):
+        # 语义修正：-1 是柜台拒单（真实 BrokerError），不是「缺少 SDK」。
+        with pytest.raises(BrokerError):
             a.place_order("600000", "buy", "limit", 10.0, 100)
     finally:
         xtp_mod._ensure_xtconstant = orig

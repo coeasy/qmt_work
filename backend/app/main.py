@@ -154,7 +154,10 @@ def create_app() -> FastAPI:
     @asynccontextmanager
     async def app_lifespan(app: FastAPI):
         state.begin_startup()
-        # 6 阶段顺序启动
+        # V9 Phase 5：6 阶段 Required/Optional 显式分层启动。
+        # Required（db/engines/watchdogs/replay/misc）失败 → 抛错阻断启动；
+        # Optional（broker）失败 → Degraded 继续（QMT 失败不失去 READY）。
+        from app.bootstrap.lifecycle import run_phases
         phases = [
             ("db",        phase_db.setup),
             ("broker",    phase_broker.setup),
@@ -163,20 +166,62 @@ def create_app() -> FastAPI:
             ("replay",    phase_replay.setup),
             ("misc",      phase_misc.setup),
         ]
-        for name, fn in phases:
-            state.mark_phase(name, "starting")
-            try:
-                await fn(app)
-                state.mark_phase(name, "ready")
-                log.info("bootstrap phase %s done", name)
-            except Exception as exc:  # noqa: BLE001
-                state.mark_phase(name, "error")
-                log.exception("bootstrap phase %s failed: %s", name, exc)
+        try:
+            await run_phases(app, phases, state.mark_phase)
+        except RuntimeError as exc:
+            log.error("startup aborted: %s", exc)
+            raise
+        # V10 Phase A：启动完成后显式聚合 AppContext（core 不反向 import 任何外层模块）。
+        # 此处是 app 层装配出口，允许 import 全栈；所有依赖显式注入。
+        # 关键顺序（P1-18 修正）：mark_ready() 必须早于 build_from_state()。
+        # AppContext.lifecycle_ready 是**快照字段**（build_from_state 逐字段拷贝），
+        # 若先建 ctx 并 set_active_context 再 mark_ready，进程级 ctx 将永久停留在
+        # lifecycle_ready=False → /api/v1/ready 恒 503（即便所有 Required 阶段都
+        # ready、db/engines 全绿）。实测：客户端本地启动后 /ready 恒 503 即由此而来。
         state.mark_ready()
+        try:
+            from core.context import AppContext, build_from_state, set_active_context
+            ctx = build_from_state(state)
+            try:
+                from app.runtime.jobs import get_runtime
+                ctx.job_runtime = get_runtime()
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                from datasource.registry import get_manager
+                ctx.data_router = get_manager()
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                from gateway.execution import get_execution_service
+                ctx.execution = get_execution_service()
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                from gateway.trading_session import default_session
+                ctx.calendar = default_session
+            except Exception:  # noqa: BLE001
+                pass
+            ctx.connector_registry = ctx.broker_manager
+            ctx.scheduler = state.market_sync
+            app.state.ctx = ctx
+            set_active_context(ctx)
+        except Exception:
+            log.exception("AppContext build failed (non-fatal, degrade to state locator)")
         try:
             yield
         finally:
             state.begin_shutdown()
+            # 停机标志同步到进程级 ctx（快照字段不随 state 自动变化），
+            # 使停机窗口内 /ready、/health 如实反映 stopping。
+            try:
+                from core.context import active_context
+                live = active_context()
+                if live is not None:
+                    live.lifecycle_ready = False
+                    live.lifecycle_stopping = True
+            except Exception:  # noqa: BLE001
+                pass
             # 优雅停机（逆序关闭所有引擎/服务）
             await _shutdown(app)
 
@@ -244,6 +289,10 @@ def create_app() -> FastAPI:
 
     app.include_router(router)
     _apply_openapi_meta(app)
+
+    # V9 Phase 5（P1-27）：全局异常处理统一信封（404/422/500 → {code,message,data}）
+    from app.middleware.error_handler import register_error_handlers
+    register_error_handlers(app)
 
     @app.post("/api/v1/scheduler/shutdown")
     async def _desktop_shutdown():

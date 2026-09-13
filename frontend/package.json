@@ -17,42 +17,8 @@
     "pack": "npm run build && npm run backend:build && electron-builder --dir",
     "dist": "npm run build && npm run backend:build && electron-builder --win nsis",
     "dist:portable": "npm run build && npm run backend:build && electron-builder --win zip",
-    "pkg:win": "npm run build && npm run backend:build && electron-builder --win"
-  },
-  "build": {
-    "appId": "com.qmtwork.desktop",
-    "productName": "qmt_work",
-    "copyright": "Copyright © 2026 qmt_work",
-    "directories": {
-      "output": "release",
-      "buildResources": "build"
-    },
-    "extraResources": [
-      {
-        "from": "../backend/dist/qmt_work",
-        "to": "backend/qmt_work"
-      }
-    ],
-    "win": {
-      "target": [
-        {
-          "target": "nsis",
-          "arch": "x64"
-        },
-        {
-          "target": "zip",
-          "arch": "x64"
-        }
-      ],
-      "artifactName": "${productName}-${version}-${os}-${arch}.${ext}"
-    },
-    "nsis": {
-      "oneClick": false,
-      "perMachine": false,
-      "allowToChangeInstallationDirectory": true,
-      "createDesktopShortcut": true,
-      "createStartMenuShortcut": true
-    }
+    "pkg:win": "npm run build && npm run backend:build && electron-builder --win",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "echarts": "^5.5.1",
@@ -71,6 +37,6 @@
     "jsdom": "26.1.0",
     "puppeteer-core": "^20.9.0",
     "vite": "^5.4.11",
-    "vitest": "^2.1.8"
+    "vitest": "^3.2.4"
   }
 }

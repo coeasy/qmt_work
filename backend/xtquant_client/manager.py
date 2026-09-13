@@ -100,6 +100,8 @@ class BrokerManager:
         self._conns: dict[str, Connection] = {}
         self._active_id: str | None = None
         self._lock = threading.Lock()
+        # V10 A4：连接事件指标回调（app 层注入；xtquant_client 不反向依赖 gateway）
+        self.metrics_fn = None
 
     # ---------------- 持久化加载 ----------------
     def load_persisted(self) -> None:
@@ -130,7 +132,7 @@ class BrokerManager:
             cfg.name = prof.name if prof else cfg.broker_id
         adapter = create_adapter(cfg.broker_id, cfg.client_path, cfg.account_id,
                                  cfg.account_type, cfg.session_id, cfg.min_version,
-                                 cfg.client_mode)
+                                 cfg.client_mode, metrics_fn=self.metrics_fn)
         conn = Connection(cfg=cfg, adapter=adapter, bridge=XTQuantBridge(adapter))
         self._conns[cfg.conn_id] = conn
         if connect:
@@ -261,6 +263,21 @@ class BrokerManager:
         except Exception as exc:  # noqa: BLE001
             log.warning("disconnect %r close 失败: %s", conn_id, exc)
         conn.connected = False
+
+    def disconnect_all(self) -> int:
+        """断开全部连接（P2-7：优雅停机用；返回断开数量）。
+
+        与逐个 disconnect 语义一致：清 active、取消重连任务、关闭适配器。
+        单个连接失败不阻断其余连接的断开。
+        """
+        n = 0
+        for conn_id in list(self._conns.keys()):
+            try:
+                self.disconnect(conn_id)
+                n += 1
+            except Exception as exc:  # noqa: BLE001
+                log.warning("disconnect_all %r 失败: %s", conn_id, exc)
+        return n
 
     def remove(self, conn_id: str) -> None:
         self.disconnect(conn_id)

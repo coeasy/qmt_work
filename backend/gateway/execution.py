@@ -61,18 +61,27 @@ class ExecutionService:
             "price": price, "price_type": price_type,
             "strategy": strategy_name, "remark": remark,
         }
+        # V9 §7 强制规则：Mandatory Risk 不可绕过。风控未初始化时必须拒绝，
+        # 绝不允许「checker is None 即放行」的无风控裸单。
+        if checker is None:
+            reason = "风控未初始化，拒绝下单（Mandatory Risk）"
+            self._audit("order.rejected", code, params, reason)
+            return {"ok": False, "reason": reason}
         risk_price, price_error = await self._risk_price(bridge, code, price)
         if risk_price is None:
             self._audit("order.rejected", code, params, price_error)
             return {"ok": False, "reason": price_error}
-        if checker is not None:
-            allowed, reason = checker.check_order(
-                code, risk_price, volume, direction, price_type)
-            if not allowed:
-                self._audit("order.rejected", code, params, reason)
-                return {"ok": False, "reason": reason}
+        allowed, reason = checker.check_order(
+            code, risk_price, volume, direction, price_type)
+        if not allowed:
+            self._audit("order.rejected", code, params, reason)
+            return {"ok": False, "reason": reason}
+        # 关键正确性修复（P0-11）：市价单/无价单必须把「真实估价后的价格」
+        # 作为保护价传给柜台，绝不能传原始 price（市价单 price=0 会被柜台判为
+        # 废单）。risk_price 已通过真实行情校验：限价单时等于用户原始价，市价单时
+        # 为最新价（见 _risk_price）。未知价场景在上方已被拒绝，不会走到这里。
         result: Any = await bridge.call_locked(
-            bridge.gateway.place_order, code, direction, price_type, price,
+            bridge.gateway.place_order, code, direction, price_type, risk_price,
             volume, strategy_name, remark)
         if isinstance(result, dict) and result.get("code", 0) != 0:
             result["ok"] = False
@@ -88,7 +97,11 @@ class ExecutionService:
         result = await bridge.call_locked(bridge.gateway.cancel_order, order_id)
         self._audit(action, order_id, {}, "ok")
         if isinstance(result, dict):
-            result["ok"] = result.get("code", 0) == 0
+            # 关键正确性修复（P0-12）：以网关返回的 ok 为准。旧实现读取不存在的
+            # `code` 键（cancel_order 根本不返回 code），导致撤单永远被判成功。
+            # 仅在网关未显式给出 ok 时，才回退到 code==0 的兼容判定。
+            if "ok" not in result:
+                result["ok"] = result.get("code", 0) == 0
         return result
 
     async def cancel_order_price(self, bridge, order_id: str, deviation: float = 0.01,

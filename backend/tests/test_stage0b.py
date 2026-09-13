@@ -8,7 +8,7 @@ import asyncio
 
 import pytest
 
-from app.state import state
+from core.state import state
 from engines.algo import AlgoEngine
 from gateway.idempotency import single_flight
 from gateway.risk import RiskManager, normalize_direction

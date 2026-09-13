@@ -1,6 +1,7 @@
-from fastapi import APIRouter
+from core.context import AppContext, get_ctx
+from fastapi import APIRouter, Depends
 
-from app.routes._common import err, ok, state
+from app.routes._common import err, ok
 
 # --- stdlib imports injected by fix_route_imports ---
 
@@ -9,64 +10,64 @@ from app.routes._common import err, ok, state
 router = APIRouter()
 
 @router.get("/webhooks")
-async def list_webhooks():
+async def list_webhooks(ctx: AppContext = Depends(get_ctx)):
     """获取webhooks（GET /webhooks）。"""
-    if state.webhook_out is None:
+    if ctx.webhook_out is None:
         return err(503, "出站 webhook 未初始化")
-    return ok(state.webhook_out.list_subs())
+    return ok(ctx.webhook_out.list_subs())
 
 @router.post("/webhooks")
-async def save_webhook(body: dict):
+async def save_webhook(body: dict, ctx: AppContext = Depends(get_ctx)):
     """创建/提交webhooks（POST /webhooks）。"""
-    if state.webhook_out is None:
+    if ctx.webhook_out is None:
         return err(503, "出站 webhook 未初始化")
     try:
-        sid = state.webhook_out.save_sub(body)
+        sid = ctx.webhook_out.save_sub(body)
     except ValueError as exc:
         return err(400, str(exc))
-    state.db.audit("admin", "webhook.save", f"#{sid}",
+    ctx.db.audit("admin", "webhook.save", f"#{sid}",
                    {"name": body.get("name"), "url": body.get("url"),
                     "events": body.get("events", "*")}, "ok")
     return ok({"id": sid})
 
 @router.delete("/webhooks/{sid}")
-async def delete_webhook(sid: int):
+async def delete_webhook(sid: int, ctx: AppContext = Depends(get_ctx)):
     """删除webhooks（DELETE /webhooks/{sid}）。"""
-    if state.webhook_out is None:
+    if ctx.webhook_out is None:
         return err(503, "出站 webhook 未初始化")
-    state.webhook_out.delete_sub(sid)
-    state.db.audit("admin", "webhook.delete", f"#{sid}", {}, "ok")
+    ctx.webhook_out.delete_sub(sid)
+    ctx.db.audit("admin", "webhook.delete", f"#{sid}", {}, "ok")
     return ok({"deleted": True})
 
 @router.post("/webhooks/batch-delete")
-async def batch_delete_webhooks(body: dict):
+async def batch_delete_webhooks(body: dict, ctx: AppContext = Depends(get_ctx)):
     """创建/提交webhooks / batch-delete（POST /webhooks/batch-delete）。"""
-    if state.webhook_out is None:
+    if ctx.webhook_out is None:
         return err(503, "出站 webhook 未初始化")
     ids = [int(x) for x in (body.get("ids") or []) if str(x).isdigit()]
     if not ids:
         return err(400, "ids 不能为空")
     for sid in ids:
-        state.webhook_out.delete_sub(sid)
-        state.db.audit("admin", "webhook.delete", f"#{sid}", {}, "ok")
+        ctx.webhook_out.delete_sub(sid)
+        ctx.db.audit("admin", "webhook.delete", f"#{sid}", {}, "ok")
     return ok({"deleted": len(ids)})
 
 @router.post("/webhooks/{sid}/test")
-async def test_webhook(sid: int):
+async def test_webhook(sid: int, ctx: AppContext = Depends(get_ctx)):
     """创建/提交webhooks / test（POST /webhooks/{sid}/test）。"""
-    if state.webhook_out is None:
+    if ctx.webhook_out is None:
         return err(503, "出站 webhook 未初始化")
     try:
-        return ok(await state.webhook_out.test(sid))
+        return ok(await ctx.webhook_out.test(sid))
     except KeyError as exc:
         return err(404, str(exc))
 
 @router.get("/webhooks/deliveries")
-async def webhook_deliveries(sid: int = 0, limit: int = 50):
+async def webhook_deliveries(sid: int = 0, limit: int = 50, ctx: AppContext = Depends(get_ctx)):
     """获取webhooks / deliveries（GET /webhooks/deliveries）。"""
-    if state.webhook_out is None:
+    if ctx.webhook_out is None:
         return err(503, "出站 webhook 未初始化")
-    return ok(state.webhook_out.deliveries(sid=sid, limit=limit))
+    return ok(ctx.webhook_out.deliveries(sid=sid, limit=limit))
 
 
 # ---------------- 告警规则引擎 ----------------

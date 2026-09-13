@@ -1,0 +1,13 @@
+{
+  "deal": [
+    "deal_event"
+  ],
+  "order": [
+    "order_event"
+  ],
+  "quotes": [],
+  "risk": [
+    "risk_circuit"
+  ],
+  "system": []
+}

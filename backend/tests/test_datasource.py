@@ -1,6 +1,7 @@
-"""多源行情 DataSourceManager 单元测试（mock 源，无 eltdx / 无网络）。
+"""多源行情 DataSourceManager 单元测试（测试替身源，无 eltdx / 无网络）。
 
-覆盖：auto 回退、显式源、复权改走补充源、全失败返回 None、熔断、超时、搜索索引。
+覆盖：auto 回退、显式源、复权链（v1.3：QMT 参与复权链，故障再降级补充源）、
+全失败返回 (None, None)、熔断、超时、搜索索引。
 需在装有 pytest 的环境运行（pytest 未装时可用 `python -m tests.test_datasource` 自查）。
 """
 import asyncio
@@ -46,6 +47,8 @@ class FakeTDX(DataSource):
         return {"code": code, "last": 2.0}
 
     async def get_kline(self, code, period="1d", count=250, adjust=None):
+        if self.fail:
+            raise RuntimeError("tdx down")
         return [{"close": 2}]
 
     async def get_instrument_detail(self, code):
@@ -139,12 +142,21 @@ def test_explicit_kline_broker_failure_does_not_fallback():
     asyncio.run(c())
 
 
-def test_kline_broker_then_adjust_to_eltdx():
+def test_kline_adjusted_chain_prefers_broker_then_falls_back():
+    """v1.3 契约（D9）：复权经 dividend_type 参数化后 **QMT 参与复权链**（不再跳过 broker）；
+    broker 不可用时按能力链真实降级到 eltdx（绝不外传伪造数据）。"""
     async def c():
         bars, src = await _m().get_kline("X.SH")
         assert src == "broker" and bars[0]["close"] == 1
+        # qfq 链首恒为 broker（链序 QMT→eltdx→baostock→akshare）
         bars2, src2 = await _m().get_kline("X.SH", adjust="qfq")
-        assert src2 == "eltdx"
+        assert src2 == "broker" and bars2[0]["close"] == 1
+        # broker 故障 → 真实降级到 eltdx（而非报错或返回空）
+        bars3, src3 = await _m(broker_fail=True).get_kline("X.SH", adjust="qfq")
+        assert src3 == "eltdx" and bars3[0]["close"] == 2
+        # 全链失败 → (None, None)，不冒充「无符合标的」
+        bars4, src4 = await _m(broker_fail=True, tdx_fail=True).get_kline("X.SH", adjust="qfq")
+        assert bars4 is None and src4 is None
     asyncio.run(c())
 
 
@@ -211,7 +223,7 @@ def test_merge_quote_derives_change_pct():
 
 if __name__ == "__main__":
     for fn in (test_auto_prefers_broker, test_auto_falls_back_to_eltdx,
-               test_explicit_source, test_kline_broker_then_adjust_to_eltdx,
+               test_explicit_source, test_kline_adjusted_chain_prefers_broker_then_falls_back,
                test_all_fail_returns_none, test_breaker_trips_and_skips,
                test_search_stocks_indexed, test_slow_source_times_out,
                test_classify_and_limit):

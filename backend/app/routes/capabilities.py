@@ -14,6 +14,18 @@ from app.routes._common import ok
 router = APIRouter()
 
 
+@router.get("/platform/status")
+async def platform_status():
+    """平台运行时能力自描述（D-C / D12）。
+
+    返回真实交易可用性（依据券商连接态）与选股可用性（screening_ready / screening_providers）。
+    前端 PlatformContext 据此驱动 ``can("trading")`` 等能力门控；未连接券商时 ``screening_ready``
+    仍应为 true（只要有 eltdx / baostock / akshare / 本地数据可用），否则即违反 D12。
+    """
+    from app.platform import get_platform_status
+    return ok(get_platform_status())
+
+
 @router.get("/capabilities")
 async def list_capabilities(category: str = "", method: str = ""):
     """能力注册表：每个 REST 端点归一为 {id,path,method,category,summary,risk_level,

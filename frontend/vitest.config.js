@@ -11,10 +11,11 @@ export default defineConfig({
     environment: "node",
     setupFiles: ["./vitest.setup.js"],
     include: [
-      "src/lib/__tests__/**/*.test.js",
+      // 统一约定：任意目录下的 __tests__/*.test.js(x) 都纳入运行范围
+      // （lib 纯函数 / hooks / components / features 域内测试均可就近放置）
+      "src/**/__tests__/**/*.test.js",
       // hook / 组件测试含 JSX，必须用 .jsx 后缀（plugin-react 只对 jsx/tsx 生效）
-      "src/hooks/__tests__/**/*.test.jsx",
-      "src/components/__tests__/**/*.test.jsx",
+      "src/**/__tests__/**/*.test.jsx",
     ],
   },
 });

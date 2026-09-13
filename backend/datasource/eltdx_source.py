@@ -80,6 +80,20 @@ class EltdxSource(DataSource):
     _industry_loaded: bool = False
     _lock = threading.Lock()
     _industry_lock = threading.Lock()
+    # 异步路径专用锁。threading.Lock 绝不能跨 await 持有：它会在线程池 worker 仍在
+    # 做 90s 网络枚举时，让事件循环线程同步卡在 `with self._lock` 上，整个 uvicorn
+    # 事件循环冻结——所有 REST/WS/静态文件请求永久挂起（前端表现为「tab 打不开」），
+    # 且外层 asyncio.wait_for 的超时也因事件循环被占死而永不触发。
+    _aio_lock: "asyncio.Lock | None" = None
+
+    @classmethod
+    def _get_aio_lock(cls) -> "asyncio.Lock":
+        """惰性创建类级 asyncio.Lock。仅创建路径用 _lock 保护，内部无 await，纳秒级。"""
+        if cls._aio_lock is None:
+            with cls._lock:
+                if cls._aio_lock is None:
+                    cls._aio_lock = asyncio.Lock()
+        return cls._aio_lock
     # 连接治理（类级，跨实例共享）
     _client = None
     _client_ts = 0.0
@@ -174,17 +188,26 @@ class EltdxSource(DataSource):
         # 检查类级 dict 是否已加载
         if self.__class__._name_map:
             return
-        with self._lock:
+        async with self.__class__._get_aio_lock():
             # 双重检查
             if self.__class__._name_map:
                 return
             # 1) 优先读本地缓存：只要缓存里含中文简称即用（名称不随 TTL 变化，避免无效重拉）。
             #    兼容旧 bug：曾出现「仅代码、中文名为空」的坏缓存 → 视为过期，走下方网络重建。
-            cached = _load_json_cache(_name_cache_path())
+            #    文件 I/O 放线程池：同步读文件会直接占死事件循环。
+            cached = await asyncio.to_thread(_load_json_cache, _name_cache_path())
             if cached and any(cached.values()):
-                self.__class__._name_map.update(cached)
+                # 历史缓存可能是「规整逻辑加入之前」落盘的原始值（实测 000858.SZ
+                # 存成 "五 粮 液"），直接 update 会把脏名字带进内存与接口返回。
+                # 加载时统一再规整一次，并仅在确有变化时回写，避免每次启动都写盘。
+                clean = {k: _normalize_name(v) for k, v in cached.items()}
+                self.__class__._name_map.update(clean)
                 self.__class__._rebuild_search_index()
-                log.info("eltdx 名称表已从本地缓存加载：%d 只", len(cached))
+                if clean != cached:
+                    await asyncio.to_thread(_save_json_cache, _name_cache_path(), clean)
+                    log.info("eltdx 名称表已从本地缓存加载并规整：%d 只", len(clean))
+                else:
+                    log.info("eltdx 名称表已从本地缓存加载：%d 只", len(clean))
                 return
             # 2) 缓存缺失 → 网络枚举全 A 股代码 + 批量取中文名（TDX 公共行情可搜索/可就绪）
             def _run():
@@ -259,10 +282,10 @@ class EltdxSource(DataSource):
         """加载行业概念表到类级 _industry_map（所有实例共享）。"""
         if self.__class__._industry_loaded:
             return
-        with self._lock:
+        async with self.__class__._get_aio_lock():
             if self.__class__._industry_loaded:
                 return
-            cached = _load_json_cache(_industry_cache_path())
+            cached = await asyncio.to_thread(_load_json_cache, _industry_cache_path())
             if cached:
                 self.__class__._industry_map.update(cached)
             self.__class__._industry_loaded = True
@@ -277,9 +300,8 @@ class EltdxSource(DataSource):
         """
         await self._ensure_industry_loaded()
         cls_imap = self.__class__._industry_map
-        with self.__class__._industry_lock:
-            if code in cls_imap:
-                return cls_imap[code]
+        if code in cls_imap:   # 读不加锁：dict 取键在 CPython 下原子，避免占死事件循环
+            return cls_imap[code]
         num = _num(code)
         industry, concepts = "", []
         try:
@@ -312,10 +334,14 @@ class EltdxSource(DataSource):
 
         rec = {"industry": industry, "concepts": concepts,
                "ts": datetime.now().isoformat(timespec="seconds")}
-        with self.__class__._industry_lock:
-            if code not in cls_imap:  # 二次检查，避免并发重复落盘
-                cls_imap[code] = rec
-                _save_json_cache(_industry_cache_path(), cls_imap)
+        def _commit() -> None:
+            # 锁 + 文件写入整体放线程池：既保并发下不重复落盘，
+            # 也不让事件循环线程持 threading.Lock 或同步写磁盘。
+            with self.__class__._industry_lock:
+                if code not in cls_imap:  # 二次检查，避免并发重复落盘
+                    cls_imap[code] = rec
+                    _save_json_cache(_industry_cache_path(), cls_imap)
+        await asyncio.to_thread(_commit)
         return rec
 
     # ---------- 预热（应用启动钩子，best-effort 不阻塞） ----------
@@ -988,7 +1014,9 @@ class EltdxSource(DataSource):
         added = {}
         for e in entries or []:
             code = (e.get("code") or "").strip()
-            nm = (e.get("name") or "").strip()
+            # 与名称表构建路径保持同一口径：并入前先规整（去 TDX 填充空格 / 全角转半角），
+            # 否则 ETF 名称会以原始脏值进入内存与 stock_names.json。
+            nm = _normalize_name((e.get("name") or "").strip())
             if code and nm and not self.__class__._name_map.get(code):
                 self.__class__._name_map[code] = nm
                 added[code] = nm

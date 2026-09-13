@@ -45,6 +45,21 @@ _ERR_MAP = {
     "BrokerError": BrokerError,
 }
 
+
+def _rebuild_error(error_type: str, message: str) -> BrokerError:
+    """按 error_type 重建子进程异常（消息原样保留）。
+
+    关键正确性修复：子进程回传的是**已人类可读的完整消息**（``_safe_err``），
+    不是构造参数。``BrokerSDKError(sdk, extra)`` 是双参构造——若把完整消息当
+    ``sdk`` 名传入，会产出
+    「缺少券商 SDK：<整段消息>。请在…安装（参见券商文档）…」的二次套娃文案
+    （真实故障：/trade/order 返回一坨重复且互相矛盾的错误说明）。
+    SDK 类错误一律经 ``from_message`` 重建。
+    """
+    if error_type == "BrokerSDKError":
+        return BrokerSDKError.from_message(message)
+    return _ERR_MAP.get(error_type, BrokerError)(message)
+
 # 后端目录（含 xtquant_client 包），用于让嵌入式子进程找到本模块
 _BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -82,7 +97,8 @@ class BridgeAdapter(BrokerAdapter):
                  broker_id: str = "", python_exe: str | None = None,
                  server_module: str = "xtquant_client.bridge_server",
                  prefer_bridge: bool = False, runtime: dict | None = None,
-                 backend_dir: str | None = None, client_mode: str = "auto"):
+                 backend_dir: str | None = None, client_mode: str = "auto",
+                 metrics_fn=None):
         self.client_path = client_path
         self._client_mode = client_mode or "auto"
         self._account_id = account_id
@@ -131,6 +147,8 @@ class BridgeAdapter(BrokerAdapter):
         self._vp_cache: dict | None = None
         self._vp_lock = threading.Lock()
         self._vp_started = False
+        # V10 A4：连接事件指标回调（由 app 层注入；默认 no-op，xtquant_client 不反向依赖 gateway）
+        self._metrics_fn = metrics_fn
 
     # ---------------- 身份 ----------------
     @property
@@ -293,11 +311,11 @@ class BridgeAdapter(BrokerAdapter):
                 log.info("bridge resubscribed %d code(s) after (re)start",
                          len(self._subscribed_codes))
                 # 阶段 3：订阅恢复可观测——指标 qmt_conn_events_total{event="subscription_recovered"}
-                try:
-                    from gateway.metrics import get_metrics
-                    get_metrics().record_conn_event("bridge", "subscription_recovered")
-                except Exception:  # noqa: BLE001
-                    pass
+                if self._metrics_fn is not None:
+                    try:
+                        self._metrics_fn("bridge", "subscription_recovered")
+                    except Exception:  # noqa: BLE001
+                        pass
             except Exception as exc:  # noqa: BLE001
                 log.warning("bridge resubscribe failed after start: %s", exc)
 
@@ -469,7 +487,7 @@ class BridgeAdapter(BrokerAdapter):
             # default，会构造出 BrokerError(None) —— str() 得 "None"，用户失明。
             # 统一走 _humanize_init_error 兜底成可操作文案。
             emsg = _humanize_init_error(res.get("error"), str(etype or ""))
-            raise _ERR_MAP.get(etype, BrokerError)(emsg)
+            raise _rebuild_error(str(etype or ""), emsg)
         return res.get("result")
 
     # ---------------- 行情 ----------------

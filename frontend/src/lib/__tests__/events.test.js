@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { EVENT_TYPES, normalizePlatformEvent } from "../events.js";
+import { EVENT_TYPES, normalizePlatformEvent } from "../../shared/events";
 
 describe("platform event contract", () => {
   it("normalizes canonical connection identity", () => {

@@ -135,3 +135,79 @@ def test_exchange_calendar_port_declares_coverage():
 
     assert exchange_calendar.coverage(date(2026, 8, 30)).exact is True
     assert exchange_calendar.coverage(date(2028, 1, 3)).exact is False
+
+
+# ---------------- 溯源为真（P3-4：禁止用 "auto" 冒充真实来源） ----------------
+def _bar(dt="20260901"):
+    return {"time": dt, "open": 1.0, "high": 2.0, "low": 0.5, "close": 1.5, "volume": 100}
+
+
+def _providers(store, code):
+    rows = store._db.query(
+        "SELECT DISTINCT provider_id FROM local_bars WHERE code=?", (code,))
+    return sorted(r["provider_id"] for r in rows)
+
+
+def test_sync_records_real_provider_id(store):
+    """抓取器返回 (bars, source) 时必须把真实来源写进 provider_id。"""
+
+    async def _fetch(code, period, adjust, count):
+        return [_bar()], "eltdx"
+
+    s = BarsSyncer(store=store, fetch_bars=_fetch, provider_id="auto")
+    out = asyncio.run(s.sync_one("600519.SH"))
+    assert out.ok is True
+    assert _providers(store, "600519.SH") == ["eltdx"]
+
+
+def test_sync_never_fabricates_auto_provider(store):
+    """拿不到来源信息且配置为 auto 时，溯源记空值 —— 绝不伪造 "auto"。"""
+
+    async def _fetch(code, period, adjust, count):
+        return [_bar()]
+
+    s = BarsSyncer(store=store, fetch_bars=_fetch, provider_id="auto")
+    out = asyncio.run(s.sync_one("600002.SZ"))
+    assert out.ok is True
+    assert _providers(store, "600002.SZ") == [""]
+
+
+def test_sync_uses_configured_provider_when_source_unknown(store):
+    """调用方显式指定的数据源在无真实来源名时作为溯源兜底。"""
+
+    async def _fetch(code, period, adjust, count):
+        return [_bar()]
+
+    s = BarsSyncer(store=store, fetch_bars=_fetch, provider_id="baostock")
+    asyncio.run(s.sync_one("600003.SH"))
+    assert _providers(store, "600003.SH") == ["baostock"]
+
+
+def test_real_source_wins_over_configured_label(store):
+    """真实命中来源优先于调用方标签（不得因标签而说谎）。"""
+
+    async def _fetch(code, period, adjust, count):
+        return [_bar()], "akshare"
+
+    s = BarsSyncer(store=store, fetch_bars=_fetch, provider_id="baostock")
+    asyncio.run(s.sync_one("600004.SH"))
+    assert _providers(store, "600004.SH") == ["akshare"]
+
+
+def test_default_fetch_passes_configured_source(monkeypatch, store):
+    """configured provider 必须真正驱动取数（eod 备用源续跑此前是空操作）。"""
+    seen = {}
+
+    class _Hub:
+        async def get_kline(self, code, period, count, source="auto", adjust=None):
+            seen["source"] = source
+            seen["adjust"] = adjust
+            return [_bar()], "baostock"
+
+    monkeypatch.setattr("app.sync.bars.get_hub", lambda: _Hub())
+    s = BarsSyncer(store=store, provider_id="baostock", adjust="qfq")
+    out = asyncio.run(s.sync_one("600005.SH"))
+    assert out.ok is True
+    assert seen["source"] == "baostock"
+    assert seen["adjust"] == "qfq"
+    assert _providers(store, "600005.SH") == ["baostock"]

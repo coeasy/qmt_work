@@ -1,36 +1,37 @@
+from core.context import AppContext, get_ctx
 # --- stdlib imports injected by fix_route_imports ---
 import hashlib
 import json
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
-from app.routes._common import Request, err, ok, settings, state
+from app.routes._common import Request, err, ok, settings
 
 router = APIRouter()
 
 @router.get("/signal/mode")
-async def get_signal_mode():
+async def get_signal_mode(ctx: AppContext = Depends(get_ctx)):
     """获取signal / mode（GET /signal/mode）。"""
-    if state.signal_router is None:
+    if ctx.signal_router is None:
         return err(503, "信号路由未初始化")
-    return ok({"mode": state.signal_router.mode})
+    return ok({"mode": ctx.signal_router.mode})
 
 @router.post("/signal/mode")
-async def set_signal_mode(body: dict):
+async def set_signal_mode(body: dict, ctx: AppContext = Depends(get_ctx)):
     """创建/提交signal / mode（POST /signal/mode）。"""
-    if state.signal_router is None:
+    if ctx.signal_router is None:
         return err(503, "信号路由未初始化")
     try:
-        mode = state.signal_router.set_mode(body.get("mode", "live"))
+        mode = ctx.signal_router.set_mode(body.get("mode", "live"))
     except ValueError as exc:
         return err(400, str(exc))
-    state.db.audit("admin", "signal.mode", "global", {"mode": mode}, "ok")
+    ctx.db.audit("admin", "signal.mode", "global", {"mode": mode}, "ok")
     return ok({"mode": mode})
 
 @router.post("/signal/submit")
-async def signal_submit(body: dict):
+async def signal_submit(body: dict, ctx: AppContext = Depends(get_ctx)):
     """创建/提交signal / submit（POST /signal/submit）。"""
-    if state.signal_router is None:
+    if ctx.signal_router is None:
         return err(503, "信号路由未初始化")
     from gateway.signal_router import Signal
     sig = Signal(
@@ -45,7 +46,7 @@ async def signal_submit(body: dict):
         payload=body.get("payload", {}))
     # 阶段 4：idempotency_key 非空时经 submit() 单飞幂等（同 key 只执行一次真实逻辑）
     idem = str(body.get("idempotency_key", "") or "").strip()
-    res = await state.signal_router.submit(
+    res = await ctx.signal_router.submit(
         code=sig.code, side=sig.side, volume=sig.volume, price=sig.price,
         price_type=sig.price_type, source=sig.source, broker_id=sig.broker_id,
         remark=sig.remark, idempotency_key=idem, payload=sig.payload)
@@ -54,22 +55,22 @@ async def signal_submit(body: dict):
     return err(503, res.get("reason", "信号路由失败") if isinstance(res, dict) else "信号路由失败")
 
 @router.post("/signal/confirm")
-async def signal_confirm(body: dict):
+async def signal_confirm(body: dict, ctx: AppContext = Depends(get_ctx)):
     """二次确认：携带 confirm_token（及 TOTP 码）执行挂起的大额下单。"""
-    if state.signal_router is None:
+    if ctx.signal_router is None:
         return err(503, "信号路由未初始化")
     token = body.get("confirm_token", "")
     if not token:
         return err(400, "缺少 confirm_token")
-    res = await state.signal_router.confirm(token, body.get("totp_code", ""))
+    res = await ctx.signal_router.confirm(token, body.get("totp_code", ""))
     if res.get("ok"):
         return ok(res)
     return err(400, res.get("reason", "确认失败"), res)
 
 @router.post("/signal/webhook")
-async def signal_webhook(request: Request):
+async def signal_webhook(request: Request, ctx: AppContext = Depends(get_ctx)):
     """外部策略系统信号入站：HMAC-SHA256 签名校验（QMT_WEBHOOK_SECRET 非空时），经统一信号路由。"""
-    if state.signal_router is None:
+    if ctx.signal_router is None:
         return err(503, "信号路由未初始化")
     import hmac
     secret = settings.webhook_secret
@@ -90,8 +91,8 @@ async def signal_webhook(request: Request):
         volume=int(body.get("volume", 0)), price=float(body.get("price", 0) or 0),
         price_type=body.get("price_type", "limit"), remark=body.get("remark", ""),
         broker_id=body.get("broker_id", ""), payload=body.get("payload", {}))
-    res = await state.signal_router.route(sig)
-    state.db.audit("webhook", "signal.submit", body.get("code", ""), body, "ok")
+    res = await ctx.signal_router.route(sig)
+    ctx.db.audit("webhook", "signal.submit", body.get("code", ""), body, "ok")
     if isinstance(res, dict) and res.get("ok"):
         return ok(res)
     reason = res.get("reason", "信号路由失败") if isinstance(res, dict) else "信号路由失败"

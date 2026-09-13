@@ -5,9 +5,15 @@
 （项目约定：无 pytest-asyncio，顶层 asyncio.run 包裹。）
 """
 import asyncio
+from datetime import datetime as _datetime
 from types import SimpleNamespace
 
 from gateway.market_sync import MarketSync
+
+
+def _dt(y, m, d, hh, mm):
+    """构造 Asia/Shanghai 语义的 naive datetime（EOD 时区打桩点）。"""
+    return _datetime(y, m, d, hh, mm)
 
 
 class _Cfg:
@@ -96,8 +102,8 @@ def test_tick_same_day_only_once(monkeypatch):
     ms, st, _ = _mk(market={"sync": {"enabled": True, "time": "00:00"}})
     async def _noop(): return None
     monkeypatch.setattr(ms, "_refresh_hot", _noop)
-    monkeypatch.setattr("gateway.market_sync.time.strftime",
-                        lambda fmt: "2026-08-31" if fmt == "%Y-%m-%d" else "09:00")
+    monkeypatch.setattr("gateway.market_sync._sh_now",
+                        lambda: _dt(2026, 8, 31, 9, 0))
     monkeypatch.setattr("gateway.trading_session.default_session.is_trading_day",
                         lambda: True, raising=False)
     _run(ms._tick())
@@ -110,7 +116,8 @@ def test_tick_before_sync_time_skips(monkeypatch):
     ms, st, _ = _mk(market={"sync": {"enabled": True, "time": "16:00"}})
     async def _boom2(): raise AssertionError("不应调用")
     monkeypatch.setattr(ms, "_refresh_hot", _boom2)
-    monkeypatch.setattr("gateway.market_sync.time.strftime", lambda fmt: "09:00")
+    monkeypatch.setattr("gateway.market_sync._sh_now",
+                        lambda: _dt(2026, 8, 31, 9, 0))
     _run(ms._tick())
     assert ms._last_run_date is None
 

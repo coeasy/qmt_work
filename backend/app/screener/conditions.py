@@ -66,12 +66,21 @@ def _resolve_ind_params(spec, params: Dict[str, Any]) -> Dict[str, Any]:
     return resolved
 
 
-def _eval_indicator(cond: dict, bars: list) -> Optional[float]:
+def _ind_cache_key(name: str, params: Dict[str, Any]) -> tuple:
+    """指标计算的去重键：同名同参 → 单次计算可复用（D-J §J.10 指标需求去重）。"""
+    return (name, tuple(sorted((k, str(v)) for k, v in (params or {}).items())))
+
+
+def _eval_indicator(cond: dict, bars: list, cache: dict) -> Optional[float]:
     ind = cond["indicator"]
     name = ind.get("name")
     spec = get_indicator(name)                       # KeyError → 路由 400
     params = _resolve_ind_params(spec, ind.get("params") or {})
-    res = calc(name, bars, **params)
+    key = _ind_cache_key(name, params)
+    res = cache.get(key)
+    if res is None:
+        res = calc(name, bars, **params)
+        cache[key] = res
     out_key = ind.get("output") or (spec.outputs[0] if spec.outputs else None)
     arr = res["outputs"].get(out_key) if out_key else None
     if arr is None:
@@ -79,7 +88,7 @@ def _eval_indicator(cond: dict, bars: list) -> Optional[float]:
     return _windowed(arr, int(ind.get("window", -1)))
 
 
-def _operand_value(operand: dict, bars: list) -> Optional[float]:
+def _operand_value(operand: dict, bars: list, cache: dict) -> Optional[float]:
     """取操作数在 window 处的值（compare 叶子用）。kind ∈ field/indicator。"""
     kind = operand.get("kind")
     if kind == "field":
@@ -92,7 +101,11 @@ def _operand_value(operand: dict, bars: list) -> Optional[float]:
     if kind == "indicator":
         spec = get_indicator(operand["name"])
         params = _resolve_ind_params(spec, operand.get("params") or {})
-        res = calc(operand["name"], bars, **params)
+        key = _ind_cache_key(operand["name"], params)
+        res = cache.get(key)
+        if res is None:
+            res = calc(operand["name"], bars, **params)
+            cache[key] = res
         out = operand.get("output") or (spec.outputs[0] if spec.outputs else None)
         arr = res["outputs"].get(out) if out else None
         if arr is None:
@@ -101,19 +114,19 @@ def _operand_value(operand: dict, bars: list) -> Optional[float]:
     raise ValueError(f"未知操作数类型：{kind}")
 
 
-def _eval_leaf(cond: dict, bars: list) -> bool:
+def _eval_leaf(cond: dict, bars: list, cache: dict) -> bool:
     if "compare" in cond:
         c = cond["compare"]
         op = c.get("op")
         if op not in _OPS:
             raise ValueError(f"非法操作符：{op}（可选 {sorted(_OPS)}）")
-        lv = _operand_value(c["left"], bars)
-        rv = _operand_value(c["right"], bars)
+        lv = _operand_value(c["left"], bars, cache)
+        rv = _operand_value(c["right"], bars, cache)
         if lv is None or rv is None:
             return False
         return _cmp(lv, op, rv)
     if "indicator" in cond:
-        val = _eval_indicator(cond, bars)
+        val = _eval_indicator(cond, bars, cache)
         leaf: dict = cond["indicator"]
     elif "field" in cond:
         f = cond["field"]
@@ -136,25 +149,28 @@ def _eval_leaf(cond: dict, bars: list) -> bool:
 
 
 def evaluate(conditions: dict, bars: list) -> Tuple[bool, int, int]:
-    """求值条件树 → (是否命中, 命中的叶子数, 叶子总数)。"""
-    def _rec(node: dict):
+    """求值条件树 → (是否命中, 命中的叶子数, 叶子总数)。
+
+    内部共享一个指标计算缓存：同一 (指标, 参数) 在一次求值内只计算一次（D-J §J.10 去重）。
+    """
+    def _rec(node: dict, cache: dict):
         if "and" in node:
-            subs = [_rec(c) for c in node["and"]]
+            subs = [_rec(c, cache) for c in node["and"]]
             hits = sum(s[0] for s in subs)
             return all(s[0] for s in subs), hits, sum(s[2] for s in subs)
         if "or" in node:
-            subs = [_rec(c) for c in node["or"]]
+            subs = [_rec(c, cache) for c in node["or"]]
             hits = sum(s[0] for s in subs)
             return any(s[0] for s in subs), hits, sum(s[2] for s in subs)
         if "not" in node:                       # G2-4 DSL 支持 NOT（叶子计数取反）
-            hit, score, total = _rec(node["not"])
+            hit, score, total = _rec(node["not"], cache)
             return (not hit), (total - score), total
-        matched = _eval_leaf(node, bars)
+        matched = _eval_leaf(node, bars, cache)
         return matched, (1 if matched else 0), 1
 
     if not isinstance(conditions, dict) or not conditions:
         raise ValueError("conditions 为空：须为 {and:[..]}/{or:[..]} 或叶子条件对象")
-    hit, score, total = _rec(conditions)
+    hit, score, total = _rec(conditions, {})
     return hit, score, total
 
 

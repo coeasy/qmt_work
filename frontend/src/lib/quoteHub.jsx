@@ -17,6 +17,7 @@ import {
   createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore,
 } from "react";
 import { createReconnectingSocket } from "./wsCore";
+import { WS_EVENTS } from "../shared/events";
 
 function wsUrl() {
   const proto = location.protocol === "https:" ? "wss" : "ws";
@@ -98,7 +99,7 @@ export function QuoteHubProvider({ children }) {
         if (codes.length) coreRef.current.send({ action: "subscribe", codes });
       },
       onMessage: (msg) => {
-        if (msg.type === "quotes" && Array.isArray(msg.data?.items)) pushBatch(msg.data.items);
+        if (msg.type === WS_EVENTS.QUOTES && Array.isArray(msg.data?.items)) pushBatch(msg.data.items);
         else if (msg.type === "quotes_replay" && Array.isArray(msg.data?.items)) pushBatch(msg.data.items);
         else if (msg.type === "quote" && msg.data) pushQuote(msg.data);
         else if (msg.type === "snapshot" && msg.data && typeof msg.data === "object") {

@@ -13,7 +13,7 @@ from app.capabilities import (
     build_capabilities,
     tool_name_for,
 )
-from app.config import settings
+from core.config import settings
 from app.routes._common import err, ok
 from gateway.risk import RiskManager
 from mcp_server import build_mcp

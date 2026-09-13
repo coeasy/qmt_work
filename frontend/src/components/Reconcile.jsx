@@ -15,13 +15,17 @@ export default function Reconcile() {
   const [lastResult, setLastResult] = useState(null);
   const [lastErr, setLastErr] = useState("");
   const [walStats, setWalStats] = useState(null);
+  const [walErr, setWalErr] = useState("");
 
   useEffect(() => { loadAll(); }, []);
   useActiveInterval(loadAll, 30000);   // T15 WAL 统计近实时
 
   async function loadAll() {
     api.reconcileLast().then(setLastResult).catch((e) => setLastErr(e.message || "对账记录加载失败"));
-    api.reconcileWalStats().then(setWalStats).catch(() => setWalStats(null));
+    // WAL 统计失败必须可见：此前静默置 null，后端路径漂移（/wal/stats vs /reconcile/wal/stats）
+    // 让整块面板永久空白且无从排查。
+    api.reconcileWalStats().then((d) => { setWalStats(d); setWalErr(""); })
+      .catch((e) => { setWalStats(null); setWalErr(e.message || "WAL 统计获取失败"); });
   }
 
   async function reconcile() {
@@ -68,7 +72,7 @@ export default function Reconcile() {
 
       <div className="card" style={{ marginTop: 16 }}>
         <h3 style={{ marginBottom: 12 }}>WAL 统计</h3>
-        {walStats ? <KVList data={walStats} /> : <EmptyState title="WAL 未初始化" />}
+        {walStats ? <KVList data={walStats} /> : <EmptyState title={walErr || "WAL 未初始化"} />}
       </div>
     </div>
   );

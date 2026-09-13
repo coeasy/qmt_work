@@ -84,6 +84,23 @@ class InstrumentMixin:
         except Exception as exc:  # noqa: BLE001
             raise BrokerNotConnectedError(f"板块成分获取失败：{exc}") from exc
 
+    @staticmethod
+    def _compact_date(value) -> str:
+        """归一化为 xtdata 要求的 YYYYMMDD。
+
+        实测缺陷：xtdata 内部用 ``strptime(x, '%Y%m%d')`` 解析，前端按 ISO 传
+        ``2026-01-01`` 直接抛 "time data ... does not match"，交易日历面板永久报错。
+        此处统一吞掉分隔符并截断到前 8 位（容忍 ``2026-01-01 00:00:00`` / 时间戳），
+        非法值返回空串（xtdata 空串 = 不限制边界）。
+        """
+        if value is None:
+            return ""
+        s = str(value).strip()
+        if not s:
+            return ""
+        digits = "".join(ch for ch in s if ch.isdigit())
+        return digits[:8] if len(digits) >= 8 else ""
+
     def get_trading_calendar(self, start: str = "", end: str = "") -> list[str]:
         if self._xtdata is None:
             raise BrokerSDKError("xtquant", "pip install xtquant")
@@ -96,10 +113,11 @@ class InstrumentMixin:
             import inspect
             sig = inspect.signature(self._xtdata.get_trading_calendar)
             params = [p for p in sig.parameters]
+            s, e = self._compact_date(start), self._compact_date(end)
             if params and params[0].lower().startswith("market"):
-                cal = self._xtdata.get_trading_calendar("SH", start or "", end or "")
+                cal = self._xtdata.get_trading_calendar("SH", s, e)
             else:
-                cal = self._xtdata.get_trading_calendar(start or "", end or "")
+                cal = self._xtdata.get_trading_calendar(s, e)
             return [str(d) for d in (cal or [])]
         except Exception as exc:  # noqa: BLE001
             raise BrokerNotConnectedError(f"交易日历获取失败：{exc}") from exc
@@ -110,16 +128,51 @@ class InstrumentMixin:
         fields = ["EPS", "BPS", "OPERATE_INCOME", "TOTAL_OPERATE_INCOME",
                   "PARENT_NETPROFIT", "TOTAL_OPERATE_EXPENSE", "ROE", "CAPITAL",
                   "TOTAL_OPERATE_INCOME_YOY", "PARENT_NETPROFIT_YOY"]
+        # 多版本方法名兼容：新 SDK 为 get_stock_financial，部分版本仅有 get_financial_data。
+        # 实测缺陷：直接写死方法名在缺该接口的券商终端上报
+        # "module 'xtquant.xtdata' has no attribute 'get_stock_financial'"，
+        # 财务面板永久报错。此处探测可用方法名，全缺时给出可操作的明确文案。
+        fn = None
+        for name in ("get_stock_financial", "get_financial_data"):
+            cand = getattr(self._xtdata, name, None)
+            if callable(cand):
+                fn, fn_name = cand, name
+                break
+        if fn is None:
+            raise BrokerNotConnectedError(
+                "财务数据获取失败：当前券商终端 xtquant 版本不含财务接口"
+                "（get_stock_financial / get_financial_data 均缺失），"
+                "请升级 QMT 客户端或改用数据中心的历史财务源")
         try:
-            df = self._xtdata.get_stock_financial([code], fields, "", "",
-                                                  report_type="report_time")
+            try:
+                df = fn([code], fields, "", "", report_type="report_time")
+            except TypeError:
+                # 旧签名不支持 report_type 关键字
+                df = fn([code], fields, "", "")
         except Exception as exc:  # noqa: BLE001
-            raise BrokerNotConnectedError(f"财务数据获取失败：{exc}") from exc
-        frame = (df or {}).get(code)
-        if frame is None or len(frame) == 0:
+            raise BrokerNotConnectedError(f"财务数据获取失败（{fn_name}）：{exc}") from exc
+        frame = (df or {}).get(code) if isinstance(df, dict) else df
+        if frame is None:
             return {"code": code, "detail": "无财务数据（数据权限或代码无效）"}
-        row = frame.iloc[-1]
-        out = {"code": code, "report_time": str(frame.index[-1])[:10]}
+
+        # 两种返回形态兼容：
+        # - pandas.DataFrame（新 SDK get_stock_financial）：取最后一行
+        # - 纯 dict（旧 SDK get_financial_data，形如 {报告期: {指标: 值}}）：取最后一个键
+        if hasattr(frame, "iloc"):
+            if len(frame) == 0:
+                return {"code": code, "detail": "无财务数据（数据权限或代码无效）"}
+            row, report_time = frame.iloc[-1], str(frame.index[-1])[:10]
+        elif isinstance(frame, dict):
+            items = list(frame.items())
+            if not items:
+                return {"code": code, "detail": "无财务数据（数据权限或代码无效）"}
+            k, v = items[-1]
+            row = v if isinstance(v, dict) else {"value": v}
+            report_time = str(k)[:10]
+        else:
+            return {"code": code, "detail": "无财务数据（数据权限或代码无效）"}
+
+        out = {"code": code, "report_time": report_time}
         for f in fields:
             try:
                 v = row.get(f)

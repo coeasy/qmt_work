@@ -136,7 +136,8 @@ def list_profiles(active_only: bool = True) -> list[BrokerProfile]:
 
 def create_adapter(broker_id: str, client_path: str, account_id: str,
                    account_type: str = "STOCK", session_id: int = 0,
-                   min_version: str = "", client_mode: str = "auto") -> BrokerAdapter:
+                   min_version: str = "", client_mode: str = "auto",
+                   metrics_fn=None) -> BrokerAdapter:
     """依据券商档案实例化对应适配器（真实实现）。
 
     client_mode：客户端连接模式 —— "auto"（自动推断）/ "mini"（极速版 MiniQMT）/
@@ -198,7 +199,8 @@ def create_adapter(broker_id: str, client_path: str, account_id: str,
                 account_id=account_id, account_type=account_type,
                 session_id=session_id, min_version=min_version or profile.min_version,
                 adapter="xtp", broker_id=broker_id, runtime=plan,
-                client_mode=client_mode or "auto")
+                client_mode=client_mode or "auto",
+                metrics_fn=metrics_fn)
         # 兜底（理论上不可达）
         return XTPQuantAdapter(
             client_path=client_path or profile.default_client_path,

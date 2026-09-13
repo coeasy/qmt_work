@@ -191,7 +191,7 @@ class _FakeCondManager:
 def test_condition_reject_intraday_retry_then_day(monkeypatch):
     """P1-5：拒单先进当日盘中重试队列（interval 30s，上限 5 次），
     盘中次数用尽后才转次日重试（retry_count 语义不变）。"""
-    from app.state import state
+    from core.state import state
     eng = ConditionOrderEngine(manager=_FakeCondManager(), on_event=lambda _e: None)
     eng._retry_limit = 2
     eng._intraday_retry_limit = 3   # 缩小便于测试
@@ -240,7 +240,7 @@ def test_condition_reject_intraday_retry_then_day(monkeypatch):
 
 def test_condition_fire_success_marks_submitted(monkeypatch):
     """P1-5：下单被受理 → status=submitted（仅已受理，未成交不可标 filled）+ order_id。"""
-    from app.state import state
+    from core.state import state
     eng = ConditionOrderEngine(manager=_FakeCondManager(), on_event=lambda _e: None)
 
     class _FakeRouter:
@@ -287,7 +287,7 @@ class _FakeSettleBridge(_FakeCondBridge):
 
 def test_condition_submitted_settles_to_terminal(monkeypatch):
     """P1-5：submitted 单经 _settle_submitted 对账，券商侧已到终态 → 回写 filled。"""
-    from app.state import state
+    from core.state import state
     eng = ConditionOrderEngine(manager=_FakeCondManager(), on_event=lambda _e: None)
 
     class _FakeRouter:
@@ -312,7 +312,7 @@ def test_condition_submitted_settles_to_terminal(monkeypatch):
 
 def test_condition_submitted_active_not_settled(monkeypatch):
     """P1-5：submitted 单在券商侧仍挂单（pending/partial）时不核销，继续跟踪。"""
-    from app.state import state
+    from core.state import state
     eng = ConditionOrderEngine(manager=_FakeCondManager(), on_event=lambda _e: None)
 
     class _FakeRouter:
@@ -336,7 +336,7 @@ def test_condition_submitted_active_not_settled(monkeypatch):
 
 def test_condition_fire_recheck_keeps_pending(monkeypatch):
     """阶段 2：触发用最新价校验——行情回退（fresh 不成立）时不误下单，保持 pending。"""
-    from app.state import state
+    from core.state import state
     eng = ConditionOrderEngine(manager=_FakeCondManager(), on_event=lambda _e: None)
 
     class _DroppedBridge(_FakeCondBridge):
@@ -392,16 +392,36 @@ def test_condition_safe_int_guards_dirty_counters():
 
 # ---------------- 下单幂等 ----------------
 def test_idempotency():
+    """下单幂等（V10：幂等收口在 gateway.idempotency 单飞）：
+    窗口内同 key 命中缓存并标记 duplicated；过期后重新执行真实逻辑。"""
     import time
 
-    from tools import trading
-    trading._IDEMPOTENCY.clear()
-    assert trading._idempotent_get("k1") is None
-    trading._idempotent_set("k1", {"order_id": "100"})
-    hit = trading._idempotent_get("k1")
-    assert hit and hit["order_id"] == "100"
-    trading._IDEMPOTENCY["k1"] = (time.time() - 60, hit)  # 过期
-    assert trading._idempotent_get("k1") is None
+    from gateway.idempotency import _cache, _inflight, single_flight
+
+    _cache.clear()
+    _inflight.clear()
+
+    async def factory():
+        return {"order_id": "100"}
+
+    async def main():
+        first = await single_flight("k1", factory, window=30.0)
+        assert first["order_id"] == "100" and not first.get("duplicated")
+        hit = await single_flight("k1", factory, window=30.0)
+        assert hit["order_id"] == "100" and hit.get("duplicated") is True
+
+    asyncio.run(main())
+
+    # 缓存过期（60s 前）→ 重新执行，不再标记 duplicated
+    _cache["k1"] = (time.time() - 60, {"order_id": "100"})
+    _inflight.clear()
+
+    async def main_expired():
+        out = await single_flight("k1", factory, window=30.0)
+        assert out["order_id"] == "100" and not out.get("duplicated")
+
+    asyncio.run(main_expired())
+    _cache.clear()
 
 
 # ---------------- 阶段 0-B：单飞幂等——并发同键只执行一次 ----------------
@@ -581,7 +601,9 @@ def test_totp_generate_and_verify():
     assert totp_at(secret, 59) == totp_at(secret, 60 - 1)   # 同 30s 窗口
     assert totp_at(secret, 0) != totp_at(secret, 3600)
     assert verify_totp(secret, current_totp(secret))
-    assert not verify_totp(secret, "000000") or True  # 极小概率碰撞，不强断言
+    # 修复 P0-9（原为恒真断言 `... or True`）：错误码应被拒绝；
+    # 「000000」恰为当前有效码的概率可忽略，直接强断言。
+    assert not verify_totp(secret, "000000")
     assert not verify_totp(secret, "abc")
     assert not verify_totp(secret, "")
 

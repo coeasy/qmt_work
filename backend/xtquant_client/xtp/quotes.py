@@ -114,20 +114,24 @@ class QuotesMixin:
             return False
 
     def get_kline(self, code: str, period: str, count: int,
-                  start: str = "", end: str = "") -> list[dict]:
+                  start: str = "", end: str = "", adjust: str | None = None) -> list[dict]:
         if self._xtdata is None:
             raise BrokerSDKError("xtquant", "pip install xtquant")
         # 迅投协议周期：各版本 xtdata 均用 "1h"（本地缓存集合 {1m,5m,15m,30m,1h,1d}），
         # 平台展示用 "60m" 只是别名——必须归一化，否则旧版 get_market_data("60m") 失败。
         period = _normalize_kline_period(period)
         field_list = ["open", "high", "low", "close", "volume", "amount"]
+        # 复权打通（D9 / P0-15之③）：dividend_type 参数化，qfq->front、hfq->back、
+        # 其余->none。原先硬编码 "none" 导致 QMT 历史 K 线永远不复权，与选股/其他源
+        # 口径不一致（选股读到的 QMT 行情是未复权，而其他源是 qfq）。
+        dividend_type = {"qfq": "front", "hfq": "back"}.get(adjust or "", "none")
 
         def _fetch() -> dict:
             try:
                 return self._xtdata.get_market_data(
                     field_list=field_list, stock_list=[code], period=period,
                     start_time=start or "", end_time=end or "", count=int(count),
-                    dividend_type="none", fill_data=True)
+                    dividend_type=dividend_type, fill_data=True)
             except Exception as exc:  # noqa: BLE001
                 raise BrokerNotConnectedError(f"K 线获取失败：{exc}") from exc
 

@@ -1,12 +1,8 @@
 """交易类工具：place_order / cancel_order / cancel_order_price / query_position / query_cash / query_orders / query_deals。
 
-下单前过统一风控（单笔金额/最小数量/单票上限/频率限制）；全部走真实券商 SDK；
-所有交易动作写入审计日志（audit_log），工业级可追溯。
+下单经 SignalRouter 统一链路（ExecutionMode/风控/幂等/WAL/审计）；撤单与查询走
+ExecutionService / 真实券商 SDK；所有交易动作写入审计日志（audit_log），工业级可追溯。
 """
-import asyncio
-import threading
-import time
-
 from core.state import state
 from gateway.execution import ExecutionService
 
@@ -20,47 +16,6 @@ def _audit(action: str, target: str, params: dict, result: str):
             state.db.audit("trading", action, target, params, result)
         except Exception:  # noqa: BLE001
             pass
-
-
-# 幂等防重：idempotency_key -> (ts, result)，窗口 30s
-_IDEMPOTENT_WINDOW = 30.0
-_IDEMPOTENCY: dict[str, tuple[float, dict]] = {}
-
-
-def _idempotent_get(key: str):
-    if not key:
-        return None
-    hit = _IDEMPOTENCY.get(key)
-    if hit and time.time() - hit[0] <= _IDEMPOTENT_WINDOW:
-        return hit[1]
-    if hit:
-        _IDEMPOTENCY.pop(key, None)
-    return None
-
-
-def _idempotent_set(key: str, result: dict) -> None:
-    if key:
-        _IDEMPOTENCY[key] = (time.time(), result)
-
-# F1 修复：幂等「get 检查 → 异步下单 → set 写入」之间存在竞态——两个同 idempotency_key
-# 的并发调用（LLM 超时重试 / 前端双击）会同时通过 _idempotent_get 检查、各下一单，
-# 造成真实重复成交。这里用 per-key asyncio.Lock 把「get→下单→set」包成原子临界区，
-# 确保同一幂等键并发时只有一个进入下单。
-_IDEMPOTENT_LOCKS: dict[str, "asyncio.Lock"] = {}
-# guard 用 threading.Lock（不绑定事件循环）：模块级 asyncio.Lock 在跨多个
-# asyncio.run()/事件循环场景会抛 "bound to a different event loop"；本临界区
-# 仅保护字典读写、不含 await，普通线程锁即可（单线程事件循环下同样安全）。
-_IDEMPOTENT_LOCKS_GUARD = threading.Lock()
-
-
-def _idempotent_lock(key: str) -> "asyncio.Lock":
-    """取 key 对应的互斥锁（惰性创建，key 复用同一把锁）。"""
-    with _IDEMPOTENT_LOCKS_GUARD:
-        lock = _IDEMPOTENT_LOCKS.get(key)
-        if lock is None:
-            lock = asyncio.Lock()
-            _IDEMPOTENT_LOCKS[key] = lock
-        return lock
 
 
 def register_trading_tools(mcp, risk):
@@ -79,32 +34,19 @@ def register_trading_tools(mcp, risk):
     ) -> dict:
         """下单（限价/市价）。direction: buy/sell。下单前过统一风控。
 
-        idempotency_key：可选幂等键，30s 内同键直接返回首次结果（防重复提交/网络重试双单）。
-        """
-        async def _impl() -> dict:
-            # 幂等检查与写入必须在同一把锁内完成（F1），避免并发穿透
-            dup = _idempotent_get(idempotency_key)
-            if dup is not None:
-                dup["duplicated"] = True
-                return dup
-            b = get_bridge(broker_id or None)
-            result = await execution.place_order(
-                b, code, direction, volume, price, price_type,
-                strategy_name, remark, risk=risk)
-            _idempotent_set(idempotency_key, result)
-            return result
+        V9 Execution Unification：MCP 下单经 SignalRouter 统一链路
+        （ExecutionMode live/paper/dry_run + 风控 + 幂等 + WAL + 审计），
+        与 REST/引擎单语义完全一致，不再拥有独立执行路径。
 
-        if not idempotency_key:
-            return await _impl()
-        lock = _idempotent_lock(idempotency_key)
-        async with lock:
-            try:
-                return await _impl()
-            finally:
-                # 释放后清理：幂等缓存已过期（key 已不在 _IDEMPOTENCY）则移除对应锁，
-                # 避免唯一 key 累积造成锁表无界增长。
-                if idempotency_key not in _IDEMPOTENCY:
-                    _IDEMPOTENT_LOCKS.pop(idempotency_key, None)
+        idempotency_key：可选幂等键，窗口内同键直接返回首次结果（防重复提交/网络重试双单）。
+        """
+        if state.signal_router is None:
+            return {"ok": False, "reason": "统一信号入口未初始化"}
+        return await state.signal_router.submit(
+            code, direction, int(volume), float(price or 0), price_type,
+            source=str(strategy_name or "mcp"),
+            broker_id=str(broker_id or ""), remark=str(remark or ""),
+            idempotency_key=str(idempotency_key or ""), auto_confirm=True)
 
     @mcp.tool()
     async def cancel_order(order_id: str, broker_id: str = "") -> dict:

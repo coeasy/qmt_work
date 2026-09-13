@@ -1,6 +1,6 @@
 import Hub from "../components/Hub.jsx";
-import Factors from "../components/Factors.jsx";
-import Research from "../components/Research.jsx";
+import Factors from "../features/research/Factors.jsx";
+import Research from "../features/research/Research.jsx";
 import FactorRegistry from "../components/FactorRegistry.jsx";
 
 // 因子研究：指标 / IC 与归因（研究深度）

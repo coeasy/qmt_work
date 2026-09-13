@@ -112,7 +112,9 @@ class _BoundBrokerSource:
     async def get_kline(self, code: str, period: str = "1d", count: int = 250,
                         adjust: Optional[str] = None) -> Optional[list]:
         try:
-            bars = await self._b.call(self._b.gateway.get_kline, code, period, count)
+            # 透传 adjust：QMT 复权经 dividend_type 参数化（quotes.get_kline），
+            # 使 broker 能参与 qfq/hfq 链（D9 v1.3）。
+            bars = await self._b.call(self._b.gateway.get_kline, code, period, count, adjust=adjust)
         except BrokerError:
             return None
         if isinstance(bars, dict) and bars.get("code"):
@@ -143,6 +145,8 @@ class DataSourceManager:
         self._broker_factory = None  # conn_id -> _BoundBrokerSource | None
         # auto 回退顺序：先券商，再各补充源。可在运行时经 set_auto_chain 调整。
         self._auto_chain: list[str] = ["broker"]
+        # 商用模式：True 时链路求值阶段跳过 Research-Only 等禁止商用的源（如 eltdx）。
+        self._commercial_mode: bool = False
         self._breakers: dict[str, dict] = {}
 
     # ---------- 注册 ----------
@@ -161,6 +165,40 @@ class DataSourceManager:
         """显式设定 auto 回退顺序；未在 chain 中的已注册源不参与 auto。"""
         self._auto_chain = [c for c in chain if c == "broker" or c in self._plugins]
         return self
+
+    # ---------- 多源能力链（Phase 3：CapabilityChain，替代写死的 auto_chain）----------
+    def set_commercial_mode(self, value: bool) -> "DataSourceManager":
+        """设置商用模式；True 时链路求值阶段跳过 Research-Only 等禁止商用的源。"""
+        self._commercial_mode = bool(value)
+        return self
+
+    def _registered_set(self) -> set[str]:
+        return set(self.list_sources())
+
+    def _resolve_sources(self, source: str, capability: str) -> list[str]:
+        """按 source 语义 + 能力链解析候选源顺序（D-J §J.2；替代写死的 auto_chain）。
+
+        - auto/prefer_qmt/空：取该能力默认降级链（QMT→eltdx→baostock→akshare），
+          并按「已注册 + 依赖可用 + 商用许可」过滤；
+        - explicit:<id>：仅该源，不降级（不支持该能力由调用方负责报错）；
+        - qmt_only：仅 broker；local_only：空（由 canonical 层处理）；
+        - broker / 具体源名：单源。
+        """
+        from datasource.providers import provider_catalog
+        src = (source or "auto").strip()
+        if src.startswith("explicit:"):
+            return [src[len("explicit:"):]]
+        if src in ("", "auto", "prefer_qmt"):
+            return provider_catalog.resolve_chain(
+                capability, commercial_mode=self._commercial_mode,
+                registered=self._registered_set())
+        if src == "qmt_only":
+            return ["broker"] if "broker" in self._registered_set() else []
+        if src == "local_only":
+            return []
+        if src == "broker":
+            return ["broker"]
+        return [src]
 
     def list_sources(self) -> list[str]:
         out = []
@@ -316,6 +354,15 @@ class DataSourceManager:
             if raw is None:
                 return None
             det = await self._detail_for(name, src, code)
+            # 指数 / 板块 等品种没有真实 instrument_detail：详情层会把 name 回落成
+            # 代码本身（实测 000001.SH 的 det = {"name": "000001.SH", industry: 全国性银行}），
+            # 此时 _merge_quote 会用它覆盖源层已解析好的「上证指数」，
+            # 界面就退化成「上证指数显示为 000001.SH」。
+            # 因此当详情名缺失或等于代码时，回退到源层 get_quote 的名称。
+            det_name = (det.get("name") or "").strip()
+            if not det_name or det_name == code:
+                if raw.get("name"):
+                    det = {**det, "name": raw["name"]}
             return self._merge_quote(raw, code, board, det, name,
                                      industry=det.get("industry") or "",
                                      concepts=det.get("concepts") or [])
@@ -413,49 +460,29 @@ class DataSourceManager:
                         adjust: Optional[str] = None) -> tuple[Optional[list], Optional[str]]:
         """返回 (bars, source_name)；bars 为 None 表示无可用源。
 
-        复权（qfq/hfq）券商不支持，自动改走支持复权的补充源（eltdx）。
+        复权（qfq/hfq）经 dividend_type 参数化后，QMT 同样参与复权链（不再强制跳过
+        broker）；其余按能力链 QMT→eltdx→baostock→akshare 依次降级（D9 v1.3 锁定）。
         """
         source = self._validate_source(source)
-        # 周期判定引用契约常量（第三份硬编码已消除）。
-        # 注意：旧常量不含 canonical "1mo"，导致月线+qfq 时不会改走支持复权的补充源。
         try:
             _canon = normalize_period(period)
         except UnknownPeriodError:
             _canon = None
-        if source == "auto" and adjust in ("qfq", "hfq") and _canon in adjust_allowed_periods():
-            for name in self._auto_chain:
-                if name == "broker":
-                    continue
-                src = self._plugins.get(name)
-                if src is None:
-                    continue
-                bars = await self._call_source(name, src.get_kline(code, period, count, adjust))
-                if bars:
-                    return bars, name
-            return None, None
-
-        async def _broker_kline():
-            b = self._broker(conn_id)
-            if b is None:
-                return None
-            return await self._call_source("broker", b.get_kline(code, period, count, adjust))
-
-        if source == "broker":
-            bars = await _broker_kline()
-            return (bars, "broker") if bars is not None else (None, None)
-        if source in self._plugins:
-            src = self._plugins.get(source)
-            bars = await self._call_source(source, src.get_kline(code, period, count, adjust))
-            return (bars, source) if bars is not None else (None, None)
-        for name in self._auto_chain:
+        cap = ("kline_qfq" if (adjust in ("qfq", "hfq")
+                               and _canon in adjust_allowed_periods()) else "kline")
+        chain = self._resolve_sources(source, cap)
+        for name in chain:
             if name == "broker":
-                bars = await _broker_kline()
+                b = self._broker(conn_id)
+                if b is None:
+                    continue
+                bars = await self._call_source("broker", b.get_kline(code, period, count, adjust))
             else:
                 src = self._plugins.get(name)
-                if src is None:
+                if src is None or not hasattr(src, "get_kline"):
                     continue
                 bars = await self._call_source(name, src.get_kline(code, period, count, adjust))
-            if bars is not None:
+            if bars:
                 return bars, name
         return None, None
 
@@ -480,19 +507,18 @@ class DataSourceManager:
 
     # ---------- 指数 / 板块 / ETF / 资金流（东财对标能力，仅补充源提供） ----------
     def _sup_chain(self, source: str = "auto") -> list:
-        """按 source 解析补充源候选链（P1-7：source 参数必须真正生效）。
+        """按 source 解析补充源候选链（D9 v1.3：能力链替代写死 _auto_chain）。
 
-        - "broker"：返回空链 → 方法返回 None，绝不悄悄回退 TDX 公共行情，
+        - "broker"：返回空链 → 方法返回 None，绝不悄悄回退补充源行情，
           否则「仅券商」的降级语义失效，用户会误以为看的是券商数据。
-        - 具体源名（如 eltdx）：只用该源。
-        - "auto"/空：按 _auto_chain 顺序回退（跳过券商）。
+        - 具体源名 / explicit:<id>：只用该源（交由 _resolve_sources 处理）。
+        - "auto"/空：按能力链（kline 维度）依次降级，并排除 broker
+          （本方法服务于「券商 SDK 无此接口」的能力，如分时/板块/资金流）。
         """
         want = self._validate_source(source)
         if want == "broker":
             return []
-        if want in ("", "auto"):
-            return [n for n in self._auto_chain if n != "broker"]
-        return [want]
+        return [n for n in self._resolve_sources(source, "kline") if n != "broker"]
 
     async def _first_supported(self, method: str, *args, source: str = "auto",
                                **kwargs):
@@ -703,7 +729,15 @@ def get_manager() -> DataSourceManager:
             source = source_cls()
             m.register(source)
             provider_catalog.register(source)
-    m.set_auto_chain(["broker", "eltdx"])
+    from datasource.akshare_source import AkshareSource
+    if AkshareSource.available():
+        _ak = AkshareSource()
+        m.register(_ak)
+        provider_catalog.register(_ak)
+    # 商用模式默认关闭（研究/个人使用，eltdx 全功能可用）。构建为商用时由环境变量
+    # QMT_COMMERCIAL=1 打开，届时链路自动跳过 eltdx 等禁止商用的源（D-J §J.5）。
+    import os
+    m.set_commercial_mode(os.environ.get("QMT_COMMERCIAL") == "1")
     _manager = m
     return _manager
 

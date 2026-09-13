@@ -126,8 +126,14 @@ def test_contract_rejected_order():
 
 # ---------------- 契约：-1 下单失败 ----------------
 def test_contract_order_minus_one():
-    """order_stock 返回 -1（柜台失败）→ BrokerSDKError，绝不伪报 submitted。"""
-    from xtquant_client.base import BrokerSDKError
+    """order_stock 返回 -1（**柜台拒单**）→ BrokerError，绝不伪报 submitted。
+
+    语义修正：-1 是券商柜台拒绝（资金不足 / 非交易时段 / 无权限 / 风控拦截），
+    并非「缺少 SDK」。旧实现抛 BrokerSDKError 会把可操作的拒单原因误导成
+    「请安装 xtquant / 重装客户端」，且经桥接跨进程重建后文案会二次套娃
+    （见 xtquant_client/bridge_client._rebuild_error）。
+    """
+    from xtquant_client.base import BrokerError, BrokerSDKError
     a = XTPQuantAdapter("C:/qmt/userdata_mini", "123456", "STOCK", 0)
     a._connected = True
     a._acc = object()
@@ -146,9 +152,11 @@ def test_contract_order_minus_one():
         try:
             a.place_order("600519.SH", "buy", "limit", 1600.0, 100)
             raised = False
-        except BrokerSDKError:
+        except BrokerError as exc:
             raised = True
-        assert raised, "柜台返回 -1 必须抛 BrokerSDKError"
+            assert "柜台返回 -1" in str(exc), str(exc)
+            assert not isinstance(exc, BrokerSDKError), "柜台拒单不得误报为「缺少券商 SDK」"
+        assert raised, "柜台返回 -1 必须抛 BrokerError（真实拒单语义）"
     finally:
         xtp_mod._ensure_xtconstant = orig
 

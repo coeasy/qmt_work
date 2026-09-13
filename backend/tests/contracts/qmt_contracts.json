@@ -1,0 +1,112 @@
+{
+  "active_states": [
+    "partial",
+    "pending"
+  ],
+  "cancel_verdict": {
+    "fail_on_return_code": -1,
+    "ok_on_return_code": 0
+  },
+  "limit_requires_positive_price": true,
+  "market_requires_protect_price": true,
+  "place_order_params": [
+    "self",
+    "code",
+    "direction",
+    "price_type",
+    "price",
+    "volume",
+    "strategy_name",
+    "remark"
+  ],
+  "place_order_response_keys": [
+    "code",
+    "direction",
+    "order_id",
+    "price",
+    "price_type",
+    "seq",
+    "status",
+    "ts",
+    "volume"
+  ],
+  "place_order_submit_status": [
+    "submitted",
+    "unknown"
+  ],
+  "price_type_accepted": [
+    "limit",
+    "market"
+  ],
+  "price_type_default": "limit",
+  "price_type_xtp_mapping": {
+    "limit": "FIX_PRICE(11)",
+    "market": "LATEST_PRICE(5)"
+  },
+  "raw_to_std": {
+    "active": "pending",
+    "canceled": "cancelled",
+    "cancelled": "cancelled",
+    "confirmed": "pending",
+    "filled": "filled",
+    "fully_dealt": "filled",
+    "junk": "rejected",
+    "not_dealt": "pending",
+    "part_cancel": "partial",
+    "part_deal": "partial",
+    "part_deal_cancel_pending": "partial",
+    "part_filled": "partial",
+    "partial": "partial",
+    "pending": "pending",
+    "queued": "pending",
+    "rejected": "rejected",
+    "reported": "pending",
+    "reported_cancel_pending": "pending",
+    "submitted": "pending",
+    "submitting": "pending",
+    "unknown": "unknown",
+    "unreported": "pending",
+    "wait_report": "pending",
+    "全部成交": "filled",
+    "已成": "filled",
+    "已报": "pending",
+    "已报待撤": "pending",
+    "已拒绝": "rejected",
+    "已撤": "cancelled",
+    "已撤单": "cancelled",
+    "废单": "rejected",
+    "待报": "pending",
+    "撤单": "cancelled",
+    "未报": "pending",
+    "部分成交": "partial",
+    "部成": "partial",
+    "部成待撤": "partial"
+  },
+  "std_states": [
+    "cancelled",
+    "filled",
+    "partial",
+    "pending",
+    "rejected",
+    "unknown"
+  ],
+  "terminal_states": [
+    "cancelled",
+    "filled",
+    "rejected"
+  ],
+  "xtp_int_status": {
+    "255": "unknown",
+    "48": "pending",
+    "49": "pending",
+    "50": "pending",
+    "51": "pending",
+    "52": "partial",
+    "53": "partial",
+    "54": "cancelled",
+    "55": "partial",
+    "56": "filled",
+    "57": "rejected",
+    "86": "pending"
+  }
+}

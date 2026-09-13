@@ -1,6 +1,7 @@
-from fastapi import APIRouter
+from core.context import AppContext, get_ctx
+from fastapi import APIRouter, Depends
 
-from app.routes._common import ok, state
+from app.routes._common import ok
 
 # --- stdlib imports injected by fix_route_imports ---
 
@@ -9,12 +10,12 @@ from app.routes._common import ok, state
 router = APIRouter()
 
 @router.post("/sync/subscribe")
-async def sync_subscribe(body: dict):
+async def sync_subscribe(body: dict, ctx: AppContext = Depends(get_ctx)):
     """创建/提交sync / subscribe（POST /sync/subscribe）。"""
     codes = body.get("codes", [])
     if codes:
-        state.sync_engine.client_subscribe("api", codes)
-    return ok({"subscribed": sorted(state.sync_engine._subscribed_codes)})
+        ctx.sync_engine.client_subscribe("api", codes)
+    return ok({"subscribed": sorted(ctx.sync_engine._subscribed_codes)})
 
 
 # ---------------- WebSocket 统一通道 ----------------

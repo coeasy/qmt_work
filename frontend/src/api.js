@@ -21,7 +21,15 @@ function _authHeaders(extra = {}) {
 
 async function _req(method, path, { params, body, signal, timeoutMs, _retried } = {}) {
   const url = new URL(BASE + path, window.location.origin);
-  if (params) Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v));
+  // 关键修复：丢弃 null/undefined/空串参数。searchParams.set(k, undefined) 会序列化成字面量
+  // "undefined"（实测 GET /trade/positions?symbol=undefined），后端拿到垃圾值走默认分支，
+  // 前端拿到 200 却可能用错数据；统一在此处过滤，避免整类参数污染。
+  if (params) {
+    for (const [k, v] of Object.entries(params)) {
+      if (v === undefined || v === null || v === "") continue;
+      url.searchParams.set(k, v);
+    }
+  }
   // 阶段 5 关键修复：实现 signal + timeoutMs 真正生效（否则取消按钮无效、连接超时无意义）。
   // 双轨：外部 signal（用户点取消）+ 内部 timer，任一触发立即中断 fetch。
   // 链路强化：默认 15s 超时（未显式指定时），避免无超时请求永久挂起。
@@ -80,7 +88,9 @@ api.listBrokers = () => api.get("/brokers");
 api.addBroker = (body) => api.post("/brokers", body);
 api.testBroker = (body) => api.post("/brokers/test", body);
 api.launchBrokerClient = (body) => api.post("/brokers/launch", body);
-api.autoDetectBrokers = () => api.get("/brokers/auto-detect");
+// 自动发现会全机扫描 QMT 安装目录并逐个做 xtquant 可导入性探测（实测 ~25s），
+// 必须放宽超时预算，否则前端 15s 默认超时会把「正在发现」误报成「发现失败」。
+api.autoDetectBrokers = () => api.get("/brokers/auto-detect", {}, { timeoutMs: 45000 });
 api.connectBroker = (id, { signal } = {}) =>
   _req("POST", `/brokers/${id}/connect`, { body: {}, signal, timeoutMs: 35000 });
 api.disconnectBroker = (id) => api.post(`/brokers/${id}/disconnect`);
@@ -92,8 +102,9 @@ api.brokerRuntimes = () => api.get("/brokers/runtimes");
 api.brokerHealth = (id) => api.get(`/brokers/${id}/health`);
 // QMT 客户端版本画像探测（识别完整版/极速版、版本号与能力矩阵）
 api.brokerVersionInfo = (body) => api.post("/brokers/version-info", body);
-// 端到端诊断快照（排障用；deep 含系统运行时发现，较重）
-api.brokerDiagnostics = (deep) => api.get("/brokers/diagnostics", deep ? { deep: 1 } : {});
+// 端到端诊断快照（排障用；deep 含系统运行时发现，较重 → 放宽超时预算）
+api.brokerDiagnostics = (deep) =>
+  api.get("/brokers/diagnostics", deep ? { deep: 1 } : {}, deep ? { timeoutMs: 60000 } : {});
 
 // ---------------- 涨停监控 / 打板助手 ----------------
 api.limitupStatus = () => api.get("/limitup/status");
@@ -126,6 +137,8 @@ api.marketIndicators = () => api.get("/market/indicators");
 api.marketIndicatorsCalc = (params) => api.get("/market/indicators/calc", params);
 // G7 条件选股：conditions 为 JSON 条件树（URL 编码）；动态板块存取
 api.marketScreen = (params) => api.get("/market/screen", params);
+// V9 Phase 8：数据源目录（GET /data/providers，供选股页数据源选择器）
+api.dataProviders = () => api.get("/data/providers");
 api.screenNL = (body) => api.post("/market/screen/nl", body);   // T5 G8 自然语言选股
 api.screenBoards = () => api.get("/market/screen/boards");
 api.screenBoardsSave = (body) => api.post("/market/screen/boards", body);
@@ -324,6 +337,8 @@ api.ready = () => api.get("/ready");
 api.quoteBusStats = () => api.get("/quote-bus/stats");
 // 统一能力自描述：各域端点数 / 可自动暴露数（观察能力面是否完整）
 api.capabilitiesSummary = () => api.get("/capabilities/summary");
+// 平台运行时能力自描述（D-C / D12）：真实交易可用性 + 选股可用性（screening_ready）
+api.platformStatus = () => api.get("/platform/status");
 // /metrics 返回 Prometheus text/plain（非 JSON），需原始文本读取
 api.metricsRaw = async () => {
   // 与 _req 统一 15s 超时（此前无超时，后端 metrics 卡顿时系统状态页被永久挂起）

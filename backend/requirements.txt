@@ -1,27 +1,32 @@
-fastapi>=0.115
-uvicorn[standard]>=0.30
-fastmcp>=1.5,<3
-pydantic>=2.7
-pydantic-settings>=2.4
-httpx>=0.27
-python-dotenv>=1.0
+# qmt_work 主依赖（Phase 0 ⑥：全量 pin，与构建 venv 实测版本一致）。
+# pin 原则：主依赖全部 `==` 锁版本（可复现构建）；可选数据源依赖见 requirements-optional.txt
+# （eltdx Research-Only 禁商用 / baostock / akshare 强推荐，均不进主依赖）。
+fastapi==0.141.1
+uvicorn[standard]==0.52.3
+fastmcp==2.14.7
+pydantic==2.13.4
+pydantic-settings==2.15.0
+httpx==0.28.1
+python-dotenv==1.2.2
 # 安全：email-validator 缺失会导致 fastapi 导入 EmailStr 时崩溃（已踩坑）
-email-validator
+email-validator==2.3.0
 # 自动发现本机 QMT 进程（xtquant_client/discovery.py）
-psutil
+psutil==7.2.2
 # 向量化指标/回测（tools/factors.py、tools/backtest.py 向量化路径；缺失时回退纯 Python）
-numpy>=1.24
-pandas>=2.0
+numpy==1.26.4
+pandas==2.2.3
 # 打包工具（build_exe.py 用 PyInstaller）
-pyinstaller>=6.0
+pyinstaller==6.22.0
 # 测试
-pytest
+pytest==9.1.1
 # 测试：行情总线 Redis 真路径（fakeredis 替代真实 Redis，无需起服务）
-redis>=5.0
-fakeredis>=2.0
-# 注意：eltdx（TDX 公共行情补充源）已移至 requirements-optional.txt。
-# 原因：eltdx 采用「ELTDX Research-Only License」，禁止一切商业使用；
-#      作为主依赖会导致本仓库无法满足商用前置条件。详见 docs/THIRD_PARTY_LICENSES.md 3.2 节。
-# 本文件保持「可商用」的最小依赖集；缺失 eltdx 时行情层自动降级为券商数据源。
+redis==8.1.0
+fakeredis==2.34.1
 # G10-4 统一导出 Excel 支持（app/export）
-openpyxl>=3.1
+openpyxl==3.1.5
+
+# —— 许可证与架构说明（勿删）——
+# eltdx（TDX 公共行情补充源）保留在 requirements-optional.txt：
+#   eltdx 采用「ELTDX Research-Only License」，禁止一切商业使用；作为主依赖会导致
+#   本仓库无法满足商用前置条件。详见 docs/THIRD_PARTY_LICENSES.md 3.2 节。
+# 本文件保持「可商用」的最小依赖集；缺失 eltdx 时行情层自动降级为券商数据源。

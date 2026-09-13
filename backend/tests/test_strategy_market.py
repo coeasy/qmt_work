@@ -17,7 +17,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from app.state import state
+from core.state import state
 from core.db import DB
 from tools import strategy_market as sm
 

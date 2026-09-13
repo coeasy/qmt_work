@@ -35,7 +35,7 @@ vi.mock("../../BrokerContext.jsx", () => ({
   useBroker: () => ({ activeId: null }),
 }));
 
-import MarketData from "../MarketData.jsx";
+import MarketData from "../../features/market/MarketData.jsx";
 import { api } from "../../api.js";
 
 vi.mock("../../api.js", () => ({

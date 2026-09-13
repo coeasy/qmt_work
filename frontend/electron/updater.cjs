@@ -1,34 +1,55 @@
 // 自动更新模块（electron-updater）。
 // 在构建时启用（app.isPackaged），开发态跳过。
 // 从 GitHub Releases 或自建更新服务器拉取 NSIS 安装包差异更新。
-const { autoUpdater } = require("electron-updater");
-const { BrowserWindow, dialog } = require("electron");
+const { app, BrowserWindow, dialog } = require("electron");
 const log = require("console");
 
-// 更新服务器配置（GitHub Releases 默认）
-// 若自建，在 electron-builder.yml 中设置 publish.serverUrl
-autoUpdater.autoDownload = false; // 询问用户后再下载
-autoUpdater.allowPrerelease = false;
+// 注意：`electron-updater` 必须在运行时惰性加载。
+// 顶层直接 require 会在模块加载期就构造 autoUpdater，进而调用 app.getVersion()；
+// 开发态（非 Electron 主进程上下文 / electron 被解析为 npm shim 包）会抛
+// `Cannot read properties of undefined (reading 'getVersion')` 直接崩掉主进程。
+// 因此这里按 app.isPackaged 惰性加载，并对加载失败做降级（只是没有自动更新，
+// 绝不允许拖垮启动）。
+let _autoUpdater = null;
+let _loadTried = false;
+
+function autoUpdater() {
+  if (!_loadTried) {
+    _loadTried = true;
+    if (app.isPackaged) {
+      try {
+        _autoUpdater = require("electron-updater").autoUpdater;
+        _autoUpdater.autoDownload = false;   // 询问用户后再下载
+        _autoUpdater.allowPrerelease = false;
+      } catch (err) {
+        log.error("[updater] 自动更新模块加载失败，已跳过：", err && err.message);
+        _autoUpdater = null;
+      }
+    }
+  }
+  return _autoUpdater;
+}
 
 let _win = null;
 let _checking = false;
 
 function init(mainWindow) {
   _win = mainWindow;
-  if (!autoUpdater.isUpdaterActive()) return;
+  const au = autoUpdater();
+  if (!au || !au.isUpdaterActive()) return;
 
-  autoUpdater.on("checking-for-update", () => {
+  au.on("checking-for-update", () => {
     _checking = true;
     log.log("[updater] checking for update...");
   });
 
-  autoUpdater.on("update-available", (info) => {
+  au.on("update-available", (info) => {
     _checking = false;
     log.log("[updater] update available:", info.version);
     _notify(info);
   });
 
-  autoUpdater.on("update-not-available", (info) => {
+  au.on("update-not-available", (info) => {
     _checking = false;
     log.log("[updater] no update available");
     if (_win && _win.webContents) {
@@ -36,7 +57,7 @@ function init(mainWindow) {
     }
   });
 
-  autoUpdater.on("error", (err) => {
+  au.on("error", (err) => {
     _checking = false;
     log.error("[updater] error:", err.message);
     if (_win && _win.webContents) {
@@ -44,7 +65,7 @@ function init(mainWindow) {
     }
   });
 
-  autoUpdater.on("download-progress", (progress) => {
+  au.on("download-progress", (progress) => {
     if (_win && _win.webContents) {
       _win.webContents.send("update-progress", {
         percent: progress.percent,
@@ -55,13 +76,13 @@ function init(mainWindow) {
     }
   });
 
-  autoUpdater.on("update-downloaded", (info) => {
+  au.on("update-downloaded", (info) => {
     log.log("[updater] update downloaded, will install on quit");
     if (_win && _win.webContents) {
       _win.webContents.send("update-status", { status: "downloaded", version: info.version });
     }
     // 静默标记：下次退出时自动安装
-    autoUpdater.autoInstallOnAppQuit = true;
+    au.autoInstallOnAppQuit = true;
   });
 }
 
@@ -77,24 +98,27 @@ async function _notify(info) {
     cancelId: 1,
   });
   if (response === 0) {
-    autoUpdater.downloadUpdate();
+    const au = autoUpdater();
+    if (au) au.downloadUpdate();
   }
 }
 
 function check() {
-  if (!autoUpdater.isUpdaterActive()) {
+  const au = autoUpdater();
+  if (!au || !au.isUpdaterActive()) {
     log.log("[updater] not active (dev mode or no publish config)");
     return;
   }
   if (_checking) return;
-  autoUpdater.checkForUpdates().catch((err) => {
+  au.checkForUpdates().catch((err) => {
     log.error("[updater] check failed:", err.message);
   });
 }
 
 function checkSilent() {
-  if (!autoUpdater.isUpdaterActive()) return;
-  autoUpdater.checkForUpdates().catch(() => {});
+  const au = autoUpdater();
+  if (!au || !au.isUpdaterActive()) return;
+  au.checkForUpdates().catch(() => {});
 }
 
 module.exports = { init, check, checkSilent };

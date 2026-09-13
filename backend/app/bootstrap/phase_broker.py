@@ -15,6 +15,7 @@ from fastapi import FastAPI
 
 from core.config import settings
 from core.state import state
+from core.state import init_broker_manager
 from xtquant_client.manager import ConnectionConfig
 
 log = logging.getLogger("qmt_work.bootstrap.broker")
@@ -33,6 +34,14 @@ def _bootstrap_from_env() -> None:
 
 
 async def setup(app: FastAPI) -> dict:
+    init_broker_manager()  # V10 A2：core 延迟绑定，避免在 core 顶层 import xtquant_client
+    # V10 A4：注入连接事件指标回调（xtquant_client 不再反向依赖 gateway.metrics）
+    try:
+        from gateway.metrics import get_metrics
+        state.broker_manager.metrics_fn = (
+            lambda conn_id, ev: get_metrics().record_conn_event(conn_id, ev))
+    except Exception:  # noqa: BLE001
+        pass
     state.broker_manager.load_persisted()
     _bootstrap_from_env()
 

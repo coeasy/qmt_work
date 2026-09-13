@@ -1,7 +1,7 @@
-from fastapi import APIRouter
+from core.context import AppContext, get_ctx
+from fastapi import APIRouter, Depends
 
 from app.routes._common import _call, _need, audit_log, err, no_broker, ok
-from gateway.execution import get_execution_service
 
 # --- stdlib imports injected by fix_route_imports ---
 
@@ -10,7 +10,7 @@ from gateway.execution import get_execution_service
 router = APIRouter()
 
 @router.post("/rebalance")
-async def rebalance(body: dict):
+async def rebalance(body: dict, ctx: AppContext = Depends(get_ctx)):
     """等权篮子再平衡：targets=[{code,target_ratio}] -> 调仓单（阈值过滤+拆单+涨跌停处理）。
 
     do_trade=True 时经券商真实下单；否则仅生成计划。
@@ -59,9 +59,14 @@ async def rebalance(body: dict):
                 break
             direction = "buy" if diff > 0 else "sell"
             if do_trade:
-                res = await get_execution_service().place_order(
-                    b, code, direction, volume, last, "limit", "rebalance",
-                    f"rebal-{code}")
+                # V9 Execution Unification：经 SignalRouter 统一链路
+                # （ExecutionMode + 风控 + WAL + 审计），不再直连 ExecutionService。
+                if ctx.signal_router is None:
+                    return err(503, "统一信号入口未初始化")
+                res = await ctx.signal_router.submit(
+                    code, direction, volume, last, "limit", source="rebalance",
+                    broker_id=str(body.get("conn_id", "") or ""),
+                    remark=f"rebal-{code}", auto_confirm=True)
                 orders.append({"code": code, "direction": direction, "volume": volume,
                                "price": last, "order": res})
             else:

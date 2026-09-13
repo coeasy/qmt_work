@@ -392,7 +392,10 @@ export function workspaceReducer(state, action) {
       if (same && !MULTI_INSTANCE_PAGES.has(key)) {
         const sLeaf = findNode(same.layout, same.activeLeaf);
         const layout = sLeaf ? setLeafParams(same.layout, same.activeLeaf, params) : same.layout;
-        return activate(mapTab(state, same.id, (t) => ({ ...t, layout })));
+        // tabId 必须传：activate(state, tabId) 首行是 `if (!findTab(state, tabId)) return state`，
+        // 漏传 → findTab(state, undefined) === null → **原样返回旧 state**，
+        // 即「tab 已在但切不过去」：点菜单无任何反应、界面停留在旧页（2026-09-12 实测）。
+        return activate(mapTab(state, same.id, (t) => ({ ...t, layout })), same.id);
       }
       // ③ 自动分屏开启且当前 tab 不是多实例页面 → 拆进当前 tab
       if (getAutoSplit() && cur && !MULTI_INSTANCE_PAGES.has(curLeaf ? curLeaf.pageKey : key) && collectLeaves(cur.layout).length < 4) {
@@ -545,6 +548,60 @@ export function WorkspaceProvider({ children }) {
     // 与 withAlive 同语义：取头部（最近使用）MAX_ALIVE 个，激活 tab 永远在列
     aliveIds: new Set(state.aliveOrder.slice(0, MAX_ALIVE)),
   }), [state]);
+
+  // 测试桥（E2E 冒烟用）——镜像 store 的**权威**状态。
+  //
+  // 为什么必须由 Provider 暴露，而不是让测试读 DOM / 读 localStorage：
+  //   · DOM 不可靠：keep-alive(LRU) 下只有激活 tab 的 .wb-tabpane 不带 "inactive"
+  //     （Workbench:172），所以「未 inactive 的 pane」恒等于 1 个 = 激活 tab；
+  //     而它的 DOM 位置 = state.tabs 的下标，**与「最新使用的 tab」无关**。
+  //     早期测试用「取最后一个可见 pane」是位置选择器，前提（最新 tab 在 tabs 末尾）
+  //     根本不成立 → 断言指错（表现为 T22c 期望「设置」实得「行情分析」）。
+  //   · localStorage 滞后：写盘是 200ms 防抖（见下方 useEffect），读到的可能是上一帧。
+  //   · 原因根因：页面侧拿不到 store 闭包，测试只能从间接证据反推 —— 这里直接给出
+  //     权威快照（激活 tab 的叶子标题 / 每个 tab 的标题 / 计数），换任意选择器都稳。
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const activeTab = state.tabs.find((t) => t.id === state.activeId) || state.tabs[0] || null;
+    const leaves = (t) => {
+      const out = [];
+      (function walk(n) {
+        if (!n || typeof n !== "object") return;
+        if (n.pageKey) { out.push(n); return; }
+        (n.kids || []).forEach(walk);
+      })(t ? t.layout : null);
+      return out;
+    };
+    const activeLeaf = activeTab
+      ? (leaves(activeTab).find((l) => l.id === activeTab.activeLeaf) || leaves(activeTab)[0] || null)
+      : null;
+    const titleOf = (l) => {
+      if (!l) return "";
+      const base = (PAGES[l.pageKey] && PAGES[l.pageKey].label) || l.pageKey;
+      const code = l.params && l.params.code;
+      return code ? `${base} · ${code}` : base;
+    };
+    window.__qmtWorkspace = {
+      tabCount: state.tabs.length,
+      activeId: state.activeId,
+      // 激活叶子标题：断言「当前前台看到的是哪一页」的唯一权威来源
+      activeTitle: titleOf(activeLeaf),
+      activePageKey: activeLeaf ? activeLeaf.pageKey : "",
+      activeLeafId: activeLeaf ? activeLeaf.id : "",
+      // 全部 tab：{ id, title, active }，用于诊断 tab 累积 / 单例聚焦行为
+      tabs: state.tabs.map((t) => {
+        const ls = leaves(t);
+        const lf = ls.find((l) => l.id === t.activeLeaf) || ls[0] || null;
+        return {
+          id: t.id,
+          title: titleOf(lf),
+          leaves: ls.length,
+          active: t.id === state.activeId,
+        };
+      }),
+      aliveCount: state.aliveOrder.slice(0, MAX_ALIVE).length,
+    };
+  }, [state]);
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }

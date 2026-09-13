@@ -74,6 +74,13 @@ async def shutdown(app: FastAPI) -> None:
     if getattr(state, "market_sync", None) is not None:
         await state.market_sync.stop()
 
+    # 9b. V9 Phase 7：Durable Scheduler
+    if getattr(state, "schedule_runner", None) is not None:
+        try:
+            await state.schedule_runner.stop()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("schedule_runner stop failed: %s", exc)
+
     # 10. 订单超时守护
     if state.order_watchdog:
         await state.order_watchdog.stop()

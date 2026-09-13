@@ -1,6 +1,7 @@
-from fastapi import APIRouter
+from core.context import AppContext, get_ctx
+from fastapi import APIRouter, Depends
 
-from app.routes._common import audit_log, err, ok, state
+from app.routes._common import audit_log, err, ok
 
 # --- stdlib imports injected by fix_route_imports ---
 
@@ -9,15 +10,15 @@ from app.routes._common import audit_log, err, ok, state
 router = APIRouter()
 
 @router.get("/limitup/status")
-async def limitup_status():
+async def limitup_status(ctx: AppContext = Depends(get_ctx)):
     """获取limitup / status（GET /limitup/status）。"""
-    m = state.limitup_monitor
+    m = ctx.limitup_monitor
     return ok(m.status() if m else {"running": False, "pool": []})
 
 @router.post("/limitup/pool")
-async def limitup_pool_add(body: dict):
+async def limitup_pool_add(body: dict, ctx: AppContext = Depends(get_ctx)):
     """创建/提交limitup / pool（POST /limitup/pool）。"""
-    m = state.limitup_monitor
+    m = ctx.limitup_monitor
     if m is None:
         return err(503, "涨停监控未初始化")
     try:
@@ -28,18 +29,18 @@ async def limitup_pool_add(body: dict):
         return err(400, str(exc))
 
 @router.delete("/limitup/pool")
-async def limitup_pool_remove(code: str):
+async def limitup_pool_remove(code: str, ctx: AppContext = Depends(get_ctx)):
     """删除limitup / pool（DELETE /limitup/pool）。"""
-    m = state.limitup_monitor
+    m = ctx.limitup_monitor
     if m is None:
         return err(503, "涨停监控未初始化")
     m.remove(code)
     return ok({"removed": code})
 
 @router.post("/limitup/start")
-async def limitup_start(body: dict):
+async def limitup_start(body: dict, ctx: AppContext = Depends(get_ctx)):
     """创建/提交limitup / start（POST /limitup/start）。"""
-    m = state.limitup_monitor
+    m = ctx.limitup_monitor
     if m is None:
         return err(503, "涨停监控未初始化")
     try:
@@ -56,17 +57,17 @@ async def limitup_start(body: dict):
         return err(400, str(exc))
 
 @router.post("/limitup/stop")
-async def limitup_stop():
+async def limitup_stop(ctx: AppContext = Depends(get_ctx)):
     """创建/提交limitup / stop（POST /limitup/stop）。"""
-    m = state.limitup_monitor
+    m = ctx.limitup_monitor
     if m is None:
         return err(503, "涨停监控未初始化")
     return ok(await m.stop())
 
 @router.post("/limitup/reset")
-async def limitup_reset():
+async def limitup_reset(ctx: AppContext = Depends(get_ctx)):
     """创建/提交limitup / reset（POST /limitup/reset）。"""
-    m = state.limitup_monitor
+    m = ctx.limitup_monitor
     if m is None:
         return err(503, "涨停监控未初始化")
     m.reset_triggered()

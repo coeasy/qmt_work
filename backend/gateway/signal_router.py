@@ -161,6 +161,10 @@ class SignalRouter:
                                                 price_type=sig.price_type)
             if not ok:
                 self._audit("signal.rejected", code, sig.__dict__, reason)
+                # V9 §5.3：风控拒绝事件进 WS 实时流（前端事件日志可见）
+                self._emit({"type": "risk.blocked", "data": {
+                    "code": code, "side": side, "volume": sig.volume,
+                    "reason": reason, "source": sig.source, "mode": self.mode}})
                 if self._notifier:
                     await self._notifier.notify("risk.blocked", "风控拦截",
                                                 f"{code} {side} {sig.volume} 被拦截：{reason}",
@@ -278,7 +282,10 @@ class SignalRouter:
     async def _live(self, sig: Signal) -> dict:
         b = self._manager.bridge(sig.broker_id or None)
         if b is None:
-            return {"ok": False, "reason": "未连接券商客户端", "mode": "live"}
+            # broker_unavailable：路由据此返回 503 + 「券商连接」引导（而非 400），
+            # 语义不再把「没有可用券商」误报成「请求非法」。
+            return {"ok": False, "reason": "未连接券商客户端", "mode": "live",
+                    "broker_unavailable": True, "error_type": "BrokerNotConnectedError"}
         try:
             from gateway.execution import ExecutionService
             res = await ExecutionService(risk=self._risk, db=self._db).place_order(
@@ -322,7 +329,13 @@ class SignalRouter:
                 await self._notifier.notify("order.error", "委托失败",
                                             f"{sig.code} {sig.side} 失败：{exc}", sig.__dict__)
             self._audit("signal.failed", sig.code, sig.__dict__, str(exc))
-            return {"ok": False, "reason": str(exc), "mode": "live"}
+            # 券商**不可用**（未连接 / SDK 缺失 / 桥接不可用）→ 路由层转 503 引导；
+            # 其余（风控拦截 / 柜台拒单）保持真实的执行拒绝语义。
+            from xtquant_client.base import BrokerNotConnectedError, BrokerSDKError
+            return {"ok": False, "reason": str(exc), "mode": "live",
+                    "error_type": type(exc).__name__,
+                    "broker_unavailable": isinstance(
+                        exc, (BrokerNotConnectedError, BrokerSDKError))}
 
     def _emit(self, event: dict):
         if self._on_event:

@@ -430,18 +430,34 @@ async def rotation(days: int = 5, kind: str = "industry",
 _BREADTH_TREND_CODE = "880005.SH"   # 涨跌家数（统计类板块，真实家数）
 
 
+OVERVIEW_BUDGET_SECONDS = 10
+
+
+def _stat_named(rows: list, name: str):
+    """按统计板块名称取真实值；找不到返回 None，绝不估算补 0。"""
+    row = next((b for b in (rows or []) if b.get("name") == name), None)
+    return row.get("last") if row else None
+
+
 async def overview(source: str = "auto", ttl: int = 10) -> dict:
     """市场概览（E3）：统计类板块真实家数（涨跌/停板/各市场）+ 主要指数快照 + 宽度趋势。
 
     两市成交额（C4）：上证+深证指数快照 amount 求和（真实口径，零额外打源）；
     任一市场缺失则 two_city_turnover=null 由前端显式标注「—」，不伪造。
+    breadth_summary 显式声明 TDX 统计口径：全市场只提供「涨跌差 / 停板家数 / 均价」，
+    不把它拆成上涨家数 / 下跌家数 / 涨停家数，避免首屏伪造 0。
     """
     ck = f"overview:{source}"
     hit = _cached(ck, ttl)
     if hit is not None:
         return hit
     try:
-        stat, _ = await get_hub().get_boards("stat", "pct", 60, source=source)
+        stat, _ = await asyncio.wait_for(
+            get_hub().get_boards("stat", "pct", 60, source=source),
+            timeout=OVERVIEW_BUDGET_SECONDS,
+        )
+    except asyncio.TimeoutError as exc:
+        raise ServiceError(503, "市场概览获取超时：TDX 行情源响应慢。") from exc
     except Exception as exc:  # noqa: BLE001
         raise ServiceError(503, f"市场概览获取失败：{exc}") from exc
     breadth = [{"code": b["code"], "name": b.get("name", ""),
@@ -477,7 +493,15 @@ async def overview(source: str = "auto", ttl: int = 10) -> dict:
     two_city = None
     if amt_sh is not None and amt_sz is not None:
         two_city = float(amt_sh) + float(amt_sz)
-    out = {"breadth": breadth, "indices": indices,
+    breadth_summary = {
+        "breadth_net": _stat_named(stat, "涨跌家数"),
+        "breadth_net_prev": next((b.get("lastClose") for b in (stat or []) if b.get("name") == "涨跌家数"), None),
+        "stopped_count": _stat_named(stat, "停板家数"),
+        "avg_price": _stat_named(stat, "成交均价"),
+        "note": "涨跌家数=上涨家数-下跌家数（TDX 统计口径）；停板家数为涨停/跌停合并家数。",
+    }
+    out = {"breadth": breadth, "breadth_summary": breadth_summary,
+           "indices": indices,
            "breadth_trend": trend, "two_city_turnover": two_city,
            "two_city_note": ("上证+深证指数快照成交额求和（真实口径）" if two_city is not None
                              else "指数快照缺成交额，无法聚合两市成交额"),

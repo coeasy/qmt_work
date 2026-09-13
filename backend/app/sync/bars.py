@@ -5,8 +5,10 @@
   date-range 参数；因此采用「拉最新 lookback 根 → 主键幂等合并」的窗口增量，
   而非逐日对账。数据正确性由 ``local_bars`` 主键 (code,period,adjust,dt) 的
   ``INSERT OR REPLACE`` 保证：重复日期覆盖、缺失日期补齐、旧数据不删除。
-- **复权**：默认 ``qfq`` 走支持复权的补充源（eltdx），复权维度入主键，前后复权
-  各自独立存储。
+- **复权**：默认 ``qfq``，按能力链 QMT→eltdx→baostock→akshare 求源（QMT 复权经
+  ``dividend_type`` 参数化后同样参与复权链），复权维度入主键，前后复权各自独立存储。
+- **溯源为真**：``provider_id`` 写入**本次真实命中来源名**（非 ``"auto"``），
+  供跨源对账按质量序选主（QMT>eltdx>baostock>akshare）；拿不到来源时记空而非伪造。
 - **并发闸门**：信号量限并发（默认 8），G6 JobRuntime 落地前先本地收敛。
 - **交易日历**：``weekday_calendar`` 已升级为真实 A 股日历（app/sync/calendar.py，
   内置 2024-2027 节假日表 + runtime_config 扩展，G1-5b 落地）。
@@ -31,7 +33,38 @@ from datasource.registry import get_hub
 log = logging.getLogger("qmt_work.sync.bars")
 
 #: 抓取器签名：(code, period, adjust, count) -> Optional[list[dict|Bar]]
+#: 生产路径返回 ``(bars, source)`` 元组以便落库写入**真实来源名**；注入式测试可返回纯 list。
 FetchBars = Callable[[str, str, str, int], Awaitable[Optional[list]]]
+
+
+def _split_fetch_result(raw) -> tuple[Optional[list], str]:
+    """兼容两种抓取器返回：``(bars, source)`` 元组 / 纯 ``bars`` 列表。
+
+    元组形态携带真实命中来源名，用于 ``local_bars.provider_id`` 溯源（P3-4：
+    拒绝把真实来源丢成 ``"auto"`` 的假溯源）。
+    """
+    if isinstance(raw, tuple):
+        bars = raw[0] if raw else None
+        src = raw[1] if len(raw) > 1 and raw[1] else ""
+        return bars, str(src).strip()
+    return raw, ""
+
+
+def _resolve_provider_id(real_src: str, configured: str) -> str:
+    """落库溯源解析：**真实命中来源优先**。
+
+    - 拿到真实来源名 → 直接采用（不因调用方传了别的标签而说谎）；
+    - 未拿到来源但配置了具体源名 → 用配置值；
+    - 配置为 ``auto``（按能力链自动降级）且无来源信息 → 记 ``""``（未知），
+      **绝不伪造 ``"auto"``** —— 空值在 ``local_store`` 读路径中按最低优先级处理。
+    """
+    real = (real_src or "").strip()
+    if real:
+        return real
+    cfg = (configured or "").strip()
+    if cfg and cfg.lower() != "auto":
+        return cfg
+    return ""
 
 
 def now_iso() -> str:
@@ -106,7 +139,10 @@ class BarsSyncer:
         self._lookback = int(lookback)
         self._period = period
         self._adjust = adjust
+        # provider_id 既是「请求的数据源」（"auto" = 按能力链自动降级），
+        # 也是拿到真实来源名之前的溯源兜底标签。
         self._provider_id = provider_id
+        self._source = (provider_id or "auto").strip() or "auto"
         self._batch_id = batch_id or f"bars-{uuid.uuid4().hex}"
         self._sem = asyncio.Semaphore(self._concurrency)
 
@@ -114,15 +150,19 @@ class BarsSyncer:
     # 抓取
     # ------------------------------------------------------------------
     async def _default_fetch(self, code: str, period: str, adjust: str,
-                             count: int) -> Optional[list]:
-        """生产路径：真实多源回退（auto 链，复权走支持复权的补充源）。"""
+                             count: int) -> Optional[tuple]:
+        """生产路径：真实多源回退（按 ``self._source`` 求链，复权走支持复权的源）。
+
+        返回 ``(bars, source_name)`` —— ``source_name`` 是本次真实命中的数据源，
+        由 :meth:`sync_one` 写入 ``local_bars.provider_id``，保证溯源为真。
+        """
         try:
-            bars, _src = await get_hub().get_kline(
-                code, period, count, source="auto", adjust=adjust)
+            bars, src = await get_hub().get_kline(
+                code, period, count, source=self._source, adjust=adjust)
         except Exception as exc:  # noqa: BLE001 单标的失败不击穿整批
-            log.warning("sync fetch %s 失败：%s", code, exc)
+            log.warning("sync fetch %s(%s) 失败：%s", code, self._source, exc)
             return None
-        return bars
+        return bars, src
 
     # ------------------------------------------------------------------
     # 核心
@@ -130,15 +170,18 @@ class BarsSyncer:
     async def sync_one(self, code: str) -> SyncOutcome:
         async with self._sem:
             try:
-                bars = await self._fetch(code, self._period, self._adjust, self._lookback)
+                raw = await self._fetch(code, self._period, self._adjust, self._lookback)
             except Exception as exc:  # noqa: BLE001
                 return SyncOutcome(code=code, error=f"抓取异常：{exc}")
+            bars, real_src = _split_fetch_result(raw)
             if not bars:
                 return SyncOutcome(code=code, error="源无数据（非交易时段或代码不受支持）")
+            # 溯源为真：写真实命中来源名，绝不用 "auto" 冒充（P3-4）
+            provider_id = _resolve_provider_id(real_src, self._provider_id)
             try:
                 n = self._store.upsert_bars(code, bars, period=self._period,
                                             adjust=self._adjust,
-                                            provider_id=self._provider_id,
+                                            provider_id=provider_id,
                                             batch_id=self._batch_id,
                                             schema_version="bars.v2",
                                             quality_state="raw")

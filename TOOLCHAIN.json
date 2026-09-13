@@ -1,0 +1,8 @@
+{
+  "schema": "qmt_work.toolchain.v1",
+  "node": "22.22.2",
+  "python": "3.11.9",
+  "pyinstaller": "6.22.0",
+  "electron": "^31.0.0",
+  "note": "Phase 9 ① 工具链锁定。PyInstaller/Electron 以 backend/requirements.txt 与 frontend/package.json 为准；本文件为 CI 与 verify_artifacts 的单一读取点。"
+}

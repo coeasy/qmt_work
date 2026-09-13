@@ -65,3 +65,18 @@ export function navToTrade(code, price, direction = "buy") {
   const payload = { code, direction, ...(price ? { price: Number(price) } : {}) };
   return navTo("trade", { params: payload, openIn: OPEN_IN.REPLACE });
 }
+
+// ---------------------------------------------------------------------------
+// 测试桥（E2E 冒烟用）。
+//
+// 导航事件走模块内 eventBus，而 page.evaluate 处于页面全局作用域，
+// 拿不到模块闭包 → 冒烟脚本此前只能 window.dispatchEvent(new CustomEvent("nav"))
+// 而全站无任何 window "nav" 监听者，导致**派发静默失效、始终停留在仪表盘**，
+// 测试却全绿（假通过）。这里显式暴露 navTo 供自动化驱动真实导航路径。
+//
+// 只暴露导航函数，不暴露 eventBus 本体，避免测试绕过 nav 契约直接 emit 脏 detail。
+if (typeof window !== "undefined") {
+  window.__qmtNavTo = (pageKey, opts) => navTo(pageKey, opts || {});
+  window.__qmtNavToQuote = (code, opts) => navToQuote(code, opts || {});
+  window.__qmtResolveKey = (key) => resolveKey(key);
+}

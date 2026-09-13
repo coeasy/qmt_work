@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { quickTradeNavigate } from "../../lib/trade.js";
 import { sendOrder, precheckOrder } from "../../lib/tradeApi.js";
 import { DEFAULT_VOLUME, PRICE_TICKS } from "./constants.js";
+import { usePlatform } from "../../PlatformContext.jsx";
 import ConfirmTradeModal from "../ui/ConfirmTradeModal.jsx";
 
 export default function QuickTrade({ code, tick, stockInfo, last, pre, activeId, resetSignal = 0 }) {
@@ -16,6 +17,9 @@ export default function QuickTrade({ code, tick, stockInfo, last, pre, activeId,
   const [qtMsgType, setQtMsgType] = useState(""); // ok|err|info
   const lastSubmitRef = useRef(0); // 防双击 5s
   const [pending, setPending] = useState(null);
+  const { can } = usePlatform();
+  // C-P4：快速下单为真实交易动作，需 can("trading") 且已连接券商
+  const tradingReady = can("trading") && !!activeId;
 
   // 订阅/换票：清空价格与消息（拆分前父组件的等价行为；价格档由 tick 自动跟随重填）
   useEffect(() => { setQtPrice(""); setQtMsg(""); setQtMsgType(""); }, [code, resetSignal]);
@@ -126,7 +130,7 @@ export default function QuickTrade({ code, tick, stockInfo, last, pre, activeId,
           onChange={(e) => setQtVol(Math.max(0, +e.target.value || 0))} />
       </div>
       <div className="qt-actions">
-        <button className={`qt-submit ${qtDir}`} disabled={qtSending || !activeId}
+        <button className={`qt-submit ${qtDir}`} disabled={qtSending || !tradingReady}
           onClick={submitOrder}>
           {qtSending ? "提交中…" : (qtDir === "buy" ? "买入" : "卖出")}
         </button>
@@ -137,7 +141,7 @@ export default function QuickTrade({ code, tick, stockInfo, last, pre, activeId,
       </div>
       {qtMsg && <div className={`qt-msg ${qtMsgType || "err"}`}>{qtMsg}</div>}
       <ConfirmTradeModal pending={pending} busy={qtSending} onClose={() => setPending(null)} risk="high" />
-      {!activeId && <div className="muted qt-hint">未连接券商：可编辑但无法提交</div>}
+      {!tradingReady && <div className="muted qt-hint">交易未就绪：未连接券商或无交易权限，无法提交</div>}
     </div>
   );
 }

@@ -127,9 +127,13 @@ class _FakeBrokerManager:
 
 
 def _patch_state(fake_bm):
-    import app.state as state_mod
+    """V10：路由经 ctx（active_context）取依赖；无 lifespan 时 _ACTIVE 为 None、
+    active_context() 每次返回新实例 → 必须显式 set_active_context。
+    state 同步 patch 兼容非 ctx 读路径（如 tools 层）。"""
+    import core.state as state_mod
+    import core.context as ctx_mod
     s = state_mod.state
-    saved = {}
+    ctx = ctx_mod.AppContext()
     patch = {
         "broker_manager": fake_bm,
         "db": object(),            # 真值 → health 的 db 检查通过
@@ -141,17 +145,22 @@ def _patch_state(fake_bm):
         "sync_engine": None,
         "health_monitor": None,
     }
+    saved_state = {}
     for k, v in patch.items():
-        saved[k] = getattr(s, k, None)
+        saved_state[k] = getattr(s, k, None)
         setattr(s, k, v)
-    return saved
+    ctx.update(**patch)
+    ctx_mod.set_active_context(ctx)
+    return saved_state
 
 
 def _restore_state(saved):
-    import app.state as state_mod
+    import core.state as state_mod
+    import core.context as ctx_mod
     s = state_mod.state
     for k, v in saved.items():
         setattr(s, k, v)
+    ctx_mod.set_active_context(None)
 
 
 @pytest.fixture

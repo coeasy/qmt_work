@@ -7,7 +7,7 @@ generate_rebalance(targets, ...) 按目标市值占比计算调仓单：
 - 落库 rebalance_orders 并可经券商真实下单
 """
 from . import get_bridge
-from .limitup import _limit_factor
+from engines.limitup import _limit_factor
 
 
 def _at_limit(quote: dict, direction: str) -> bool:

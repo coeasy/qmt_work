@@ -573,6 +573,61 @@ CREATE TABLE IF NOT EXISTS plugin_catalog (
 );
 CREATE INDEX IF NOT EXISTS idx_plugin_catalog_state ON plugin_catalog(state);
 """),
+    (23, """
+-- V9 §10.3 Raw 层多源隔离：provider_id 入主键，多源同一根 K 线不再互相覆盖。
+-- 旧表重建：数据全量搬迁（旧主键 (code,period,adjust,dt) 唯一 → 不丢行），
+-- v19 溯源列（provider_id/batch_id/checksum/schema_version/quality_state）保留。
+CREATE TABLE local_bars_v23 (
+    code TEXT NOT NULL,
+    period TEXT NOT NULL DEFAULT '1d',
+    adjust TEXT NOT NULL DEFAULT '',
+    dt TEXT NOT NULL,
+    provider_id TEXT NOT NULL DEFAULT '',
+    open REAL, high REAL, low REAL, close REAL,
+    volume REAL, amount REAL,
+    fetched_at TEXT DEFAULT '',
+    batch_id TEXT DEFAULT '',
+    checksum TEXT DEFAULT '',
+    schema_version TEXT DEFAULT '1',
+    quality_state TEXT DEFAULT 'unknown',
+    PRIMARY KEY (code, period, adjust, dt, provider_id)
+);
+INSERT INTO local_bars_v23
+    (code,period,adjust,dt,provider_id,open,high,low,close,volume,amount,
+     fetched_at,batch_id,checksum,schema_version,quality_state)
+    SELECT code,period,adjust,dt,COALESCE(provider_id,''),open,high,low,close,
+           volume,amount,COALESCE(fetched_at,''),COALESCE(batch_id,''),
+           COALESCE(checksum,''),COALESCE(schema_version,'1'),
+           COALESCE(quality_state,'unknown')
+    FROM local_bars;
+DROP TABLE local_bars;
+ALTER TABLE local_bars_v23 RENAME TO local_bars;
+CREATE INDEX IF NOT EXISTS idx_local_bars_lookup
+    ON local_bars(code, period, adjust, dt);
+CREATE INDEX IF NOT EXISTS idx_local_bars_provenance
+    ON local_bars(provider_id, batch_id, dt);
+-- V9 §10.4 Dataset Snapshot 复现元数据：记录日历版本与复权版本。
+ALTER TABLE dataset_snapshots ADD COLUMN calendar_version TEXT DEFAULT '';
+ALTER TABLE dataset_snapshots ADD COLUMN adjustment_version TEXT DEFAULT '';
+"""),
+    (24, """
+-- V9 Phase 7：Durable Scheduler —— schedules 表（D-F 自研调度，不引入 apscheduler）。
+CREATE TABLE IF NOT EXISTS schedules (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL DEFAULT '',
+    kind TEXT NOT NULL,                 -- JobKind（system.* / sync / screen ...）
+    cron TEXT NOT NULL,                 -- 5 段 cron：分 时 日 月 周
+    timezone TEXT NOT NULL DEFAULT 'Asia/Shanghai',
+    enabled INTEGER NOT NULL DEFAULT 1,
+    misfire_policy TEXT NOT NULL DEFAULT 'coalesce',  -- catch_up / coalesce / skip
+    params_json TEXT NOT NULL DEFAULT '{}',
+    last_run_at TEXT DEFAULT '',        -- 上次触发（ISO 本地时间）
+    next_run_at TEXT DEFAULT '',        -- 下次预计触发（调度器计算落库，重启不丢相位）
+    created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_schedules_next ON schedules(enabled, next_run_at);
+"""),
 ]
 
 
@@ -590,4 +645,6 @@ EXTRA_COLUMNS: dict[str, tuple[str, ...]] = {
                          "settle_status"),
     # kline_cache：复权标记预留列（''=券商原始值）
     "kline_cache": ("adjust",),
+    # backtests：V9 §10.4 回测结果挂 Dataset Snapshot（可复现研究溯源）
+    "backtests": ("dataset_snapshot_id",),
 }

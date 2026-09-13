@@ -55,11 +55,26 @@ async def setup(app: FastAPI) -> dict:
     state.sync_engine.on_notify(state.ws_manager.broadcast)
 
     # 行情管道统一注册（C3 修复：SyncEngine 构造之后）
+    # V9 Phase 5（P1-17）：注册加保护 —— 单个 bridge 注册失败不炸整个阶段；
+    # 以 conn_id 去重防重启/重入导致的双份 handler（重复推送/重复计数）。
     _register_quote_handlers = state.sync_engine.on_event
+    _quoted_bound: set[str] = getattr(state, "_quote_bound_conns", None) or set()
     for conn in state.broker_manager.all_connections():
-        if conn.bridge is not None:
+        try:
+            # 关键修复：Connection 的 conn_id 在 cfg 上（`Connection.cfg.conn_id`）。
+            # 旧代码读 `conn.conn_id` → AttributeError 直接被本 try 吞掉，导致
+            # **每个券商连接的实时行情回调都注册失败**（bridge.on("quote") 从未调用），
+            # 券商实时行情永远不进入 sync/WS → 与「实时最新数据」铁律相悖。
+            cid = conn.cfg.conn_id
+            if conn.bridge is None or cid in _quoted_bound:
+                continue
             conn.bridge.on("quote", _register_quote_handlers)
             state.sync_engine.register_realtime_trade_handlers(conn)
+            _quoted_bound.add(cid)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("quote handler registration failed for %s: %s",
+                        getattr(conn.cfg, "conn_id", "?"), exc)
+    state._quote_bound_conns = _quoted_bound
 
     state.sync_engine.start_batch()
     await state.sync_engine.start_account_snapshots(interval=5.0)

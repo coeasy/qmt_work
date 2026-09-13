@@ -1,0 +1,47 @@
+[project]
+name = "qmt-work"
+version = "0.1.0-beta.1"
+description = "qmt_work —— 面向真实券商（迅投 MiniQMT 系）的量化交易统一网关（个人研究用途）"
+readme = "../README.md"
+requires-python = ">=3.11,<3.12"
+license = { text = "Proprietary" }
+authors = [{ name = "qmt_work" }]
+dependencies = [
+    "fastapi==0.141.1",
+    "uvicorn[standard]==0.52.3",
+    "fastmcp==2.14.7",
+    "pydantic==2.13.4",
+    "pydantic-settings==2.15.0",
+    "httpx==0.28.1",
+    "python-dotenv==1.2.2",
+    "email-validator==2.3.0",
+    "psutil==7.2.2",
+    "numpy==1.26.4",
+    "pandas==2.2.3",
+    "pyinstaller==6.22.0",
+    "pytest==9.1.1",
+    "redis==8.1.0",
+    "fakeredis==2.34.1",
+    "openpyxl==3.1.5",
+]
+
+[tool.pytest.ini_options]
+# Phase 0 ⑤：skip 统计阈值——CI 中 skip 占比不得超过该值，防止「跳着过」假绿。
+addopts = "-ra"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+# 项目约定：只跑 F（pyflakes）+ E9（语法/缩进）——见项目记忆（ruff 无配置文件，全量规则误伤 re-export）
+select = ["F", "E9"]
+
+[tool.ruff.lint.per-file-ignores]
+# 多版本 xtquant 兼容层的 47 个 F401 为故意保留（re-export 供多版本 SDK 兼容）
+"xtquant_client/xtp/__init__.py" = ["F401"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"

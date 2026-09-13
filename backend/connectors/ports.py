@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol, runtime_checkable
 
 
 class ConnectorError(RuntimeError):
@@ -86,6 +86,7 @@ class AccountSnapshot:
     raw: dict[str, Any] = field(default_factory=dict)
 
 
+@runtime_checkable
 class ConnectorPort(Protocol):
     """Async boundary used by lifecycle and execution orchestration."""
 
@@ -100,3 +101,102 @@ class ConnectorPort(Protocol):
     async def place_order(self, request: OrderRequest) -> dict[str, Any]: ...
 
     async def cancel_order(self, order_id: str) -> dict[str, Any]: ...
+
+
+# ---------------------------------------------------------------------------
+# V9 Phase 6（D-A）：9 端口拆分 —— 应用服务依赖窄接口，连接器负责 SDK 映射。
+# 全部 runtime_checkable，供 test_connector_ports.py 做结构化契约测试。
+# ---------------------------------------------------------------------------
+
+@runtime_checkable
+class ExecutionPort(Protocol):
+    """交易执行：下单 / 撤单 / 委托与成交查询。"""
+
+    async def place_order(self, request: OrderRequest) -> dict[str, Any]: ...
+
+    async def cancel_order(self, order_id: str) -> dict[str, Any]: ...
+
+    def get_orders(self) -> list[dict[str, Any]]: ...
+
+    def get_deals(self) -> list[dict[str, Any]]: ...
+
+
+@runtime_checkable
+class AccountPort(Protocol):
+    """账户资产：净值摘要与资金。"""
+
+    def get_account(self) -> dict[str, Any]: ...
+
+    def get_cash(self) -> dict[str, Any]: ...
+
+
+@runtime_checkable
+class PositionsPort(Protocol):
+    """持仓快照查询。"""
+
+    def get_positions(self, symbol: str | None = None) -> list[dict[str, Any]]: ...
+
+
+@runtime_checkable
+class MarketDataPort(Protocol):
+    """历史/快照行情：K 线、报价、全 tick。"""
+
+    def get_quote(self, code: str) -> dict[str, Any]: ...
+
+    def get_kline(self, code: str, period: str, count: int,
+                  adjust: str = "") -> list[dict[str, Any]]: ...
+
+    def get_full_tick(self, codes: list[str]) -> dict[str, Any]: ...
+
+
+@runtime_checkable
+class QuoteFeedPort(Protocol):
+    """实时行情订阅（回调式）。"""
+
+    def subscribe_quote(self, codes: list[str],
+                        on_tick: Callable[[dict], None]) -> None: ...
+
+
+@runtime_checkable
+class InstrumentPort(Protocol):
+    """合约与板块基础数据。"""
+
+    def get_instrument_detail(self, code: str) -> dict[str, Any]: ...
+
+    def get_stock_list(self, sector: str = "沪深A股") -> list[dict[str, Any]]: ...
+
+    def get_sector_list(self) -> list[str]: ...
+
+
+@runtime_checkable
+class CalendarPort(Protocol):
+    """交易日历。"""
+
+    def get_trading_calendar(self, start: str = "",
+                             end: str = "") -> list[str]: ...
+
+
+@runtime_checkable
+class HealthPort(Protocol):
+    """连接健康：探活 + 结构化诊断。"""
+
+    def is_connected(self) -> bool: ...
+
+    def test_connection(self) -> dict[str, Any]: ...
+
+
+@runtime_checkable
+class CapabilityPort(Protocol):
+    """能力协商：连接器声明自己支持什么（quote/kline/trade/...）。"""
+
+    descriptor: ConnectorDescriptor
+
+    def capabilities(self) -> tuple[str, ...]: ...
+
+
+#: 9 端口清单（DoD 测试与文档引用的唯一真源）
+CANONICAL_PORTS: tuple[str, ...] = (
+    "ConnectorPort", "ExecutionPort", "AccountPort", "PositionsPort",
+    "MarketDataPort", "QuoteFeedPort", "InstrumentPort", "CalendarPort",
+    "HealthPort", "CapabilityPort",
+)

@@ -4,6 +4,7 @@
 // 本模块只保留系统域逻辑：system 快照广播、broker 事件、通用事件分发。
 import { useEffect, useRef, useState } from "react";
 import { createReconnectingSocket } from "../lib/wsCore";
+import { WS_EVENTS } from "../shared/events";
 
 const listeners = new Set();
 const brokerHandlers = new Set();
@@ -28,7 +29,7 @@ function emit() {
 }
 
 function onCoreMessage(msg) {
-  if (msg.type === "system") {
+  if (msg.type === WS_EVENTS.SYSTEM) {
     sysData = msg.data || {};
     if (msg.data && msg.data.event === "shutdown") {
       // 后端显式停机：停止自动重连 + 心跳，关闭当前连接

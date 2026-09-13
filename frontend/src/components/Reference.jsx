@@ -3,6 +3,13 @@ import { api } from "../api.js";
 import { useListRefresh } from "../lib/listRefresh.js";
 import { t as _t } from "../lib/i18n.js";
 
+// xtdata 返回 YYYYMMDD 紧凑格式，展示时补回连字符（长度不符则原样透传）
+const fmtDay = (s) => {
+  const x = String(s || "").trim();
+  return x.length === 8 ? `${x.slice(0, 4)}-${x.slice(4, 6)}-${x.slice(6, 8)}` : x;
+};
+const todayCompact = new Date().toISOString().slice(0, 10).replace(/-/g, "");
+
 // 参考数据：交易日历 / 板块列表 / 板块成分 / 财务摘要 / L2 逐笔（借鉴 quant-qmt-proxy 参考数据能力）
 export default function Reference() {
   const [err, setErr] = useState("");
@@ -25,7 +32,9 @@ export default function Reference() {
   }
   async function loadCalendar() {
     const d = await wrap(() => api.calendar("", ""));
-    if (d) setCalendar(d);
+    // 后端按升序返回全量历史（实测 8000+ 交易日），必须倒序后 slice 才是「最近一批」；
+    // 直接 slice(0, 60) 会把 1990 年代的旧数据展示在标题写着「最近」的面板里。
+    if (d) setCalendar(d.slice().sort((a, b) => (String(a) < String(b) ? 1 : -1)));
   }
   async function loadSectors() {
     const d = await wrap(() => api.sectors());
@@ -65,11 +74,19 @@ export default function Reference() {
 
       {tab === "calendar" && (
         <div className="card">
-          <h3>交易日历（最近一批）</h3>
+          <h3>交易日历（最近 {Math.min(calendar.length, 60)} / 共 {calendar.length} 个交易日）</h3>
           {calendar.length === 0 ? <p className="muted">无数据</p> : (
             <table>
               <thead><tr><th>交易日</th></tr></thead>
-              <tbody>{calendar.slice(0, 60).map((d) => <tr key={d}><td className="code">{d}</td></tr>)}</tbody>
+              <tbody>{calendar.slice(0, 60).map((d) => {
+                const isToday = String(d).replace(/-/g, "") === todayCompact;
+                return (
+                  <tr key={d}>
+                    <td className="code">{fmtDay(d)}</td>
+                    {isToday && <td style={{ color: "var(--accent)", fontSize: 12 }}>今日</td>}
+                  </tr>
+                );
+              })}</tbody>
             </table>
           )}
         </div>

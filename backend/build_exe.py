@@ -13,6 +13,7 @@
 - 运行时 SQLite 数据库由 Electron 主进程通过 QMT_DB_PATH 指向 userData。
 """
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -32,7 +33,8 @@ HIDDEN = [
     # FastMCP 的 docket 会话管理器依赖（内存模式）
     "docket", "burner_redis", "fakeredis", "redis",
     # app.main 经 uvicorn 字符串在运行时加载，PyInstaller 不会自动收集，需显式声明
-    "app", "app.config", "app.db", "app.state", "app.routes", "app.main",
+    # V10 Phase G：app.config/db/state 等 re-export shim 已删除，只保留真实模块
+    "app", "app.routes", "app.main",
     "app.logging_setup",
     # core 层：P1-2 (M1) 下沉的共享内核（配置/状态/加密），app 原路径为 re-export shim
     "core", "core.config", "core.state", "core.crypto",
@@ -47,7 +49,7 @@ HIDDEN = [
     "gateway.idempotency",
     "gateway.alert_engine", "gateway.wal", "gateway.reconcile",
     "gateway.quote_bus", "gateway.health", "gateway.signal_router",
-    "gateway.masking", "gateway.kline_cache", "gateway.webhook_out",
+    "gateway.kline_cache", "gateway.webhook_out",
     "gateway.log_alert",
     "gateway.runtime_config",
     "xtquant_client", "xtquant_client.base", "xtquant_client.gateway",
@@ -57,8 +59,8 @@ HIDDEN = [
     "xtquant_client.adapters.ptrade", "xtquant_client.adapters.juejin",
     "tools", "tools.market", "tools.trading", "tools.account",
     "tools.backtest", "tools.rebalance", "tools.analysis",
-    "tools.limitup", "tools.algo", "tools.strategy_gen", "tools.reference",
-    "tools.condition_order", "tools.position", "tools.factors",
+    "tools.strategy_gen", "tools.reference",
+    "tools.position", "tools.factors",
     # P1-7 (M13)：factor_research 拆分后的三组能力模块（factor_research.py 为入口 re-export）
     "tools.factor_research", "tools.factor_stats", "tools.factor_ic",
     "tools.factor_backtest",
@@ -68,10 +70,32 @@ HIDDEN = [
     "datasource.base", "datasource.board", "datasource.degrade",
     "datasource.instrument", "datasource.periods", "datasource.result",
     "datasource.pinyin",
-    "tools.strategy_market", "tools.strategy_runtime",
+    "tools.strategy_market",
     "app.routes.strategy_run",
-    "paper", "paper.paper_engine",
     "app.routes.factors", "app.routes.paper", "app.routes.strategy_market",
+    # V9 Phase 5-7（P2-24 收口）：动态导入的新层 —— bootstrap 生命周期/中间件/
+    # runtime 调度器/选股引擎/统一数据面/connectors 端口层/plugins。
+    # PyInstaller 静态分析看不到 main→bootstrap→routes 的动态链，必须显式声明。
+    "app.bootstrap", "app.bootstrap.lifecycle", "app.bootstrap.phase_db",
+    "app.bootstrap.phase_broker", "app.bootstrap.phase_engines",
+    "app.bootstrap.phase_watchdogs", "app.bootstrap.phase_replay",
+    "app.bootstrap.phase_misc", "app.bootstrap.shutdown",
+    "app.middleware", "app.middleware.envelope", "app.middleware.request_id",
+    "app.middleware.error_handler",
+    "app.runtime", "app.runtime.jobs", "app.runtime.cron",
+    "app.runtime.schedules", "app.runtime.system_jobs", "app.runtime.eod",
+    "app.data", "app.data.bars_provider",
+    "app.screener", "app.screener.engine", "app.screener.conditions",
+    "app.screener.universe", "app.screener.fundamentals",
+    "app.screener.source_policy",
+    "app.platform", "app.version",
+    "connectors", "connectors.ports", "connectors.qmt",
+    "connectors.supervisor", "connectors.http",
+    "plugins",
+    "datasource.quality", "datasource.providers", "datasource.snapshots",
+    "datasource.optional_sources", "datasource.public_sources",
+    "datasource.akshare_source",
+    "app.sync", "app.sync.bars", "app.sync.calendar",
 ]
 
 # 收集可能含动态导入/数据的包
@@ -168,7 +192,62 @@ def _sanitize_dist_runtime() -> None:
             print(f"  [sanitize] 移除残缺命名空间 stub：{p.name}")
 
 
+def _verify_static_input() -> None:
+    """构建前校验 static/ 已完整生成，并快照文件名供构建后核对。
+
+    背景（2026-09-12 实测）：若 `npm run build` 与 PyInstaller 重叠执行，
+    Analysis 会在 static/ 仍处于「半写入」状态时冻结数据清单 —— COLLECT-00.toc
+    里记录的是一批中途产物（如 QuoteBoard-BNBoqL3F.js），而 pyinstaller 拷贝时
+    源文件已被 vite 重命名清理，最终 dist 里只剩 index.html + 少量共享 chunk，
+    所有懒加载页面分片全部缺失 → 打开客户端即「前端界面加载失败」白屏。
+    这里在打包前显式校验入口与分片齐备，避免再次产出坏包。
+    """
+    if not static_dir.is_dir():
+        raise SystemExit(f"[FATAL] 前端产物目录不存在：{static_dir}，请先 npm run build")
+    index_html = static_dir / "index.html"
+    if not index_html.is_file():
+        raise SystemExit(f"[FATAL] 缺少 {index_html}，请先 npm run build")
+    html = index_html.read_text(encoding="utf-8", errors="replace")
+    assets_dir = static_dir / "assets"
+    js_files = sorted(assets_dir.glob("*.js")) if assets_dir.is_dir() else []
+    if not js_files:
+        raise SystemExit(f"[FATAL] {assets_dir} 无任何 js 分片，请先 npm run build")
+    # index.html 中引用的入口/预加载文件必须真实存在，否则 SPA 首屏直接 404。
+    missing = [m for m in re.findall(r'/assets/([A-Za-z0-9_.\-]+\.(?:js|css))', html)
+               if not (assets_dir / m).is_file()]
+    if missing:
+        raise SystemExit(
+            f"[FATAL] index.html 引用了不存在的资源：{missing}\n"
+            f"        static/ 可能处于半写入状态（vite 构建未结束）。请等待 build 完成再打包。")
+    print(f"  [static] 入口校验通过：{len(js_files)} 个 js 分片，index.html 引用齐备")
+
+
+def _verify_static_output() -> None:
+    """构建后核对：dist 内的 static 必须与源 static 一一对应。
+
+    这是「坏包」的最后一道闸门。历史上 PyInstaller 曾在源目录半写入时
+    产出一个只含 6 个文件的 static（源 32 个），而打包过程本身 exit 0、
+    日志无任何异常 —— 不显式核对就会把坏包当作成功发布。
+    """
+    out_static = DIST / "qmt_work" / "_internal" / "static"
+    if not out_static.is_dir():
+        raise SystemExit(f"[FATAL] 打包产物缺少 static 目录：{out_static}")
+    src_files = {p.relative_to(static_dir).as_posix()
+                 for p in static_dir.rglob("*") if p.is_file()}
+    out_files = {p.relative_to(out_static).as_posix()
+                 for p in out_static.rglob("*") if p.is_file()}
+    missing = sorted(src_files - out_files)
+    if missing:
+        raise SystemExit(
+            f"[FATAL] 打包产物 static 不完整：源 {len(src_files)} 个文件，"
+            f"产物仅 {len(out_files)} 个，缺失 {len(missing)} 个：\n"
+            + "\n".join(f"        - {m}" for m in missing[:20])
+            + "\n        请删除 backend/dist 后重跑本脚本（源 static 须已构建完成）。")
+    print(f"  [static] 产物核对通过：{len(out_files)} / {len(src_files)} 个文件全部打包")
+
+
 def main():
+    _verify_static_input()
     # 控制台开关（可移植）：默认 --noconsole（发布友好，无黑框窗口）；
     # 调试需要看后端 stdout 时设 QMT_BUILD_CONSOLE=1 或传 --console 参数。
     console_flag = "--console" if (
@@ -215,6 +294,7 @@ def main():
         raise SystemExit(proc.returncode)
     print(proc.stdout[-800:] if proc.stdout else "")
     _sanitize_dist_runtime()
+    _verify_static_output()
     print(f"\n完成：{DIST / 'qmt_work' / 'qmt_work.exe'}")
 
 

@@ -1,6 +1,6 @@
 // 页面注册表：所有页面的「树形分组 + 扁平映射」单一真相来源。
 // 顶菜单（MenuBar）、命令面板（CommandPalette）、中央工作区（Workbench）共用。
-// 通达信式重构：每个叶子即一个独立窗口（Workbench 标签），分组仅用于树形归类。
+// v2 精简：21→17 页，BottomDock 5 Tab 提升为独立页面，纯顶部菜单。
 import { lazy } from "react";
 
 // 深度优化：SPA 重部署后浏览器可能持有旧的 entry chunk，
@@ -22,9 +22,7 @@ function lazyWithRetry(imp, key) {
         /error loading dynamically imported module/i.test(msg);
       if (isChunkError && !sessionStorage.getItem(CHUNK_RELOAD_FLAG + ":" + key)) {
         sessionStorage.setItem(CHUNK_RELOAD_FLAG + ":" + key, "1");
-        // index.html 已配置 no-cache，整页刷新必拉取最新入口与新分片
         location.reload();
-        // 保持 promise pending，避免刷新前 React 抛错 / ErrorBoundary 闪现
         return new Promise(() => {});
       }
       throw err;
@@ -32,8 +30,6 @@ function lazyWithRetry(imp, key) {
   });
 }
 
-// 保留原始 import(...) 字面量供 Vite 静态分析做代码分割，
-// 同时用工厂源码提取模块路径作为刷新守卫的 key。
 const D = (imp) => {
   const src = imp.toString();
   const m = src.match(/import\(\s*["']([^"']+)["']\s*\)/);
@@ -41,25 +37,33 @@ const D = (imp) => {
   return lazyWithRetry(imp, key);
 };
 
-// ================= 旧 key → 中心页 key 归一（阶段一入口合并） =================
-// 被并入 Hub 子页签的旧页面 key，在导航/持久化/迁移三处统一归一。
-// 归并后的旧 key 仍可通过 nav / 菜单 / 命令面板打开，表现为「中心页 + 对应子页签」。
+// ================= 旧 key → 保留页 key 归一 =================
+// 被移除页面（回测/策略/模拟盘/信号/数据中心/审计/目标持仓等）的旧 key
+// 统一回退到仪表盘，避免旧收藏/持久化数据导致空白页。
 export const KEY_ALIAS = {
+  // 市场结构 Hub 子页（保留）
   boards: "mktstructure", etfs: "mktstructure", index_overview: "mktstructure", rotation: "mktstructure",
-  strategies: "strategy_hub", strmarket: "strategy_hub",
-  factors: "factor_hub", research: "factor_hub",
-  signal: "automation", alerts: "automation", notifications: "automation", webhooks: "automation",
-  markettools: "datacenter", reference: "datacenter",
-  audit: "audit_recon", reconcile: "audit_recon",
+  // 已移除页面 → dashboard
+  strategies: "dashboard", strmarket: "dashboard",
+  backtest: "dashboard", research: "dashboard",
+  factors: "factor_hub",
+  signal: "dashboard", alerts: "dashboard", notifications: "dashboard", webhooks: "dashboard",
+  markettools: "dashboard", reference: "dashboard",
+  audit: "sysstatus", reconcile: "sysstatus",
+  datacenter: "sysstatus",
+  target: "dashboard", rebalance: "dashboard",
+  paper: "dashboard", limitup: "dashboard",
+  automation: "dashboard",
+  // 新增独立页（原 BottomDock Tab）
+  watchlist: "watchlist", sector_radar: "sector_radar",
+  moneyflow: "moneyflow", deal_feed: "deal_feed", system_log: "system_log",
 };
 
-// 把任意 key 解析为 PAGES 中实际存在的 key（旧 key → 新中心 key；非法 → 默认页）。
 export function resolveKey(key) {
   const k = KEY_ALIAS[key] || key;
   return PAGES[k] ? k : DEFAULT_PAGE;
 }
 
-// 若 key 是被归并的旧 key，返回它在目标中心页里应携带的 tab 参数，否则 undefined。
 export function aliasTab(key) {
   return KEY_ALIAS[key] ? key : undefined;
 }
@@ -68,70 +72,51 @@ export const PAGES = {
   // fullBleed: 终端型页面（行情/K线/报价牌/选股/市场结构），满幅渲染不加留白；
   // 其余文档型页面由 Pane 统一包裹 .pane-leaf-body.padded 提供四周留白。
   dashboard: { label: "仪表盘", comp: D(() => import("./components/Dashboard.jsx")) },
-  quote: { label: "行情分析", comp: D(() => import("./components/MarketData.jsx")), fullBleed: true },
-  quoteboard: { label: "报价牌", comp: D(() => import("./components/QuoteBoard.jsx")), fullBleed: true },
+  quote: { label: "行情分析", comp: D(() => import("./features/market/MarketData.jsx")), fullBleed: true },
+  quoteboard: { label: "报价牌", comp: D(() => import("./features/market/QuoteBoard.jsx")), fullBleed: true },
   mktstructure: { label: "市场结构", comp: D(() => import("./hubs/MarketStructureHub.jsx")), fullBleed: true },
-  screen: { label: "条件选股", comp: D(() => import("./components/Screen.jsx")), fullBleed: true },
-
-  trade: { label: "手动交易", comp: D(() => import("./components/Trade.jsx")) },
-  limitup: { label: "涨停监控", comp: D(() => import("./components/LimitUp.jsx")) },
-  algo: { label: "算法交易", comp: D(() => import("./components/Algo.jsx")) },
-  paper: { label: "模拟盘", comp: D(() => import("./components/Paper.jsx")) },
-
-  strategy_hub: { label: "策略工场", comp: D(() => import("./hubs/StrategyHub.jsx")) },
-  target: { label: "目标持仓", comp: D(() => import("./components/TargetPortfolio.jsx")) },
-  rebalance: { label: "即时再平衡", comp: D(() => import("./components/Rebalance.jsx")) },
-
-  backtest: { label: "回测对比", comp: D(() => import("./components/Backtest.jsx")) },
+  sector_radar: { label: "板块雷达", comp: D(() => import("./features/market/SectorRadar.jsx")), fullBleed: true },
+  moneyflow: { label: "资金流", comp: D(() => import("./features/market/Moneyflow.jsx")), fullBleed: true },
+  deal_feed: { label: "成交明细", comp: D(() => import("./features/market/DealFeed.jsx")), fullBleed: true },
+  screen: { label: "条件选股", comp: D(() => import("./features/research/Screen.jsx")), fullBleed: true },
   factor_hub: { label: "因子研究", comp: D(() => import("./hubs/FactorHub.jsx")) },
-
-  automation: { label: "信号与自动化", comp: D(() => import("./hubs/AutomationHub.jsx")) },
-
-  brokers: { label: "连接管理", comp: D(() => import("./components/Brokers.jsx")) },
-  accounts: { label: "多账户网格", comp: D(() => import("./components/AccountsGrid.jsx")) },
-
-  datacenter: { label: "数据中心", comp: D(() => import("./hubs/DataCenterHub.jsx")) },
-  audit_recon: { label: "审计对账", comp: D(() => import("./hubs/AuditReconHub.jsx")) },
-  sysstatus: { label: "系统状态", comp: D(() => import("./components/SystemStatus.jsx")) },
-
-  settings: { label: "设置", comp: D(() => import("./components/Settings.jsx")) },
+  trade: { label: "手动交易", comp: D(() => import("./features/trading/Trade.jsx")) },
+  algo: { label: "算法交易", comp: D(() => import("./features/trading/Algo.jsx")) },
+  watchlist: { label: "自选股", comp: D(() => import("./features/market/Watchlist.jsx")), fullBleed: true },
+  brokers: { label: "连接管理", comp: D(() => import("./features/system/Brokers.jsx")) },
+  accounts: { label: "多账户网格", comp: D(() => import("./features/accounts/AccountsGrid.jsx")) },
+  sysstatus: { label: "系统状态", comp: D(() => import("./features/system/SystemStatus.jsx")) },
+  system_log: { label: "系统日志", comp: D(() => import("./features/system/SystemLog.jsx")), fullBleed: true },
+  settings: { label: "设置", comp: D(() => import("./features/system/Settings.jsx")) },
 };
 
-// 页面分组树（命令面板 / Alt+1..9 快捷跳转共用）：分组 -> 叶子（阶段一：入口合并为 7 中心组 21 顶层页）
+// 页面分组树（命令面板 / 顶部下拉菜单共用）：4 组 17 页
 export const PAGE_TREE = [
-  { group: "总览", items: [{ key: "dashboard", label: "仪表盘" }] },
   { group: "行情", items: [
     { key: "quoteboard", label: "报价牌" },
     { key: "quote", label: "行情分析" },
     { key: "mktstructure", label: "市场结构" },
-  ] },
+    { key: "sector_radar", label: "板块雷达" },
+    { key: "moneyflow", label: "资金流" },
+    { key: "deal_feed", label: "成交明细" },
+  ]},
+  { group: "研究", items: [
+    { key: "screen", label: "条件选股" },
+    { key: "factor_hub", label: "因子研究" },
+  ]},
   { group: "交易", items: [
     { key: "trade", label: "手动交易" },
-    { key: "limitup", label: "涨停监控" },
     { key: "algo", label: "算法交易" },
-    { key: "paper", label: "模拟盘" },
-  ] },
-  { group: "组合与策略", items: [
-    { key: "strategy_hub", label: "策略工场" },
-    { key: "target", label: "目标持仓" },
-    { key: "rebalance", label: "即时再平衡" },
-  ] },
-  { group: "研究", items: [
-    { key: "backtest", label: "回测对比" },
-    { key: "factor_hub", label: "因子研究" },
-  ] },
-  { group: "选股与信号", items: [
-    { key: "screen", label: "条件选股" },
-    { key: "automation", label: "信号与自动化" },
-  ] },
-  { group: "系统运维", items: [
+    { key: "watchlist", label: "自选股" },
+  ]},
+  { group: "系统", items: [
+    { key: "dashboard", label: "仪表盘" },
     { key: "brokers", label: "连接管理" },
     { key: "accounts", label: "多账户网格" },
-    { key: "datacenter", label: "数据中心" },
-    { key: "audit_recon", label: "审计对账" },
     { key: "sysstatus", label: "系统状态" },
+    { key: "system_log", label: "系统日志" },
     { key: "settings", label: "设置" },
-  ] },
+  ]},
 ];
 
 export const DEFAULT_PAGE = "dashboard";

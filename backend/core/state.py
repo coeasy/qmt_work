@@ -4,7 +4,8 @@
 `bridge` / `gateway` 保持为「当前活跃连接」的引用以便单连接调用点兼容；
 多连接场景下请通过 `broker_manager.bridge(conn_id)` 指定。
 """
-from xtquant_client.manager import BrokerManager
+# V10 Phase A2：core 不得反向依赖 xtquant_client，BrokerManager 延迟实例化。
+# 由 app/main.py 或 bootstrap/phase_broker 在装配期显式绑定（见 init_broker_manager）。
 
 # 无券商连接的统一文案（503 响应与异常共用；app/routes/_common.no_broker 引用此处）。
 MSG_NO_BROKER = "未连接任何券商客户端：请到「券商连接」页添加并连接券商。"
@@ -14,9 +15,14 @@ MSG_NO_BROKER_EXC = ("当前未连接任何券商客户端：请到「券商连�
                      "（国金/华鑫/银河等 MiniQMT）。")
 
 
+# V9 Phase 5：Required 阶段唯一真源（core 不依赖 app，供 bootstrap/lifecycle 映射）。
+# broker 为 Optional：QMT/券商失败 → Degraded，绝不阻断 READY。
+REQUIRED_PHASES: tuple[str, ...] = ("db", "engines", "watchdogs", "replay", "misc")
+
+
 class AppState:
     db = None
-    broker_manager = BrokerManager()
+    broker_manager = None  # 延迟绑定（init_broker_manager）
     bridge = None          # 活跃连接 bridge（可能为 None）
     gateway = None         # 活跃连接 gateway（可能为 None）
     risk = None
@@ -42,6 +48,7 @@ class AppState:
     paper_engine = None      # 模拟盘引擎（P1）
     strategy_runtime = None  # 策略运行容器：在平台内把策略当作实盘/模拟机器人运行（P0）
     market_sync = None       # 行情缓存定时维护：今年热数据收盘后刷新 + 跨年归档
+    schedule_runner = None   # V9 Phase 7：Durable Scheduler（ScheduleRunner）
     started_at: float = 0.0  # 进程启动时间戳（健康检查用）
     latest_quotes: dict = {}
     # 生命周期状态机：启动阶段可观测，未完成核心阶段不得宣称 ready。
@@ -58,8 +65,10 @@ class AppState:
         self.phase_status[name] = status
 
     def mark_ready(self) -> bool:
-        required = ("db", "engines", "watchdogs", "replay", "misc")
-        self.lifecycle_ready = all(self.phase_status.get(n) == "ready" for n in required)
+        # P1-18：READY 判定基于 lifecycle 分层信号（Required 阶段全部 ready），
+        # 不再依赖 started_at 时间戳（启动瞬间即被赋值，属恒真）。
+        self.lifecycle_ready = all(self.phase_status.get(n) == "ready"
+                                   for n in REQUIRED_PHASES)
         return self.lifecycle_ready
 
     def begin_shutdown(self) -> None:
@@ -76,3 +85,15 @@ class AppState:
 
 
 state = AppState()
+
+
+def init_broker_manager():
+    """延迟创建 BrokerManager（core 不 import xtquant_client）。
+
+    由 app 层（main.py / bootstrap/phase_broker）在装配期调用；
+    多券商/多版本适配器的真实实现位于 xtquant_client.manager。
+    """
+    from xtquant_client.manager import BrokerManager
+    if state.broker_manager is None:
+        state.broker_manager = BrokerManager()
+    return state.broker_manager

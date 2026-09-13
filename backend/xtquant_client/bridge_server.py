@@ -291,7 +291,10 @@ def serve_adapter(adapter, stdin=None, stdout=None,
     #    单个 SDK 调用挂死只占一个 worker，其余请求照常响应；
     #  - 方法级超时在客户端 _rpc（future.result(timeout)）承担（C13）。
     _EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="bridge-job")
-    _job_q: _queue.Queue = _queue.Queue()
+    # P2-5：队列加界（背压）。无界队列在 SDK 持续挂死时会无限吞内存；
+    # 有界后 put 阻塞，客户端方法级超时（C13）自然形成上层反压。
+    _JOB_Q_MAX = 4096
+    _job_q: _queue.Queue = _queue.Queue(maxsize=_JOB_Q_MAX)
     _SENTINEL = object()
 
     def _worker() -> None:

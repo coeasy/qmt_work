@@ -11,9 +11,8 @@ import logging
 # 删除即断下游导入链 —— 故显式 noqa 保留。改动前请全仓 grep 下游 `from ..._common import`。
 from fastapi import Request, WebSocket, WebSocketDisconnect  # noqa: F401
 
-from app import crypto  # noqa: F401  (re-export for routes: config.py/signal.py)
 from core.config import settings
-from core.state import state
+from core.context import active_context
 from xtquant_client.base import BrokerError
 from xtquant_client.manager import ConnectionConfig  # noqa: F401  (re-export for routes: broker.py)
 from xtquant_client.registry import get_profile, list_profiles  # noqa: F401  (re-export for routes: broker.py)
@@ -30,8 +29,8 @@ def err(code: int, message: str, extra=None) -> dict:
     return {"code": code, "message": message, "data": extra if extra is not None else None}
 
 
-# 无券商连接的统一 503 文案（单一真相源在 app/state.py；零 mock 降级口径见 README）。
-from core.state import MSG_NO_BROKER  # noqa: E402  (re-export 供各路由域使用)
+# 无券商连接的统一 503 文案（单一真相源在 core/state.py；零 mock 降级口径见 README）。
+from core.state import MSG_NO_BROKER  # noqa: E402  (常量，非 state locator；供各路由域使用)
 
 
 def no_broker() -> dict:
@@ -46,7 +45,7 @@ def audit_log(actor: str, action: str, target: str, params: dict | None = None,
     供所有写域端点调用：``audit_log("api", "screen.save_board", body.get("name", ""), body)``。
     """
     try:
-        state.db.audit(actor, action, target, params or {}, result, ip)
+        active_context().db.audit(actor, action, target, params or {}, result, ip)
     except (AttributeError, OSError, RuntimeError) as exc:
         # 审计失败不阻断业务路径（仅丢一条审计记录，可观测性降级）
         log.debug("审计写入失败（已忽略）：%s.%s %s: %s", actor, action, target, exc)
@@ -54,7 +53,7 @@ def audit_log(actor: str, action: str, target: str, params: dict | None = None,
 
 def _need(conn_id: str | None = None):
     """取指定/活跃 bridge；无连接返回 None（调用方返回 503）。"""
-    return state.broker_manager.bridge(conn_id)
+    return active_context().broker_manager.bridge(conn_id)
 
 
 def envelope_ok(res):
@@ -92,7 +91,7 @@ def _ws_authorized(ws: WebSocket) -> bool:
         return False
     if token == settings.api_key:
         return True
-    store = state.apikey_store
+    store = active_context().apikey_store
     if store is None:
         return False
     row = store.verify(token)
