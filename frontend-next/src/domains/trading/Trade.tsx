@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Badge,
   Button,
@@ -89,6 +89,12 @@ export function Trade() {
       /* 未连接券商时静默，banner 已由下单流程给出提示 */
     }
   }, []);
+
+  // 挂载时拉取一次账户持仓/委托/成交。此前 refresh 只在下单后与手动点「刷新」时
+  // 触发，导致首次打开页面三个页签恒为空（阶段 3 本地实测发现的 UX 缺陷）。
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
 
   const fillMarketPrice = useCallback(() => {
     if (quote?.price) setPrice(String(quote.price));
