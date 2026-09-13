@@ -74,6 +74,7 @@
   "get_quote_bus_stats",
   "get_ready",
   "get_reconcile_last",
+  "get_reconcile_wal_stats",
   "get_runtime_jobs",
   "get_runtime_jobs_by_job_id",
   "get_runtime_schedules",

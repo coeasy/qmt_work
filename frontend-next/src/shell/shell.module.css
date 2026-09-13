@@ -1,0 +1,579 @@
+/* ==========================================================================
+   应用外壳：菜单栏 / 工具条 / 工作区 / 数据面板 / 状态栏 / 命令面板
+   布局契约：外壳固定高度由令牌定义（--h-menu / --h-toolbar / --h-tab / --h-status）
+   ========================================================================== */
+
+.shell {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
+  background: var(--bg-0);
+}
+
+/* ---------- 顶部菜单栏（替代左侧功能树） ---------- */
+.menubar {
+  height: var(--h-menu);
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0 var(--sp-2);
+  background: var(--bg-2);
+  border-bottom: 1px solid var(--border);
+  user-select: none;
+}
+
+.brand {
+  font-size: var(--font-sm);
+  font-weight: 500;
+  color: var(--text-dim);
+  padding-right: var(--sp-3);
+  letter-spacing: 0.3px;
+}
+
+.menuItem {
+  position: relative;
+  height: 100%;
+  padding: 0 10px;
+  display: flex;
+  align-items: center;
+  background: none;
+  border: none;
+  color: var(--text);
+  cursor: pointer;
+  font-size: var(--font);
+}
+.menuItem:hover {
+  background: var(--bg-hover);
+}
+.menuItemActive {
+  background: var(--bg-active);
+  color: var(--accent);
+}
+
+.menuDrop {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  z-index: var(--z-dropdown);
+  min-width: 148px;
+  padding: var(--sp-1) 0;
+  background: var(--bg-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.28);
+  display: flex;
+  flex-direction: column;
+}
+
+.menuDropItem {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  height: 26px;
+  padding: 0 var(--sp-3);
+  background: none;
+  border: none;
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+  font-size: var(--font);
+  white-space: nowrap;
+}
+.menuDropItem:hover {
+  background: var(--accent-dim);
+  color: var(--accent);
+}
+
+.menuSpacer {
+  flex: 1;
+}
+
+/* 全局搜索 / 代码直达 */
+.globalSearch {
+  position: relative;
+  width: 190px;
+}
+.globalSearchInput {
+  width: 100%;
+  height: 20px;
+  padding: 0 8px;
+  font-size: var(--font-sm);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--bg-3);
+  color: var(--text);
+  outline: none;
+}
+.globalSearchInput:focus {
+  border-color: var(--accent);
+}
+.searchResults {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  width: 280px;
+  max-height: 320px;
+  overflow: auto;
+  z-index: var(--z-dropdown);
+  background: var(--bg-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.28);
+}
+.searchItem {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  width: 100%;
+  height: 26px;
+  padding: 0 var(--sp-3);
+  background: none;
+  border: none;
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+  font-size: var(--font);
+}
+.searchItem:hover,
+.searchItemActive {
+  background: var(--accent-dim);
+  color: var(--accent);
+}
+.searchCode {
+  font-family: var(--font-mono);
+  color: var(--text-dim);
+}
+
+/* ---------- 工具条 ---------- */
+.toolbar {
+  height: var(--h-toolbar);
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: 0 var(--sp-2);
+  background: var(--bg-1);
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+.toolGroup {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding-right: var(--sp-2);
+  border-right: 1px solid var(--border);
+  flex: 0 0 auto;
+}
+.toolGroup:last-child {
+  border-right: none;
+}
+.toolLabel {
+  font-size: var(--font-xs);
+  color: var(--text-faint);
+  padding-right: var(--sp-1);
+  white-space: nowrap;
+}
+.toolBtn {
+  height: 22px;
+  min-width: 30px;
+  padding: 0 7px;
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: var(--font-sm);
+  white-space: nowrap;
+}
+.toolBtn:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+.toolBtnActive {
+  background: var(--accent-dim);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* ---------- 主体区 ---------- */
+.main {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  overflow: hidden;
+}
+
+/* ---------- 左侧数据面板（不再是功能树） ---------- */
+.datapanel {
+  width: var(--w-datapanel);
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--bg-1);
+  border-right: 1px solid var(--border);
+}
+.datapanelCollapsed {
+  width: 0;
+  border-right: none;
+  overflow: hidden;
+}
+.datapanelHead {
+  display: flex;
+  align-items: center;
+  height: 26px;
+  flex: 0 0 auto;
+  padding: 0 var(--sp-1) 0 var(--sp-2);
+  background: var(--bg-2);
+  border-bottom: 1px solid var(--border);
+}
+.datapanelTabs {
+  display: flex;
+  gap: 1px;
+  flex: 1;
+  min-width: 0;
+}
+.datapanelTab {
+  height: 20px;
+  padding: 0 7px;
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: var(--font-sm);
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  white-space: nowrap;
+}
+.datapanelTab:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+.datapanelTabActive {
+  background: var(--bg-active);
+  color: var(--accent);
+}
+.datapanelBody {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+/* ---------- 工作区 ---------- */
+.workspace {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.tabbar {
+  height: var(--h-tab);
+  flex: 0 0 auto;
+  display: flex;
+  align-items: stretch;
+  gap: 1px;
+  background: var(--bg-2);
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+.tabbar::-webkit-scrollbar {
+  height: 4px;
+}
+
+.tabItem {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  padding: 0 var(--sp-2) 0 var(--sp-3);
+  max-width: 200px;
+  background: var(--bg-2);
+  border: none;
+  border-right: 1px solid var(--border);
+  border-top: 2px solid transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: var(--font-sm);
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+.tabItem:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+.tabItemActive {
+  background: var(--bg-1);
+  color: var(--text);
+  border-top-color: var(--accent);
+}
+.tabItemEvicted {
+  opacity: 0.55;
+}
+.tabTitle {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tabClose {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 15px;
+  height: 15px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-faint);
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+  flex: 0 0 auto;
+}
+.tabClose:hover {
+  background: var(--danger-dim);
+  color: var(--danger);
+}
+
+.wsBody {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  background: var(--bg-0);
+}
+
+/* 非激活 Tab：visibility 隐藏（保留尺寸，避免重排）；
+   LRU 逐出的 Tab 直接不渲染，释放内存与图表实例 */
+.hiddenTab {
+  visibility: hidden;
+  pointer-events: none;
+  position: absolute;
+  inset: 0;
+}
+.shownTab {
+  position: absolute;
+  inset: 0;
+  display: flex;
+}
+
+/* ---------- 分栏 ---------- */
+.paneSplit {
+  display: flex;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+}
+.paneSplitH {
+  flex-direction: row;
+}
+.paneSplitV {
+  flex-direction: column;
+}
+.paneChild {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+}
+.paneLeaf {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  overflow: hidden;
+}
+.paneLeafActive {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+
+/* 拖拽条 */
+.splitter {
+  flex: 0 0 auto;
+  background: var(--border);
+  transition: background var(--dur-fast);
+  position: relative;
+  z-index: 2;
+}
+.splitterH {
+  width: 4px;
+  cursor: col-resize;
+}
+.splitterV {
+  height: 4px;
+  cursor: row-resize;
+}
+.splitter:hover,
+.splitterDragging {
+  background: var(--accent);
+}
+
+.paneBody {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+.paneBodyFlush {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.paneToolbar {
+  height: 22px;
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  padding: 0 var(--sp-1);
+  background: var(--bg-2);
+  border-bottom: 1px solid var(--border);
+  font-size: var(--font-xs);
+  color: var(--text-dim);
+  opacity: 0;
+  transition: opacity var(--dur-fast);
+}
+.paneLeaf:hover .paneToolbar {
+  opacity: 1;
+}
+.paneToolBtn {
+  height: 16px;
+  padding: 0 5px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: var(--font-xs);
+}
+.paneToolBtn:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+/* ---------- 状态栏 ---------- */
+.statusbar {
+  height: var(--h-status);
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: 0 var(--sp-3);
+  background: var(--bg-2);
+  border-top: 1px solid var(--border);
+  font-size: var(--font-xs);
+  color: var(--text-dim);
+  user-select: none;
+}
+.statusItem {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  white-space: nowrap;
+}
+.statusSpacer {
+  flex: 1;
+}
+.dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+}
+.dotOk {
+  background: var(--success);
+}
+.dotWarn {
+  background: var(--warning);
+}
+.dotErr {
+  background: var(--danger);
+}
+.dotIdle {
+  background: var(--text-faint);
+}
+.statusBtn {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: var(--font-xs);
+  padding: 0 4px;
+  border-radius: var(--radius-sm);
+}
+.statusBtn:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+/* ---------- 命令面板 ---------- */
+.paletteBackdrop {
+  position: fixed;
+  inset: 0;
+  background: var(--bg-overlay);
+  z-index: var(--z-modal);
+  display: flex;
+  justify-content: center;
+  padding-top: 12vh;
+}
+.palette {
+  width: min(520px, 92vw);
+  max-height: 60vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+}
+.paletteInput {
+  height: 38px;
+  padding: 0 var(--sp-3);
+  border: none;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-3);
+  color: var(--text);
+  outline: none;
+  font-size: var(--font-lg);
+}
+.paletteList {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: var(--sp-1) 0;
+}
+.paletteItem {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  width: 100%;
+  height: 30px;
+  padding: 0 var(--sp-3);
+  background: none;
+  border: none;
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+  font-size: var(--font);
+}
+.paletteItem:hover,
+.paletteItemActive {
+  background: var(--accent-dim);
+  color: var(--accent);
+}
+.paletteGroup {
+  font-size: var(--font-xs);
+  color: var(--text-faint);
+  margin-left: auto;
+}
+.paletteEmpty {
+  padding: var(--sp-4);
+  text-align: center;
+  color: var(--text-faint);
+  font-size: var(--font-sm);
+}

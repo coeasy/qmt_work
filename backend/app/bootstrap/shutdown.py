@@ -113,6 +113,15 @@ async def shutdown(app: FastAPI) -> None:
             # bridge 子进程可能在父进程退出前已自杀；不阻断
             log.debug("bridge %s 关停异常（已忽略）：%s", conn.id, exc)
 
+    # 17. DB（启动顺序里 db 是第一个，停机必须最后）——P0-10
+    # 此前全靠 GC 隐式回收，SQLite 句柄与未 checkpoint 的 -wal 文件可能残留。
+    # 关闭动作本身是同步阻塞 I/O，移出事件循环，避免停机时卡住 loop。
+    if state.db is not None:
+        try:
+            await asyncio.to_thread(state.db.close)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("db close 失败（已忽略）：%s", exc)
+
     log.info("qmt_work stopped")
 
 

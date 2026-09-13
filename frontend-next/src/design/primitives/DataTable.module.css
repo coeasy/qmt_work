@@ -1,0 +1,104 @@
+/* ==========================================================================
+   DataTable · 虚拟滚动行情表
+   关键性能约定：行高固定，行内容按 cell 订阅，避免整表重渲
+   ========================================================================== */
+
+.wrap {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+  background: var(--bg-1);
+}
+
+.head {
+  display: flex;
+  align-items: center;
+  height: 24px;
+  flex: 0 0 auto;
+  background: var(--bg-2);
+  border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  z-index: var(--z-panel);
+}
+
+.headCell {
+  padding: 0 6px;
+  font-size: var(--font-xs);
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 0 0 auto;
+}
+
+.body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  position: relative;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  border-bottom: 1px solid transparent;
+  cursor: default;
+  will-change: transform;
+}
+
+.rowInteractive {
+  cursor: pointer;
+}
+.rowInteractive:hover {
+  background: var(--bg-hover);
+}
+.rowActive {
+  background: var(--bg-active);
+}
+
+.cell {
+  padding: 0 6px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 0 0 auto;
+}
+
+.cellRight {
+  text-align: right;
+}
+
+.cellCenter {
+  text-align: center;
+}
+
+.cellMono {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 涨跌着色（由 rowTone 决定，令牌驱动） */
+.toneUp {
+  color: var(--up);
+}
+.toneDown {
+  color: var(--down);
+}
+.toneFlat {
+  color: var(--text);
+}
+
+.empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--text-faint);
+  font-size: var(--font-sm);
+}

@@ -1,13 +1,34 @@
 {
+  "algo_alert": [],
+  "algo_slice": [],
+  "condition_created": [],
+  "condition_expired": [],
+  "condition_failed": [],
+  "condition_order": [],
+  "condition_settled": [],
+  "condition_triggered": [],
   "deal": [
     "deal_event"
   ],
+  "heartbeat": [],
+  "limitup": [],
+  "limitup_order": [],
   "order": [
     "order_event"
   ],
+  "order.timeout": [],
+  "pong": [],
   "quotes": [],
+  "quotes_replay": [],
+  "reconcile": [],
   "risk": [
     "risk_circuit"
   ],
+  "risk.blocked": [],
+  "signal_dry_run": [],
+  "signal_live": [],
+  "signal_paper": [],
+  "signal_pending": [],
+  "snapshot": [],
   "system": []
 }

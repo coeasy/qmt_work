@@ -53,8 +53,16 @@ class ExecutionService:
         *,
         risk=None,
         audit_action: str = "order.submitted",
+        risk_checked: bool = False,
     ) -> dict:
-        """执行一笔真实委托；市价/无价委托必须使用真实行情完成风控估价。"""
+        """执行一笔真实委托；市价/无价委托必须使用真实行情完成风控估价。
+
+        risk_checked=True 表示**调用方已完成风控**（当前仅 SignalRouter 的下单路径，
+        它在 route() 里先跑风控再调本方法）。此时本方法跳过二次校验，只做价格估价——
+        P0-2：此前两处都校验，同一笔委托消耗两倍频率窗口与日额度，正常单被提前误拦。
+
+        默认 False：MCP 工具 / 批量等直连路径仍强制风控，Mandatory Risk 不因此被削弱。
+        """
         checker = risk or self._risk
         params = {
             "code": code, "direction": direction, "volume": volume,
@@ -67,15 +75,18 @@ class ExecutionService:
             reason = "风控未初始化，拒绝下单（Mandatory Risk）"
             self._audit("order.rejected", code, params, reason)
             return {"ok": False, "reason": reason}
+        # 估价无论是否 risk_checked 都要做：市价单需把真实最新价作为保护价送柜台
+        # （P0-11），价格传 0 会被判废单。
         risk_price, price_error = await self._risk_price(bridge, code, price)
         if risk_price is None:
             self._audit("order.rejected", code, params, price_error)
             return {"ok": False, "reason": price_error}
-        allowed, reason = checker.check_order(
-            code, risk_price, volume, direction, price_type)
-        if not allowed:
-            self._audit("order.rejected", code, params, reason)
-            return {"ok": False, "reason": reason}
+        if not risk_checked:
+            allowed, reason = checker.check_order(
+                code, risk_price, volume, direction, price_type)
+            if not allowed:
+                self._audit("order.rejected", code, params, reason)
+                return {"ok": False, "reason": reason}
         # 关键正确性修复（P0-11）：市价单/无价单必须把「真实估价后的价格」
         # 作为保护价传给柜台，绝不能传原始 price（市价单 price=0 会被柜台判为
         # 废单）。risk_price 已通过真实行情校验：限价单时等于用户原始价，市价单时

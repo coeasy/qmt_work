@@ -22,7 +22,11 @@ BACKEND_ROOT = Path(__file__).resolve().parents[2]
 os.environ.setdefault("QMT_API_KEY", "contract-introspect-key")
 
 _WS_SCAN_ROOTS = ("sync", "app", "gateway", "engines", "xtquant_client")
-_EMIT_FUNC_NAMES = {"broadcast", "_notify"}
+# 事件发射函数名。除 broadcast/_notify 外，绝大多数事件走各引擎的 `_emit(event: dict)`
+# （SignalRouter / limitup / condition / algo 等），它最终也落到 ws_manager.broadcast，
+# 只因形态是「单个 dict」而长期未被扫描到 —— 基线曾因此只剩 5 个频道。
+# `on_event` 是注入的回调（= broadcast 本身），watchdog 以 (event_type, payload) 调用。
+_EMIT_FUNC_NAMES = {"broadcast", "_notify", "_emit", "emit", "on_event"}
 
 
 # ---------------------------------------------------------------------------
@@ -191,7 +195,52 @@ def _emit_calls(tree: ast.AST):
             yield node
 
 
+def _direct_ws_types(tree: ast.AST) -> list[str]:
+    """扫描直接 `json.dumps({"type": "snapshot", ...})` 的 WS 发送帧。
+
+    `WSManager.send_full_snapshot()` 不走 broadcast，而是直接 `ws.send_text`，
+    原扫描只看 broadcast/_emit，导致 snapshot 长期漏出基线。
+    """
+    out: list[str] = []
+    for call in ast.walk(tree):
+        if not isinstance(call, ast.Call):
+            continue
+        name = getattr(call.func, "attr", None) or getattr(call.func, "id", None)
+        if name != "dumps" or not call.args or not isinstance(call.args[0], ast.Dict):
+            continue
+        d = call.args[0]
+        for key, value in zip(d.keys, d.values):
+            if (isinstance(key, ast.Constant) and key.value == "type"
+                    and isinstance(value, ast.Constant) and isinstance(value.value, str)):
+                out.append(value.value)
+                break
+    return out
+
+
+def _type_constants(call: ast.Call) -> list[str]:
+    """按出现顺序收集调用内全部形如 {"type": "<常量>"} 的字符串值。
+
+    ast.walk 是广度优先，外层 dict 先于内层的 data payload，
+    因此 tvals[0] 即**顶层事件类型**，其余为 payload 内的子类型。
+    """
+    out: list[str] = []
+    for sub in ast.walk(call):
+        if (isinstance(sub, ast.Dict) and sub.keys
+                and isinstance(sub.keys[0], ast.Constant)
+                and sub.keys[0].value == "type"
+                and isinstance(sub.values[0], ast.Constant)
+                and isinstance(sub.values[0].value, str)):
+            out.append(sub.values[0].value)
+    return out
+
+
 def ws_events() -> dict:
+    """扫描全部事件发射点，返回 {频道/事件类型: [子类型]}。
+
+    兼容两种发射形态（见 sync.WSManager.broadcast 的 P2-2 兼容逻辑）：
+    - ``broadcast(channel, payload)`` → 首参字符串即频道；
+    - ``_emit({"type": evt, "data": payload})`` → dict 的 type 即事件类型。
+    """
     channels: dict = {}
     for root in _WS_SCAN_ROOTS:
         base = BACKEND_ROOT / root
@@ -202,21 +251,23 @@ def ws_events() -> dict:
                 tree = ast.parse(py.read_text(encoding="utf-8"))
             except (SyntaxError, UnicodeDecodeError):
                 continue
+            for direct_type in _direct_ws_types(tree):
+                channels.setdefault(direct_type, set())
             for call in _emit_calls(tree):
                 if not call.args:
                     continue
                 a0 = call.args[0]
-                if not (isinstance(a0, ast.Constant) and isinstance(a0.value, str)):
+                tvals = _type_constants(call)
+                if isinstance(a0, ast.Constant) and isinstance(a0.value, str):
+                    ch, subs = a0.value, tvals
+                elif isinstance(a0, ast.Dict):
+                    # 单 dict 形态：首参即 {"type": ...}，无 type 则非事件（跳过）
+                    if not tvals:
+                        continue
+                    ch, subs = tvals[0], tvals[1:]
+                else:
                     continue  # 频道为变量（如 quote_bus.publish(code,…)）不属事件词汇
-                ch = a0.value
-                types = channels.setdefault(ch, set())
-                for sub in ast.walk(call):
-                    if (isinstance(sub, ast.Dict) and sub.keys
-                            and isinstance(sub.keys[0], ast.Constant)
-                            and sub.keys[0].value == "type"
-                            and isinstance(sub.values[0], ast.Constant)
-                            and isinstance(sub.values[0].value, str)):
-                        types.add(sub.values[0].value)
+                channels.setdefault(ch, set()).update(subs)
     return {ch: sorted(ts) for ch, ts in sorted(channels.items())}
 
 

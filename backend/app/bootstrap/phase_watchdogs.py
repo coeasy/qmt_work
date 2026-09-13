@@ -115,7 +115,9 @@ async def setup(app: FastAPI) -> dict:
         state.broker_manager, timeout=settings.order_watchdog_timeout,
         interval=settings.order_watchdog_interval,
         enabled=settings.order_watchdog_enabled,
-        on_event=state.ws_manager.broadcast, notifier=state.notifier)
+        on_event=state.ws_manager.broadcast, notifier=state.notifier,
+        # P0-8：撤单纳入统一链路（WAL + 审计），不再「只撤不留痕」。
+        wal=state.wal, db=state.db)
     await state.order_watchdog.start()
 
     # 统一信号入口

@@ -465,7 +465,10 @@ class AlgoEngine:
             res = await state.signal_router.submit(
                 job["code"], job["direction"], vol, price, price_type,
                 source=f"algo_{job['algo']}", remark=job.get("remark", ""),
-                broker_id=job.get("conn_id") or "", auto_confirm=True)
+                broker_id=job.get("conn_id") or "", auto_confirm=True,
+                # P0-3：显式幂等键含「作业号 + 分片序号」，天然唯一 —— 各片参数
+                # 完全相同也不会被去重吞掉，同时重启重放同片不会重复下单。
+                idempotency_key=f"algo:{aid}:{idx}")
             # 真实成交而非假设全额：查委托确认 filled，冰山/POV 据此推进，避免超额下发
             filled = await self._confirm_fill(b, res.get("order_id"), vol)
             # P1-8：限价片确认窗口内未成交 → 撤单并把剩余量并入下一片（调用方根据返回推进），

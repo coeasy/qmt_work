@@ -26,25 +26,26 @@ jobs:
         with:
           node-version: 20
           cache: npm
-          cache-dependency-path: frontend/package-lock.json
+          cache-dependency-path: frontend-next/package-lock.json
 
       - name: Install frontend dependencies
-        working-directory: frontend
+        working-directory: frontend-next
         run: npm ci
         shell: bash
 
-      - name: Lint (--max-warnings=0)
-        working-directory: frontend
-        run: npm run lint
+      # 旧 frontend/ 已退役：frontend-next 无 ESLint 配置，类型门禁由 tsc --noEmit 承担
+      - name: Typecheck (tsc --noEmit)
+        working-directory: frontend-next
+        run: npm run typecheck
         shell: bash
 
       - name: Unit tests (vitest)
-        working-directory: frontend
+        working-directory: frontend-next
         run: npm test
         shell: bash
 
       - name: Build (vite)
-        working-directory: frontend
+        working-directory: frontend-next
         run: npm run build
         shell: bash
 
@@ -92,7 +93,7 @@ jobs:
         with:
           node-version: 20
           cache: npm
-          cache-dependency-path: frontend/package-lock.json
+          cache-dependency-path: frontend-next/package-lock.json
 
       - name: Setup Python 3.11
         uses: actions/setup-python@v5
@@ -108,12 +109,12 @@ jobs:
         shell: bash
 
       - name: Install frontend dependencies
-        working-directory: frontend
+        working-directory: frontend-next
         run: npm ci
         shell: bash
 
       - name: Build client (frontend + backend + electron)
-        working-directory: frontend
+        working-directory: frontend-next
         run: npm run dist:portable
         shell: bash
 
@@ -125,5 +126,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: qmt_work-client-${{ github.sha }}
-          path: frontend/release/*
+          path: frontend-next/release/*
           retention-days: 14

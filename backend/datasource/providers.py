@@ -23,21 +23,26 @@ class ProviderDescriptor:
 
 
 # 默认能力链（v1.3 锁定契约）：QMT（链首恒为 broker） → eltdx → baostock → akshare，
-# 其余（pytdx / tencent / sina）仅用于显式指定或个别能力的末位兜底。改此顺序必须同步
+# 其余（tencent / sina）仅用于显式指定或个别能力的末位兜底。改此顺序必须同步
 # 改文档 + 测试（test_default_chain_order.py），三处一致才允许合并。
+#
+# ★ 2026-09-13 移除 "pytdx" 链项与 tstdx provider（方案 §6.1）：
+#   该源注册名为 "tstdx"（optional_sources.TstdxSource.name），而链里写的是
+#   "pytdx"，标识错配导致**它从来没有被真正选中过**——移除不损失任何实际能力，
+#   只是消除无效冗余与「看起来还有一层兜底」的误导。
 DEFAULT_CAPABILITY_CHAINS: dict[str, tuple[str, ...]] = {
-    "kline": ("broker", "eltdx", "baostock", "akshare", "pytdx", "tencent", "sina"),
+    "kline": ("broker", "eltdx", "baostock", "akshare", "tencent", "sina"),
     "kline_qfq": ("broker", "eltdx", "baostock", "akshare", "tencent"),
     "kline_hfq": ("broker", "eltdx", "baostock", "akshare", "tencent"),
-    "stock_list": ("broker", "eltdx", "baostock", "akshare", "pytdx"),
-    "instrument_detail": ("broker", "eltdx", "baostock", "akshare", "pytdx"),
+    "stock_list": ("broker", "eltdx", "baostock", "akshare"),
+    "instrument_detail": ("broker", "eltdx", "baostock", "akshare"),
     "sector": ("broker", "eltdx", "akshare", "baostock"),
     "index_constituent": ("broker", "eltdx", "akshare", "baostock"),
     "fundamental": ("broker", "eltdx", "baostock", "akshare"),
     "capital": ("broker", "eltdx", "baostock", "akshare"),
     "suspend": ("broker", "eltdx", "baostock", "akshare"),
     "price_limit": ("broker", "eltdx", "akshare", "baostock"),
-    "corporate_action": ("broker", "eltdx", "baostock", "akshare", "pytdx"),
+    "corporate_action": ("broker", "eltdx", "baostock", "akshare"),
     "calendar": ("broker", "eltdx", "baostock", "akshare", "local"),
     "quote": ("broker", "eltdx", "tencent", "sina", "akshare"),
     "moneyflow": ("broker", "eltdx", "akshare"),
@@ -62,8 +67,6 @@ PROVIDER_CATALOG = (
         "quote", "kline", "kline_qfq", "kline_hfq", "stock_list", "sector",
         "index_constituent", "fundamental", "capital", "suspend", "moneyflow",
         "calendar", "dividend"), "akshare", "MIT", commercial_ok=True),
-    ProviderDescriptor("tstdx", "TDX standard", "pytdx", ("quote", "kline", "stock_list"),
-        "pytdx", "MIT", commercial_ok=True),
     ProviderDescriptor("sina", "Sina public quote", "http", ("quote",),
         license_note="public endpoint; availability is runtime checked", commercial_ok=True),
     ProviderDescriptor("tencent", "Tencent public quote", "http", ("quote", "kline_qfq"),

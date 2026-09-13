@@ -197,7 +197,9 @@ class LimitUpMonitor:
             from core.state import state
             res = await state.signal_router.submit(
                 code, "buy", vol, float(limit_price), "limit",
-                source="limitup", remark="打板自动买入", auto_confirm=True)
+                source="limitup", remark="打板自动买入", auto_confirm=True,
+                # P0-3：同一标的同一交易日只打一次板；重启重放不会重复下单。
+                idempotency_key=f"limitup:{code}:{time.strftime('%Y%m%d')}")
             self._emit({"type": "limitup_order", "data": {
                 "code": code, "order_id": res.get("order_id"),
                 "price": limit_price, "volume": vol}})

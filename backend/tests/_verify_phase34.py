@@ -4,7 +4,7 @@ sys.path.insert(0, r"p:\github_public\qmt_work\backend")
 def section(name):
     print(f"\n=== {name} ===")
 
-reg = {"broker", "eltdx", "baostock", "akshare", "pytdx", "tencent", "sina"}
+reg = {"broker", "eltdx", "baostock", "akshare", "tencent", "sina"}
 
 try:
     import datasource.providers as p

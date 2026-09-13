@@ -131,6 +131,7 @@ class DB:
         except sqlite3.Error:  # noqa: BLE001 只读介质等场景降级不阻塞启动
             pass
         self._audit_last_hash: str | None = None   # D4 审计链尾哈希（惰性加载）
+        self._closed = False
         self._migrate()
         self._ensure_columns()
         self._conn.commit()
@@ -184,6 +185,36 @@ class DB:
                     with _rw.write():
                         self._conn.execute(
                             f"ALTER TABLE {table} ADD COLUMN {c} TEXT DEFAULT ''")
+
+    def close(self) -> bool:
+        """P0-10：显式关闭数据库（停机逆序的最后一步）。
+
+        此前完全依赖 GC 隐式回收：句柄与未 checkpoint 的 -wal 文件可能残留，
+        打包客户端 / 频繁重启场景下会留下脏数据或文件锁。现显式完成：
+        1) ``wal_checkpoint(TRUNCATE)`` —— 把 WAL 合并回主库并清零 -wal 文件；
+        2) 依次关闭只读连接与主写连接。
+
+        幂等：已关闭时重复调用返回 False，不抛异常。
+        """
+        if self._closed:
+            return False
+        self._closed = True
+        try:
+            with _rw.write():
+                self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        except sqlite3.Error as exc:
+            log.warning("db close：wal_checkpoint 失败（已忽略）：%s", exc)
+        ro = self._ro
+        if ro is not None and ro is not False:
+            try:
+                ro.close()
+            except sqlite3.Error as exc:
+                log.debug("db close：只读连接关闭异常（已忽略）：%s", exc)
+        try:
+            self._conn.close()
+        except sqlite3.Error as exc:
+            log.debug("db close：主连接关闭异常（已忽略）：%s", exc)
+        return True
 
     def execute(self, sql: str, params: tuple = ()) -> sqlite3.Cursor:
         with _rw.write():

@@ -46,9 +46,9 @@ from ctypes import wintypes
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-CLIENT_EXE = ROOT / "frontend" / "dist-electron" / "win-unpacked" / "qmt_work.exe"
+CLIENT_EXE = ROOT / "frontend-next" / "dist-electron" / "win-unpacked" / "qmt_work.exe"
 BACKEND_EXE = ROOT / "backend" / "dist" / "qmt_work" / "qmt_work.exe"
-DEV_ELECTRON = ROOT / "frontend" / "node_modules" / "electron" / "dist" / "electron.exe"
+DEV_ELECTRON = ROOT / "frontend-next" / "node_modules" / "electron" / "dist" / "electron.exe"
 DEV_PYTHON = ROOT / "backend" / "runtimes" / "cp311" / "python.exe"
 OUT_DIR = ROOT / "output" / "client_test"
 
@@ -466,7 +466,7 @@ def main() -> int:
         if not DEV_ELECTRON.exists():
             record("start", "开发态 Electron 可用", False, f"缺少 {DEV_ELECTRON}")
             return _finish(report_path, started, target)
-        exe, argv, cwd = DEV_ELECTRON, [str(DEV_ELECTRON), "."], ROOT / "frontend"
+        exe, argv, cwd = DEV_ELECTRON, [str(DEV_ELECTRON), "."], ROOT / "frontend-next"
         dev_py, dev_src = find_dev_python()
         record("start", "开发态后端解释器可用（含 fastapi/uvicorn）", dev_py is not None, dev_src)
         if not dev_py:

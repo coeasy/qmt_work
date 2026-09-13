@@ -30,7 +30,7 @@ setlocal enabledelayedexpansion
 set ROOT=%~dp0
 if "%ROOT:~ -1%"=="\" set ROOT=%ROOT:~0,-1%
 set BACKEND=%ROOT%\backend
-set FRONTEND=%ROOT%\frontend
+set FRONTEND=%ROOT%\frontend-next
 set VERIFY_RC=0
 
 REM ---------- resolve interpreters (no hardcoded absolute paths) ----------
@@ -139,7 +139,7 @@ if exist "%BACKEND%\dist\qmt_work.exe" del /q "%BACKEND%\dist\qmt_work.exe"
 goto :eof
 
 REM ---------- helper: report frontend output state ----------
-REM frontend/vite.config.js already sets emptyOutDir: true, so vite wipes
+REM frontend-next/vite.config.ts already sets emptyOutDir: true, so vite wipes
 REM ../backend/static itself. Deleting it here is redundant AND trips the
 REM safe-delete bulk guard (>50 files). Completeness is gated later by
 REM :verify_static (missing refs / no js chunks -> fail).

@@ -3,8 +3,10 @@
 
 三项计数契约（不是通过率旁路）：
   1. EXPECTED_TESTS      —— pytest 逐文件 --collect-only 收集到的用例总数。
-  2. EXPECTED_COMPONENTS —— frontend/src/{components,features} 下全部 .jsx。
-  3. EXPECTED_PAGES      —— pagesRegistry.jsx 的 PAGES 键数量（= 前端「页」的真源）。
+  2. EXPECTED_COMPONENTS —— frontend-next/src/{components,shell,charts,domains} 下全部 .tsx。
+  3. EXPECTED_PAGES      —— app/routes.tsx 的 PAGES 键数量（= 前端「页」的真源）。
+
+  注：旧 frontend/ 已退役；前端契约全部改指 frontend-next/（见 §12.4 / 退役改造）。
 
 任一项不符即退出非 0，提示是「改了代码忘了更文档」还是「文档数字过时」。
 用法：
@@ -26,14 +28,14 @@ import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BACKEND = os.path.join(ROOT, "backend")
-FRONTEND = os.path.join(ROOT, "frontend")
+FRONTEND = os.path.join(ROOT, "frontend-next")
 SRC = os.path.join(FRONTEND, "src")
-PAGES_REGISTRY = os.path.join(SRC, "pagesRegistry.jsx")
+PAGES_REGISTRY = os.path.join(SRC, "app", "routes.tsx")
 
 # ── 计数契约（与 README「核心能力」「项目结构」章节同步）─────────────────────
-EXPECTED_TESTS = 778          # 后端用例收集数
-EXPECTED_COMPONENTS = 70     # 前端 .jsx 组件数（components + features）
-EXPECTED_PAGES = 17          # 注册页数量
+EXPECTED_TESTS = 815          # 后端用例收集数
+EXPECTED_COMPONENTS = 51     # 前端 .tsx 组件数（components + shell + charts + domains）
+EXPECTED_PAGES = 35          # 注册页数量（routes.tsx PAGES 键；含占位）
 
 # ── 收集失败时允许跳过的辅助模块（非测试）────────────────────────────────────
 _SKIP_FILES = {"smoke2.py", "fake_bridge_server.py", "_phase4_support.py",
@@ -99,16 +101,15 @@ def collect_backend_tests() -> int:
 
 
 def count_frontend_components() -> int:
-    """src/components 与 src/features 下全部 .jsx（递归）。
+    """src/{components,shell,charts,domains} 下全部 .tsx（递归，排除 tests）。
 
-    V10 重构后页面从 components/ 迁到 features/{market,research,trading,accounts,system}，
-    只看 components/ 会漏计（曾因此出现 EXPECTED=48 而实际只有 36 的假漂移）。
-    glob 天然排除 *.jsx.dead 等已移出构建路径的文件。
+    frontend-next 无 features/ 目录：可复用 UI 在 components/shell/charts，
+    页面级（域）组件在 domains/。glob 天然排除 *.tsx.dead 等已移出构建路径的文件。
     注意：Python 的 glob 不支持 bash 式的 {a,b} 花括号展开，须逐目录列。
     """
     n = 0
-    for d in ("components", "features"):
-        n += len(glob.glob(os.path.join(FRONTEND, "src", d, "**", "*.jsx"),
+    for d in ("components", "shell", "charts", "domains"):
+        n += len(glob.glob(os.path.join(FRONTEND, "src", d, "**", "*.tsx"),
                            recursive=True))
     return n
 
@@ -118,9 +119,10 @@ def count_pages() -> int:
     if not os.path.isfile(PAGES_REGISTRY):
         raise RuntimeError(f"缺少页面注册表：{PAGES_REGISTRY}")
     src = open(PAGES_REGISTRY, encoding="utf-8").read()
-    m = re.search(r"\bPAGES\s*=\s*\{", src)
+    # 兼容两种声明：旧 `PAGES = {` 与 frontend-next 的 `PAGES: Record<...> = {`
+    m = re.search(r"PAGES\b[^\{]*=\s*\{", src)
     if not m:
-        raise RuntimeError("pagesRegistry.jsx 中未找到 PAGES = {")
+        raise RuntimeError(f"{os.path.basename(PAGES_REGISTRY)} 中未找到 PAGES = {{")
     # 从 PAGES = { 起做括号配对，取到对象体
     depth = 0
     start = src.index("{", m.end() - 1)

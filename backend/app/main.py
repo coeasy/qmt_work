@@ -325,6 +325,8 @@ def create_app() -> FastAPI:
             resp.headers["content-type"] = ct + "; charset=utf-8"
         return resp
 
+    # ---- 主前端：frontend-next 已退役旧 frontend/，构建产物落在 backend/static，
+    #      由下方 catch-all "/" 挂载统一服务（vite base="/"）。旧 /next 灰度挂载已移除。
     static_dir = BASE_DIR / "static"
     if static_dir.exists():
         # index.html 必须走 no-cache：StaticFiles(html=True) 默认不发缓存头，浏览器会缓存

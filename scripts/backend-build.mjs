@@ -8,7 +8,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import path from "node:path";
 
-const root = process.cwd(); // 约定从 frontend/ 运行
+const root = process.cwd(); // 约定从 frontend-next/ 运行（旧 frontend/ 已退役）
 const backendDir = path.resolve(root, "..", "backend");
 const buildExe = path.join(backendDir, "build_exe.py");
 

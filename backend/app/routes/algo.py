@@ -55,9 +55,18 @@ async def algo_resume(algo_id: str, ctx: AppContext = Depends(get_ctx)):
 
 @router.post("/algo/{algo_id}/cancel")
 async def algo_cancel(algo_id: str, ctx: AppContext = Depends(get_ctx)):
-    """创建/提交algo / cancel（POST /algo/{algo_id}/cancel）。"""
+    """创建/提交algo / cancel（POST /algo/{algo_id}/cancel）。
+
+    ★ 阶段 3 E2E 实测缺陷（2026-09-13）：``AlgoEngine.cancel`` 是**协程**，
+      此处未 await 直接 ``ok(...)`` 包装 → FastAPI 序列化一个 coroutine 对象，
+      端点恒定失败（前端「取消算法单」点了没反应且无报错提示）。
+      其余 pause/resume 是同步方法，无需 await。
+    """
+    e = ctx.algo_engine
+    if e is None:
+        return err(503, "算法单引擎未初始化")
     try:
-        return ok(ctx.algo_engine.cancel(algo_id))
+        return ok(await e.cancel(algo_id))
     except KeyError as exc:
         return err(404, str(exc))
 

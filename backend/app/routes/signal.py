@@ -80,6 +80,11 @@ async def signal_webhook(request: Request, ctx: AppContext = Depends(get_ctx)):
         expected = hmac.new(secret.encode(), raw, hashlib.sha256).hexdigest()
         if not hmac.compare_digest(provided, expected):
             return err(401, "签名校验失败")
+    elif not getattr(settings, "webhook_allow_insecure", False):
+        # P0-7：未配置密钥 = 任何人都能构造请求实盘下单。默认拒绝，
+        # 必须由运维显式开启 webhook_allow_insecure 才回到旧的不安全行为。
+        return err(401, "未配置 webhook_secret，已拒绝未签名请求"
+                        "（联调环境如需放行请显式设置 webhook_allow_insecure=true）")
     try:
         body = json.loads(raw or b"{}")
     except Exception:
@@ -91,7 +96,9 @@ async def signal_webhook(request: Request, ctx: AppContext = Depends(get_ctx)):
         volume=int(body.get("volume", 0)), price=float(body.get("price", 0) or 0),
         price_type=body.get("price_type", "limit"), remark=body.get("remark", ""),
         broker_id=body.get("broker_id", ""), payload=body.get("payload", {}))
-    res = await ctx.signal_router.route(sig)
+    # P0-3：外部系统可显式传 idempotency_key 获得幂等（未传则不去重，保持旧行为）。
+    res = await ctx.signal_router.route(
+        sig, idempotency_key=str(body.get("idempotency_key", "") or "").strip())
     ctx.db.audit("webhook", "signal.submit", body.get("code", ""), body, "ok")
     if isinstance(res, dict) and res.get("ok"):
         return ok(res)

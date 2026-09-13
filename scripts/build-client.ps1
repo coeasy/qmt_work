@@ -8,7 +8,7 @@
 #
 # 说明：
 #   - 自动探测 Python/PyInstaller（PATH -> 常见 miniforge -> python -m PyInstaller）。
-#   - 产物位于 frontend/release/。
+#   - 产物位于 frontend-next/release/（electron-builder 输出）。
 [CmdletBinding()]
 param(
   [ValidateSet("nsis", "zip", "dir")] [string]$Target = "nsis",
@@ -18,7 +18,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $root = Resolve-Path (Join-Path $PSScriptRoot "..")
-$frontend = Join-Path $root "frontend"
+$frontend = Join-Path $root "frontend-next"
 $backend = Join-Path $root "backend"
 
 function Test-Command {
@@ -56,4 +56,4 @@ if ($Target -eq "dir") {
 }
 
 Pop-Location
-Write-Host "[build] 完成。产物目录: frontend/release/" -ForegroundColor Green
+Write-Host "[build] 完成。产物目录: frontend-next/release/" -ForegroundColor Green

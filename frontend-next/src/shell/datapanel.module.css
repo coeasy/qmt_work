@@ -1,0 +1,84 @@
+.list {
+  display: flex;
+  flex-direction: column;
+}
+
+.row {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  align-items: center;
+  gap: var(--sp-1);
+  height: 26px;
+  padding: 0 var(--sp-2);
+  cursor: pointer;
+  border-bottom: 1px solid var(--border);
+}
+.row:hover {
+  background: var(--bg-hover);
+}
+.rowActive {
+  background: var(--bg-active);
+}
+
+.name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--font-sm);
+}
+
+.code {
+  font-family: var(--font-mono);
+  font-size: var(--font-xs);
+  color: var(--text-faint);
+}
+
+.price {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--font-sm);
+  text-align: right;
+  min-width: 52px;
+}
+
+.pct {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--font-xs);
+  text-align: right;
+  min-width: 52px;
+}
+
+.remove {
+  background: none;
+  border: none;
+  color: var(--text-faint);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 0 2px;
+  line-height: 1;
+  opacity: 0;
+}
+.row:hover .remove {
+  opacity: 1;
+}
+.remove:hover {
+  color: var(--danger);
+}
+
+.empty {
+  padding: var(--sp-4);
+  text-align: center;
+  color: var(--text-faint);
+  font-size: var(--font-sm);
+}
+
+.section {
+  padding: var(--sp-2);
+  color: var(--text-dim);
+  font-size: var(--font-sm);
+}
+
+.stale {
+  color: var(--warning);
+}

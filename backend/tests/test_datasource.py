@@ -10,6 +10,8 @@ from datasource.base import DataSource
 from datasource.board import classify_board, limit_ratio
 from datasource.registry import DataSourceManager, UnsupportedDataSource
 
+from _phase4_support import force_deps
+
 
 class FakeBroker:
     def __init__(self, fail: bool = False):
@@ -144,7 +146,14 @@ def test_explicit_kline_broker_failure_does_not_fallback():
 
 def test_kline_adjusted_chain_prefers_broker_then_falls_back():
     """v1.3 契约（D9）：复权经 dividend_type 参数化后 **QMT 参与复权链**（不再跳过 broker）；
-    broker 不可用时按能力链真实降级到 eltdx（绝不外传伪造数据）。"""
+    broker 不可用时按能力链真实降级到 eltdx（绝不外传伪造数据）。
+
+    ★ 必须用 force_deps()：get_kline 走 provider_catalog.resolve_chain，其中会按
+    ``importlib.util.find_spec(optional_dependency)`` 过滤「依赖未安装」的源。本用例
+    注入的是**测试替身** FakeTDX（name="eltdx"），而真实 eltdx 包并未安装，不做
+    find_spec 替身时 eltdx 会被链路过滤掉，降级断言就会假失败。
+    （对照：get_quote 走 _auto_candidates，只做许可证过滤、不做依赖过滤，故无需 force_deps。）
+    """
     async def c():
         bars, src = await _m().get_kline("X.SH")
         assert src == "broker" and bars[0]["close"] == 1
@@ -157,7 +166,8 @@ def test_kline_adjusted_chain_prefers_broker_then_falls_back():
         # 全链失败 → (None, None)，不冒充「无符合标的」
         bars4, src4 = await _m(broker_fail=True, tdx_fail=True).get_kline("X.SH", adjust="qfq")
         assert bars4 is None and src4 is None
-    asyncio.run(c())
+    with force_deps():
+        asyncio.run(c())
 
 
 def test_all_fail_returns_none():
@@ -221,11 +231,58 @@ def test_merge_quote_derives_change_pct():
     assert none_c["change"] is None and none_c["change_pct"] is None
 
 
+def test_commercial_mode_blocks_eltdx_on_all_paths():
+    """许可证合规（D-J §J.5）：商用模式下 **所有** 取数路径都必须跳过 eltdx。
+
+    eltdx 是 ELTDX Research-Only 许可（禁止一切商业使用），其 ProviderDescriptor
+    的 ``commercial_ok=False``。回归背景（2026-09-13 修复）：
+
+    此前只有 ``get_kline`` 经 ``resolve_chain`` 应用了商用过滤，而 ``get_quote`` /
+    ``get_instrument_detail`` / ``get_minutes`` / ``get_stock_list`` /
+    ``search_stocks`` 直接遍历 ``_auto_chain``，**绕过了许可证过滤**。后果是商用
+    部署里 K 线已正确跳过 eltdx，实时行情却仍在用 eltdx —— 等于把禁止商用的数据源
+    用在了商业部署中。修复后五条路径统一走 ``_auto_candidates()``。
+
+    本用例同时覆盖「非商用必须仍可用」，避免用「一律禁用 eltdx」的粗暴修法蒙混过关。
+    """
+    with force_deps():
+        m = _m(broker_fail=True)  # broker 故障，迫使走补充源
+
+        async def c():
+            # --- 非商用（个人研究）：eltdx 全路径可用 ---
+            m.set_commercial_mode(False)
+            assert (await m.get_quote("X.SH"))["source"] == "eltdx"
+            assert (await m.get_kline("X.SH"))[1] == "eltdx"
+            assert (await m.get_instrument_detail("X.SH"))["name"] == "E"
+            assert await m.search_stocks("E") == [{"code": "E.SH", "name": "E"}]
+
+            # --- 商用：eltdx 必须被全路径跳过（不报错、静默降级）---
+            m.set_commercial_mode(True)
+            assert await m.get_quote("X.SH") is None
+            assert await m.get_kline("X.SH") == (None, None)
+            assert await m.get_instrument_detail("X.SH") is None
+            assert await m.search_stocks("E") == []
+        asyncio.run(c())
+
+
+def test_license_gate_keeps_broker_and_public_sources():
+    """许可证过滤只针对 commercial_ok=False 的源，不得误伤 broker 与 MIT/公共源。"""
+    m = _m()
+    m.set_commercial_mode(True)
+    assert m._license_ok("broker") is True   # 券商授权终端，授权即合规
+    assert m._license_ok("eltdx") is False   # Research-Only
+    assert m._license_ok("baostock") is True  # BSD-3-Clause
+    assert m._license_ok("akshare") is True   # MIT
+    # broker 恒在候选链中，即使商用模式
+    assert "broker" in m._auto_candidates()
+
+
 if __name__ == "__main__":
     for fn in (test_auto_prefers_broker, test_auto_falls_back_to_eltdx,
                test_explicit_source, test_kline_adjusted_chain_prefers_broker_then_falls_back,
                test_all_fail_returns_none, test_breaker_trips_and_skips,
                test_search_stocks_indexed, test_slow_source_times_out,
-               test_classify_and_limit):
+               test_classify_and_limit, test_commercial_mode_blocks_eltdx_on_all_paths,
+               test_license_gate_keeps_broker_and_public_sources):
         fn()
     print("ALL DATASOURCE TESTS PASSED")

@@ -52,6 +52,14 @@ def _used_classes() -> dict:      # class -> [file:line]
 
 
 def main() -> int:
+    # 旧 frontend/ 已退役（2026-09）：本门禁只针对旧工程的「全局 styles.css」架构。
+    # frontend-next 改用 CSS Modules（作用域类名 + 编译期引用），不存在全局样式表，
+    # 因此该差集检测不再适用；为不阻断 CI，目标缺失时显式跳过并说明原因。
+    if not SRC.exists() or not CSS.exists():
+        print(f"[SKIP] 未找到 {SRC} 或 {CSS} —— 旧 frontend/ 已退役；"
+              f"frontend-next 使用 CSS Modules，本门禁不再适用。")
+        return 0
+
     css = _css_classes()
     used = _used_classes()
 

@@ -1,0 +1,324 @@
+/* ==========================================================================
+   原语组件样式（Button / Input / Select / Badge / Panel / Tabs / Tooltip）
+   全部走设计令牌，禁止硬编码色值
+   ========================================================================== */
+
+/* ---------- Button ---------- */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-1);
+  height: 26px;
+  padding: 0 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--bg-3);
+  color: var(--text);
+  cursor: pointer;
+  whiteSpace: nowrap;
+  transition: background var(--dur-fast), border-color var(--dur-fast);
+  user-select: none;
+}
+.btn:hover:not(:disabled) {
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
+}
+.btn:active:not(:disabled) {
+  background: var(--bg-active);
+}
+.btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.btnSm {
+  height: 22px;
+  padding: 0 7px;
+  font-size: var(--font-sm);
+}
+.btnLg {
+  height: 32px;
+  padding: 0 16px;
+  font-size: var(--font-lg);
+}
+.btnPrimary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+.btnPrimary:hover:not(:disabled) {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
+.btnDanger {
+  background: var(--danger-dim);
+  border-color: var(--danger);
+  color: var(--danger);
+}
+.btnDanger:hover:not(:disabled) {
+  background: var(--danger);
+  color: #fff;
+}
+.btnGhost {
+  background: transparent;
+  border-color: transparent;
+}
+.btnGhost:hover:not(:disabled) {
+  background: var(--bg-hover);
+  border-color: var(--border);
+}
+.btnBuy {
+  background: var(--up-dim);
+  border-color: var(--up);
+  color: var(--up);
+}
+.btnBuy:hover:not(:disabled) {
+  background: var(--up);
+  color: #fff;
+}
+.btnSell {
+  background: var(--down-dim);
+  border-color: var(--down);
+  color: var(--down);
+}
+.btnSell:hover:not(:disabled) {
+  background: var(--down);
+  color: #fff;
+}
+.btnBlock {
+  width: 100%;
+}
+
+/* ---------- Input / Select ---------- */
+.field {
+  height: 26px;
+  padding: 0 8px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--bg-3);
+  color: var(--text);
+  outline: none;
+  transition: border-color var(--dur-fast);
+  min-width: 0;
+}
+.field::placeholder {
+  color: var(--text-faint);
+}
+.field:hover {
+  border-color: var(--border-strong);
+}
+.field:focus {
+  border-color: var(--accent);
+}
+.fieldError {
+  border-color: var(--danger);
+}
+.fieldMono {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+.select {
+  composes: field;
+  cursor: pointer;
+  appearance: none;
+  padding-right: 22px;
+  background-image: linear-gradient(45deg, transparent 50%, var(--text-dim) 50%),
+    linear-gradient(135deg, var(--text-dim) 50%, transparent 50%);
+  background-position: calc(100% - 12px) 11px, calc(100% - 8px) 11px;
+  background-size: 4px 4px, 4px 4px;
+  background-repeat: no-repeat;
+}
+
+/* ---------- Badge ---------- */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  height: 17px;
+  padding: 0 5px;
+  border-radius: var(--radius-sm);
+  font-size: var(--font-xs);
+  background: var(--bg-3);
+  color: var(--text-dim);
+  border: 1px solid var(--border);
+  white-space: nowrap;
+}
+.badgeSuccess {
+  background: var(--success-dim);
+  color: var(--success);
+  border-color: var(--success);
+}
+.badgeWarning {
+  background: var(--warning-dim);
+  color: var(--warning);
+  border-color: var(--warning);
+}
+.badgeDanger {
+  background: var(--danger-dim);
+  color: var(--danger);
+  border-color: var(--danger);
+}
+.badgeInfo {
+  background: var(--info-dim);
+  color: var(--info);
+  border-color: var(--info);
+}
+.badgeUp {
+  background: var(--up-dim);
+  color: var(--up);
+  border-color: var(--up);
+}
+.badgeDown {
+  background: var(--down-dim);
+  color: var(--down);
+  border-color: var(--down);
+}
+
+/* ---------- Panel ---------- */
+.panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+.panelHead {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  height: 26px;
+  padding: 0 var(--sp-2);
+  background: var(--bg-2);
+  border-bottom: 1px solid var(--border);
+  flex: 0 0 auto;
+}
+.panelTitle {
+  font-size: var(--font-sm);
+  font-weight: 500;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.panelSpacer {
+  flex: 1;
+}
+.panelBody {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+.panelBodyFlush {
+  composes: panelBody;
+  overflow: hidden;
+}
+.panelPad {
+  padding: var(--sp-3);
+}
+
+/* ---------- Tabs ---------- */
+.tabs {
+  display: flex;
+  align-items: stretch;
+  gap: 1px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-2);
+  flex: 0 0 auto;
+}
+.tab {
+  height: 26px;
+  padding: 0 12px;
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  white-space: nowrap;
+  transition: color var(--dur-fast), border-color var(--dur-fast);
+}
+.tab:hover {
+  color: var(--text);
+  background: var(--bg-hover);
+}
+.tabActive {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+  background: var(--bg-1);
+}
+
+/* ---------- Tooltip ---------- */
+.tipWrap {
+  position: relative;
+  display: inline-flex;
+}
+.tip {
+  position: absolute;
+  z-index: var(--z-dropdown);
+  bottom: calc(100% + 5px);
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 3px 7px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-3);
+  border: 1px solid var(--border-strong);
+  color: var(--text);
+  font-size: var(--font-xs);
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+/* ---------- 空态 / 加载 / 错误 ---------- */
+.empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
+  height: 100%;
+  min-height: 80px;
+  color: var(--text-faint);
+  font-size: var(--font-sm);
+  padding: var(--sp-4);
+  text-align: center;
+}
+.emptyAction {
+  color: var(--accent);
+  cursor: pointer;
+  background: none;
+  border: none;
+  text-decoration: underline;
+}
+.spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--border-strong);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ---------- 表单行 ---------- */
+.formRow {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-height: 28px;
+}
+.formLabel {
+  flex: 0 0 72px;
+  color: var(--text-dim);
+  font-size: var(--font-sm);
+  text-align: right;
+}
+.formControl {
+  flex: 1;
+  min-width: 0;
+}

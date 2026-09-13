@@ -236,6 +236,34 @@ class DataSourceManager:
             return False
         return True
 
+    def _license_ok(self, name: str) -> bool:
+        """该源在当前模式下是否允许使用（商用模式跳过 Research-Only 源）。
+
+        决策权统一在 ``provider_catalog.is_commercial_ok``，此处不另写一套判断，
+        避免两处 commercial_ok 口径漂移。
+
+        ★ 修复（2026-09-13，许可证合规）：此前只有 ``get_kline`` 经
+        ``resolve_chain`` 应用了商用过滤，而 ``get_quote`` /
+        ``get_instrument_detail`` / ``get_minutes`` / ``get_stock_list`` /
+        ``search_stocks`` 都直接遍历 ``_auto_chain``，**绕过了许可证过滤**。
+        后果：商用模式下 K 线已正确跳过 eltdx（ELTDX Research-Only，禁止商用），
+        行情却仍在用 eltdx —— 等于把禁止商用的数据源用在了商业部署里。
+        现统一走 ``_auto_candidates()``，五条路径与 K 线同规则。
+        """
+        if not self._commercial_mode:
+            return True
+        from datasource.providers import provider_catalog
+        return provider_catalog.is_commercial_ok(name)
+
+    def _auto_candidates(self) -> list[str]:
+        """auto 链候选源：注册顺序 + 商用许可过滤。
+
+        与 ``_resolve_sources`` 的区别：这里保留 ``_auto_chain`` 的注册顺序
+        （含 ``set_auto_chain`` 的运行时覆盖），只叠加许可证过滤；
+        broker 恒不过滤（券商授权终端，授权即合规）。
+        """
+        return [n for n in self._auto_chain if n == "broker" or self._license_ok(n)]
+
     def _record_failure(self, name: str) -> None:
         b = self._breaker(name)
         b["failures"] += 1
@@ -372,7 +400,7 @@ class DataSourceManager:
         if source in self._plugins:
             return await _from_plugin(source)
         # auto：按 auto_chain 依次尝试
-        for name in self._auto_chain:
+        for name in self._auto_candidates():
             if name == "broker":
                 q = await _from_broker()
             else:
@@ -442,7 +470,7 @@ class DataSourceManager:
         if source in self._plugins:
             return await _plugin_detail(source)
         last: Optional[dict] = None
-        for name in self._auto_chain:
+        for name in self._auto_candidates():
             det = await (_broker_detail() if name == "broker" else _plugin_detail(name))
             if det is None:
                 continue
@@ -492,7 +520,7 @@ class DataSourceManager:
         """当日分时曲线（价格+均价+分钟量）。按 auto 链遍历补充源（跳过券商），
         全部无数据返回 None。"""
         source = self._validate_source(source)
-        for name in self._auto_chain:
+        for name in self._auto_candidates():
             if name == "broker":
                 continue
             if source not in ("auto", name):
@@ -598,7 +626,7 @@ class DataSourceManager:
                 return None
             lst = await self._call_source("broker", b.get_stock_list())
             return lst
-        for name in self._auto_chain:
+        for name in self._auto_candidates():
             if name == "broker":
                 b = self._broker(conn_id)
                 if b:
@@ -631,7 +659,7 @@ class DataSourceManager:
         q = (q or "").strip()
         if not q:
             return []
-        for name in self._auto_chain:
+        for name in self._auto_candidates():
             if name == "broker":
                 continue
             src = self._plugins.get(name)
@@ -723,8 +751,10 @@ def get_manager() -> DataSourceManager:
     for source in (SinaSource(), TencentSource()):
         m.register(source)
         provider_catalog.register(source)
-    from datasource.optional_sources import BaoStockSource, TstdxSource
-    for source_cls in (TstdxSource, BaoStockSource):
+    # 2026-09-13：tstdx（pytdx）已按方案 §6.1 移除——其注册名 "tstdx" 与
+    # 能力链里的 "pytdx" 标识错配，实际从未被选中过，属无效冗余。
+    from datasource.optional_sources import BaoStockSource
+    for source_cls in (BaoStockSource,):
         if source_cls.available():
             source = source_cls()
             m.register(source)

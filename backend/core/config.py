@@ -85,6 +85,12 @@ def _default_config_payload() -> dict[str, Any]:
         "totp_digits": 6,
         # ---- 外部信号 webhook 签名密钥 ----
         "webhook_secret": "",
+        # P0-7：未配置 webhook_secret 时是否仍放行未签名请求（默认 False = 拒绝）。
+        # 仅在明确的隔离环境/联调场景显式置 true，绝不在实盘环境开启。
+        "webhook_allow_insecure": False,
+        # ---- P0-3 幂等窗口（秒）----
+        "signal_idem_window": 30.0,        # 显式 idempotency_key 的去重窗口
+        "signal_auto_idem_window": 2.0,    # 引擎来源自动生成键的窗口（0=关闭）
         # ---- 风控默认值（运行期可在「设置 → 风控」调整）----
         "risk_max_amount": 100_000.0,
         "risk_min_qty": 100,
@@ -189,6 +195,12 @@ class Settings(BaseSettings):
 
     # 外部信号 webhook 签名密钥（HMAC-SHA256）；非空时校验 X-Signature 头
     webhook_secret: str = ""
+    # P0-7：未配置 webhook_secret 时是否放行未签名请求。默认 False —— 未配置密钥
+    # 即意味着「任何人都能实盘下单」，必须显式 opt-in 才允许这种不安全形态。
+    webhook_allow_insecure: bool = False
+    # P0-3 幂等窗口（秒）：显式键长窗；引擎自动生成键短窗（防拆单被吞），0=关闭
+    signal_idem_window: float = 30.0
+    signal_auto_idem_window: float = 2.0
 
     # 风控默认值（运行期可在「设置 → 风控」页调整，持久化到 risk_config 表）
     risk_max_amount: float = 100_000.0

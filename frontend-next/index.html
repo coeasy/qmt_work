@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>qmt_work · 量化交易终端</title>
+    <!--
+      主题预热（防闪烁）：必须在样式/React 之前同步执行。
+      规则与 src/stores/ui.ts 的 load()/resolve() 保持一致：
+        auto -> 跟随系统 prefers-color-scheme；显式 dark/light -> 直接用。
+      若此处逻辑与 store 不一致，会出现「首屏一个主题、挂载后跳另一个」的闪烁。
+    -->
+    <script>
+      (function () {
+        try {
+          var pref = null;
+          var raw = localStorage.getItem("qmt.ui.v1");
+          if (raw) {
+            var p = JSON.parse(raw) || {};
+            if (p.themePref === "auto" || p.themePref === "dark" || p.themePref === "light") {
+              pref = p.themePref;
+            } else if (p.theme === "dark" || p.theme === "light") {
+              pref = p.theme; /* 老版本字段迁移 */
+            }
+          }
+          if (!pref) pref = "auto";
+          var theme =
+            pref === "auto"
+              ? window.matchMedia("(prefers-color-scheme: dark)").matches
+                ? "dark"
+                : "light"
+              : pref;
+          var el = document.documentElement;
+          el.dataset.theme = theme;
+          el.dataset.themePref = pref;
+        } catch (e) {
+          /* localStorage 不可用（隐私模式等）：退回 :root 的深色令牌 */
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

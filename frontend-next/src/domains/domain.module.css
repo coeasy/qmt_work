@@ -1,0 +1,273 @@
+/* 业务页面通用布局与信息块。
+   仅承载「跨页面重复出现」的版式；页面专属样式各自建 module。
+   令牌口径见 design/tokens.css（--bg-N / --border / --text* / --success / --warning ...）。 */
+
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  height: 100%;
+  min-height: 0;
+  padding: var(--sp-2);
+  overflow: auto;
+}
+
+.pageFlush {
+  padding: 0;
+  overflow: hidden;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  flex: 0 0 auto;
+}
+
+.spacer {
+  flex: 1 1 auto;
+}
+
+.grow {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.split {
+  display: grid;
+  grid-template-columns: minmax(280px, 360px) minmax(0, 1fr);
+  gap: var(--sp-2);
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.splitWide {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 380px);
+  gap: var(--sp-2);
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.cols2 {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--sp-2);
+}
+
+.cols3 {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--sp-2);
+}
+
+.cols4 {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--sp-2);
+}
+
+/* ---- 指标卡 ---- */
+
+.stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: var(--sp-2);
+}
+
+.stat {
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--sp-2) 10px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  min-width: 0;
+}
+
+.statLabel {
+  font-size: var(--font-xs);
+  color: var(--text-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.statValue {
+  font-size: var(--font-lg);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+
+.statSub {
+  font-size: var(--font-xs);
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---- 键值表 ---- */
+
+.kv {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: var(--sp-1) 12px;
+  font-size: var(--font-sm);
+}
+
+.kvKey {
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+
+.kvVal {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ---- 提示条 ---- */
+
+.note {
+  border-radius: var(--radius);
+  padding: var(--sp-1) 10px;
+  font-size: var(--font-sm);
+  border: 1px solid var(--border);
+  background: var(--bg-2);
+  color: var(--text-dim);
+  line-height: 1.5;
+}
+
+.noteInfo {
+  border-color: var(--info);
+  background: var(--info-dim);
+  color: var(--text);
+}
+
+.noteWarn {
+  border-color: var(--warning);
+  background: var(--warning-dim);
+  color: var(--text);
+}
+
+.noteError {
+  border-color: var(--danger);
+  background: var(--danger-dim);
+  color: var(--text);
+}
+
+.noteOk {
+  border-color: var(--success);
+  background: var(--success-dim);
+  color: var(--text);
+}
+
+/* ---- 文本 ---- */
+
+.mono {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.muted {
+  color: var(--text-faint);
+}
+
+.up {
+  color: var(--up);
+}
+
+.down {
+  color: var(--down);
+}
+
+/* ---- 表单 ---- */
+
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.inline {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.inline > :first-child {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.actions {
+  display: flex;
+  gap: var(--sp-2);
+  align-items: center;
+}
+
+/* ---- 表格容器 ---- */
+
+.tableArea {
+  flex: 1 1 auto;
+  min-height: 160px;
+  display: flex;
+  flex-direction: column;
+}
+
+.tableArea > * {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.scroll {
+  overflow: auto;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+/* ---- 图表容器 ---- */
+
+.chart {
+  flex: 1 1 auto;
+  min-height: 220px;
+  position: relative;
+}
+
+.center {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 120px;
+}
+
+/* ---- 行内列表（用于事件流 / 日志） ---- */
+
+.logList {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: var(--font-xs);
+  font-family: var(--font-mono);
+  overflow: auto;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.logRow {
+  display: flex;
+  gap: var(--sp-2);
+  padding: 2px 4px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-dim);
+}
+
+.logRow:last-child {
+  border-bottom: none;
+}

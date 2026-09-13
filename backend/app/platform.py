@@ -6,7 +6,7 @@
   ``realtime_trading``，前端 PlatformContext 据此联动，未连接券商时正确地显示「不可交易」
   而非「永远不可交易」。
 - ``screening_ready``（D12 底线）：只要「QMT 已连接」或「任一非券商源（eltdx /
-  baostock / akshare / pytdx）依赖可用」或「本地 canonical 层已有数据」任一成立，选股
+  baostock / akshare）依赖可用」或「本地 canonical 层已有数据」任一成立，选股
   即可用；三者皆无才为 false（此时选股接口必须返回 503 + 安装指引，禁止返回空列表）。
 """
 from __future__ import annotations

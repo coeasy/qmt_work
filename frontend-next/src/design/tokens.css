@@ -1,0 +1,165 @@
+/* ==========================================================================
+   设计令牌 · qmt_work 专业交易终端
+   --------------------------------------------------------------------------
+   三条铁律：
+   1. 所有颜色/尺寸必须走令牌，组件内禁止硬编码色值（类名门禁会校验）
+   2. 主题切换只改令牌，不改组件
+   3. 涨跌色可独立于主题切换（A 股红涨绿跌 / 国际市场绿涨红跌）
+
+   注：旧前端存在 6 处 `var(--bg3)` 而令牌名为 `--bg-3` 的拼写错误，
+   导致背景解析为透明。本工程令牌命名统一为 `--bg-N`，并在 base.css
+   中保留 `--bg3` 的别名兼容，避免同类问题复发。
+   ========================================================================== */
+
+:root,
+[data-theme="dark"] {
+  /* --- 层级背景（由深到浅） --- */
+  --bg-0: #0d1117;
+  --bg-1: #131a24;
+  --bg-2: #1a2230;
+  --bg-3: #212b3b;
+  --bg-hover: #263244;
+  --bg-active: #2d3b50;
+  --bg-overlay: rgba(6, 10, 16, 0.72);
+
+  /* --- 边框 --- */
+  --border: #2a3648;
+  --border-strong: #3a4a61;
+
+  /* --- 文本 --- */
+  --text: #e6edf6;
+  --text-dim: #9aa8bd;
+  --text-faint: #6b7a91;
+  --text-inverse: #0d1117;
+
+  /* --- 强调 --- */
+  --accent: #3b82f6;
+  --accent-hover: #60a5fa;
+  --accent-dim: rgba(59, 130, 246, 0.16);
+
+  /* --- 语义 --- */
+  --success: #22c55e;
+  --warning: #f59e0b;
+  --danger: #ef4444;
+  --info: #38bdf8;
+  --success-dim: rgba(34, 197, 94, 0.14);
+  --warning-dim: rgba(245, 158, 11, 0.14);
+  --danger-dim: rgba(239, 68, 68, 0.14);
+  --info-dim: rgba(56, 189, 248, 0.14);
+
+  /* --- 涨跌（默认 A 股口径：红涨绿跌） --- */
+  --up: #ef4444;
+  --down: #22c55e;
+  --flat: #9aa8bd;
+  --up-dim: rgba(239, 68, 68, 0.14);
+  --down-dim: rgba(34, 197, 94, 0.14);
+
+  /* --- 图表专用 --- */
+  --chart-bg: #131a24;
+  --chart-grid: #212b3b;
+  --chart-axis: #6b7a91;
+  --chart-crosshair: #9aa8bd;
+  --chart-ma5: #f59e0b;
+  --chart-ma10: #38bdf8;
+  --chart-ma20: #a78bfa;
+  --chart-ma60: #22c55e;
+}
+
+[data-theme="light"] {
+  --bg-0: #f2f4f8;
+  --bg-1: #ffffff;
+  --bg-2: #f7f9fc;
+  --bg-3: #eef1f6;
+  --bg-hover: #e6ebf3;
+  --bg-active: #dbe3ee;
+  --bg-overlay: rgba(20, 26, 36, 0.42);
+
+  --border: #d8dee9;
+  --border-strong: #b9c3d3;
+
+  --text: #16202e;
+  --text-dim: #55637a;
+  --text-faint: #8593a8;
+  --text-inverse: #ffffff;
+
+  --accent: #2563eb;
+  --accent-hover: #1d4ed8;
+  --accent-dim: rgba(37, 99, 235, 0.12);
+
+  --success: #16a34a;
+  --warning: #d97706;
+  --danger: #dc2626;
+  --info: #0284c7;
+  --success-dim: rgba(22, 163, 74, 0.12);
+  --warning-dim: rgba(217, 119, 6, 0.12);
+  --danger-dim: rgba(220, 38, 38, 0.12);
+  --info-dim: rgba(2, 132, 199, 0.12);
+
+  --up: #dc2626;
+  --down: #16a34a;
+  --flat: #55637a;
+  --up-dim: rgba(220, 38, 38, 0.12);
+  --down-dim: rgba(22, 163, 74, 0.12);
+
+  --chart-bg: #ffffff;
+  --chart-grid: #eef1f6;
+  --chart-axis: #8593a8;
+  --chart-crosshair: #55637a;
+  --chart-ma5: #d97706;
+  --chart-ma10: #0284c7;
+  --chart-ma20: #7c3aed;
+  --chart-ma60: #16a34a;
+}
+
+/* 涨跌色独立切换：国际市场口径（绿涨红跌） */
+[data-updown="green-up"] {
+  --up: #22c55e;
+  --down: #ef4444;
+  --up-dim: rgba(34, 197, 94, 0.14);
+  --down-dim: rgba(239, 68, 68, 0.14);
+}
+
+[data-updown="green-up"][data-theme="light"] {
+  --up: #16a34a;
+  --down: #dc2626;
+  --up-dim: rgba(22, 163, 74, 0.12);
+  --down-dim: rgba(220, 38, 38, 0.12);
+}
+
+/* --- 尺寸与排版（与主题无关） --- */
+:root {
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 24px;
+  --sp-6: 32px;
+
+  --radius-sm: 3px;
+  --radius: 6px;
+  --radius-lg: 10px;
+
+  --font-xs: 11px;
+  --font-sm: 12px;
+  --font: 13px;
+  --font-lg: 15px;
+  --font-xl: 18px;
+
+  --font-mono: ui-monospace, "Cascadia Mono", "SF Mono", Consolas, monospace;
+  --font-sans: system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+
+  /* 外壳固定高度（布局计算依赖，勿随意改） */
+  --h-menu: 30px;
+  --h-toolbar: 34px;
+  --h-tab: 32px;
+  --h-status: 24px;
+  --w-datapanel: 232px;
+
+  --z-panel: 10;
+  --z-dropdown: 100;
+  --z-modal: 1000;
+  --z-toast: 2000;
+
+  --dur-fast: 120ms;
+  --dur: 180ms;
+}

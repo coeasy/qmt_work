@@ -45,7 +45,7 @@ def _toolchain() -> dict:
 
 def components() -> list[dict[str, str]]:
     result: list[dict[str, str]] = []
-    lock = ROOT / "frontend" / "package-lock.json"
+    lock = ROOT / "frontend-next" / "package-lock.json"
     if lock.exists():
         data = json.loads(lock.read_text(encoding="utf-8"))
         deps = data.get("packages", {}).get("", {}).get("dependencies", {})
@@ -66,7 +66,7 @@ def main() -> int:
     parser.add_argument("--require-client", action="store_true")
     args = parser.parse_args()
     backend = ROOT / "backend" / "dist" / "qmt_work"
-    release = ROOT / "frontend" / "dist-electron"
+    release = ROOT / "frontend-next" / "dist-electron"
     artifact_paths = [p for p in files(backend) + files(release)
                       if p.name != "release-manifest.json"]
     if args.require_client and (not backend.exists() or not release.exists()):

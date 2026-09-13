@@ -58,8 +58,22 @@ async def trade_order(body: dict, ctx: AppContext = Depends(get_ctx)):
         return err(503, "统一信号入口未初始化")
     # V9 Execution Unification：手动单同样经 SignalRouter 统一链路
     # （ExecutionMode live/paper/dry_run + 风控 + 幂等 + WAL + 审计），
-    # 不再直连 ExecutionService 绕过信号模式。auto_confirm=True 保持原有
-    # 手动单 UX（无 TOTP 挂起），大额确认语义与引擎单一致由配置决定。
+    # 不再直连 ExecutionService 绕过信号模式。
+    #
+    # ★ P0-4 修复（2026-09-13）：此前此处硬编码 auto_confirm=True，语义是
+    #   「跳过人工 TOTP 挂起」。但 auto_confirm 的设计意图是给**已授权的自动化
+    #   引擎**用（algo/condition/limitup/strategy/rebalance —— 下单前已由用户
+    #   配置并授权，无需逐单确认）。手动单同样传 True 的后果是：
+    #   signal_router.route() 里 `amount >= threshold and not auto_confirm`
+    #   这一条件**永远不成立**，于是**人工大额单的二次确认从不触发**，
+    #   TOTP 形同虚设，前端 Trade.tsx 里整套 pending_confirmation / TOTP 交互
+    #   成了死代码。
+    #
+    #   现改为 auto_confirm=False：手动单走完整语义 —— 金额 ≥
+    #   signal_confirm_threshold（默认 10 万）且 mode ∈ {live, paper} 时，
+    #   返回 pending_confirmation + confirm_token，由前端弹 TOTP 确认框，
+    #   再调 /signal/confirm 执行。小额单不受影响，照常直接下单。
+    #   引擎单（algo/limitup/... 各自传 True）行为完全不变。
     async def _run():
         # conn_id 透传：单笔下单必须支持指定账户（broker_id 即连接选择器），
         # 不传则回落到 active 连接（由 signal_router 处理）。修复 P0-14：原先
@@ -68,7 +82,7 @@ async def trade_order(body: dict, ctx: AppContext = Depends(get_ctx)):
         res = await ctx.signal_router.submit(
             code, direction, volume, price, price_type, source="manual",
             broker_id=conn_id, remark=str(body.get("remark", "") or ""),
-            idempotency_key=str(idem or ""), auto_confirm=True)
+            idempotency_key=str(idem or ""), auto_confirm=False)
         if isinstance(res, dict) and conn_id:
             res["conn_id"] = conn_id
         if isinstance(res, dict) and not res.get("ok", True):

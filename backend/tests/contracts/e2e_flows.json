@@ -1,0 +1,161 @@
+{
+  "_comment": "方案 §5「核心流程贯通清单」的机器可读清单（前后端共用的唯一真源）。后端 tests/test_e2e_flows.py 按 flows 逐条跑 HTTP 级贯通；前端 frontend-next/tests/flowEntry.test.ts 按 endpoints 逐条断言前端确有入口。改动任一流程涉及端点时必须同步本文件与两侧断言。 pages = 该流程的前端入口页（键对应 frontend-next/src/app/routes.tsx 的 PAGES）。",
+  "flows": [
+    {
+      "id": "flow1",
+      "title": "冷启动 → 连接券商 → 实时行情",
+      "endpoints": [
+        "GET /api/v1/live",
+        "GET /api/v1/ready",
+        "GET /api/v1/brokers/profiles",
+        "POST /api/v1/brokers",
+        "POST /api/v1/brokers/{conn_id}/connect",
+        "GET /api/v1/brokers",
+        "POST /api/v1/market/quotes"
+      ],
+      "pages": [
+        "brokers",
+        "dashboard"
+      ]
+    },
+    {
+      "id": "flow2",
+      "title": "标的检索 → 自选股 → K 线 → 联动",
+      "endpoints": [
+        "GET /api/v1/market/search",
+        "POST /api/v1/sync/subscribe",
+        "GET /api/v1/market/kline",
+        "GET /api/v1/market/quote"
+      ],
+      "pages": [
+        "search",
+        "quote",
+        "watchlist"
+      ]
+    },
+    {
+      "id": "flow3",
+      "title": "手动下单全流程（含大额二次确认）",
+      "endpoints": [
+        "POST /api/v1/trade/precheck",
+        "POST /api/v1/trade/order",
+        "POST /api/v1/signal/confirm",
+        "GET /api/v1/trade/orders"
+      ],
+      "pages": [
+        "trade"
+      ]
+    },
+    {
+      "id": "flow4",
+      "title": "算法交易 TWAP/VWAP",
+      "endpoints": [
+        "POST /api/v1/algo/submit",
+        "GET /api/v1/algo",
+        "POST /api/v1/algo/{algo_id}/pause",
+        "POST /api/v1/algo/{algo_id}/resume",
+        "POST /api/v1/algo/{algo_id}/cancel"
+      ],
+      "pages": [
+        "algo"
+      ]
+    },
+    {
+      "id": "flow5",
+      "title": "条件单 / 涨停监控（自动化触发）",
+      "endpoints": [
+        "POST /api/v1/trade/conditions",
+        "GET /api/v1/trade/conditions",
+        "POST /api/v1/limitup/pool",
+        "POST /api/v1/limitup/start",
+        "POST /api/v1/limitup/stop",
+        "GET /api/v1/limitup/status"
+      ],
+      "pages": [
+        "conditions",
+        "limitup"
+      ]
+    },
+    {
+      "id": "flow6",
+      "title": "多账户批量下单/撤单",
+      "endpoints": [
+        "POST /api/v1/account/batch/order",
+        "POST /api/v1/account/batch/cancel",
+        "GET /api/v1/account/status"
+      ],
+      "pages": [
+        "accounts"
+      ]
+    },
+    {
+      "id": "flow7",
+      "title": "风控拦截 → 前端实时提示",
+      "endpoints": [
+        "POST /api/v1/trade/order",
+        "POST /api/v1/trade/precheck"
+      ],
+      "pages": [
+        "trade"
+      ]
+    },
+    {
+      "id": "flow8",
+      "title": "委托/成交/持仓 → 对账核销",
+      "endpoints": [
+        "GET /api/v1/trade/orders",
+        "GET /api/v1/trade/deals",
+        "GET /api/v1/trade/positions",
+        "GET /api/v1/wal/stats",
+        "POST /api/v1/reconcile",
+        "GET /api/v1/reconcile/last"
+      ],
+      "pages": [
+        "reconcile",
+        "positions"
+      ]
+    },
+    {
+      "id": "flow9",
+      "title": "告警规则 → 通知 / 出站 Webhook",
+      "endpoints": [
+        "POST /api/v1/alerts/rules",
+        "GET /api/v1/alerts/rules",
+        "POST /api/v1/alerts/test",
+        "GET /api/v1/alerts/history",
+        "POST /api/v1/webhooks",
+        "GET /api/v1/webhooks/deliveries"
+      ],
+      "pages": [
+        "alerts",
+        "webhooks"
+      ]
+    },
+    {
+      "id": "flow10",
+      "title": "外部信号入站 → 路由 → 执行",
+      "endpoints": [
+        "POST /api/v1/signal/webhook",
+        "GET /api/v1/signal/mode",
+        "GET /api/v1/trade/orders"
+      ],
+      "pages": [
+        "signals"
+      ]
+    }
+  ],
+  "api_only": [
+    {
+      "endpoint": "GET /api/v1/ready",
+      "reason": "就绪探活由 http.ts 启动探测调用（非页面入口），前端无独立 UI"
+    },
+    {
+      "endpoint": "GET /api/v1/market/quote",
+      "reason": "单只行情由 quotes store 的批量接口 /market/quotes 覆盖，前端不单独调用"
+    },
+    {
+      "endpoint": "POST /api/v1/sync/subscribe",
+      "reason": "新前端经 WS 帧 {\"action\":\"subscribe\",\"codes\":[...]} 订阅（stores/quotes.ts 引用计数聚合），REST 端点仅留给第三方/MCP 调用方"
+    }
+  ]
+}

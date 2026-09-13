@@ -53,14 +53,17 @@ async def test_notification(body: dict, ctx: AppContext = Depends(get_ctx)):
         return err(503, "通知中心未初始化")
     cfg = body.get("config", {})
     # 临时构造 Notifier 子任务，复用同一个 http client
-    from gateway.notifier import _render
+    from gateway.notifier import NotifyMessage, _render
     event = body.get("event", "system.test")
     title = body.get("title", "测试通知")
     text = body.get("body", "来自 qmt_work 的通知测试。")
-    ctx = {"event": event, "title": title, "body": text, "payload": body.get("payload", {}), "ts": "", "name": cfg.get("name", "")}
-    rendered = _render(cfg.get("template", "{{title}}\n{{body}}"), ctx)
-    # 直接复用 Notifier 内部 _send_one 逻辑：构造一条伪配置
-    from gateway.notifier import NotifyMessage
+    # ★ 阶段 3 实测缺陷（2026-09-13）：此处原写 `ctx = {...}` 覆盖了路由入参
+    #   ctx（AppContext）→ 下一行 `ctx.notifier` 变成访问 dict 属性，
+    #   端点恒定 500（前端「发送测试通知」永远失败且原因是 AttributeError）。
+    #   模板上下文改名 tpl_ctx，路由上下文 ctx 保持不动。
+    tpl_ctx = {"event": event, "title": title, "body": text,
+               "payload": body.get("payload", {}), "ts": "", "name": cfg.get("name", "")}
+    rendered = _render(cfg.get("template", "{{title}}\n{{body}}"), tpl_ctx)
     await ctx.notifier._send_one({
         "id": 0, "name": cfg.get("name", "test"), "channel": cfg.get("channel", "webhook"),
         "params": cfg.get("params", {}), "template": cfg.get("template", "{{title}}\n{{body}}"),

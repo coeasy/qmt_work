@@ -30,7 +30,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 BACKEND="$ROOT/backend"
-FRONTEND="$ROOT/frontend"
+FRONTEND="$ROOT/frontend-next"
 export ROOT BACKEND FRONTEND
 
 # Git Bash 下 $ROOT 是 POSIX 形式（/p/github_public/...），而 Windows 原生 Python
@@ -189,7 +189,7 @@ clean_dist() {
     fi
     if [[ -d "$d" ]]; then rm -rf "$d" && log "已清理 $d"; fi
 }
-# 前端产物由 vite 自行清理：frontend/vite.config.js 已设 emptyOutDir: true，
+# 前端产物由 vite 自行清理：frontend-next/vite.config.ts 已设 emptyOutDir: true，
 # vite 会整体清空 ../backend/static 再写入。此处不再 rm -rf —— 那既冗余，
 # 又会因文件数超阈值触发沙箱批量删除保护（实测 64 个分片被拦）。
 # 完整性仍由 verify_static_ready 兜住（引用缺失 / 无 js 分片 → 直接 fail）。

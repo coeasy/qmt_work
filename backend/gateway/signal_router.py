@@ -12,11 +12,22 @@ from __future__ import annotations
 
 import logging
 import time
+import uuid
 from dataclasses import dataclass, field
 
 from gateway.idempotency import single_flight
 
+# P0-1：WAL 写前日志的操作语义常量（单一真源定义在 gateway.wal，此处复用）
+from gateway.wal import WAL_OP_INTENT, WAL_OP_INTENT_FAILED, WAL_OP_RESULT  # noqa: E402
+
 log = logging.getLogger("qmt_work.signal")
+
+# P0-3：自动生成幂等键的引擎来源白名单（按 source 首段匹配）。
+# 用白名单而非黑名单：未知来源一律不去重，宁可漏去重也绝不误吞正常下单。
+_ENGINE_SOURCES = frozenset({
+    "algo", "condition", "limitup", "rebalance", "strategy", "strategy_runtime",
+    "bot", "position", "target", "target_portfolio",
+})
 
 
 @dataclass
@@ -52,6 +63,11 @@ class SignalRouter:
         self._pending: dict[str, dict] = {}
         # P2-4：待二次确认令牌 TTL（默认 10 分钟），超时自动清理，防内存泄漏与过期确认
         self._pending_ttl = float(getattr(settings, "signal_confirm_ttl", 600.0) or 600.0)
+        # P0-3：幂等窗口（秒）。显式键用长窗；自动内容键用短窗（默认 2s），
+        # 否则 TWAP/VWAP 各片参数相同的拆单会被吞成一单。0 = 关闭自动生成。
+        self._idem_window = float(getattr(settings, "signal_idem_window", 30.0) or 30.0)
+        self._auto_idem_window = float(
+            getattr(settings, "signal_auto_idem_window", 2.0) or 0.0)
 
     def _prune_pending(self) -> None:
         """清理超时未确认的下单令牌（P2-4）。"""
@@ -107,13 +123,53 @@ class SignalRouter:
         log.info("signal mode: %s -> %s（已持久化）", old, mode)
         return mode
 
-    async def route(self, sig: Signal, auto_confirm: bool = False) -> dict:
+    async def route(self, sig: Signal, auto_confirm: bool = False,
+                    idempotency_key: str = "") -> dict:
+        """统一信号入口（幂等包装层）：决定幂等键后委托给 `_route_inner`。
+
+        P0-3：引擎路径强制幂等。幂等键优先级：
+        1. 调用方显式传入（如算法单的 ``algo:{aid}:{idx}``，含分片序号，最可靠）；
+        2. 引擎来源按内容自动生成（source+code+side+vol+price+时间桶，短窗）。
+
+        人工单（manual / webhook / api）**不自动生成**幂等键：人工重复下单是真实
+        意图，去重会挡住合理操作；外部系统需要幂等请显式传 idempotency_key。
+        """
+        key = (idempotency_key or "").strip()
+        window = self._idem_window
+        if not key:
+            key = self._auto_idem_key(sig)
+            window = self._auto_idem_window
+        if not key:
+            return await self._route_inner(sig, auto_confirm)
+
+        async def _run():
+            return await self._route_inner(sig, auto_confirm)
+
+        return await single_flight(f"order:{key}", _run, window=window)
+
+    def _auto_idem_key(self, sig: Signal) -> str:
+        """引擎来源按内容自动生成幂等键；非引擎来源返回 ""（不去重）。
+
+        时间桶的必要性：TWAP/VWAP 拆单各片的 code/side/vol/price 可能**完全相同**，
+        若用长窗口去重会把整轮拆单吞成一单。短窗 + 时间桶保证「间隔超过窗口的两次
+        正常下单」各自成立，只合并极短间隔内的重复投递/并发重试。
+        """
+        src = (sig.source or "").strip().lower()
+        base = src.split(":", 1)[0].split("_", 1)[0]  # bot:xxx / algo_twap -> bot / algo
+        if base not in _ENGINE_SOURCES:
+            return ""
+        if self._auto_idem_window <= 0:
+            return ""
+        bucket = int(time.time() / self._auto_idem_window)
+        return (f"auto:{src}:{sig.code}:{sig.side}:{int(sig.volume)}:"
+                f"{float(sig.price or 0):.4f}:{bucket}")
+
+    async def _route_inner(self, sig: Signal, auto_confirm: bool = False) -> dict:
         """统一信号入口：根据 mode 决定真实下单 / 旁路 / 预演 / 二次确认。
 
         auto_confirm=True 时跳过「大额 TOTP 二次确认挂起」（用于已授权自动化引擎：
         algo/limitup/rebalance/strategy_runtime/condition/position），但仍走完整风控。
         """
-        import uuid
         code = (sig.code or "").strip().upper()
         side = (sig.side or "").lower()
         if not code:
@@ -142,7 +198,6 @@ class SignalRouter:
         is_market = (sig.price_type or "limit").lower() == "market"
         if is_market and est_price <= 0:
             if not auto_confirm:
-                import uuid
                 token = uuid.uuid4().hex
                 self._pending[token] = {"sig": sig.__dict__, "ts": time.time(),
                                         "mode": self.mode, "pending_price_unknown": True}
@@ -216,16 +271,16 @@ class SignalRouter:
 
         idempotency_key 非空时经单飞（single-flight）幂等：同 key 并发/窗口内重复
         请求只执行一次真实逻辑，其余返回缓存结果并标记 duplicated（阶段 0-B / F1）。
+
+        P0-3：幂等统一在 `route()` 内处理（此处只做透传），避免 submit + route
+        双层 single_flight 造成语义混乱；未传 key 的引擎来源由 route 自动生成。
         """
         sig = Signal(source=source, code=str(code), side=str(side),
                      volume=int(volume), price=float(price or 0),
                      price_type=price_type, remark=remark or "", broker_id=broker_id or "",
                      payload=payload or {})
-        if idempotency_key:
-            async def _run():
-                return await self.route(sig, auto_confirm=auto_confirm)
-            return await single_flight(f"order:{idempotency_key}", _run)
-        return await self.route(sig, auto_confirm=auto_confirm)
+        return await self.route(sig, auto_confirm=auto_confirm,
+                                idempotency_key=idempotency_key)
 
     async def _execute(self, sig: Signal) -> dict:
         """确认后/未超阈值时的实际执行（paper 或 live）。"""
@@ -279,6 +334,32 @@ class SignalRouter:
         get_metrics().record_order(sig.side, "paper")
         return {"ok": True, "mode": "paper", "recorded": True, "signal": sig.__dict__}
 
+    def _wal_append(self, op: str, entity_id: str, payload: dict) -> None:
+        """WAL 写入（无 WAL / 类型不符 / 写失败均静默，绝不阻断下单主链路）。"""
+        if self._wal is None:
+            return
+        from gateway.wal import WAL
+        if isinstance(self._wal, WAL):
+            try:
+                self._wal.append(op, "order", entity_id, payload)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("wal append failed: op=%s id=%s err=%s", op, entity_id, exc)
+
+    def _wal_intent(self, intent_id: str, sig: Signal) -> None:
+        """P0-1：下单**前**写 intent。
+
+        崩溃窗口（intent 已落盘、柜台结果未知）内的委托，重启后由
+        ``WAL.unresolved_intents()`` 发现，对账不再「查无此单」。
+        """
+        self._wal_append(WAL_OP_INTENT, intent_id, {
+            "intent_id": intent_id,
+            "source": sig.source, "code": sig.code, "side": sig.side,
+            "price": sig.price, "volume": sig.volume,
+            "price_type": sig.price_type, "broker_id": sig.broker_id,
+            "mode": self.mode, "remark": sig.remark,
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        })
+
     async def _live(self, sig: Signal) -> dict:
         b = self._manager.bridge(sig.broker_id or None)
         if b is None:
@@ -286,11 +367,17 @@ class SignalRouter:
             # 语义不再把「没有可用券商」误报成「请求非法」。
             return {"ok": False, "reason": "未连接券商客户端", "mode": "live",
                     "broker_unavailable": True, "error_type": "BrokerNotConnectedError"}
+        # P0-1：intent 必须在下单**之前**落盘（顺序不可交换）。
+        intent_id = uuid.uuid4().hex
+        self._wal_intent(intent_id, sig)
         try:
             from gateway.execution import ExecutionService
             res = await ExecutionService(risk=self._risk, db=self._db).place_order(
                 b, sig.code, sig.side, sig.volume, sig.price, sig.price_type,
                 sig.source, sig.remark, risk=self._risk,
+                # P0-2：route() 已完成风控与计数，此处不再二次校验——
+                # 否则同一笔委托会消耗两倍频率窗口与日额度。
+                risk_checked=True,
                 audit_action="signal.live")
             # 阶段 0-B（F13）：绝不把失败/未确认的下单粉饰成成功。
             # 柜台未返回委托号（超时 unknown）或明确拒单 → ok=False。
@@ -301,19 +388,24 @@ class SignalRouter:
                 res["ok"] = False
                 res["reason"] = res.get("reason") or "下单未确认（柜台未返回委托号，可能超时或拒单）"
                 res["mode"] = "live"
+                res["intent_id"] = intent_id
+                self._wal_append(WAL_OP_INTENT_FAILED, intent_id,
+                                 {"intent_id": intent_id, "reason": res["reason"],
+                                  "code": sig.code, "side": sig.side,
+                                  "volume": sig.volume, "price": sig.price})
                 self._audit("signal.failed", sig.code, sig.__dict__, res["reason"])
                 return res
             res["ok"] = True
             res["mode"] = "live"
+            res["intent_id"] = intent_id
             from gateway.metrics import get_metrics
             get_metrics().record_order(sig.side, "submitted")
-            if self._wal is not None:
-                from gateway.wal import WAL
-                if isinstance(self._wal, WAL):
-                    self._wal.append("order", "signal", str(res.get("order_id", "")),
-                                     {"source": sig.source, "code": sig.code, "side": sig.side,
-                                      "price": sig.price, "volume": sig.volume,
-                                      "order_id": res.get("order_id")})
+            # P0-1：结果记录携带 intent_id，与 intent 配成对，供对账判定「已完成」。
+            self._wal_append(WAL_OP_RESULT, str(res.get("order_id", "")),
+                             {"intent_id": intent_id,
+                              "source": sig.source, "code": sig.code, "side": sig.side,
+                              "price": sig.price, "volume": sig.volume,
+                              "order_id": res.get("order_id")})
             if self._notifier:
                 await self._notifier.notify("order.filled", "委托已提交",
                                             f"{sig.code} {sig.side} {sig.volume}@{sig.price}",
@@ -323,6 +415,12 @@ class SignalRouter:
                         f"order_id={res.get('order_id')}")
             return res
         except Exception as exc:  # noqa: BLE001
+            # P0-1：异常路径同样要终结 intent，否则对账会误报为「悬而未决」。
+            self._wal_append(WAL_OP_INTENT_FAILED, intent_id,
+                             {"intent_id": intent_id, "reason": str(exc),
+                              "code": sig.code, "side": sig.side,
+                              "volume": sig.volume, "price": sig.price,
+                              "error_type": type(exc).__name__})
             from gateway.metrics import get_metrics
             get_metrics().record_order(sig.side, "error")
             if self._notifier:

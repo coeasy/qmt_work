@@ -52,6 +52,7 @@ async def rebalance(body: dict, ctx: AppContext = Depends(get_ctx)):
         if not last:
             continue
         remaining = abs(diff)
+        slice_idx = 0
         while remaining > 1:
             lot = min(remaining, delta_max)
             volume = int(lot // last // 100 * 100)
@@ -66,11 +67,15 @@ async def rebalance(body: dict, ctx: AppContext = Depends(get_ctx)):
                 res = await ctx.signal_router.submit(
                     code, direction, volume, last, "limit", source="rebalance",
                     broker_id=str(body.get("conn_id", "") or ""),
-                    remark=f"rebal-{code}", auto_confirm=True)
+                    remark=f"rebal-{code}", auto_confirm=True,
+                    # P0-3：显式幂等键含分片序号——各片 volume 可能完全相同，
+                    # 若靠内容去重会把后续分片误吞成同一单。
+                    idempotency_key=f"rebalance:{code}:{direction}:{slice_idx}")
                 orders.append({"code": code, "direction": direction, "volume": volume,
                                "price": last, "order": res})
             else:
                 orders.append({"code": code, "direction": direction, "volume": volume, "price": last})
+            slice_idx += 1
             remaining -= lot
     audit_log("api", "rebalance", body.get('target',''), body)
 

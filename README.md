@@ -64,18 +64,20 @@
 
 ---
 
-## 界面导航（4 分组 / 17 页）
+## 界面导航（6 分组 / 35 页）
 
-页面注册表 `frontend/src/pagesRegistry.jsx` 是菜单、功能树、命令面板的**单一真相来源**；当前 4 分组 17 页：
+页面注册表 `frontend-next/src/app/routes.tsx` 的 `PAGES`（含 `status: "done" | "planned"`）是顶部菜单、命令面板的**单一真相来源**。6 大业务域、35 个页面入口（33 已实现，2 占位：目标持仓 / 分仓再平衡）。占位页会显式展示其后端契约，避免「看起来能用其实是空壳」。
 
 | 分组 | 页面 |
 |------|------|
-| 行情（6） | 报价牌 · 行情分析 · 市场结构 · 板块雷达 · 资金流 · 成交明细 |
-| 研究（2） | 条件选股 · 因子研究 |
-| 交易（3） | 手动交易 · 算法交易 · 自选股 |
-| 系统（6） | 仪表盘 · 连接管理 · 多账户网格 · 系统状态 · 系统日志 · 设置 |
+| 行情（11） | 仪表盘 · 报价牌 · K 线分析 · 分时图 · 盘口逐笔 · 成交明细 · 板块雷达 · 资金流 · ETF · 市场结构 · 自选股 |
+| 研究（4） | 条件选股 · 公式选股 · 因子研究 · 标的检索 |
+| 交易（6） | 手动交易 · 算法交易 · 条件单 · 涨停监控 · 目标持仓(占位) · 分仓再平衡(占位) |
+| 账户（3） | 多账户网格 · 委托/持仓/成交 · 对账核销 |
+| 自动化（4） | 告警规则 · 出站 Webhook · 外部信号 · 定时任务 |
+| 系统（6） | 连接管理 · 系统状态 · 审计日志 · API Key · 设置 · 系统日志 |
 
-工作区约束（`frontend/src/store/workspace.jsx`）：最多 24 个标签（`MAX_TABS`）、keep-alive 存活上限 8 个（`MAX_ALIVE`）、仅「行情分析」为多实例页（`MULTI_INSTANCE_PAGES`），其余为单例页。旧页面 key（回测 / 策略市场 / 模拟盘 / 信号 / 审计 / 目标持仓等）通过 `KEY_ALIAS` 统一归一到现有关键页，不会导致空白页。
+工作区（多标签）约束见 `frontend-next/src/stores/`；页面懒加载与路由见 `routes.tsx`。
 
 ---
 
@@ -88,7 +90,7 @@
 | Node.js（前端开发 / 构建） | 20+（工具链锁定 `22.22.2`） |
 | 券商客户端 | 对应券商的 MiniQMT / QMT 客户端已安装并登录 |
 
-> 工具链版本以 `TOOLCHAIN.json` 为 CI 与制品校验的单一读取点：`node 22.22.2` / `python 3.11.9` / `pyinstaller 6.22.0` / `electron ^31`。`PyInstaller` / `Electron` 的实际版本以 `backend/requirements.txt` 与 `frontend/package.json` 为准。
+> 工具链版本以 `TOOLCHAIN.json` 为 CI 与制品校验的单一读取点：`node 22.22.2` / `python 3.11.9` / `pyinstaller 6.22.0` / `electron ^31`。`PyInstaller` / `Electron` 的实际版本以 `backend/requirements.txt` 与 `frontend-next/package.json` 为准。
 
 ---
 
@@ -119,9 +121,9 @@ pip install -r requirements.txt   # 可选数据源依赖见 requirements-option
 python run.py                     # http://127.0.0.1:21118
 
 # 2. 前端（另开终端）
-cd frontend
+cd frontend-next
 npm install
-npm run dev                       # http://127.0.0.1:5173，代理 /api /ws /mcp → 21118
+npm run dev                       # http://127.0.0.1:5273，代理 /api /ws /mcp → 21118
 
 # 3. 依赖 xtquant 时，准备桥接运行时（见下节）
 cd backend
@@ -176,7 +178,7 @@ cd backend
 python build_exe.py              # 后端 EXE → backend/dist/qmt_work/qmt_work.exe
                                 # （与 python run.py 同源，托管 API + SPA + MCP）
 
-cd frontend
+cd frontend-next
 node node_modules/electron-builder/cli.js --win zip       # zip 便携版
 node node_modules/electron-builder/cli.js --win nsis zip  # NSIS + zip
 ```
@@ -393,10 +395,10 @@ print(httpx.get(f"{BASE}/paper/positions", headers=HEAD).json())
 
 | 层级 | 命令 | 覆盖范围 |
 |------|------|----------|
-| 后端单测 | `cd backend && for f in tests/test_*.py; do python -m pytest "$f" -q -p no:cacheprovider; done` | 86 个 `test_*.py`，778 个用例 |
+| 后端单测 | `cd backend && for f in tests/test_*.py; do python -m pytest "$f" -q -p no:cacheprovider; done` | 88 个 `test_*.py`，815 个用例 |
 | 后端冒烟 | `python backend/tests/smoke2.py` | REST 主要端点 + 错误语义（**需先起后端**；默认连 `data/app.db`，检测到真实券商连接时自动跳过 3 条「未连接券商 → 503」断言并提示改用下方客户端测试做权威验证） |
-| 前端类型 / lint | `cd frontend && npm run typecheck && npm run lint` | TypeScript strict + ESLint 零告警 |
-| 前端单测 | `cd frontend && npm test` | vitest |
+| 前端类型检查 | `cd frontend-next && npm run typecheck` | TypeScript strict 零错误 |
+| 前端单测 | `cd frontend-next && npm test` | vitest |
 | 前端渲染冒烟 | `node tests/render_smoke_all.mjs` | headless 逐页渲染，判定 `.pane-leaf-body` 非空 |
 | 客户端端到端 | `python scripts/client_start_test.py --target client\|dev\|backend` | 清理 → 启动 → 就绪 → REST 冒烟 → WS → 窗口截图 → 停机 → 零残留 |
 | 契约计数门禁 | `python scripts/ci_reconcile.py` | 测试数 / 组件数 / 注册页数与文档一致 |
@@ -461,20 +463,19 @@ qmt_work/
 │  ├─ connectors/ plugins/ sync/   # 外部连接器 / 插件内核 / WebSocket 同步引擎
 │  ├─ tools/ runtimes/  # 因子策略工具 / 捆绑 Python 运行时（cp311）
 │  ├─ data/ static/ dist/   # SQLite / 前端构建产物 / PyInstaller 产物
-│  ├─ tests/            # 86 个 test_*.py（778 用例）+ 冒烟测试 smoke2.py
+│  ├─ tests/            # 88 个 test_*.py（815 用例）+ 冒烟测试 smoke2.py
 │  ├─ scripts/          # 门禁脚本（许可 / 能力漂移 / 契约生成 / 架构校验）
 │  └─ build_exe.py      # EXE 打包脚本（含 static 闸门）
-├─ frontend/             # React + Vite + Electron
+├─ frontend-next/         # 主前端：React 18 + Vite 5 + TS 5 strict（已退役旧 frontend/）
 │  ├─ src/
-│  │  ├─ App.jsx · main.jsx · pagesRegistry.jsx   # 入口 / 页面注册表（单一真源）
-│  │  ├─ api.js                # 统一 REST 客户端（get/post/put/patch/del 5 个通用方法）
-│  │  ├─ components/           # 52 个可复用 UI 组件（含 brokers/ marketdata/ ui/ 子目录）
-│  │  ├─ features/             # 18 个页面级组件：market/ research/ trading/ accounts/ system/
-│  │  ├─ hubs/                 # 6 个聚合 Hub（市场结构 / 因子 / 策略 / 数据 / 运维 / 审计）
-│  │  ├─ store/workspace.jsx   # 多标签工作区（MAX_TABS=24 / MAX_ALIVE=8 / keep-alive）
-│  │  ├─ hooks/ lib/ shared/   # 自定义 Hook / 工具库 / 事件单一真源
-│  │  └─ electron/             # 桌面壳（端口发现 + 托盘 + 开机自启 + 自动更新）
-│  ├─ tests/render_smoke*.mjs  # headless 渲染冒烟
+│  │  ├─ main.tsx · App.tsx · app/routes.tsx   # 入口 / 页面注册表（单一真源，PAGES 含 status）
+│  │  ├─ services/api/         # 统一 REST 客户端（TS 类型化）
+│  │  ├─ components/           # 可复用 UI 组件
+│  │  ├─ domains/              # 页面级组件：market/ research/ trading/ account/ automation/ system/
+│  │  ├─ shell/ · stores/ · charts/ · shared/   # 外壳 / 状态 / 图表 / 工具
+│  │  ├─ tests/                # vitest 单测
+│  │  └─ electron/             # 桌面壳（端口发现 + 托盘 + 开机自启 + 自动更新；从旧 frontend 移植）
+│  ├─ vite.config.ts           # base="/"，outDir → backend/static
 │  └─ electron-builder.yml     # 打包配置（extraResources: ../backend/dist）
 ├─ scripts/              # 构建 / CI / 门禁脚本（ci_reconcile / verify_artifacts / client_start_test …）
 ├─ .github/workflows/    # ci.yml · build-client.yml · release.yml
@@ -498,7 +499,7 @@ qmt_work/
    ```bash
    cd backend && python3.11 -m venv .venv && .venv\Scripts\activate
    pip install -r requirements.txt
-   cd ../frontend && npm install
+   cd ../frontend-next && npm install
    ```
 3. **开发**，保持改动聚焦，避免夹带无关重构。
 4. **本地自检**（必须全部通过）：
@@ -509,9 +510,8 @@ qmt_work/
    python -m ruff check . --select=F,E9     # 仅 F + E9 规则
 
    # 前端
-   cd ../frontend
+   cd ../frontend-next
    npm run typecheck
-   npm run lint
    npm test
    npm run build
 
@@ -621,7 +621,7 @@ qmt_work/
 <details>
 <summary><b>桌面客户端在服务器 / 无桌面会话下无法启动</b></summary>
 
-Electron 桌面壳需要图形界面会话，属已知限制。另外无 GPU 会话下 Chromium 会 FATAL（`gles2_cmd_decoder`）—— **不要加 `--in-process-gpu` / `--disable-software-rasterizer`**；`frontend/electron/main.cjs` 的 SAFE_MODE 组合已用 swiftshader 兜底。无桌面环境请改用后端 EXE + 浏览器访问。
+Electron 桌面壳需要图形界面会话，属已知限制。另外无 GPU 会话下 Chromium 会 FATAL（`gles2_cmd_decoder`）—— **不要加 `--in-process-gpu` / `--disable-software-rasterizer`**；`frontend-next/electron/main.cjs` 的 SAFE_MODE 组合已用 swiftshader 兜底。无桌面环境请改用后端 EXE + 浏览器访问。
 </details>
 
 <details>
@@ -633,7 +633,7 @@ Electron 桌面壳需要图形界面会话，属已知限制。另外无 GPU 会
 <details>
 <summary><b>前端 `npm run dev` 后接口 404</b></summary>
 
-确认后端已启动。Vite 开发服务器把 `/api` `/ws` `/mcp` 代理到 `http://127.0.0.1:21118`；若后端因端口占用改了口，需同步 `frontend/vite.config.js` 的代理目标。
+确认后端已启动。Vite 开发服务器把 `/api` `/ws` `/mcp` 代理到 `http://127.0.0.1:21118`；若后端因端口占用改了口，需同步 `frontend-next/vite.config.ts` 的代理目标。
 </details>
 
 <details>

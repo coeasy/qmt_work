@@ -9,10 +9,17 @@
 import asyncio
 import logging
 import time
+import uuid
 
 from xtquant_client.order_status import is_active
 
 log = logging.getLogger("qmt_work.order_watchdog")
+
+# P0-8：撤单 WAL 记录操作语义（与 signal_router 的 intent/result 配对同构）：
+#   cancel_intent  撤单**前**落盘 —— 崩溃后可知「该单本应被撤」
+#   cancel         撤单结果（payload.result 为 cancelled / cancel_failed:...）
+WAL_OP_CANCEL_INTENT = "cancel_intent"
+WAL_OP_CANCEL = "cancel"
 
 
 def collect_stale(orders: list[dict], first_seen: dict[str, float],
@@ -52,13 +59,16 @@ class OrderWatchdog:
     """后台任务：周期扫描各已连接券商，处理超时委托。"""
 
     def __init__(self, manager, timeout: float = 60.0, interval: float = 5.0,
-                 enabled: bool = True, on_event=None, notifier=None):
+                 enabled: bool = True, on_event=None, notifier=None, wal=None, db=None):
         self.manager = manager
         self.timeout = timeout
         self.interval = interval
         self.enabled = enabled
         self.on_event = on_event      # WS 广播回调（event_type, data）
         self.notifier = notifier
+        # P0-8：撤单纳入统一可追溯链路（WAL + 审计）；未注入时降级为旧行为，不阻断。
+        self.wal = wal
+        self.db = db
         self._first_seen: dict[str, float] = {}
         self._task: asyncio.Task | None = None
         self._last_scan_at: float = 0.0
@@ -96,6 +106,35 @@ class OrderWatchdog:
                 self._handled += 1
                 await self._handle_stale(conn, o)
 
+    def _wal_append(self, op: str, intent_id: str, oid: str, code: str,
+                    conn_id: str, result: str) -> None:
+        """P0-8：撤单 WAL 落盘（无 WAL / 写入失败均静默，不阻断撤单动作）。"""
+        if self.wal is None:
+            return
+        try:
+            from gateway.wal import WAL
+            if isinstance(self.wal, WAL):
+                self.wal.append(op, "order", intent_id, {
+                    "intent_id": intent_id, "order_id": oid, "code": code,
+                    "conn_id": conn_id, "result": result,
+                    "source": "order_watchdog",
+                    "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                })
+        except Exception as exc:  # noqa: BLE001
+            log.warning("watchdog wal append failed: op=%s oid=%s err=%s", op, oid, exc)
+
+    def _audit_cancel(self, oid: str, code: str, conn_id: str,
+                      result: str, reason: str) -> None:
+        """P0-8：撤单进审计日志（与下单/风控拒绝同源，可追溯）。"""
+        if self.db is None:
+            return
+        try:
+            self.db.audit("watchdog", "order.cancel", oid,
+                          {"order_id": oid, "code": code, "conn_id": conn_id},
+                          result if result == "cancelled" else reason)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("watchdog audit failed: oid=%s err=%s", oid, exc)
+
     async def _handle_stale(self, conn, order: dict):
         oid = str(order.get("order_id") or "")
         code = order.get("code", "")
@@ -103,11 +142,17 @@ class OrderWatchdog:
         reason = (f"订单超时守护：{code} 委托 {oid}（{conn_id}）"
                   f"超过 {self.timeout:.0f}s 未成交，自动撤单")
         result = "cancelled"
+        # P0-8：撤单**前**先落 WAL intent。旧实现直接桥接撤单、无任何记录，
+        # 崩溃后这笔「本应撤销」的委托永久失联，对账也查不到。
+        intent_id = uuid.uuid4().hex
+        self._wal_append(WAL_OP_CANCEL_INTENT, intent_id, oid, code, conn_id, "")
         try:
             await conn.bridge.call(conn.adapter.cancel_order, oid)
         except Exception as exc:  # noqa: BLE001
             result = f"cancel_failed: {exc}"
             reason += f"（撤单失败：{exc}）"
+        self._wal_append(WAL_OP_CANCEL, intent_id, oid, code, conn_id, result)
+        self._audit_cancel(oid, code, conn_id, result, reason)
         log.warning("%s [%s]", reason, result)
         if self.notifier is not None:
             try:

@@ -39,6 +39,15 @@ output/
 frontend/node_modules/
 frontend/dist/
 frontend/dist-electron/
+# frontend-next（新一代前端工程）
+# ★ frontend-next/build/ 含 icon.ico / icon.png 打包图标，属源资源，故意不忽略
+frontend-next/node_modules/
+frontend-next/dist/
+frontend-next/dist-electron/
+frontend-next/.vite/
+frontend-next/release*/
+# Vite / Vitest 构建期生成的临时配置副本
+*.timestamp-*.mjs
 
 # ---------- 运行期 ----------
 *.log

@@ -5,7 +5,7 @@ name: Release build
 #
 # 注意事项：
 # - 构建需要 Windows runner（后端是 PyInstaller 打的 Windows exe，electron-builder --win 亦然）。
-# - Release 的 tag 必须与 frontend/package.json 的 version 一致（electron-builder 用 package.json
+# - Release 的 tag 必须与 frontend-next/package.json 的 version 一致（electron-builder 用 package.json
 #   version 命名产物并生成 latest.yml；tag 不一致会导致 electron-updater 找不到对应安装包）。
 # - App 内自动更新（electron-updater 拉 latest.yml）仅对【公开】仓库默认可用；
 #   私有仓库请改用自建更新服务器或在 electron-builder.yml 配 publish 源。
@@ -41,15 +41,15 @@ jobs:
         with:
           node-version: "20"
           cache: npm
-          cache-dependency-path: frontend/package-lock.json
+          cache-dependency-path: frontend-next/package-lock.json
 
       # ---- Step 1: 前端构建（vite 产物 → backend/static）----
       - name: Install frontend deps
-        working-directory: frontend
+        working-directory: frontend-next
         run: npm ci
 
       - name: Build frontend
-        working-directory: frontend
+        working-directory: frontend-next
         run: npm run build
 
       # ---- Step 2: 后端 EXE（PyInstaller onedir → backend/dist/qmt_work/qmt_work.exe）----
@@ -66,7 +66,7 @@ jobs:
       # ---- Step 3: Electron 桌面壳打包并上传到 Release assets ----
       # provider: github 会在 Release 上生成 latest.yml，供 electron-updater 自动更新。
       - name: Electron build & publish to release
-        working-directory: frontend
+        working-directory: frontend-next
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: npx electron-builder --win -p always

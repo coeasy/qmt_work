@@ -25,6 +25,15 @@ from typing import Any
 
 log = logging.getLogger("qmt_work.wal")
 
+# 下单 intent / 结果配对语义（P0-1 写前日志契约）。
+# 在**存储层**定义，业务层（gateway.signal_router）直接复用，避免反向依赖：
+#   intent         下单**前**落盘：崩溃后对账可发现「已决定下单但结果未知」的委托
+#   order          下单成功：payload 携带 intent_id 与 intent 配对
+#   intent_failed  拒单/异常：payload 携带 intent_id，表示该 intent 已终结
+WAL_OP_INTENT = "intent"
+WAL_OP_RESULT = "order"
+WAL_OP_INTENT_FAILED = "intent_failed"
+
 
 class WAL:
     def __init__(self, path: Path | str, replay_handlers: dict[str, Callable[[dict], Any]] | None = None):
@@ -185,6 +194,33 @@ class WAL:
             self._apply(rec, handlers, summary)
         return {"replayed": sum(summary.values()), "by_entity": summary,
                 "corrupt": self._corrupt_lines}
+
+    def unresolved_intents(self) -> list[dict]:
+        """P0-1：返回「已写 intent、无结果配对」的记录 —— 崩溃后对账入口。
+
+        配对规则：下单路径在**下单前**写 ``op="intent"``（entity_id = intent_id），
+        拿到柜台结果后写 ``op="order"``（成功）或 ``op="intent_failed"``（拒单/异常），
+        且 payload 携带 ``intent_id`` 与之配对（语义常量见
+        ``gateway.signal_router.WAL_OP_*``）。
+
+        于是「有 intent 但无配对结果」= 进程崩在「已决定下单、柜台结果未知」的窗口内。
+        这类委托**必须**核对柜台实际状态，否则会永久失联（正是 P0-1 要消灭的问题）。
+        """
+        records = self.all_records()
+        resolved: set[str] = set()
+        for rec in records:
+            if rec.get("op") in (WAL_OP_RESULT, WAL_OP_INTENT_FAILED):
+                iid = (rec.get("payload") or {}).get("intent_id")
+                if iid:
+                    resolved.add(str(iid))
+        out: list[dict] = []
+        for rec in records:
+            if rec.get("op") != WAL_OP_INTENT:
+                continue
+            iid = str(rec.get("entity_id") or "")
+            if iid and iid not in resolved:
+                out.append(rec)
+        return out
 
     def snapshot(self) -> list[dict]:
         """读取全部记录，供外部状态机用于启动恢复。"""
