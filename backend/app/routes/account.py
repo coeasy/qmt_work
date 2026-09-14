@@ -6,6 +6,7 @@ import time
 from fastapi import APIRouter, Depends
 
 from app.routes._common import BrokerError, _call, _need, err, no_broker, ok
+from app.services.positions import enrich_positions
 from gateway.execution import get_execution_service
 
 router = APIRouter()
@@ -22,6 +23,10 @@ async def account_status(conn_id: str = "", ctx: AppContext = Depends(get_ctx)):
     pos = await _call(b, b.gateway.get_positions)
     if isinstance(pos, dict) and pos.get("code"):
         return pos
+    # 持仓行富化（现价/盈亏/盈亏比 + 中文名兜底）：仪表盘「持仓盈亏」对 positions
+    # 求和 p.profit，与 /trade/positions 是同一份契约期待 → 必须共用同一实现，
+    # 否则同一时刻两页会各说各话（实测：持仓页 -10.4、仪表盘 0）。
+    pos = await enrich_positions(pos, ctx, b)
     pos_value = sum(p.get("market_value", 0.0) for p in pos)
     # 券商 total_asset（assets）已包含持仓市值；若无 total_asset（为 0/空）才退化为现金+持仓市值，
     # 避免持仓市值被重复相加导致总资产虚高。

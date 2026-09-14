@@ -1,4 +1,3 @@
-import asyncio
 import logging
 
 from core.context import AppContext, get_ctx
@@ -6,225 +5,19 @@ from fastapi import APIRouter, Depends
 
 from app.routes._common import (MSG_NO_BROKER, _call, _need, envelope_ok, err,
                                 no_broker, ok)
-from app.services.market.common import QUOTES_FILL_SEM, TTLCache
+# 持仓行富化（中文名兜底 + 现价/盈亏/盈亏比补算）已抽到服务层：
+# /trade/positions 与 /account/status（仪表盘「持仓盈亏」）必须共用同一实现，
+# 否则两页会各说各话（实测：持仓页 -10.4、仪表盘 0）。
+from app.services.positions import enrich_names, enrich_positions
 
 # --- stdlib imports injected by fix_route_imports ---
-from datasource.registry import get_manager
 from gateway.execution import get_execution_service
 from gateway.idempotency import single_flight
 
 log = logging.getLogger("qmt_work.routes.trade")
 
-
-def _enrich_names(rows):
-    """用 eltdx 名称表 O(1) 兜底富化券商返回的裸代码 name（持仓/委托/成交常只剩代码）。
-
-    仅当 name 缺失或回退成代码本身时查表补全；查不到保持原值，绝不伪造。
-    """
-    if not isinstance(rows, list):
-        return rows
-    try:
-        mgr = get_manager()
-    except Exception:  # noqa: BLE001
-        return rows
-    for r in rows:
-        if not isinstance(r, dict):
-            continue
-        code = r.get("code") or r.get("stock_code") or r.get("symbol") or ""
-        if not code:
-            continue
-        nm = r.get("name")
-        bare = str(code).split(".")[0].upper()
-        if not nm or str(nm).upper() in (bare, str(code).upper()):
-            looked = mgr.lookup_name(code)
-            if looked:
-                r["name"] = looked
-    return rows
-
-
-# ---------------- 持仓行情补算（现价 / 盈亏 / 盈亏比） ----------------
-
-# 单只补齐的超时与并发上限：与 /market/quotes 同源限流，避免持仓页轮询打爆行情侧。
-# 超时压到 2.5s：真实环境里 broker quote 的合约详情富化会回落到不可达的公共源
-# （实测单次约 5.6s），持仓页不该为此干等——拿不到就走负缓存快速降级，
-# 由 SyncEngine 持仓订阅（零打源）在秒级内把现价补上。
-_POS_QUOTE_TIMEOUT = 2.5
-# 现价短 TTL 缓存：持仓页会被前端定时轮询，同代码 5s 内复用同一结果，
-# 既挡住轮询风暴，又保证「现价」不因缓存而明显滞后（行情本身为秒级快照）。
-_POS_PRICE_TTL = 5.0
-# 负缓存：确证「拿不到」后短时间内不再重复打源（否则每次轮询都白等一个超时）。
-_POS_PRICE_FAIL_TTL = 20.0
-_NO_PRICE = object()
-_POS_PRICE_CACHE = TTLCache(max_entries=4096, keep=3800, hard_ttl=120)
-
-
-def _pick_last_price(q) -> float | None:
-    """从行情快照 dict 提取最新价（多源键名兼容；非正数/不可解析视为缺失，不伪造）。
-
-    hub 归一化后的 quote 以 ``last`` 为准（见 datasource/registry._merge_quote），
-    但券商/第三方源历史字段名不一，这里做兼容读取。停牌 last==0 视为缺失。
-    """
-    if not isinstance(q, dict):
-        return None
-    for k in ("last", "price", "lastPrice", "close"):
-        v = q.get(k)
-        if v is None:
-            continue
-        try:
-            f = float(v)
-        except (TypeError, ValueError):
-            continue
-        if f > 0:
-            return f
-    return None
-
-
-def _apply_pnl(rows):
-    """按 现价 / 成本 / 数量 计算浮动盈亏与盈亏比（数据不全则留 None，绝不伪造）。
-
-    - profit     = (price - cost) × volume
-    - profit_pct = (price - cost) / cost × 100
-
-    成本字段多版本兼容：券商契约是 ``cost``（xtquant_client/xtp/account.py:55），
-    但历史适配器/模拟盘用 ``avg_cost`` / ``cost_price``。此处兼容读取并**归一化**
-    到 ``cost``（前端持仓「成本」列只认 ``cost``，否则该列同样会空）。
-    券商已给 profit/market_value 时不覆盖（以券商口径为准）。
-    """
-    for r in rows:
-        if not isinstance(r, dict):
-            continue
-        price = _pick_last_price(r)
-        # 成本归一化：多版本键名 → 统一写回 cost
-        cost = r.get("cost")
-        if cost is None:
-            for k in ("avg_cost", "cost_price", "open_price"):
-                if r.get(k) is not None:
-                    cost = r[k]
-                    r["cost"] = cost
-                    break
-        try:
-            cost = float(cost) if cost is not None else None
-        except (TypeError, ValueError):
-            cost = None
-        try:
-            vol = float(r.get("volume")) if r.get("volume") is not None else None
-        except (TypeError, ValueError):
-            vol = None
-        if price is not None and cost and cost > 0 and vol:
-            if r.get("profit") is None:
-                r["profit"] = round((price - cost) * vol, 2)
-            if r.get("profit_pct") is None:
-                r["profit_pct"] = round((price - cost) / cost * 100, 2)
-        # 市值缺失时用 现价×数量 兜底（券商已给则不动，尊重券商口径）
-        if price is not None and not r.get("market_value") and vol:
-            r["market_value"] = round(price * vol, 2)
-    return rows
-
-
-async def _enrich_positions(rows, ctx, b=None):
-    """给券商持仓行补算 现价 / 盈亏 / 盈亏比，并兜底补全中文名。
-
-    背景（零 mock 契约）：券商 ``get_positions`` 只回 code/name/volume/avail/cost/
-    market_value（权威定义 xtquant_client/xtp/account.py:55），**不含现价与浮动盈亏**，
-    于是前端持仓表「现价 / 盈亏 / 盈亏比」三列恒为空。这里按真实行情补算：
-
-      1) 先查 SyncEngine.latest_quotes 订阅缓存（零网络调用，命中即用）；
-      2) 未命中走**券商直连快照**（b.gateway.get_quote，只取 last，不做画像富化）；
-      3) 再兜底 hub.get_quote（限流 + 2.5s 超时 + 正/负短 TTL 缓存）。
-
-    第 2 步不可省：hub 的 broker 路径会做「合约详情富化」，详情为空壳时回落到
-    公共源（实测 sina 403 经代理耗时约 5.6s），持仓页不可能等这个延迟。
-
-    任何异常都不得阻断持仓返回（持仓本身来自券商，是本接口的核心数据）。
-    """
-    rows = _enrich_names(rows)
-    if not isinstance(rows, list) or not rows:
-        return rows
-    try:
-        await _fill_position_prices(rows, ctx, b)
-    except Exception as exc:  # noqa: BLE001
-        # 补算是增强项，失败降级为「只有持仓、无现价」，不影响主数据链路。
-        log.debug("持仓行情补算失败（已降级）：%s", exc)
-    return _apply_pnl(rows)
-
-
-async def _fill_position_prices(rows, ctx, b=None) -> None:
-    """把可得的现价写回 rows[*]['price']（缓存优先，未命中再打源）。"""
-    want: list[str] = []
-    for r in rows:
-        if not isinstance(r, dict) or _pick_last_price(r) is not None:
-            continue
-        code = r.get("code") or r.get("stock_code") or r.get("symbol") or ""
-        if code:
-            want.append(str(code).upper())
-    if not want:
-        return
-
-    cache = getattr(getattr(ctx, "sync_engine", None), "latest_quotes", None) or {}
-    prices: dict[str, float] = {}
-    miss: list[str] = []
-    for c in dict.fromkeys(want):
-        bare = c.split(".")[0]
-        # ① SyncEngine 订阅缓存最实时且零网络（键通常带交易所后缀，兼容裸代码）
-        p = _pick_last_price(cache.get(c)) or _pick_last_price(cache.get(bare))
-        if p is None:
-            # ② 负缓存：近期已确证拿不到行情 → 跳过打源（不伪造，只是不再空等）
-            if _POS_PRICE_CACHE.get(c, _POS_PRICE_FAIL_TTL) is _NO_PRICE:
-                continue
-            # ③ 打源结果的短 TTL 复用（挡轮询风暴，但不得盖过实时 tick）
-            p = _POS_PRICE_CACHE.get(c, _POS_PRICE_TTL)
-        if p is not None:
-            prices[c] = p
-        else:
-            miss.append(c)
-
-    # ③ 券商直连快照：绕过 hub 的画像富化（后者可能被不可达公共源拖到秒级）
-    if miss and b is not None:
-        async def _from_broker(c: str):
-            try:
-                q = await _call(b, b.gateway.get_quote, c, timeout=_POS_QUOTE_TIMEOUT)
-            except Exception:  # noqa: BLE001
-                return c, None
-            return c, _pick_last_price(q)
-
-        for c, p in await asyncio.gather(*[_from_broker(c) for c in miss]):
-            if p is not None:
-                prices[c] = p
-                _POS_PRICE_CACHE.set(c, p)
-        miss = [c for c in miss if c not in prices]
-
-    # ④ hub 兜底（best-effort：失败静默跳过，不阻断持仓返回）
-    if miss:
-        try:
-            hub = get_manager()
-        except Exception:  # noqa: BLE001
-            hub = None
-        if hub is not None:
-            async def _fill(c: str):
-                try:
-                    async with QUOTES_FILL_SEM:
-                        q = await asyncio.wait_for(
-                            hub.get_quote(c, source="auto"), timeout=_POS_QUOTE_TIMEOUT)
-                except Exception:  # noqa: BLE001
-                    return c, None
-                return c, _pick_last_price(q)
-
-            for c, p in await asyncio.gather(*[_fill(c) for c in miss]):
-                if p is not None:
-                    prices[c] = p
-                    _POS_PRICE_CACHE.set(c, p)
-                else:
-                    _POS_PRICE_CACHE.set(c, _NO_PRICE)
-
-    # 回填：无论来源是缓存还是打源，都必须写回（此前缓存全命中时提前 return 会漏写）
-    for r in rows:
-        if not isinstance(r, dict):
-            continue
-        code = str(r.get("code") or r.get("stock_code") or r.get("symbol") or "").upper()
-        p = prices.get(code)
-        if p is not None and _pick_last_price(r) is None:
-            r["price"] = p
-
+# 兼容别名：既有调用方/测试仍以 routes.trade._enrich_names 引用
+_enrich_names = enrich_names
 
 router = APIRouter()
 
@@ -309,13 +102,13 @@ async def trade_positions(symbol: str = "", ctx: AppContext = Depends(get_ctx)):
     """获取trade / positions（GET /trade/positions）。
 
     券商只回 code/name/volume/avail/cost/market_value；本接口在此之上按真实行情
-    补算 price / profit / profit_pct（拿不到行情则留空，见 _enrich_positions）。
+    补算 price / profit / profit_pct（拿不到行情则留空，见 app.services.positions）。
     """
     b = _need()
     if b is None:
         return no_broker()
     res = await _call(b, b.gateway.get_positions, symbol or None)
-    return (envelope_ok(await _enrich_positions(res, ctx, b))
+    return (envelope_ok(await enrich_positions(res, ctx, b))
             if isinstance(res, list) else res)
 
 @router.get("/trade/orders")

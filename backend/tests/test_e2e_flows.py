@@ -338,13 +338,13 @@ def _clean_idempotency():
         idem._inflight.clear()
     # 持仓现价短 TTL 缓存同为模块级全局：不清会让上一条流程的行情喂给下一条
     # （实测表现为「注入 1688 却读到上条流程券商价 12」的伪失败）。
-    import app.routes.trade as trade_routes
-    trade_routes._POS_PRICE_CACHE._data.clear()
+    import app.services.positions as pos_svc
+    pos_svc.clear_price_cache()
     yield
     with idem._lock:
         idem._cache.clear()
         idem._inflight.clear()
-    trade_routes._POS_PRICE_CACHE._data.clear()
+    pos_svc.clear_price_cache()
 
 
 @pytest.fixture()
@@ -814,6 +814,29 @@ def test_positions_price_and_pnl_enrichment(h):
     h.run(scenario())
 
 
+def test_account_status_positions_carry_pnl(h):
+    """/account/status 的 positions 必须与 /trade/positions 同口径带上盈亏。
+
+    仪表盘「持仓盈亏」是对 `/account/status` 的 positions 求和 `p.profit`
+    （见 frontend-next/src/domains/Dashboard.tsx）。两页读的是同一份券商持仓，
+    补算若只做在其中一个端点，同一时刻两页就会各说各话（实测：持仓页 -10.4、
+    仪表盘 0）——故两者必须共用 app.services.positions 的同一实现。
+    """
+    async def scenario():
+        async with h.client() as c:
+            await h.sync_engine.on_event({"type": "quote", "data": {
+                "code": "600519.SH", "last": 1688.0, "name": "贵州茅台"}})
+            acct = _ok(await c.get("/api/v1/account/status"))
+            row = next(p for p in acct["positions"] if p["code"] == "600519.SH")
+            assert row["price"] == 1688.0, f"现价未补算：{row}"
+            assert row["profit"] == round((1688.0 - 1500.0) * 100, 2), row
+            # 仪表盘口径：对 positions 求和
+            total = sum(p.get("profit") or 0 for p in acct["positions"])
+            assert total == row["profit"], f"仪表盘聚合口径对不上：{total} != {row['profit']}"
+
+    h.run(scenario())
+
+
 def test_positions_price_from_broker_snapshot_when_hub_broken(h, monkeypatch):
     """hub 不可用时，现价仍须由**券商直连快照**补出（持仓页能否显示现价的关键）。
 
@@ -821,12 +844,12 @@ def test_positions_price_from_broker_snapshot_when_hub_broken(h, monkeypatch):
     （实测 sina 403 经代理耗时约 5.6s），持仓页等不起。故把 hub 直接打坏：
     只剩券商直连这一条路，仍必须出价——否则线上表现为「三列恒空」。
     """
-    import app.routes.trade as trade_routes
+    import app.services.positions as pos_svc
 
     def _boom():
         raise RuntimeError("hub 不可用（测试注入）")
 
-    monkeypatch.setattr(trade_routes, "get_manager", _boom, raising=False)
+    monkeypatch.setattr(pos_svc, "get_manager", _boom, raising=False)
 
     async def scenario():
         async with h.client() as c:
@@ -842,7 +865,7 @@ def test_positions_price_from_broker_snapshot_when_hub_broken(h, monkeypatch):
 
 def test_positions_quote_failure_is_negatively_cached(monkeypatch):
     """打源失败必须进负缓存：否则持仓页每次轮询都白等一个超时（实测 2.5s）。"""
-    import app.routes.trade as trade_routes
+    import app.services.positions as pos_svc
 
     calls = {"n": 0}
 
@@ -851,14 +874,14 @@ def test_positions_quote_failure_is_negatively_cached(monkeypatch):
             calls["n"] += 1
             return None
 
-    monkeypatch.setattr(trade_routes, "get_manager", lambda: _DeadHub(), raising=False)
+    monkeypatch.setattr(pos_svc, "get_manager", lambda: _DeadHub(), raising=False)
     rows = [{"code": "600519.SH", "volume": 100, "cost": 1500.0}]
 
     async def scenario():
         ctx = AppContext()      # sync_engine 为 None → 缓存冷，必然走打源
-        await trade_routes._fill_position_prices(rows, ctx, b=None)
+        await pos_svc._fill_position_prices(rows, ctx, bridge=None)
         assert calls["n"] == 1, f"首次未打源：{calls}"
-        await trade_routes._fill_position_prices(rows, ctx, b=None)
+        await pos_svc._fill_position_prices(rows, ctx, bridge=None)
         assert calls["n"] == 1, f"负缓存未生效，第二次仍在打源：{calls}"
         assert "price" not in rows[0], "拿不到行情却写入了现价（伪造）"
 
@@ -871,7 +894,7 @@ def test_positions_pnl_cost_field_fallback():
     归一化是必需的——前端持仓「成本」列只读 cost；若适配器回 avg_cost 而不同步，
     成本列与盈亏列会一起空掉。
     """
-    from app.routes.trade import _apply_pnl
+    from app.services.positions import apply_pnl as _apply_pnl
 
     rows = [
         {"code": "A.SH", "volume": 100, "avg_cost": 10.0, "price": 12.0},
