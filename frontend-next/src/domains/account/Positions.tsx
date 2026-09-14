@@ -86,9 +86,9 @@ export function Positions() {
       width: 76,
       align: "right",
       mono: true,
-      render: (r) => (r.available === undefined ? "--" : String(r.available)),
+      render: (r) => (r.avail === undefined ? "--" : String(r.avail)),
     },
-    { key: "cost", header: "成本", width: 74, align: "right", mono: true, render: (r) => fmtPrice(r.cost_price) },
+    { key: "cost", header: "成本", width: 74, align: "right", mono: true, render: (r) => fmtPrice(r.cost) },
     { key: "price", header: "现价", width: 74, align: "right", mono: true, render: (r) => fmtPrice(r.price) },
     { key: "mv", header: "市值", width: 100, align: "right", mono: true, render: (r) => fmtAmount(r.market_value) },
     {

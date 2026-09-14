@@ -194,8 +194,8 @@ export function Trade() {
     { key: "code", header: "代码", width: 92, mono: true, render: (r) => r.code },
     { key: "name", header: "名称", width: 88, render: (r) => r.name ?? "--" },
     { key: "volume", header: "持仓", width: 70, align: "right", mono: true, render: (r) => String(r.volume) },
-    { key: "avail", header: "可用", width: 70, align: "right", mono: true, render: (r) => String(r.available ?? "--") },
-    { key: "cost", header: "成本", width: 72, align: "right", mono: true, render: (r) => fmtPrice(r.cost_price) },
+    { key: "avail", header: "可用", width: 70, align: "right", mono: true, render: (r) => String(r.avail ?? "--") },
+    { key: "cost", header: "成本", width: 72, align: "right", mono: true, render: (r) => fmtPrice(r.cost) },
     { key: "price", header: "现价", width: 72, align: "right", mono: true, render: (r) => fmtPrice(r.price) },
     { key: "mv", header: "市值", width: 90, align: "right", mono: true, render: (r) => fmtPrice(r.market_value) },
     {

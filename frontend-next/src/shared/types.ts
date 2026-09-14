@@ -87,8 +87,13 @@ export interface Position {
   code: string;
   name?: string;
   volume: number;
-  available?: number;
-  cost_price?: number;
+  /**
+   * 可用数量。★ 后端契约字段名是 avail（xtquant_client/xtp/account.py 输出
+   * {"avail":…,"cost":…,"market_value":…}），不是 available。
+   */
+  avail?: number;
+  /** 成本价。★ 后端契约字段名是 cost，不是 cost_price。 */
+  cost?: number;
   price?: number;
   market_value?: number;
   profit?: number;
