@@ -70,6 +70,28 @@ class SyncEngine:
             for c in codes:
                 self._quote_bus.dec_ref(c)
 
+    def subscribe_positions(self, positions: list[dict]) -> list[str]:
+        """把持仓代码并入券商行情订阅（持仓盯市）。
+
+        收益：/trade/positions 的「现价 / 盈亏 / 盈亏比」直接命中 latest_quotes
+        （零额外打源，避免持仓页轮询逐只打行情源），且浮盈随 tick 实时刷新。
+
+        仅增量下发已订阅集合之外的代码（幂等，可每轮快照无脑调用）；
+        卖出后的代码**不自动退订**——订阅集合规模有限，而退订需与客户端引用计数
+        协调，误退会打断正在看该标的的页面，收益不抵风险。
+        """
+        new: list[str] = []
+        for p in positions or []:
+            if not isinstance(p, dict):
+                continue
+            c = p.get("code") or p.get("stock_code") or p.get("symbol")
+            if c and str(c) not in self._subscribed_codes:
+                new.append(str(c))
+        if not new:
+            return []
+        self._subscribe_to_qmt(new)
+        return new
+
     def _subscribe_to_qmt(self, codes: list[str]) -> None:
         b = self.manager.active_bridge()
         if b is None:
@@ -214,6 +236,12 @@ class SyncEngine:
                         acc_key = conn.cfg.account_id or conn.cfg.conn_id
                         cash = await conn.bridge.call(conn.adapter.get_cash)
                         pos = await conn.bridge.call(conn.adapter.get_positions)
+                        # 持仓盯市：把持仓代码并入行情订阅（现价/浮盈零打源可读，
+                        # 见 subscribe_positions）。失败仅告警，不阻断快照归档。
+                        try:
+                            self.subscribe_positions(pos)
+                        except Exception as exc:  # noqa: BLE001
+                            log.debug("持仓订阅失败（已忽略）：%s", exc)
                         pos_value = sum(p.get("market_value", 0.0) for p in pos)
                         snap = {"cash": cash, "net_value": round((cash.get("assets", 0.0) or 0.0) + pos_value, 2),
                                 "positions": pos, "broker": conn.cfg.name,

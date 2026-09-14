@@ -88,8 +88,11 @@ class FakeGateway:
                  "price": o["price"], "side": o["direction"]} for o in self.orders]
 
     def get_positions(self, symbol=None):
+        # 字段名严格对齐真实适配器契约（xtquant_client/xtp/account.py:55）：
+        # code / name / volume / avail / cost / market_value —— 不含现价与浮动盈亏，
+        # 现价/盈亏由 /trade/positions 按行情补算（见 test_positions_price_and_pnl_enrichment）。
         rows = [{"code": "600519.SH", "name": "贵州茅台", "volume": 100,
-                 "avg_cost": 1500.0, "market_value": 150_000.0}]
+                 "avail": 100, "cost": 1500.0, "market_value": 150_000.0}]
         if symbol:
             return [r for r in rows if r["code"] == symbol]
         return rows
@@ -126,12 +129,16 @@ class FakeConnCfg:
         self.account_id = account_id
         self.account_type = "STOCK"
         self.session_id = 0
+        self.active = False
 
 
 class FakeConn:
     def __init__(self, conn_id: str):
         self.cfg = FakeConnCfg(conn_id)
         self.connected = True
+        # 账户快照轮次需要 conn.bridge / conn.adapter（真实 BrokerManager 由连接建立时装配）
+        self.bridge = None
+        self.adapter = None
 
 
 class FakeManager:
@@ -145,10 +152,15 @@ class FakeManager:
     def active_bridge(self):
         return self._bridge
 
+    def all_connections(self):
+        return list(self._conns.values())
+
     def add_connection(self, cfg, autoconnect=True):
         c = FakeConn(cfg.conn_id or f"C{len(self._conns) + 1}")
         c.cfg = cfg          # 保留路由写入的完整 ConnectionConfig（含 account_id）
         c.connected = bool(autoconnect)
+        c.bridge = self._bridge
+        c.adapter = self._bridge.gateway
         self._conns[c.cfg.conn_id] = c
         return c
 
@@ -324,10 +336,15 @@ def _clean_idempotency():
     with idem._lock:
         idem._cache.clear()
         idem._inflight.clear()
+    # 持仓现价短 TTL 缓存同为模块级全局：不清会让上一条流程的行情喂给下一条
+    # （实测表现为「注入 1688 却读到上条流程券商价 12」的伪失败）。
+    import app.routes.trade as trade_routes
+    trade_routes._POS_PRICE_CACHE._data.clear()
     yield
     with idem._lock:
         idem._cache.clear()
         idem._inflight.clear()
+    trade_routes._POS_PRICE_CACHE._data.clear()
 
 
 @pytest.fixture()
@@ -720,6 +737,157 @@ def test_flow10_inbound_webhook_signal(h, monkeypatch):
             assert len(orders) == 1
 
     h.run(scenario())
+
+
+# ============ 持仓行情补算（现价 / 盈亏 / 盈亏比）：/trade/positions ============
+
+def test_sync_engine_subscribes_held_positions(h):
+    """持仓盯市：SyncEngine 把持仓代码并入行情订阅（现价/盈亏零打源可读）。
+
+    回归背景：持仓页此前靠「请求时逐只打行情源」取现价，而 broker quote 的
+    合约详情富化会回落到不可达的公共源（实测单次 5.6s），必然超时 → 三列恒空。
+    改为持仓代码随账户快照轮次自动订阅，现价直接命中实时缓存且随 tick 刷新。
+    """
+    eng = h.sync_engine
+    pos = h.gateway.get_positions()
+    new = eng.subscribe_positions(pos)
+    assert new == ["600519.SH"], new
+    assert "600519.SH" in eng._subscribed_codes, "未登记已订阅集合 → 下轮会重复下发"
+    assert "600519.SH" in h.gateway.subscribed, "未真正下发到券商"
+
+    # 幂等：每轮快照无脑调用，不得重复下发
+    assert eng.subscribe_positions(pos) == [], "重复订阅未去重"
+    # 脏数据容错：None / 非 dict / 无 code 一律跳过，不得抛错
+    assert eng.subscribe_positions([None, "x", {}, {"code": ""}]) == []
+
+
+def test_account_snapshot_loop_subscribes_positions(h):
+    """接线验收：账户快照轮次必须真的调用持仓订阅（否则功能存在但永不生效）。
+
+    只测 `subscribe_positions` 本身不足以防回归——它被从快照循环里摘掉时，
+    单测依旧全绿，而持仓页的现价/盈亏会静默回到恒空状态。
+    """
+    async def scenario():
+        cfg = FakeConnCfg("C9", name="快照账户", account_id="A9")
+        cfg.active = True
+        h.manager.add_connection(cfg)
+
+        eng = h.sync_engine
+        await eng.start_account_snapshots(interval=5.0)
+        try:
+            for _ in range(60):
+                if "600519.SH" in eng._subscribed_codes:
+                    break
+                await asyncio.sleep(0.05)
+            assert "600519.SH" in eng._subscribed_codes, (
+                "快照轮次未订阅持仓 → 持仓页现价/盈亏恒空")
+            assert "600519.SH" in h.gateway.subscribed, "未真正下发到券商"
+        finally:
+            eng._account_task.cancel()
+            try:
+                await eng._account_task
+            except asyncio.CancelledError:
+                pass
+
+    h.run(scenario())
+
+
+def test_positions_price_and_pnl_enrichment(h):
+    """券商只回 成本/数量，接口须按真实行情补出 现价/盈亏/盈亏比（拿不到行情则留空）。
+
+    回归背景：前端持仓表「现价 / 盈亏 / 盈亏比」三列此前恒为「--」——因为
+    /trade/positions 直接透传券商字段，而券商 get_positions 契约
+    （xtquant_client/xtp/account.py:55）本就不含这三个字段。
+    """
+    async def scenario():
+        async with h.client() as c:
+            # 行情经 SyncEngine 注入 → 命中订阅缓存（零网络调用），补算路径确定性可验
+            await h.sync_engine.on_event({"type": "quote", "data": {
+                "code": "600519.SH", "last": 1688.0, "name": "贵州茅台"}})
+            positions = _ok(await c.get("/api/v1/trade/positions"))
+            row = next(p for p in positions if p["code"] == "600519.SH")
+            assert row["price"] == 1688.0, f"现价未补算：{row}"
+            assert row["profit"] == round((1688.0 - 1500.0) * 100, 2), f"盈亏错误：{row}"
+            assert row["profit_pct"] == round((1688.0 - 1500.0) / 1500.0 * 100, 2), \
+                f"盈亏比错误：{row}"
+
+    h.run(scenario())
+
+
+def test_positions_price_from_broker_snapshot_when_hub_broken(h, monkeypatch):
+    """hub 不可用时，现价仍须由**券商直连快照**补出（持仓页能否显示现价的关键）。
+
+    hub 的 broker 路径会做「合约详情富化」，详情为空壳时回落到公共源
+    （实测 sina 403 经代理耗时约 5.6s），持仓页等不起。故把 hub 直接打坏：
+    只剩券商直连这一条路，仍必须出价——否则线上表现为「三列恒空」。
+    """
+    import app.routes.trade as trade_routes
+
+    def _boom():
+        raise RuntimeError("hub 不可用（测试注入）")
+
+    monkeypatch.setattr(trade_routes, "get_manager", _boom, raising=False)
+
+    async def scenario():
+        async with h.client() as c:
+            positions = _ok(await c.get("/api/v1/trade/positions"))
+            row = next(p for p in positions if p["code"] == "600519.SH")
+            assert row["price"] == h.gateway.last, f"券商直连快照未补价：{row}"
+            assert row["profit"] == round((h.gateway.last - 1500.0) * 100, 2), row
+            assert row["profit_pct"] == round(
+                (h.gateway.last - 1500.0) / 1500.0 * 100, 2), row
+
+    h.run(scenario())
+
+
+def test_positions_quote_failure_is_negatively_cached(monkeypatch):
+    """打源失败必须进负缓存：否则持仓页每次轮询都白等一个超时（实测 2.5s）。"""
+    import app.routes.trade as trade_routes
+
+    calls = {"n": 0}
+
+    class _DeadHub:
+        async def get_quote(self, code, source="auto"):
+            calls["n"] += 1
+            return None
+
+    monkeypatch.setattr(trade_routes, "get_manager", lambda: _DeadHub(), raising=False)
+    rows = [{"code": "600519.SH", "volume": 100, "cost": 1500.0}]
+
+    async def scenario():
+        ctx = AppContext()      # sync_engine 为 None → 缓存冷，必然走打源
+        await trade_routes._fill_position_prices(rows, ctx, b=None)
+        assert calls["n"] == 1, f"首次未打源：{calls}"
+        await trade_routes._fill_position_prices(rows, ctx, b=None)
+        assert calls["n"] == 1, f"负缓存未生效，第二次仍在打源：{calls}"
+        assert "price" not in rows[0], "拿不到行情却写入了现价（伪造）"
+
+    asyncio.run(scenario())
+
+
+def test_positions_pnl_cost_field_fallback():
+    """成本字段多版本兼容：cost 缺失时回落 avg_cost/cost_price，并归一化到 cost。
+
+    归一化是必需的——前端持仓「成本」列只读 cost；若适配器回 avg_cost 而不同步，
+    成本列与盈亏列会一起空掉。
+    """
+    from app.routes.trade import _apply_pnl
+
+    rows = [
+        {"code": "A.SH", "volume": 100, "avg_cost": 10.0, "price": 12.0},
+        {"code": "B.SH", "volume": 100, "cost_price": 20.0, "price": 18.0},
+        {"code": "C.SH", "volume": 100, "price": 5.0},          # 无成本 → 不伪造盈亏
+        {"code": "D.SH", "volume": 100, "cost": 0.0, "price": 5.0},  # 成本 0 → 不伪造
+    ]
+    _apply_pnl(rows)
+    assert rows[0]["cost"] == 10.0 and rows[0]["profit"] == 200.0
+    assert rows[0]["profit_pct"] == 20.0
+    assert rows[1]["cost"] == 20.0 and rows[1]["profit"] == -200.0
+    assert rows[1]["profit_pct"] == -10.0
+    assert rows[2].get("profit") is None and rows[2].get("profit_pct") is None
+    assert rows[3].get("profit") is None and rows[3].get("profit_pct") is None
+    # 市值兜底：券商未给时按 现价×数量 补
+    assert rows[2]["market_value"] == 500.0
 
 
 # ==================== 元验收：流程清单本身必须是完整的契约 ====================
