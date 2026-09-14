@@ -179,12 +179,16 @@ class BarsSyncer:
             # 溯源为真：写真实命中来源名，绝不用 "auto" 冒充（P3-4）
             provider_id = _resolve_provider_id(real_src, self._provider_id)
             try:
-                n = self._store.upsert_bars(code, bars, period=self._period,
-                                            adjust=self._adjust,
-                                            provider_id=provider_id,
-                                            batch_id=self._batch_id,
-                                            schema_version="bars.v2",
-                                            quality_state="raw")
+                # 同步 sqlite 写必须移出事件循环：EOD 全市场同步（实测 7175 只）期间
+                # 逐只在事件循环里落库，会持续阻塞**所有** HTTP 请求——实测
+                # /trade/positions 由 0.019s 恶化到 6.59s、纯内存的 /capabilities
+                # 由 0.032s 恶化到 2.41s（取消 EOD 任务后立刻全部恢复）。
+                # to_thread 后落库在线程池执行，事件循环只负责调度。
+                n = await asyncio.to_thread(
+                    self._store.upsert_bars, code, bars,
+                    period=self._period, adjust=self._adjust,
+                    provider_id=provider_id, batch_id=self._batch_id,
+                    schema_version="bars.v2", quality_state="raw")
             except Exception as exc:  # noqa: BLE001
                 return SyncOutcome(code=code, error=f"落库失败：{exc}")
             return SyncOutcome(code=code, ok=True, bars_written=n)

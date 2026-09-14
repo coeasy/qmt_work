@@ -151,18 +151,44 @@ class QuotesMixin:
         df0 = next(iter(data.values()))
         if df0 is None or len(df0) == 0:
             return []
-        dates = list(df0.columns)
+        # 性能（2026-09-14）：此前是「320 日期 × 6 字段」次 pandas 标量访问
+        # （`code in sub.index` + `dt in sub.columns` + `sub.loc[code, dt]`），
+        # 单只约 100ms 且**全程持有 GIL**（pandas 的索引/取值是 Python 层操作，
+        # 不释放 GIL）。EOD 全市场同步（数千只、多线程）时会把事件循环线程饿死——
+        # 实测 EOD 运行期间 /trade/positions 0.019s → 4.84s、纯内存的
+        # /capabilities 0.032s → 3.97s，取消 EOD 后立刻全部恢复。
+        # 改为「每字段一次取整行 + tolist()」（C 层批量转换，释放 GIL），
+        # 再按**列标签**建映射，循环内只做 dict 查找：pandas 层调用从
+        # O(日期×字段) 降到 O(字段)，且不依赖各字段 DataFrame 的列顺序一致
+        # （按标签对齐，列顺序不同也不会错位取到别的日期）。
+        col_maps: dict = {}
+        for fld in field_list:
+            sub = data.get(fld)
+            if sub is None:
+                col_maps[fld] = None
+                continue
+            try:
+                if code not in sub.index:
+                    col_maps[fld] = None
+                    continue
+                row = sub.loc[code]
+                vals = row.tolist() if hasattr(row, "tolist") else list(row)
+                col_maps[fld] = dict(zip(list(sub.columns), vals))
+            except Exception:  # noqa: BLE001
+                col_maps[fld] = None
         out = []
-        for dt in dates:
+        for dt in df0.columns:
             bar = {"time": str(dt)[:19]}
             for fld in field_list:
-                sub = data.get(fld)
+                cmap = col_maps.get(fld)
                 val = None
-                if sub is not None and code in sub.index and dt in sub.columns:
-                    val = self._f(sub.loc[code, dt])
-                    # NaN 归一为 None，避免 JSON 序列化 nan
-                    if val is not None and val != val:
-                        val = None
+                if cmap is not None:
+                    raw = cmap.get(dt)
+                    if raw is not None:
+                        val = self._f(raw)
+                        # NaN 归一为 None，避免 JSON 序列化 nan
+                        if val is not None and val != val:
+                            val = None
                 bar[fld] = val
             out.append(bar)
         return out

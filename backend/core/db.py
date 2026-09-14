@@ -30,12 +30,19 @@ _audit_lock = threading.Lock()
 
 
 class _RWLock:
-    """读写锁（M3）：读共享、写独占、写优先防饥饿。
+    """读写锁（M3）：读共享、写独占。
 
     背景：原实现所有读写共用一把 threading.Lock —— WAL 虽让 SQLite 层面
     读写可并发，但应用层互斥把读也串行化了，长事务（行情微批写盘/备份）
     期间所有查询排队。现拆为读写锁：查询走 read（共享），写/迁移/备份走
     write（独占）。
+
+    公平性（2026-09-14 调整）：**读者优先**——read() 不因「有写者排队」而让路。
+    原先的「写优先防饥饿」在持续写负载下会把读者饿死（EOD 全市场落库实测
+    7175 次写事务，期间读 DB 的 /trade/positions 由 0.019s 恶化到 4.73s）。
+    HTTP 读延迟是用户可见的，优先级高于后台批处理吞吐。
+    反向风险（写者被持续读者饿住）经实测不成立：EOD 在持续请求下正常推进并
+    完成；且读都是短查询，最后一个读者退出时会 notify_all() 唤醒写者。
 
     安全前提：共享连接并发读要求 sqlite3 serialized 模式（threadsafety>=3，
     CPython 默认满足）。若运行环境 threadsafety<3，read() 自动降级为独占，
@@ -55,9 +62,18 @@ class _RWLock:
             with self.write():
                 yield
             return
+        # 读者**不等待写者**：读走独立只读连接（见 query），WAL 下与写（主连接）
+        # 天然并发，本就不需要与写互斥。
+        #
+        # 此前这里是 `while self._writer or self._writers_waiting`（「写优先防写饥饿」），
+        # 代价是**持续写负载下读者被饿死**：EOD 全市场落库（每只一次写事务，实测
+        # 7175 次）期间，读 DB 的 /trade/positions 由 0.019s 恶化到 4.73s、
+        # /capabilities 由 0.032s 到 1.97s，而同一时刻不读 DB 的 `/` 仅 0.007s；
+        # 取消 EOD 后立刻全部恢复。HTTP 请求（读）的延迟是用户可见的，优先级高于
+        # 后台批处理的吞吐，故读者不再让路。
+        # 写者仍等待读者（见 write）：读都是短查询，且 query 的「回退主连接」分支
+        # 本身走 write()，与写互斥的安全性不受影响。
         with self._cond:
-            while self._writer or self._writers_waiting:
-                self._cond.wait()
             self._readers += 1
         try:
             yield
@@ -69,6 +85,9 @@ class _RWLock:
 
     @contextlib.contextmanager
     def write(self):
+        # `_writers_waiting` 仅保留为观测字段（写者排队数）：自 read() 改为
+        # 「读者不让路」后，它不再参与读者调度——此前读者一见有写者排队就让路，
+        # 在持续写负载下会把读者饿死（详见 read() 注释）。
         with self._cond:
             self._writers_waiting += 1
             while self._writer or self._readers:

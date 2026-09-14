@@ -163,3 +163,36 @@ def test_list_sorted_recent_first():
         items = rt.list()
         assert items[0]["id"] == b and items[1]["id"] == a
     asyncio.run(_case())
+
+
+def test_report_persist_is_throttled():
+    """高频 report 不得每次都写 DB（2026-09-14）。
+
+    背景：EOD 全市场 K 线同步每完成一只就 report 一次（实测 7175 次），旧实现每次都
+    同步 upsert runtime_jobs → 事件循环被自己的进度回调反复阻塞（py-spy 抓到
+    MainThread 直接卡在 `db.write → upsert`，栈为 _tracked → _cb → _report → _persist），
+    同一时刻读 DB 的 /trade/positions 由 0.019s 恶化到 2.79s。
+    进度仍须实时更新到内存（前端轮询读的就是内存态），只把**落库**节流。
+    """
+    persisted = []
+
+    class _DB:
+        def upsert(self, table, data):
+            persisted.append(data)
+
+    rt = JobRuntime(db=_DB())
+    job = {
+        "id": "j-throttle", "kind": "system.eod", "name": "t", "priority": 5,
+        "status": "running", "progress": 0, "message": "", "created_at": "",
+        "started_at": None, "finished_at": None, "result": None, "error": None,
+        "params": {}, "checkpoint": {},
+    }
+    report = rt._make_report(job)
+    for i in range(1, 201):
+        report(i, f"sync {i}/200")
+
+    # 内存态实时更新（前端轮询读的就是它）
+    assert job["progress"] == 100
+    assert job["message"] == "sync 200/200"
+    # 落库被节流：200 次 report 不该产生 200 次写
+    assert len(persisted) < 200, f"落库未节流：{len(persisted)} 次"

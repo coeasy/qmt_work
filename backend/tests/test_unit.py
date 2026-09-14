@@ -8,6 +8,7 @@ import os
 import sqlite3
 import sys
 import tempfile
+import threading
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -2179,6 +2180,36 @@ def test_limit_first_seen_prune_bounded():
     assert len(_LIMIT_FIRST_SEEN) <= _LIMIT_SEEN_MAX
     # 残留（超 6h）已被剔除，仅保留近期条目
     assert all(now - v <= 6 * 3600.0 for v in _LIMIT_FIRST_SEEN.values())
+
+
+# ---------------- DB 读写锁：读者不得被写者饿死（2026-09-14） ----------------
+def test_rwlock_reader_not_starved_by_waiting_writer():
+    """读者不得因「有写者排队」而让路。
+
+    背景：EOD 全市场同步每完成一只就写一次 runtime_jobs / local_bars（实测 7175 次），
+    旧实现里 `read()` 见到 `_writers_waiting > 0` 就让路，于是读 DB 的接口被持续饿死：
+    /trade/positions 0.019s → 4.73s、/capabilities 0.032s → 3.97s，而同一时刻不读 DB
+    的 `/` 仅 0.007s；取消 EOD 后立刻恢复。读者（HTTP 请求）必须能立即进入。
+    """
+    from core.db import _RWLock
+
+    rw = _RWLock(concurrent_reads=True)
+    with rw._cond:
+        rw._writers_waiting = 1          # 模拟「写者已排队但尚未持写锁」
+    entered = []
+
+    def _reader():
+        with rw.read():
+            entered.append(True)
+
+    t = threading.Thread(target=_reader, daemon=True)
+    t.start()
+    t.join(timeout=1.0)
+    # 先断言再清理：若先 notify_all 会把阻塞中的读者唤醒，旧实现也能「通过」
+    assert entered, "读者在有写者排队时被阻塞（旧行为 → 持续写负载下读者被饿死）"
+    with rw._cond:                        # 清理，避免污染同进程其他用例
+        rw._writers_waiting = 0
+        rw._cond.notify_all()
 
 
 if __name__ == "__main__":

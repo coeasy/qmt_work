@@ -28,6 +28,9 @@ log = logging.getLogger("qmt_work.runtime.jobs")
 QUOTA: Dict[str, int] = {"sync": 1, "screen": 1, "backtest": 2, "report": 2}
 GLOBAL_MAX = 4
 LEASE_SECONDS = 90.0
+#: 进度落库的最小间隔（秒）。见 JobRuntime._make_report 的说明：
+#: 高频 report（如 EOD 每完成一只股票一次）若每次都同步写 DB，会把事件循环阻塞住。
+_PERSIST_MIN_INTERVAL = 1.0
 
 Runner = Callable[[Dict[str, Any]], Awaitable[Any]]   # async (job) -> result
 
@@ -111,6 +114,17 @@ class JobRuntime:
             self._persist(job)
 
     def _make_report(self, job: dict):
+        # 持久化节流（2026-09-14）：调用方可能每完成一个最小单元就 report 一次
+        # （EOD 全市场 K 线同步实测 7175 次）。若每次都同步写 DB，事件循环会被
+        # 自己的进度回调反复阻塞——py-spy 抓到 MainThread 直接卡在
+        # `db.write → upsert(runtime_jobs)`（栈：_tracked → _cb → _report → _persist），
+        # 同一时刻读 DB 的 /trade/positions 由 0.019s 恶化到 2.79s。
+        # 进度仍实时更新到内存（前端轮询读的就是内存态），只把**落库**节流到
+        # >= _PERSIST_MIN_INTERVAL 秒；该值远小于 LEASE_SECONDS(90s)，租约续期
+        # 不受影响；终态（done/failed/canceled）由各自分支单独 _persist，
+        # 不会被节流吞掉。
+        last_persist = [0.0]
+
         def _report(pct: int, msg: str) -> None:
             job["progress"] = max(0, min(100, int(pct)))
             job["message"] = msg
@@ -118,6 +132,10 @@ class JobRuntime:
             # P1-20：心跳续租（report/checkpoint 均视为存活信号）
             if job.get("lease_until"):
                 job["lease_until"] = time.time() + LEASE_SECONDS
+            now = time.time()
+            if now - last_persist[0] < _PERSIST_MIN_INTERVAL:
+                return
+            last_persist[0] = now
             self._persist(job)
         return _report
 

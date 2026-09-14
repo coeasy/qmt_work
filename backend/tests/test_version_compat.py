@@ -460,7 +460,13 @@ def test_normalize_kline_period_60m_maps_to_1h():
 
 class _FakeKlineDF:
     """伪 DataFrame：模拟迅投 get_market_data 的 ``{字段: DataFrame}`` 返回格式。
-    每个 DataFrame 的 index=股票代码、columns=日期；``df.loc[code, date]`` 取该字段值。"""
+    每个 DataFrame 的 index=股票代码、columns=日期；``df.loc[code, date]`` 取该字段值。
+
+    需同时支持 pandas 的两种行访问语义，因为生产 get_kline 从「逐 (code, date)
+    标量取值」改为「一次取整行 + tolist()」（见 quotes.get_kline 的 GIL 优化）：
+    - ``df.loc[code, date]`` -> 标量
+    - ``df.loc[code]`` -> 该代码整行（带 ``.tolist()``）
+    """
     def __init__(self, index, columns, data):
         self.index = list(index)
         self.columns = list(columns)
@@ -475,14 +481,31 @@ class _FakeKlineDF:
         return self._loc
 
 
+class _FakeSeries:
+    """极简 pandas Series 替身：只需 ``.tolist()``（生产 get_kline 按行批量取值）。"""
+    def __init__(self, values):
+        self._values = list(values)
+
+    def tolist(self):
+        return list(self._values)
+
+
 class _FakeLoc:
-    """复刻 pandas ``.loc[code, date]`` 下标访问语义（生产 get_kline 用 ``sub.loc[code, dt]``）。"""
+    """复刻 pandas ``.loc`` 下标访问语义。
+
+    - 二元组键 ``df.loc[code, dt]`` -> 标量（旧实现用）
+    - 单键 ``df.loc[code]`` -> 整行 ``_FakeSeries``（新实现用）
+    """
     def __init__(self, df):
         self._df = df
 
     def __getitem__(self, key):
-        code, dt = key
-        return self._df._data.get((code, dt), 0.0)
+        if isinstance(key, tuple):
+            code, dt = key
+            return self._df._data.get((code, dt), 0.0)
+        code = key
+        return _FakeSeries([self._df._data.get((code, dt), 0.0)
+                            for dt in self._df.columns])
 
 
 class _FakeKlineSink:
@@ -512,6 +535,45 @@ def test_get_kline_60m_maps_to_1h():
     assert sink.calls and sink.calls[0]["period"] == "1h"
     assert len(rows) == 1
     assert rows[0]["close"] == 10.5
+
+
+def test_get_kline_aligns_fields_by_column_label_not_position():
+    """多字段 DF 列顺序不一致时，必须按**列标签**对齐，不得按下标错位取值。
+
+    背景：get_kline 为降低 GIL 占用（EOD 全市场同步会饿死事件循环），从
+    「逐 (code, dt) 标量取值」改为「每字段一次取整行 + tolist()」（见
+    quotes.get_kline 注释）。整行取值天然带位置语义，若随后按 df0.columns 的
+    位置下标去各字段行里取值，某字段列顺序不同就会取到别的日期——本用例把
+    「按标签对齐」固定为契约。close 故意用反序列，其余字段用正序。
+    """
+    from datetime import datetime
+
+    d1, d2 = datetime(2024, 1, 1), datetime(2024, 1, 2)
+    code = "600000"
+
+    class _Sink:
+        def get_market_data(self, **kwargs):
+            out = {}
+            for f in (kwargs.get("field_list") or []):
+                if f == "close":            # 反序：[d2, d1]
+                    out[f] = _FakeKlineDF([code], [d2, d1],
+                                          {(code, d1): 10.0, (code, d2): 20.0})
+                else:                        # 正序：[d1, d2]
+                    out[f] = _FakeKlineDF([code], [d1, d2],
+                                          {(code, d1): 1.0, (code, d2): 2.0})
+            return out
+
+    a = _new_adapter()
+    a._xtdata = _Sink()
+    rows = a.get_kline(code, "1d", 2)
+    assert len(rows) == 2
+    by_time = {r["time"]: r for r in rows}
+    # 2024-01-01 的 close 必须是 10.0（若按下标取值会错拿成 20.0）
+    assert by_time["2024-01-01 00:00:00"]["close"] == 10.0
+    assert by_time["2024-01-02 00:00:00"]["close"] == 20.0
+    # 正序字段照常对齐
+    assert by_time["2024-01-01 00:00:00"]["open"] == 1.0
+    assert by_time["2024-01-02 00:00:00"]["open"] == 2.0
 
 
 def test_subscribe_quote_60m_maps_to_1h():
