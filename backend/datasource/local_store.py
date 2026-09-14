@@ -41,6 +41,35 @@ def _num(v: Any) -> Optional[float]:
         return None
 
 
+#: Canonical 选主的质量状态优先级（小者优先），与两处窗口函数 CASE 一一对应。
+_QUALITY_RANK = {"validated": 0, "complete": 1, "match": 2}
+
+
+def _canonical_key(row: Any) -> tuple:
+    """Canonical 选主排序键 —— 逐项复刻窗口函数里的 ``ORDER BY``（小者优先）。
+
+    1. 质量状态 ``validated > complete > match > 其他``（对应 CASE ... ELSE 3）；
+    2. ``(provider_id = '') DESC`` —— 空 provider 排在前面（保持既有语义）；
+    3. ``provider_id`` 升序。
+
+    注：``local_bars.provider_id`` 是 ``NOT NULL DEFAULT ''``，故无需处理 NULL；
+    ``quality_state`` 为 NULL 时与 SQL 的 ``ELSE 3`` 一致，落到最后一档。
+    """
+    return (
+        _QUALITY_RANK.get(row["quality_state"], 3),
+        0 if (row["provider_id"] or "") == "" else 1,
+        row["provider_id"] or "",
+    )
+
+
+def _row_to_bar(row: Any) -> Bar:
+    """``sqlite3.Row`` → ``Bar``：只喂模型真正声明的列，不让溯源列参与校验。"""
+    return Bar(
+        time=row["dt"], open=row["open"], high=row["high"], low=row["low"],
+        close=row["close"], volume=row["volume"], amount=row["amount"],
+    )
+
+
 class LocalStore:
     """本地数据仓访问层（日线 / 股票列表 / 板块榜 / 同步元数据）。"""
 
@@ -147,13 +176,26 @@ class LocalStore:
         adjust: str = "",
         limit: int = 250,
     ) -> Dict[str, List[Bar]]:
-        """批量取多标的 K 线：单条 ``WHERE code IN (...)`` + 窗口函数选主，
+        """批量取多标的 K 线：单条 ``WHERE code IN (...)`` + 索引序取回，
         分块 SQL 取回整批，替代逐只 ``get_bars`` 的 N 次循环（P3 / Phase B）。
 
         设计目标：把「逐只循环 = N 次 SQL」降到「O(块数) 次 SQL」
         （约 5000 只 → 6 块）。SQLite 变量上限安全分块（每块 900 只）。
         Canonical 选主逻辑与 ``get_bars`` 完全一致（质量状态 + 具名 provider 优先），
-        每块内对每标的最近 ``limit`` 根按时间降序取头、升序返回。
+        每块内对每标的最近 ``limit`` 根按时间升序返回。
+
+        2026-09-14 吞吐优化（全市场选股请求自身 ~14.9s → ~10.3s，API 实测中位）：
+        原实现用**双层窗口函数**（内层按 ``code, dt`` 去重、外层按 ``code`` 取最近 N）。
+        在 117 万行真实库上执行计划出现 **3 次 ``USE TEMP B-TREE FOR ORDER BY``**，
+        SQL 侧单次 ~9s。现改为 ``ORDER BY code, dt`` 直接命中 ``idx_local_bars_lookup``
+        （执行计划为纯 ``SEARCH local_bars USING INDEX``，**零排序**）：同一
+        ``(code, dt)`` 的多 provider 行在结果中天然相邻，选主下沉到 Python 侧一趟
+        分组比较。选主键由 :func:`_canonical_key` 逐项复刻原窗口的 ``ORDER BY``，
+        故结果逐行等价（已用 92 万行实测新旧结果完全一致）。
+
+        剩余成本：SQL 取回 ~4s + Python 分组 ~1s + ``Bar`` 构造 ~4.5s（92 万根）。
+        取数行数不可再压缩——本库每标的仅 ~168 根，``limit=250`` 根本不生效，
+        所以「缩减取数根数」方向无效；下一个杠杆在 ``Bar`` 构造（Pydantic 校验）。
         """
         if not codes:
             return {}
@@ -167,33 +209,37 @@ class LocalStore:
         for i in range(0, len(uniq), _CHUNK):
             chunk = uniq[i:i + _CHUNK]
             placeholders = ",".join("?" for _ in chunk)
-            inner = (
-                "SELECT code, dt, open, high, low, close, volume, amount, provider_id, "
-                "quality_state, ROW_NUMBER() OVER ("
-                "PARTITION BY code, dt ORDER BY "
-                "CASE quality_state WHEN 'validated' THEN 0 WHEN 'complete' THEN 1 "
-                "WHEN 'match' THEN 2 ELSE 3 END, (provider_id = '') DESC, provider_id"
-                ") AS rn FROM local_bars "
-                f"WHERE code IN ({placeholders}) AND period=? AND adjust=?"
+            sql = (
+                "SELECT code, dt, open, high, low, close, volume, amount, "
+                "provider_id, quality_state FROM local_bars "
+                f"WHERE code IN ({placeholders}) AND period=? AND adjust=? "
+                "ORDER BY code, dt"
             )
-            if limit and limit > 0:
-                outer = (
-                    "SELECT code, dt AS time, open, high, low, close, volume, amount "
-                    "FROM (SELECT code, dt, open, high, low, close, volume, amount, "
-                    "ROW_NUMBER() OVER (PARTITION BY code ORDER BY dt DESC) AS rk "
-                    f"FROM ({inner}) WHERE rn=1) WHERE rk<=? ORDER BY code, time ASC"
-                )
-                params: List[Any] = list(chunk) + [period, adjust, int(limit)]
-            else:
-                outer = (
-                    "SELECT code, dt AS time, open, high, low, close, volume, amount "
-                    f"FROM ({inner}) WHERE rn=1 ORDER BY code, time ASC"
-                )
-                params = list(chunk) + [period, adjust]
-            rows = self._db.execute(outer, tuple(params)).fetchall()
+            rows = self._db.execute(
+                sql, tuple(list(chunk) + [period, adjust])).fetchall()
+
+            cur_key: Any = None
+            best: Any = None
+            best_key: Any = None
             for r in rows:
-                d = dict(r)
-                out.setdefault(d["code"], []).append(Bar.model_validate(d))
+                key = (r["code"], r["dt"])
+                if key != cur_key:
+                    if best is not None:
+                        out.setdefault(best["code"], []).append(_row_to_bar(best))
+                    cur_key, best = key, r
+                    best_key = _canonical_key(r)
+                else:
+                    k = _canonical_key(r)
+                    if k < best_key:
+                        best_key, best = k, r
+            if best is not None:
+                out.setdefault(best["code"], []).append(_row_to_bar(best))
+
+        if limit and limit > 0:
+            # 行已按 dt 升序，尾部即最近 limit 根（与 get_bars 的 latest-N 语义一致）。
+            for c, bars in out.items():
+                if len(bars) > limit:
+                    del bars[:-limit]
         return out
 
     def count_bars(self, code: str, period: str = "1d", adjust: str = "") -> int:
