@@ -108,13 +108,14 @@ describe("页面注册表", () => {
     expect(notDone).toEqual([]);
   });
 
-  it("仅剩 2 个占位页（目标持仓 / 分仓再平衡）", () => {
+  it("仅剩 1 个占位页（分仓再平衡）", () => {
     // 系统日志已由占位实现为真实 WS 事件流页（旧 frontend 退役移植），不再占位。
+    // 目标持仓（target_portfolio）已按 backend /target-portfolio/* 契约实现为真实页面（210 行）。
     const planned = allPages()
       .filter((p) => p.status === "planned")
       .map((p) => p.key)
       .sort();
-    expect(planned).toEqual(["rebalance", "target_portfolio"]);
+    expect(planned).toEqual(["rebalance"]);
   });
 
   it("回测页仍未开放，但因子研究已按退役决策移植回来", () => {
