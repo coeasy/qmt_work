@@ -37,6 +37,18 @@ _PER_SOURCE_TIMEOUT = 8.0
 _BREAKER_THRESHOLD = 3
 _BREAKER_COOLDOWN = 30.0
 
+# 合约详情富化的时间预算（仅在券商详情为空壳时才会用到，见 DataSourceManager._enrich_detail）。
+# ★ 2026-09-14 实测：券商对 ETF / 指数常回空壳详情（无名称/无涨跌停），
+#   此时原实现会顺序遍历全部插件源且**不设总时限**。一旦某源不可达
+#   （实测 sina 经本机代理 403，单次约 5.5s），整次 get_quote 就被拖到 5.6s ——
+#   实测同一接口 股票 0.02s / ETF·指数 5.6s 的巨大差异即由此而来。
+#   详情只是「增强项」：拿不到也必须让行情本身照常返回。
+_DETAIL_ENRICH_BUDGET = 2.0     # 遍历全部插件源的总预算
+_DETAIL_ENRICH_ATTEMPT = 1.0    # 单源切片（不可达源快速出局，给后续源留机会）
+# 详情富化结果缓存：合约画像日内基本不变，同一代码在 TTL 内只付一次网络代价。
+_DETAIL_CACHE_TTL = 300.0
+_DETAIL_CACHE_MAX = 4096
+
 
 def _contentless_detail(det: Optional[dict], code: str) -> bool:
     """判定一份合约详情是否「成功但无内容」（空壳）。
@@ -148,6 +160,8 @@ class DataSourceManager:
         # 商用模式：True 时链路求值阶段跳过 Research-Only 等禁止商用的源（如 eltdx）。
         self._commercial_mode: bool = False
         self._breakers: dict[str, dict] = {}
+        # 详情富化结果缓存：code -> (写入时间, det)；见 _enrich_detail
+        self._detail_cache: dict[str, tuple[float, dict]] = {}
 
     # ---------- 注册 ----------
     def register(self, source: DataSource) -> "DataSourceManager":
@@ -278,17 +292,20 @@ class DataSourceManager:
             b["failures"] = 0
             b["open_until"] = 0.0
 
-    async def _call_source(self, name: str, coro):
+    async def _call_source(self, name: str, coro, timeout: Optional[float] = None):
         """对单个源调用施加超时 + 熔断；成功返回结果，失败/熔断/超时返回 None。
 
         熔断打开时直接丢弃未启动的协程（close），避免「coroutine never awaited」警告。
+
+        ``timeout`` 可选覆盖单源超时：详情富化等「增强项」用更短的切片，
+        让不可达源快速出局而不是拖死整次调用（见 ``_enrich_detail``）。
         """
         if not self._source_allowed(name):
             if coro is not None and hasattr(coro, "close"):
                 coro.close()
             return None
         try:
-            res = await asyncio.wait_for(coro, timeout=_PER_SOURCE_TIMEOUT)
+            res = await asyncio.wait_for(coro, timeout=timeout or _PER_SOURCE_TIMEOUT)
             self._record_success(name)
             return res
         except Exception as exc:  # noqa: BLE001
@@ -345,6 +362,57 @@ class DataSourceManager:
         det = await self._call_source(name, src.get_instrument_detail(code))
         return det or {}
 
+    async def _enrich_detail(self, code: str, det: Optional[dict]) -> dict:
+        """券商详情为空壳时补齐画像：**结果缓存 → 本地名称兜底 → 限预算网络遍历**。
+
+        ★ 为什么需要（2026-09-14 实测）：券商对 ETF / 指数常回空壳详情，原实现会
+        顺序遍历全部插件源且**不设总时限**。一旦某源不可达（实测 sina 经本机代理
+        403，单次约 5.5s），整次 get_quote 被拖到 5.6s —— 实测同一接口
+        股票 0.02s / ETF·指数 5.6s 的差异即由此而来。而实测这 5.6s **只换来一个
+        名称**（`_merge_quote` 的 broker 分支只用 det 的 name/涨跌停/昨收，
+        行业与概念并不透出）。代价与收益严重不匹配，故：
+
+        ① **结果缓存**（``_DETAIL_CACHE_TTL``）：合约画像日内基本不变，
+           同一代码在 TTL 内只付一次网络代价；只有「非空壳」结果才入缓存
+           （空壳入缓存会让富化永久失效）。
+        ② **本地名称兜底**（``lookup_name``，零网络 O(1)）：先补上最关键的 name，
+           即使后续网络全失败，界面也不会退化成「只有代码」。
+        ③ **限预算网络遍历**：单源切片 + 总预算，超预算即放弃剩余源。
+           注意**不做**「有本地名称就跳过网络」的短路——正常部署下插件源能给出
+           完整画像（涨跌停/行业/概念），短路会让这些部署白丢数据。
+        """
+        det = dict(det or {})
+        # ① 结果缓存
+        hit = self._detail_cache.get(code)
+        if hit is not None and time.time() - hit[0] < _DETAIL_CACHE_TTL:
+            return dict(hit[1])
+        # ② 本地名称兜底：先补 name，网络全失败时至少不丢名称
+        nm = det.get("name")
+        if not nm or str(nm) == code:
+            local = self.lookup_name(code)
+            if local:
+                det["name"] = local
+        # ③ 限预算网络遍历
+        deadline = time.time() + _DETAIL_ENRICH_BUDGET
+        best = det
+        for pname in self._plugins:
+            remain = deadline - time.time()
+            if remain <= 0:
+                log.debug("详情富化预算用尽，放弃剩余源：%s", code)
+                break
+            pdet = await self._call_source(
+                pname, self._plugins[pname].get_instrument_detail(code),
+                timeout=min(remain, _DETAIL_ENRICH_ATTEMPT))
+            if not _contentless_detail(pdet, code):
+                best = pdet
+                break
+        if not _contentless_detail(best, code):
+            # 容量防护：条目数与代码数同量级，超限整体重置即可（不做 LRU）
+            if len(self._detail_cache) >= _DETAIL_CACHE_MAX:
+                self._detail_cache.clear()
+            self._detail_cache[code] = (time.time(), dict(best))
+        return best
+
     # ---------- 行情快照 ----------
     async def get_quote(self, code: str, source: str = "auto",
                         conn_id: Optional[str] = None) -> Optional[dict]:
@@ -366,12 +434,7 @@ class DataSourceManager:
             # 名称缺失会一路透到界面（个股名显示为一串代码），因此这里用补充源
             # 富化画像；价格仍以券商为准，富化失败也不影响行情本身。
             if _contentless_detail(det, code):
-                for pname in self._plugins:
-                    pdet = await self._call_source(
-                        pname, self._plugins[pname].get_instrument_detail(code))
-                    if not _contentless_detail(pdet, code):
-                        det = pdet
-                        break
+                det = await self._enrich_detail(code, det)
             return self._merge_quote(raw, code, board, det, "broker")
 
         async def _from_plugin(name: str):

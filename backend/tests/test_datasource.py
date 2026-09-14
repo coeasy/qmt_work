@@ -5,6 +5,7 @@
 需在装有 pytest 的环境运行（pytest 未装时可用 `python -m tests.test_datasource` 自查）。
 """
 import asyncio
+import time
 
 from datasource.base import DataSource
 from datasource.board import classify_board, limit_ratio
@@ -277,12 +278,198 @@ def test_license_gate_keeps_broker_and_public_sources():
     assert "broker" in m._auto_candidates()
 
 
+# ---------------- 券商详情为空壳时的画像富化（ETF / 指数真实形态） ----------------
+#
+# 回归背景（2026-09-14 实测）：券商对 ETF/指数常回**空壳详情**（无名称、无涨跌停），
+# 原实现会顺序遍历全部插件源且不设总时限。一旦某源不可达（实测 sina 经本机代理
+# 403，单次约 5.5s），整次 get_quote 被拖到 5.6s —— 实测同一接口
+# 股票 0.02s / ETF·指数 5.6s。而实测这 5.6s 只换来一个名称。
+
+class ShellBroker:
+    """详情为空壳的券商（ETF/指数的真实形态）：有价、无名称、无涨跌停。"""
+
+    async def get_quote(self, code):
+        return {"code": code, "last": 1.0}
+
+    async def get_kline(self, *a, **k):
+        return []
+
+    async def get_instrument_detail(self, code):
+        return {}
+
+    async def get_stock_list(self):
+        return []
+
+
+def test_shell_detail_falls_back_to_local_name_when_network_fails():
+    """网络富化全失败时，须用**本地名称表**兜底，不得让界面退化成「只有代码」。
+
+    这正是原 docstring 描述的坏体验：空壳详情 + 富化失败 → 个股名显示为一串代码。
+    """
+    class Dead(DataSource):
+        name = "eltdx"
+
+        @classmethod
+        def lookup_name(cls, code):
+            return "本地名称" if code == "X.SH" else None
+
+        async def get_quote(self, code):
+            return {"code": code, "last": 2.0}
+
+        async def get_kline(self, *a, **k):
+            return []
+
+        async def get_instrument_detail(self, code):
+            raise RuntimeError("source down")
+
+        async def get_stock_list(self):
+            return []
+
+    async def c():
+        m = DataSourceManager()
+        m.register_broker(lambda cid: ShellBroker())
+        m.register(Dead())
+        m.set_auto_chain(["broker", "eltdx"])
+        q = await m.get_quote("X.SH")
+        assert q["source"] == "broker" and q["last"] == 1.0, q
+        assert q["name"] == "本地名称", f"富化失败时未用本地名称兜底：{q}"
+
+    asyncio.run(c())
+
+
+def test_detail_enrichment_result_is_cached():
+    """富化结果须缓存：合约画像日内不变，同一代码不得反复付网络代价。
+
+    回归背景：不可达源会让单次富化耗时秒级；无缓存则每次 get_quote 都重付。
+    """
+    calls: list = []
+
+    class Good(DataSource):
+        name = "eltdx"
+
+        async def get_quote(self, code):
+            return {"code": code, "last": 2.0}
+
+        async def get_kline(self, *a, **k):
+            return []
+
+        async def get_instrument_detail(self, code):
+            calls.append(code)
+            return {"name": "创业板指", "industry": "指数"}
+
+        async def get_stock_list(self):
+            return []
+
+    async def c():
+        m = DataSourceManager()
+        m.register_broker(lambda cid: ShellBroker())
+        m.register(Good())
+        m.set_auto_chain(["broker", "eltdx"])
+        q1 = await m.get_quote("X.SH")
+        assert q1["name"] == "创业板指", q1
+        assert calls == ["X.SH"], calls
+        q2 = await m.get_quote("X.SH")
+        assert q2["name"] == "创业板指", q2
+        assert calls == ["X.SH"], f"富化结果未缓存，重复打源：{calls}"
+
+    asyncio.run(c())
+
+
+def test_shell_detail_network_enrichment_is_time_bounded():
+    """本地名称表未命中时（指数/板块），网络富化必须有总时限。
+
+    不可达源不得把行情拖到秒级——详情只是增强项，拿不到也要让行情照常返回。
+    """
+    class Hanging(DataSource):
+        name = "eltdx"
+
+        async def get_quote(self, code):
+            return {"code": code, "last": 2.0}
+
+        async def get_kline(self, *a, **k):
+            return []
+
+        async def get_instrument_detail(self, code):
+            await asyncio.sleep(30)          # 不可达源：永不返回
+            return {}
+
+        async def get_stock_list(self):
+            return []
+
+    async def c():
+        m = DataSourceManager()
+        m.register_broker(lambda cid: ShellBroker())
+        m.register(Hanging())
+        m.set_auto_chain(["broker", "eltdx"])
+        t0 = time.monotonic()
+        q = await m.get_quote("X.SH")
+        dt = time.monotonic() - t0
+        assert q["source"] == "broker" and q["last"] == 1.0, q
+        assert dt < 2.5, f"详情富化未限时，耗时 {dt:.2f}s（行情被增强项拖死）"
+
+    asyncio.run(c())
+
+
+def test_shell_detail_enrichment_still_yields_name_when_a_source_works():
+    """限预算不能把富化能力砍掉：有可用源时仍须补出名称（指数场景）。"""
+    class Hanging(DataSource):
+        name = "eltdx"
+
+        async def get_quote(self, code):
+            return {"code": code, "last": 2.0}
+
+        async def get_kline(self, *a, **k):
+            return []
+
+        async def get_instrument_detail(self, code):
+            await asyncio.sleep(30)          # 排在前面的不可达源
+            return {}
+
+        async def get_stock_list(self):
+            return []
+
+    class Good(DataSource):
+        name = "tencent"
+
+        async def get_quote(self, code):
+            return {"code": code, "last": 3.0}
+
+        async def get_kline(self, *a, **k):
+            return []
+
+        async def get_instrument_detail(self, code):
+            # 注意：只回 name 会被 _contentless_detail 判为空壳（名称之外还需
+            # 涨跌停/行业/概念之一），故这里带上 industry —— 与真实 tencent 形态一致。
+            return {"name": "创业板指", "industry": "指数"}
+
+        async def get_stock_list(self):
+            return []
+
+    async def c():
+        m = DataSourceManager()
+        m.register_broker(lambda cid: ShellBroker())
+        m.register(Hanging())
+        m.register(Good())
+        m.set_auto_chain(["broker", "eltdx", "tencent"])
+        t0 = time.monotonic()
+        q = await m.get_quote("X.SH")
+        dt = time.monotonic() - t0
+        assert q["name"] == "创业板指", f"排在后方的可用源被误放弃：{q}"
+        assert dt < 2.5, f"耗时 {dt:.2f}s"
+
+    asyncio.run(c())
+
+
 if __name__ == "__main__":
     for fn in (test_auto_prefers_broker, test_auto_falls_back_to_eltdx,
                test_explicit_source, test_kline_adjusted_chain_prefers_broker_then_falls_back,
                test_all_fail_returns_none, test_breaker_trips_and_skips,
                test_search_stocks_indexed, test_slow_source_times_out,
                test_classify_and_limit, test_commercial_mode_blocks_eltdx_on_all_paths,
-               test_license_gate_keeps_broker_and_public_sources):
+               test_license_gate_keeps_broker_and_public_sources,
+               test_shell_detail_falls_back_to_local_name_when_network_fails,
+               test_detail_enrichment_result_is_cached,
+               test_shell_detail_network_enrichment_is_time_bounded,
+               test_shell_detail_enrichment_still_yields_name_when_a_source_works):
         fn()
     print("ALL DATASOURCE TESTS PASSED")
