@@ -154,3 +154,38 @@ def test_save_and_list_board(store):
 def test_save_board_empty_name(store):
     with pytest.raises(ValueError):
         save_as_board(store, "  ", {}, [])
+
+
+# ==================== 求值必须离开事件循环（2026-09-14） ====================
+def test_scan_async_evaluation_runs_off_event_loop(store, monkeypatch):
+    """``evaluate_scan`` 是纯 CPU 的同步循环（全池逐只算指标），必须在线程里执行。
+
+    否则整段选股会阻塞事件循环、拖慢**所有** HTTP 请求——实测沪深 A 股规模
+    （5000 只 × 250 根，MA20+RSI14 三条件）耗时 1.91s，期间 asyncio 心跳最大
+    间隔 **1.912s**（循环完全停摆）；改用 ``asyncio.to_thread`` 后最大间隔 0.071s。
+    本用例把「必须离开事件循环线程」固定为契约（回退成同步调用即失败）。
+    """
+    import asyncio
+    import threading
+
+    import app.screener.engine as eng
+    from app.screener.engine import scan_async
+
+    main_thread = threading.current_thread()
+    seen = {}
+    real = eng.evaluate_scan
+
+    def _spy(*args, **kwargs):
+        seen["thread"] = threading.current_thread()
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(eng, "evaluate_scan", _spy)
+
+    out = asyncio.run(scan_async(
+        store, {"field": {"name": "close", "op": "gt", "value": 0}},
+        source_policy="local_only", offline=True))
+
+    assert seen.get("thread") is not None, "evaluate_scan 未被调用，用例没覆盖到目标路径"
+    assert seen["thread"] is not main_thread, (
+        "evaluate_scan 仍在事件循环线程执行——全市场选股会阻塞所有 HTTP 请求")
+    assert out["count"] >= 1

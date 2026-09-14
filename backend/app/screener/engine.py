@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from typing import Any, Callable, Dict, List, Optional
@@ -172,10 +173,17 @@ async def scan_async(
         raise RuntimeError(
             "no_data_source_and_no_local_data：请先连接数据源或运行同步任务")
 
-    results, scanned, elapsed_ms = evaluate_scan(
-        codes, bars_map, conditions, names=uni["names"],
-        min_price=min_price, max_price=max_price, prefilter=prefilter,
-        progress_cb=progress_cb)
+    # 求值必须移出事件循环（2026-09-14）：evaluate_scan 是纯 CPU 的同步循环
+    # （全池逐只算指标），在事件循环里跑会**整段阻塞所有 HTTP 请求**——实测
+    # 沪深 A 股规模（5000 只 × 250 根，MA20+RSI14 三条件）耗时 1.91s，期间
+    # asyncio 心跳最大间隔 1.912s（循环完全停摆）；to_thread 后最大间隔 0.071s。
+    # 与 app/sync/bars.py 的 upsert_bars、app/runtime/jobs.py 的进度落库同类。
+    # 注：progress_cb 因此会由**工作线程**调用（与 jobs.screen_runner 的既有做法一致）；
+    # 当前唯一调用方 routes/screen.py 不传该回调。
+    results, scanned, elapsed_ms = await asyncio.to_thread(
+        evaluate_scan, codes, bars_map, conditions,
+        names=uni["names"], min_price=min_price, max_price=max_price,
+        prefilter=prefilter, progress_cb=progress_cb)
 
     results.sort(key=lambda r: r[sort_by], reverse=bool(sort_desc))
     if limit and limit > 0:

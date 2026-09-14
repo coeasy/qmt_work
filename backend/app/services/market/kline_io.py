@@ -235,6 +235,26 @@ async def kline_sync(kc, body: dict, get_sector_stocks) -> dict:
             "files_count": len(files), "rows": total_rows, "errors": errors}
 
 
+def _upsert_market_cache(code: str, bars: list) -> int:
+    """逐条写入 market_cache（同步；供 ``asyncio.to_thread`` 调用）。返回写入条数。
+
+    2026-09-14：抽成独立同步函数，好让调用方把它移出事件循环。逐条 upsert 若直接
+    跑在事件循环里，``days×codes`` 条同步 sqlite 写会**阻塞所有 HTTP 请求**
+    （与 ``app/sync/bars.py`` 的 ``BarsSyncer.sync_one`` 属同类缺陷）。
+    """
+    n = 0
+    for bb in bars:
+        try:
+            state.db.upsert("market_cache", {
+                "code": code, "dtype": "kline", "ts": bb.get("time", ""),
+                "payload_json": json.dumps(bb, ensure_ascii=False)})
+            n += 1
+        except (AttributeError, OSError, ValueError) as exc:
+            # 单条 K 线写入失败：跳过该条，其他继续
+            log.debug("market_cache K 线写入失败（已跳过）：%s", exc)
+    return n
+
+
 async def crawl_market(body: dict) -> dict:
     """行情爬虫：真实 K 线落库（body: codes/days/period/adjust/conn_id）。"""
     b = state.broker_manager.bridge(body.get("conn_id") or None)
@@ -255,16 +275,9 @@ async def crawl_market(body: dict) -> dict:
         if isinstance(bars, dict) and bars.get("code"):
             return bars
         if cache is None:
-            # 无缓存引擎时退化为老逻辑（写入 market_cache 兜底），避免空操作
-            for bb in bars:
-                try:
-                    state.db.upsert("market_cache", {
-                        "code": code, "dtype": "kline", "ts": bb.get("time", ""),
-                        "payload_json": json.dumps(bb, ensure_ascii=False)})
-                    inserted += 1
-                except (AttributeError, OSError, ValueError) as exc:
-                    # 单条 K 线写入失败：跳过该条，其他继续
-                    log.debug("market_cache K 线写入失败（已跳过）：%s", exc)
+            # 无缓存引擎时退化为老逻辑（写入 market_cache 兜底），避免空操作。
+            # 落库移出事件循环——见 _upsert_market_cache 的说明。
+            inserted += await asyncio.to_thread(_upsert_market_cache, code, bars)
         else:
             # 统一经 KlineCache 落库（热/归档分离）：抓取结果直接进入图表/回测查询链路
             inserted += await cache.aput(code, period, bars, adjust)
