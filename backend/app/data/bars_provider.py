@@ -106,19 +106,21 @@ class BarsProvider:
         return get_store()
 
     def _local_batch(self, codes: List[str], period: str, adjust: str,
-                     count: int) -> Dict[str, list]:
+                     count: int, lite: bool = False) -> Dict[str, list]:
         if not codes:
             return {}
         st = self._get_store()
         try:
             # Phase B：单条（分块）SQL 批量取数，替代逐只循环
-            return st.get_bars_batch(codes, period=period, adjust=adjust, limit=count)
+            return st.get_bars_batch(codes, period=period, adjust=adjust,
+                                     limit=count, lite=lite)
         except Exception as exc:  # noqa: BLE001
             log.debug("本地仓批量取数失败: %s", exc)
             return {c: [] for c in codes}
 
     async def _local_batch_async(self, codes: List[str], period: str,
-                                 adjust: str, count: int) -> Dict[str, list]:
+                                 adjust: str, count: int,
+                                 lite: bool = False) -> Dict[str, list]:
         """把同步的本地仓批量取数移出事件循环（唯一调用入口，勿直接调 ``_local_batch``）。
 
         2026-09-14：``st.get_bars_batch`` 是同步 sqlite 取数 + Python 侧构造 Bar
@@ -126,9 +128,13 @@ class BarsProvider:
         **整段阻塞所有 HTTP 请求**——实测 ``/market/screen`` 请求 13.67s，期间并发
         ``/health`` 等待 **12.26s**（循环停摆），而同一次请求里纯求值只占 163ms。
         与 ``BarsSyncer.sync_one`` / ``evaluate_scan`` 属同类缺陷。
+
+        ``lite=True`` 时本地路径返回 :class:`~datasource.models.BarLite`
+        （结构等价的轻量视图，跳过 Pydantic 校验，实测约 3 倍快）。**仅选股引擎
+        传 True**——它只按属性读 K 线；其它调用方保持默认 ``Bar`` 契约。
         """
         return await asyncio.to_thread(
-            self._local_batch, codes, period, adjust, count)
+            self._local_batch, codes, period, adjust, count, lite)
 
     # ------------------------------------------------------------------
     # 主入口
@@ -142,10 +148,16 @@ class BarsProvider:
         policy_str: str = "auto",
         offline: bool = False,
         bar_count: int = _BAR_COUNT_DEFAULT,
+        lite: bool = False,
     ) -> tuple[Dict[str, list], BarsBatchReport]:
         """一次性取回多标的 K 线（本地 canonical 或在线能力链）。
 
         返回 ``(bars_map, report)``，``bars_map`` 为 ``{code: [Bar,...]}``（无数据为空列表）。
+
+        ``lite=True``：**本地路径**返回 :class:`~datasource.models.BarLite`
+        （``Bar`` 的结构等价轻量视图，跳过 Pydantic 校验，实测约 3 倍快）。
+        仅全市场批处理消费方（选股引擎）使用；在线路径仍返回 ``Bar``——那些对象
+        由 hub 构造，再转一道只会增加成本。两者字段同名同义，消费方按属性访问即可。
         """
         report = BarsBatchReport(source_policy=policy_str or "auto")
         codes = [str(c) for c in codes]
@@ -153,7 +165,8 @@ class BarsProvider:
 
         # —— LOCAL_ONLY / offline：纯本地，绝不触网 ——
         if offline or parse_source_policy(policy_str) == SourcePolicy.LOCAL_ONLY:
-            batch = await self._local_batch_async(codes, period, adjust, bar_count)
+            batch = await self._local_batch_async(codes, period, adjust, bar_count,
+                                                  lite)
             n = sum(1 for v in batch.values() if v)
             report.provider_used = "local"
             report.count_local = n
@@ -185,7 +198,8 @@ class BarsProvider:
         if not chain:
             report.degraded = True
             report.degraded_reason = resolved.qmt_unavailable_reason or "no_online_source"
-            batch = await self._fallback_local(codes, period, adjust, bar_count, report)
+            batch = await self._fallback_local(codes, period, adjust, bar_count,
+                                               report, lite)
             return batch, report
 
         # —— 按链逐源尝试（J-4 同源一致性：整批用同一源）——
@@ -204,7 +218,8 @@ class BarsProvider:
                 # 缺失标的用本地补（不破坏同源：仍记 fallback）
                 missing = [c for c, v in batch.items() if not v]
                 if missing:
-                    local = await self._local_batch_async(missing, period, adjust, bar_count)
+                    local = await self._local_batch_async(missing, period, adjust,
+                                                          bar_count, lite)
                     filled = 0
                     for c in missing:
                         if local.get(c):
@@ -222,7 +237,8 @@ class BarsProvider:
         # —— 全在线失败 → 本地（degraded）——
         report.degraded = True
         report.degraded_reason = report.degraded_reason or "all_online_unavailable"
-        batch = await self._fallback_local(codes, period, adjust, bar_count, report)
+        batch = await self._fallback_local(codes, period, adjust, bar_count, report,
+                                           lite)
         return batch, report
 
     # ------------------------------------------------------------------
@@ -246,8 +262,9 @@ class BarsProvider:
         results = await asyncio.gather(*[_one(c) for c in codes])
         return {c: bl for c, bl in results}
 
-    async def _fallback_local(self, codes, period, adjust, count, report) -> Dict[str, list]:
-        batch = await self._local_batch_async(codes, period, adjust, count)
+    async def _fallback_local(self, codes, period, adjust, count, report,
+                              lite: bool = False) -> Dict[str, list]:
+        batch = await self._local_batch_async(codes, period, adjust, count, lite)
         report.provider_used = "local"
         report.local_fallback = True
         report.count_local = sum(1 for v in batch.values() if v)

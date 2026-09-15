@@ -166,8 +166,13 @@ async def scan_async(
     codes, pre_meta = _prefilter_codes(codes, uni["names"], prefilter)
 
     bp = BarsProvider(store=st)
+    # lite=True（2026-09-15）：全市场批处理为 117 万根 K 线各构造一个对象，逐行
+    # Pydantic 校验是取数侧最大单项成本（实测 ~4.9s）。轻量视图跳过校验，约 3 倍快，
+    # 且选股结果逐行等价（tests/test_bar_lite.py 钉住）。本引擎只按属性读 K 线
+    # （close/open/high/low/volume），不依赖 Bar 的类型身份，故可安全消费两种。
     bars_map, report = await bp.get_bars_batch(
-        codes, period=period, adjust=adjust, policy_str=source_policy, offline=offline)
+        codes, period=period, adjust=adjust, policy_str=source_policy, offline=offline,
+        lite=True)
     # 全空（既无在线源数据又无本地数据）→ 503 引导
     if report.provider_used == "local" and report.count_local == 0 and not offline:
         raise RuntimeError(

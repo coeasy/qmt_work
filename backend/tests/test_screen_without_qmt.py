@@ -100,7 +100,7 @@ def test_local_batch_runs_off_event_loop():
     seen = {}
 
     class _RecordingStore(FakeStore):
-        def get_bars_batch(self, codes, period="1d", adjust="", limit=250):
+        def get_bars_batch(self, codes, period="1d", adjust="", limit=250, lite=False):
             seen["thread"] = threading.current_thread()
             return {c: [make_bar(15, time_="2024-01-02")] for c in codes}
 

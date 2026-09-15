@@ -100,6 +100,53 @@ class Bar(_AliasModel):
     volume_unit: Optional[str] = None
 
 
+class BarLite:
+    """``Bar`` 的**结构等价只读轻量视图**（全市场批处理专用，非契约模型）。
+
+    存在理由（2026-09-15 实测，117 万行真实库）：全市场选股要为 6982 只 ×
+    ~168 根 ≈ 117 万根 K 线各构造一个对象，逐行 Pydantic 校验是
+    ``LocalStore.get_bars_batch`` 的最大单项成本（117 万次 4.9～5.9s）。本类用
+    ``__slots__`` + 位置实参构造，同规模实测 **~1.9s（约 3 倍快）**。
+
+    已实测排除的「更干净」方案（勿重复尝试）：
+    - ``Bar.model_construct``：8.3s，比 ``Bar(...)`` **更慢**；
+    - ``TypeAdapter(list[Bar]).validate_python``：4.2s，仅快 ~15%，且需先构造
+      dict —— ``sqlite3.Row`` 不被 Pydantic 当作 mapping，直喂会产出 117 万个
+      校验错误。
+
+    铁律：
+    1. **字段集必须与 ``Bar`` 完全一致** —— 由 ``tests/test_bar_lite.py`` 的
+       ``test_bar_lite_field_parity`` 钉住，任一侧增删字段即测试失败；
+    2. **仅用于进程内批处理消费**（选股 / 指标计算）。**不得**用于 API 响应、
+       持久化或跨模块契约 —— 那些场景一律用 ``Bar``；
+    3. **不做任何校验或类型强转**，值原样保留。调用方须保证
+       ``time``/``open``/``high``/``low``/``close`` 非空：``local_bars`` 的写入
+       路径经 ``upsert_bars`` 的 ``Bar`` 校验，已保证这一点。
+    """
+
+    __slots__ = ("time", "open", "high", "low", "close", "volume", "amount",
+                 "volume_unit")
+
+    def __init__(self, time: str, open: float, high: float, low: float,
+                 close: float, volume: Optional[float] = None,
+                 amount: Optional[float] = None,
+                 volume_unit: Optional[str] = None) -> None:
+        self.time = time
+        self.open = open
+        self.high = high
+        self.low = low
+        self.close = close
+        self.volume = volume
+        self.amount = amount
+        self.volume_unit = volume_unit
+
+    def __repr__(self) -> str:
+        return (f"BarLite(time={self.time!r}, open={self.open!r}, "
+                f"high={self.high!r}, low={self.low!r}, close={self.close!r}, "
+                f"volume={self.volume!r}, amount={self.amount!r}, "
+                f"volume_unit={self.volume_unit!r})")
+
+
 # ---------------------------------------------------------------------------
 # 合约基础信息
 # ---------------------------------------------------------------------------

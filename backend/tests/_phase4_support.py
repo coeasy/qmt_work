@@ -41,8 +41,12 @@ class FakeStore:
     def get_bars(self, code, period="1d", adjust="", limit=250, start=None, end=None):
         return list(self._bars.get(code, [])[-limit:])
 
-    def get_bars_batch(self, codes, period="1d", adjust="", limit=250):
-        """Phase B 新增的批量取数接口（BarsProvider._local_batch 依赖）。"""
+    def get_bars_batch(self, codes, period="1d", adjust="", limit=250, lite=False):
+        """Phase B 新增的批量取数接口（BarsProvider._local_batch 依赖）。
+
+        ``lite`` 为 2026-09-15 新增（选股引擎传 True 走轻量视图）；本桩返回
+        构造好的 Bar，属性同名同义，消费方按属性访问故无需分支。
+        """
         return {c: list(self._bars.get(c, [])[-limit:]) for c in codes}
 
     def get_boards(self, kind):

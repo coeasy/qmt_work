@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Union
 
 from core.db import DB, get_db
-from datasource.models import Bar, BoardItem, StockInfo
+from datasource.models import Bar, BarLite, BoardItem, StockInfo
 
 log = logging.getLogger("qmt_work.datasource.local_store")
 
@@ -62,9 +62,18 @@ def _canonical_key(row: Any) -> tuple:
     )
 
 
-def _row_to_bar(row: Any) -> Bar:
-    """``sqlite3.Row`` → ``Bar``：只喂模型真正声明的列，不让溯源列参与校验。"""
-    return Bar(
+def _row_to_bar(row: Any, lite: bool = False) -> Union[Bar, BarLite]:
+    """``sqlite3.Row`` → ``Bar``（``lite=True`` 时 → ``BarLite`` 轻量视图）。
+
+    只喂模型真正声明的列，不让溯源列参与校验。两种目标的**取值同源**（同一个
+    函数体、同一份列清单），避免拆成两个函数后各自漂移。
+
+    ``lite`` 的取舍见 :class:`datasource.models.BarLite`：全市场批处理下逐行
+    Pydantic 校验是最大单项成本，轻量视图约快 3 倍。默认 ``False`` 保持
+    ``get_bars_batch`` 的对外契约（返回 ``Bar``）不变。
+    """
+    cls = BarLite if lite else Bar
+    return cls(
         time=row["dt"], open=row["open"], high=row["high"], low=row["low"],
         close=row["close"], volume=row["volume"], amount=row["amount"],
     )
@@ -175,6 +184,7 @@ class LocalStore:
         period: str = "1d",
         adjust: str = "",
         limit: int = 250,
+        lite: bool = False,
     ) -> Dict[str, List[Bar]]:
         """批量取多标的 K 线：单条 ``WHERE code IN (...)`` + 索引序取回，
         分块 SQL 取回整批，替代逐只 ``get_bars`` 的 N 次循环（P3 / Phase B）。
@@ -193,9 +203,17 @@ class LocalStore:
         分组比较。选主键由 :func:`_canonical_key` 逐项复刻原窗口的 ``ORDER BY``，
         故结果逐行等价（已用 92 万行实测新旧结果完全一致）。
 
-        剩余成本：SQL 取回 ~4s + Python 分组 ~1s + ``Bar`` 构造 ~4.5s（92 万根）。
+        2026-09-15 吞吐优化 2（``lite=True``）：117 万行三段成本实测
+        = SQL 取回 ~3.6s + Python 选主 ~0.8s + ``Bar`` 构造 ~4.9s，构造是最大单项。
+        ``lite=True`` 改构造 :class:`~datasource.models.BarLite`（``__slots__``
+        轻量视图，字段集与 ``Bar`` 一致但跳过 Pydantic 校验），同规模实测
+        ~1.9s（约 3 倍快），**选股结果逐行等价**（``tests/test_bar_lite.py`` 钉住）。
         取数行数不可再压缩——本库每标的仅 ~168 根，``limit=250`` 根本不生效，
-        所以「缩减取数根数」方向无效；下一个杠杆在 ``Bar`` 构造（Pydantic 校验）。
+        所以「缩减取数根数」方向无效。
+
+        ``lite`` 默认 ``False``：对外契约仍返回 ``Bar``；仅**进程内批处理消费方**
+        （选股引擎）显式传 ``True``。返回类型因此随 ``lite`` 变化，调用方按属性
+        访问即可（两者字段同名同义）。
         """
         if not codes:
             return {}
@@ -225,7 +243,8 @@ class LocalStore:
                 key = (r["code"], r["dt"])
                 if key != cur_key:
                     if best is not None:
-                        out.setdefault(best["code"], []).append(_row_to_bar(best))
+                        out.setdefault(best["code"], []).append(
+                            _row_to_bar(best, lite))
                     cur_key, best = key, r
                     best_key = _canonical_key(r)
                 else:
@@ -233,7 +252,7 @@ class LocalStore:
                     if k < best_key:
                         best_key, best = k, r
             if best is not None:
-                out.setdefault(best["code"], []).append(_row_to_bar(best))
+                out.setdefault(best["code"], []).append(_row_to_bar(best, lite))
 
         if limit and limit > 0:
             # 行已按 dt 升序，尾部即最近 limit 根（与 get_bars 的 latest-N 语义一致）。
