@@ -10,7 +10,12 @@ CI 无需存活后端即可验证 REST/WS/MCP 契约。
   券商则返回真实数据——测试断言必须环境无关（503 引导或真实数据，绝不假数据）；
 - shutdown 阶段后台任务可能抛 CancelledError（TestClient 已完成真实停机序列：
   db backup / mcp session manager 均正常关闭），此处兜底吞掉退出噪声；
-- 测试须逐文件运行（同进程全量会硬崩溃，见项目记忆）。
+- 测试**建议**逐文件运行。⚠️ 更正（2026-09-15 实测）：同进程全量**并不会硬崩溃**，
+  而是有 **5 条顺序依赖的假失败**（`test_risk_regression` / `test_screen_without_qmt` /
+  `test_ws_contract`×3，单独跑该文件时全部通过）—— 根因是 ``app_client`` 是
+  ``scope="session"`` 的进程内 TestClient，反复启停 lifespan 后全局状态被置空。
+  全量基线：``5 failed, 890 passed, 10 skipped``（收集 905，见 ``scripts/ci_reconcile.py``）。
+  逐文件跑更干净；**全量同进程跑适合作「差分兜底」**（失败数 > 5 即说明有新增回归）。
 """
 from __future__ import annotations
 
