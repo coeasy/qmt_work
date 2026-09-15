@@ -21,8 +21,8 @@ REM    CSC_KEY_PASSWORD  cert password
 REM    QMT_PYTHON        python used for PyInstaller (default: resolve below)
 REM    QMT_NODE_DIR      node install dir used by npm (default: resolve below)
 REM
-REM  Only backend/dist is deleted by this script. frontend/static is wiped by
-REM  vite itself (emptyOutDir: true). Source, config and data/ are never touched.
+REM  Only backend/dist is deleted by this script. frontend-next static output is wiped
+REM  by vite itself (emptyOutDir: true). Source, config and data/ are never touched.
 REM ============================================================
 
 setlocal enabledelayedexpansion
@@ -212,7 +212,7 @@ if "%DESKTOP_ONLY%"=="false" (
     if "%SKIP_FRONTEND%"=="false" (
         echo [build] Step 1/3: frontend build
         cd /d "%FRONTEND%"
-        if not exist "package.json" ( echo [error] frontend/package.json missing & exit /b 1 )
+        if not exist "package.json" ( echo [error] frontend-next/package.json missing & exit /b 1 )
         call :clean_static
         if defined MANAGED_NODE_DIR set "PATH=!MANAGED_NODE_DIR!;!PATH!"
         call npm run build

@@ -218,7 +218,7 @@ echo ""
 
 # ---- 前端依赖 ----
 if [[ ! -d "$FRONTEND/node_modules" ]]; then
-    log "frontend/node_modules 不存在，执行 npm install ..."
+    log "frontend-next/node_modules 不存在，执行 npm install ..."
     (cd "$FRONTEND" && PATH="$NODE_DIR:$PATH" npm install) || fail "npm install 失败"
 fi
 
@@ -227,7 +227,7 @@ if [[ "$DESKTOP_ONLY" == false ]]; then
     if [[ "$SKIP_FRONTEND" == false ]]; then
         log "Step 1/3: 前端构建"
         cd "$FRONTEND"
-        [[ -f package.json ]] || fail "frontend/package.json 不存在"
+        [[ -f package.json ]] || fail "frontend-next/package.json 不存在"
         clean_static_assets
         PATH="$NODE_DIR:$PATH" npm run build || { cd "$ROOT"; fail "前端构建失败"; }
         cd "$ROOT"

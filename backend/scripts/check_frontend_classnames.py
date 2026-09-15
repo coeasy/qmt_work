@@ -1,7 +1,12 @@
 """G11-6 前端样式防回归：组件 className 与 styles.css 差集检测。
 
-组件里出现的 className 若未在 styles.css 定义，该页将完全无样式（用户感知
-「界面无法加载」）。本脚本扫描 frontend/src 下 jsx/js 的字面量 className，
+⚠️ **已退役（2026-09-15 V11-R3）**：本门禁只针对旧 `frontend/` 的「全局 styles.css」
+架构；旧工程已删除（tag `archive-frontend-v1`），frontend-next 改用 CSS Modules
+（作用域类名 + 编译期引用），不存在全局样式表，差集检测不再适用。
+脚本保留以便历史追溯，目标缺失时显式 SKIP 并返回 0（不阻断 CI）。
+
+历史背景：组件里出现的 className 若未在 styles.css 定义，该页将完全无样式
+（用户感知「界面无法加载」）。旧实现扫描 frontend/src 下 jsx/js 的字面量 className，
 与 styles.css 已定义类做差集，缺失即 exit 1（纳入 CI）。
 
 范围：仅静态字面量（className="a b" / className={'a b'}）；模板字符串拼接
@@ -13,7 +18,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]      # 仓库根
-FRONTEND = ROOT / "frontend"
+FRONTEND = ROOT / "frontend"                    # 旧工程（已退役；缺失即 SKIP）
 SRC = FRONTEND / "src"
 CSS = SRC / "styles.css"
 
