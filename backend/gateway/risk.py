@@ -14,9 +14,14 @@
 
 全部参数支持运行期经 risk_config 表持久化（config/risk 端点读写），拒绝时返回原因。
 """
+import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
+
+# P0-5：账户快照未就绪时的演示级默认总资产。占比类闸门用它做分母等于「形同虚设」
+# （10 万单 = 演示 100 万的 10%），故实盘（live）买入前必须要求快照就绪。
+DEMO_TOTAL_ASSETS = 1_000_000.0
 
 # 可运行期配置的参数：字段名 -> (类型转换, 是否允许 0/关闭)
 _TUNABLES: dict[str, tuple[type, bool]] = {
@@ -33,6 +38,8 @@ _TUNABLES: dict[str, tuple[type, bool]] = {
     "price_deviation_pct": (float, True),
     "symbol_allow": (str, True),
     "symbol_deny": (str, True),
+    # P0-5：实盘买入是否强制要求账户快照就绪（0 = 关闭该闸门）
+    "require_snapshot_for_buy": (int, True),
 }
 
 
@@ -78,10 +85,25 @@ class RiskManager:
     symbol_deny: str = ""               # 标的黑名单（逗号分隔；命中即拒）
     # 简单内存态：code -> 持仓市值（真实场景由账户网关提供）
     positions_value: dict[str, float] = field(default_factory=dict)
-    total_assets: float = 1_000_000.0
+    total_assets: float = DEMO_TOTAL_ASSETS
     # 数据来源标注：未接入真实持仓时为 "demo"（演示级 100 万默认值），
     # 由 SyncEngine 账户快照喂入后切换为 "live"。前端据此显式提示「演示值」。
     data_source: str = "demo"
+    # ---- P0-5 资金/仓位原子化 ----
+    # 可用资金（来自账户快照 get_cash 的 cash 字段）
+    available_cash: float = 0.0
+    # 快照是否已喂入现金（未喂入时不做资金校验，宁可放过也不误拒）
+    _cash_known: bool = False
+    # 实盘买入是否强制要求账户快照就绪（1=是，默认；0=关闭该闸门，供联调/无资产
+    # 上报能力的券商临时放行）。仅对「实盘（live）买入」生效，模拟盘不受影响。
+    require_snapshot_for_buy: int = 1
+    # 在途委托金额（P0-5 原子化核心）：已放行但尚未体现在 positions_value 里的
+    # 买入金额，按 (code, amount, ts) 记录并 TTL 过期。占比闸门必须把它算进去，
+    # 否则并发多单会各自按「未含彼此」的旧仓位判定，双双通过 → 超仓。
+    _pending_buys: list = field(default_factory=list)
+    _pending_ttl: float = 120.0
+    # 校验+计数+在途登记必须原子（跨线程调用方：REST/MCP/引擎）
+    _lock: object = field(default_factory=threading.Lock)
     _order_times: deque = field(default_factory=lambda: deque(maxlen=500))
     _price_provider: object = None      # 最新价回调：fn(code) -> float|None（价格偏离校验用）
     # 日级计数（跨日自动清零）
@@ -101,15 +123,44 @@ class RiskManager:
         d["data_source"] = self.data_source
         return d
 
-    def feed_account_snapshot(self, positions_value: dict[str, float], total_assets: float) -> None:
+    def feed_account_snapshot(self, positions_value: dict[str, float], total_assets: float,
+                              available_cash: float | None = None) -> None:
         """由 SyncEngine 账户快照喂入真实持仓市值与总资产，切换数据来源为 live。
 
         未调用前 total_assets 停留在默认 100 万（演示级），data_source="demo"。
+
+        P0-5：额外接收 ``available_cash``（券商 get_cash 的可用资金）。一旦喂入，
+        后续实盘买入会做「可用资金充足性」校验；未喂入（None）则不做该校验，
+        避免把「没有资产上报能力」误判成「没有资金」。
         """
         self.positions_value = dict(positions_value or {})
         if total_assets and total_assets > 0:
             self.total_assets = float(total_assets)
+        if available_cash is not None:
+            self.available_cash = float(available_cash or 0.0)
+            self._cash_known = True
         self.data_source = "live"
+
+    # ---------------- P0-5 在途委托（原子化占比判定）----------------
+    def _prune_pending(self, now: float) -> None:
+        """丢弃超过 TTL 的在途委托（视为已被账户快照反映或已失效）。"""
+        ttl = self._pending_ttl
+        if ttl <= 0:
+            self._pending_buys = []
+            return
+        if self._pending_buys:
+            self._pending_buys = [e for e in self._pending_buys if now - e[2] < ttl]
+
+    def _pending_total(self) -> float:
+        return sum(e[1] for e in self._pending_buys)
+
+    def _pending_for(self, code: str) -> float:
+        return sum(e[1] for e in self._pending_buys if e[0] == code)
+
+    def _reserve_pending(self, code: str, amount: float, now: float) -> None:
+        """登记一笔已放行的买入在途金额（调用方须持锁）。"""
+        if amount > 0:
+            self._pending_buys.append((code, float(amount), float(now)))
 
     def update_from(self, data: dict) -> list[str]:
         """按传入字典更新参数；返回实际变更的字段名列表。"""
@@ -268,11 +319,16 @@ class RiskManager:
         return float(r) if r and r > 0 else 0.0
 
     def _validate_order(self, code: str, price: float, volume: int,
-                        direction: str, price_type: str = "limit") -> tuple[bool, str]:
+                        direction: str, price_type: str = "limit",
+                        require_account: bool = False) -> tuple[bool, str]:
         """纯校验（不修改任何计数/状态）：返回 (是否放行, 原因)。
 
         供 `precheck_order` 复用 —— 预检只判断「这笔委托会不会被风控拦截」，
         但不计入频率窗口与日级用量，避免预检本身污染真实风控计数。
+
+        ``require_account``（P0-5）：该笔为**实盘**下单时为 True —— 此时才要求
+        账户快照就绪并做可用资金校验。模拟盘（paper）无券商账户，快照永不就绪，
+        若一刀切会废掉模拟盘，故由调用方按 mode 显式传入。
 
         price_type 区分限价/市价：
         - 限价单：price 必须 >0（防「限价单以 0 元送出」灾难），价格相关校验齐全；
@@ -340,16 +396,35 @@ class RiskManager:
                            f"≥ 上限 {self.daily_amount_limit:.0f}"
                            f"（今日已用 {self._day_amount:.0f}）")
         if is_buy and amount > 0:
-            cur = self.positions_value.get(code, 0.0)
-            # P1-4：单票占比用「单票市值 + 本单金额」
+            # ---- P0-5：实盘买入的资金/仓位闸门（require_account=实盘下单时为 True）----
+            if require_account:
+                # ① 账户快照未就绪：total_assets 仍是演示级 100 万 → 占比闸门形同虚设，
+                #    一律拒绝买入开仓，绝不用假分母放行真单（卖出/平仓不受限）。
+                if self.require_snapshot_for_buy and self.data_source != "live":
+                    return False, (
+                        "账户快照未就绪：拒绝买入开仓（总资产仍为演示值 "
+                        f"{DEMO_TOTAL_ASSETS:.0f}，无法核算仓位与资金；"
+                        "请等待账户同步完成或连接券商）")
+                # ② 可用资金充足性（仅在快照已喂入现金时校验）
+                if self._cash_known and amount > self.available_cash + 1e-9:
+                    return False, (
+                        f"可用资金不足：本单需 {amount:.0f}，"
+                        f"可用 {self.available_cash:.0f}")
+            # P0-5：占比分母/分子都并入「在途买入」，否则并发多单各自按未含彼此的
+            # 旧仓位判定，会双双通过 → 超仓。positions_value 由 5s 快照喂入，
+            # 在快照到达前只能靠在途登记兜住。
+            pend_code = self._pending_for(code)
+            pend_total = self._pending_total()
+            cur = self.positions_value.get(code, 0.0) + pend_code
+            # P1-4：单票占比用「单票市值 + 在途 + 本单金额」
             new_single = (cur + amount) / self.total_assets
             if new_single > self.max_single_position_ratio:
                 return False, (
                     f"single position ratio would be {new_single:.2f} > "
                     f"max {self.max_single_position_ratio:.2f}")
-            # P0-4/P1-4：全局总仓位占比用「组合总市值 + 本单金额」，单票占比规则
+            # P0-4/P1-4：全局总仓位占比用「组合总市值 + 在途 + 本单金额」，单票占比规则
             # 不再重复遮蔽全局规则（此前两者都按单票，max_position_ratio 永不生效）。
-            port = (sum(self.positions_value.values()) + amount) / self.total_assets
+            port = (sum(self.positions_value.values()) + pend_total + amount) / self.total_assets
             if port > self.max_position_ratio:
                 return False, (
                     f"portfolio position ratio would be {port:.2f} > "
@@ -357,48 +432,63 @@ class RiskManager:
         return True, "ok"
 
     def precheck_order(self, code: str, price: float, volume: int,
-                       direction: str, price_type: str = "limit") -> tuple[bool, str]:
+                       direction: str, price_type: str = "limit",
+                       require_account: bool = False) -> tuple[bool, str]:
         """非变更型预检：判断委托是否会被风控放行，但不计入频率/日级用量。
 
         前端「风控预检」按钮调用，避免预检本身污染真实风控计数（与 `check_order` 的区别）。
+        预检同样**不登记在途金额**（只判断，不预留）。
         """
-        return self._validate_order(code, price, volume, direction, price_type)
+        return self._validate_order(code, price, volume, direction, price_type,
+                                    require_account=require_account)
 
     def check_order(self, code: str, price: float, volume: int,
-                    direction: str, price_type: str = "limit") -> tuple[bool, str]:
-        """下单前校验 + 计入频率窗口与日级用量（放行的委托才计数）。"""
-        self._roll_day()
-        now = time.time()
-        # 频率窗口当前计数（不含本次）——先判窗口，再校验
-        while self._order_times and now - self._order_times[0] > 60:
-            self._order_times.popleft()
-        if len(self._order_times) >= self.max_orders_per_min:
-            # 阶段 3：风控拦截可观测（频率）
-            try:
-                from gateway.metrics import get_metrics
-                get_metrics().record_risk_blocked("frequency")
-            except Exception:  # noqa: BLE001
-                pass
-            return False, (
-                f"下单频率超限：近 60s 已 {len(self._order_times)} 笔 "
-                f"> 上限 {self.max_orders_per_min}")
-        ok, reason = self._validate_order(code, price, volume, direction, price_type)
-        if not ok:
-            # 阶段 3：风控拦截可观测（校验类：额度/黑名单/偏离/熔断/仓位）
-            try:
-                from gateway.metrics import get_metrics
-                get_metrics().record_risk_blocked("validation")
-            except Exception:  # noqa: BLE001
-                pass
-            # 阶段 0-B（F5 修正）：被拒单**不占用频率额度**，避免频率 DoS
-            # （连续构造被拒委托即可耗尽频率窗口、阻断正常下单）。
-            return False, reason
-        # 全部通过 -> 计入频率窗口与日级用量（只统计放行的委托）
-        # P1-4：日额度用**有效价**估算金额（市价单用最新价），避免「校验用估价、
-        # 计数却用原始 price(市价=0)」导致日累计金额被低估。
-        self._order_times.append(now)
-        amount = self._effective_price(code, price, price_type) * volume
-        self._day_amount += amount
-        self._day_orders += 1
-        self._day_code_orders[code] = self._day_code_orders.get(code, 0) + 1
-        return True, "ok"
+                    direction: str, price_type: str = "limit",
+                    require_account: bool = False) -> tuple[bool, str]:
+        """下单前校验 + 计入频率窗口与日级用量（放行的委托才计数）。
+
+        P0-5：整个「校验 → 计数 → 在途登记」在同一把锁内完成，保证并发下单时
+        占比闸门串行判定；放行的买入单登记在途金额，供后续并发单的占比分母/分子
+        计入，从而在 5s 账户快照到达前也不会超仓。
+        """
+        with self._lock:
+            self._roll_day()
+            now = time.time()
+            self._prune_pending(now)
+            # 频率窗口当前计数（不含本次）——先判窗口，再校验
+            while self._order_times and now - self._order_times[0] > 60:
+                self._order_times.popleft()
+            if len(self._order_times) >= self.max_orders_per_min:
+                # 阶段 3：风控拦截可观测（频率）
+                try:
+                    from gateway.metrics import get_metrics
+                    get_metrics().record_risk_blocked("frequency")
+                except Exception:  # noqa: BLE001
+                    pass
+                return False, (
+                    f"下单频率超限：近 60s 已 {len(self._order_times)} 笔 "
+                    f"> 上限 {self.max_orders_per_min}")
+            ok, reason = self._validate_order(code, price, volume, direction,
+                                              price_type, require_account=require_account)
+            if not ok:
+                # 阶段 3：风控拦截可观测（校验类：额度/黑名单/偏离/熔断/仓位）
+                try:
+                    from gateway.metrics import get_metrics
+                    get_metrics().record_risk_blocked("validation")
+                except Exception:  # noqa: BLE001
+                    pass
+                # 阶段 0-B（F5 修正）：被拒单**不占用频率额度**，避免频率 DoS
+                # （连续构造被拒委托即可耗尽频率窗口、阻断正常下单）。
+                return False, reason
+            # 全部通过 -> 计入频率窗口与日级用量（只统计放行的委托）
+            # P1-4：日额度用**有效价**估算金额（市价单用最新价），避免「校验用估价、
+            # 计数却用原始 price(市价=0)」导致日累计金额被低估。
+            self._order_times.append(now)
+            amount = self._effective_price(code, price, price_type) * volume
+            self._day_amount += amount
+            self._day_orders += 1
+            self._day_code_orders[code] = self._day_code_orders.get(code, 0) + 1
+            # P0-5：买入在途登记（供后续并发单占比判定计入）
+            if normalize_direction(direction) == "buy":
+                self._reserve_pending(code, amount, now)
+            return True, "ok"

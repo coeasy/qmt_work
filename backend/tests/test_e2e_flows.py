@@ -194,11 +194,13 @@ class FakeRisk:
         self.reason = "风控拒绝（E2E）"
         self.calls = 0
 
-    def check_order(self, code, price, volume, side, price_type="limit"):
+    def check_order(self, code, price, volume, side, price_type="limit",
+                    require_account=False, **kwargs):
         self.calls += 1
         return (True, "") if self.allow else (False, self.reason)
 
-    def precheck_order(self, code, price, volume, side, price_type="limit"):
+    def precheck_order(self, code, price, volume, side, price_type="limit",
+                       require_account=False, **kwargs):
         return (True, "") if self.allow else (False, self.reason)
 
 

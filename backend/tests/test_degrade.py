@@ -84,3 +84,49 @@ def test_envelope_merges_meta():
     assert out["as_of"] == "20260828"
     assert out["warning"].startswith("远程行情源不可用")
     assert len(out["warnings"]) == 1
+
+
+# ---- 路由层：降级路径必须透传 count（P1-1 回归）----------------------------
+def _bars_seq(n):
+    """生成 n 根时间升序的 K 线（跨月，避免 _bars() 的 9 根上限）。"""
+    from datetime import date, timedelta
+    base = date(2025, 1, 1)
+    return [Bar(time=(base + timedelta(days=i)).strftime("%Y%m%d"),
+                open=10, high=11, low=9, close=10.0 + i, volume=1000, amount=10500)
+            for i in range(n)]
+
+
+def test_kline_route_degrade_respects_count(store, monkeypatch):
+    """远程无源 → 本地兜底时，返回根数必须 == 请求的 count。
+
+    历史缺陷（P1-1）：`market.py` 调 `local_bars()` 未传 `limit`，而
+    `degrade.local_bars` 默认 `limit=500` → 请求 `count=30` 实测返回本地全量
+    （320 根），前端图表与指标计算随之失真。回退该修复即 FAILED。
+    """
+    import asyncio
+    from datetime import date, timedelta
+
+    import tools
+    import app.routes.market as market_routes
+
+    n_all = 320
+    store.upsert_bars("600519.SH", _bars_seq(n_all), adjust="")
+    # 路由内 `local_bars` 走 `degrade.get_store()`；把它指到本测试的临时仓。
+    monkeypatch.setattr("datasource.degrade.get_store", lambda: store)
+
+    async def _no_remote(*a, **k):
+        return {"bars": [], "source": None}          # 模拟远程源彻底不可用
+    monkeypatch.setattr(tools, "fetch_kline_cached", _no_remote, raising=False)
+
+    env = asyncio.run(market_routes.market_kline(code="600519.SH", count=30, ctx=None))
+    assert env["code"] == 0, env
+    data = env["data"]
+    assert data["stale"] is True                     # 降级≠造假：显式标 stale
+    assert data["source"] == "local:sqlite"
+    assert data["count"] == 30                       # ← 核心断言：不是 320
+    assert len(data["bars"]) == 30
+    # 必须是「最近 30 根」而非最早 30 根（latest-N 语义）
+    last = (date(2025, 1, 1) + timedelta(days=n_all - 1)).strftime("%Y%m%d")
+    first = (date(2025, 1, 1) + timedelta(days=n_all - 30)).strftime("%Y%m%d")
+    assert data["bars"][-1]["time"] == last
+    assert data["bars"][0]["time"] == first

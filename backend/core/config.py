@@ -216,6 +216,8 @@ class Settings(BaseSettings):
     risk_price_deviation_pct: float = 0.0       # 下单价相对最新价允许偏离上限（0.05=±5%）
     risk_symbol_allow: str = ""                 # 标的白名单（逗号分隔；空=全部允许）
     risk_symbol_deny: str = ""                  # 标的黑名单（逗号分隔；命中即拒）
+    # P0-5：实盘买入是否强制要求账户快照就绪（1=是，默认；0=关闭，仅供联调）
+    risk_require_snapshot_for_buy: int = 1
 
     # 存储与日志（默认跟随运行根目录：打包=exe 同目录 data/、logs/）
     db_path: Path = Field(default_factory=_default_db_path)

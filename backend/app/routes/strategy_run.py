@@ -122,5 +122,9 @@ async def precheck(body: dict, ctx: AppContext = Depends(get_ctx)):
         price = float(body.get("price", 0) or 0)
     except (TypeError, ValueError):
         return err(400, "volume/price 必须为数字")
-    allowed, reason = ctx.risk.precheck_order(code, price, volume, direction)
+    # P0-5：预检口径与真实下单一致——实盘（live）才要求账户快照就绪。
+    _sr = ctx.signal_router
+    _live = bool(_sr is not None and getattr(_sr, "mode", "paper") == "live")
+    allowed, reason = ctx.risk.precheck_order(code, price, volume, direction,
+                                              require_account=_live)
     return ok({"allowed": allowed, "reason": reason})

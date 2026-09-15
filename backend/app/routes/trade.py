@@ -159,7 +159,12 @@ async def trade_precheck(body: dict, ctx: AppContext = Depends(get_ctx)):
     except (TypeError, ValueError):
         return err(400, "volume/price 必须为数字")
     price_type = body.get("price_type", "limit")
-    allowed, reason = ctx.risk.precheck_order(code, price, volume, direction, price_type)
+    # P0-5：预检口径必须与真实下单一致——实盘（live）才要求账户快照就绪 +
+    # 可用资金校验，模拟盘无券商账户、不受该闸门限制。
+    _sr = ctx.signal_router
+    _live = bool(_sr is not None and getattr(_sr, "mode", "paper") == "live")
+    allowed, reason = ctx.risk.precheck_order(code, price, volume, direction, price_type,
+                                              require_account=_live)
     return ok({"allowed": allowed, "reason": reason})
 
 

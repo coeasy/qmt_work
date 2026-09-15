@@ -252,8 +252,17 @@ async def test_idempotent_concurrent():
     await post("/signal/mode", {"mode": "paper"})
     tag = f"smoke-idem-{int(time.time() * 1000)}"
     key = f"order:{tag}"
+    # P0-6：paper 单现由 PaperEngine 真实撮合，会校验委托价在涨跌停区间内。
+    # 故用真实最新价作为委托价（此前无校验时写死 10.0 也能"成交"）。
+    _qc, _qd = await get("/market/quote?code=600519.SH")
+    _q = (_qd.get("data") or {}) if isinstance(_qd, dict) else {}
+    ref_price = float(_q.get("last") or _q.get("preClose") or 0) or 0.0
+    if ref_price <= 0:
+        check("幂等并发：取得 600519.SH 最新价用于 paper 委托", False,
+              f"quote={_q}")
+        return
     signal = {"source": "test", "code": "600519.SH", "side": "buy",
-              "volume": 100, "price": 10.0, "price_type": "limit",
+              "volume": 100, "price": ref_price, "price_type": "limit",
               "remark": tag, "idempotency_key": key}
     try:
         async with httpx.AsyncClient(timeout=15) as cli:
@@ -268,15 +277,21 @@ async def test_idempotent_concurrent():
         check("仅一次真实执行，其余标记重复",
               len(real) == 1 and len(dup) == 4,
               f"real={len(real)} dup={len(dup)}")
-        # 数据库仅落一条 paper 订单（同一 idempotency_key 只执行一次）
+        # P0-6：paper 模式统一走 PaperEngine —— paper_orders 仅作「信号受理日志」，
+        # 同一 idempotency_key 只执行一次 → 仅落一条；账户真源在 paper_trades。
         try:
             c = sqlite3.connect(DB_PATH)
             n = c.execute("SELECT COUNT(*) FROM paper_orders WHERE remark=?",
                           (tag,)).fetchone()[0]
+            n_trades = c.execute(
+                "SELECT COUNT(*) FROM paper_trades WHERE code='600519.SH'").fetchone()[0]
             c.close()
         except Exception:
             n = -1
+            n_trades = -1
         check("paper_orders 仅落一条记录", n == 1, f"rows={n}")
+        check("PaperEngine 账户已入账（paper_trades 有成交）", n_trades >= 1,
+              f"paper_trades rows={n_trades}")
     finally:
         await post("/signal/mode", {"mode": prev_mode})
 

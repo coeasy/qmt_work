@@ -9,7 +9,8 @@ class _Risk:
         self.allowed = allowed
         self.prices = []
 
-    def check_order(self, code, price, volume, direction, price_type="limit"):
+    def check_order(self, code, price, volume, direction, price_type="limit",
+                    require_account=False, **kwargs):
         self.prices.append(price)
         return self.allowed, "blocked" if not self.allowed else ""
 

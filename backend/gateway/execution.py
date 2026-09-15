@@ -83,7 +83,10 @@ class ExecutionService:
             return {"ok": False, "reason": price_error}
         if not risk_checked:
             allowed, reason = checker.check_order(
-                code, risk_price, volume, direction, price_type)
+                code, risk_price, volume, direction, price_type,
+                # P0-5：直连路径（MCP 工具/批量）都是真实下单 → 要求账户快照就绪，
+                # 避免用演示级总资产放行真单。
+                require_account=True)
             if not allowed:
                 self._audit("order.rejected", code, params, reason)
                 return {"ok": False, "reason": reason}

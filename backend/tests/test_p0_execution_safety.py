@@ -79,13 +79,15 @@ class _CountingRisk:
     def __init__(self):
         self.calls = 0
 
-    def check_order(self, code, price, volume, side, price_type="limit"):
+    def check_order(self, code, price, volume, side, price_type="limit",
+                    require_account=False, **kwargs):
         self.calls += 1
         return True, ""
 
 
 class _DenyRisk:
-    def check_order(self, code, price, volume, side, price_type="limit"):
+    def check_order(self, code, price, volume, side, price_type="limit",
+                    require_account=False, **kwargs):
         return False, "风控拒绝（测试）"
 
 

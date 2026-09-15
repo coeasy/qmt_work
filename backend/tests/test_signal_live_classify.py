@@ -15,7 +15,8 @@ from xtquant_client.base import (
 
 
 class _PermissiveRisk:
-    def check_order(self, code, price, volume, side, price_type="limit"):
+    def check_order(self, code, price, volume, side, price_type="limit",
+                    require_account=False, **kwargs):
         return True, ""
 
 

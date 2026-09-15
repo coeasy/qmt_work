@@ -40,6 +40,8 @@ risk = RiskManager(
     price_deviation_pct=settings.risk_price_deviation_pct,
     symbol_allow=settings.risk_symbol_allow,
     symbol_deny=settings.risk_symbol_deny,
+    # P0-5：实盘买入要求账户快照就绪（total_assets 非演示值）+ 可用资金校验
+    require_snapshot_for_buy=settings.risk_require_snapshot_for_buy,
 )
 # 模块级 risk 单例 → 挂到 state 供 lifespan 阶段使用
 # （REST/各引擎/MCP 工具都通过 state.risk 共享同一个闸门）

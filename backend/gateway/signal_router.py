@@ -3,13 +3,19 @@
 所有交易信号（策略、算法单、条件单、涨停打板、目标持仓同步）统一经 SignalRouter，
 根据 mode 决定路由：
 - live    真实下单（经风控 + WAL + 通知）
-- paper   物理旁路：不真实下单，记录到 paper_orders 表（联调/演练/策略验证）
+- paper   物理旁路：不真实下单，**统一交 PaperEngine 撮合**（与策略运行共用同一
+          模拟盘账户/持仓/现金/成交），另落一行 paper_orders 作为「信号受理日志」
 - dry_run 只返回拟执行计划，不下单不记录
+
+P0-6（2026-09-15）：paper 模式此前直写 paper_orders、与策略运行的 PaperEngine
+是两套互不相通的账；现统一为 PaperEngine 单实现，paper 单会真实影响
+/paper/account 的持仓与现金（且受 PaperEngine 的现金/T+1/涨跌停校验）。
 
 切换模式：POST /config/signal-mode {mode: "live"|"paper"|"dry_run"}
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 import uuid
@@ -45,7 +51,7 @@ class Signal:
 
 class SignalRouter:
     def __init__(self, manager, risk=None, db=None, wal=None, notifier=None, on_event=None,
-                 runtime_config=None):
+                 runtime_config=None, paper_engine=None):
         from core.config import settings
         self._manager = manager
         self._risk = risk
@@ -54,6 +60,8 @@ class SignalRouter:
         self._notifier = notifier
         self._on_event = on_event
         self._runtime_config = runtime_config
+        # P0-6：模拟盘统一到 PaperEngine（与策略运行共用同一账户）。
+        self._paper_engine = paper_engine
         # P0-1：模式持久化 + 安全默认。启动时从 runtime_config 读取；读取失败或无记录
         # 时默认 paper（而非 live），避免升级/崩溃/自动更新重启后无提示恢复实盘。
         self.mode = self._load_persisted_mode("paper")
@@ -213,7 +221,10 @@ class SignalRouter:
             return {"ok": False, "reason": "无最新行情，无法估算市价单金额", "mode": self.mode}
         if self._risk is not None:
             ok, reason = self._risk.check_order(code, est_price, sig.volume, side,
-                                                price_type=sig.price_type)
+                                                price_type=sig.price_type,
+                                                # P0-5：仅实盘要求账户快照就绪 +
+                                                # 可用资金校验；模拟盘无券商账户。
+                                                require_account=(self.mode == "live"))
             if not ok:
                 self._audit("signal.rejected", code, sig.__dict__, reason)
                 # V9 §5.3：风控拒绝事件进 WS 实时流（前端事件日志可见）
@@ -238,7 +249,7 @@ class SignalRouter:
                     "amount": round(amount, 2), "requires_totp": bool(self.totp_secret),
                     "mode": self.mode}
 
-        return await self._execute(sig)
+        return await self._execute(sig, est_price)
 
     async def _est_price_async(self, sig: Signal) -> float:
         """估算下单金额所用价格：有价用价，市价/无价则取最新行情价。
@@ -282,10 +293,14 @@ class SignalRouter:
         return await self.route(sig, auto_confirm=auto_confirm,
                                 idempotency_key=idempotency_key)
 
-    async def _execute(self, sig: Signal) -> dict:
-        """确认后/未超阈值时的实际执行（paper 或 live）。"""
+    async def _execute(self, sig: Signal, est_price: float = 0.0) -> dict:
+        """确认后/未超阈值时的实际执行（paper 或 live）。
+
+        est_price：路由层已算好的估价（限价=委托价；市价=最新价）。P0-6 起 paper
+        分支需要它——PaperEngine 拒绝 price<=0 的委托，市价单必须用估价成交。
+        """
         if self.mode == "paper":
-            return await self._paper(sig)
+            return await self._paper(sig, est_price)
         return await self._live(sig)
 
     async def confirm(self, token: str, totp_code: str = "") -> dict:
@@ -302,23 +317,51 @@ class SignalRouter:
         # 不得直接放行。
         est_price = await self._est_price_async(sig)
         if self._risk is not None:
-            ok, reason = self._risk.check_order(sig.code, est_price, sig.volume, sig.side)
+            ok, reason = self._risk.check_order(sig.code, est_price, sig.volume, sig.side,
+                                                require_account=(self.mode == "live"))
             if not ok:
                 self._audit("signal.rejected", sig.code, sig.__dict__, reason)
                 return {"ok": False, "reason": reason, "mode": self.mode}
-        res = await self._execute(sig)
+        res = await self._execute(sig, est_price)
         res["confirmed"] = True
         return res
 
     def pending_count(self) -> int:
         return len(self._pending)
 
-    async def _paper(self, sig: Signal) -> dict:
+    async def _paper(self, sig: Signal, est_price: float = 0.0) -> dict:
+        """模拟盘旁路（P0-6）：统一交 PaperEngine 撮合，与策略运行共用同一账户。
+
+        统一前：此处直写 paper_orders，既不影响 /paper/account 的持仓/现金，也不受
+        PaperEngine 的现金/T+1/涨跌停校验——同一「模拟盘」实际是两套互不相通的账。
+        统一后：成交/持仓/现金由 PaperEngine 单一实现维护；paper_orders 仅保留为
+        「信号受理日志」（记录 source/remark 等 PaperEngine 不承载的信号元数据），
+        且**仅在撮合成功后**落行，绝不把被拒单记成已受理。
+        """
+        pe = self._paper_engine
+        if pe is None:
+            # 引擎未注入：绝不静默假装成交（零 mock），明确失败并审计。
+            reason = "模拟盘引擎未初始化（paper 模式不可用）"
+            self._audit("signal.rejected", sig.code, sig.__dict__, reason)
+            return {"ok": False, "reason": reason, "mode": "paper"}
+        # 限价单用委托价；市价单用路由层估好的最新价（PaperEngine 拒绝 price<=0）。
+        price = float(sig.price or 0) or float(est_price or 0)
+        try:
+            # submit_order 内含同步 SQLite 写（现金/持仓/成交落库），移出事件循环，
+            # 避免高频信号下单时阻塞其他请求（与 strategy_runtime 同口径）。
+            fill = await asyncio.to_thread(
+                pe.submit_order, sig.code, sig.side, price, sig.volume,
+                price_type=sig.price_type or "limit", remark=sig.remark or "")
+        except ValueError as exc:
+            reason = f"模拟盘拒单：{exc}"
+            self._audit("signal.rejected", sig.code, sig.__dict__, reason)
+            return {"ok": False, "reason": reason, "mode": "paper"}
+        # 信号受理日志（PaperEngine 成功后落行；失败路径不落）
         if self._db is not None:
             try:
                 self._db.insert("paper_orders", {
                     "source": sig.source, "code": sig.code, "side": sig.side,
-                    "price": sig.price, "volume": sig.volume,
+                    "price": fill.get("price", price), "volume": sig.volume,
                     "price_type": sig.price_type, "remark": sig.remark,
                     "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
                 })
@@ -328,11 +371,14 @@ class SignalRouter:
             from gateway.wal import WAL
             if isinstance(self._wal, WAL):
                 self._wal.append("paper", "signal", sig.code, sig.__dict__)
-        self._emit({"type": "signal_paper", "data": sig.__dict__})
-        log.info("paper signal: %s %s %s@%s", sig.source, sig.code, sig.side, sig.volume)
+        payload = {**sig.__dict__, "fill": fill}
+        self._emit({"type": "signal_paper", "data": payload})
+        log.info("paper signal: %s %s %s@%s -> %s", sig.source, sig.code, sig.side,
+                 sig.volume, fill.get("order_id"))
         from gateway.metrics import get_metrics
         get_metrics().record_order(sig.side, "paper")
-        return {"ok": True, "mode": "paper", "recorded": True, "signal": sig.__dict__}
+        return {"ok": True, "mode": "paper", "recorded": True,
+                "signal": sig.__dict__, **fill}
 
     def _wal_append(self, op: str, entity_id: str, payload: dict) -> None:
         """WAL 写入（无 WAL / 类型不符 / 写失败均静默，绝不阻断下单主链路）。"""

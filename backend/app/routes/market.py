@@ -350,7 +350,10 @@ async def market_kline(code: str, period: str = "1d", count: int = 250,
     # （stale 明示、as_of 标数据截至时间、降级≠造假）；本地也无数据才 503。
     if not bars and not res.get("source"):
         from datasource.degrade import envelope, local_bars
-        dres = local_bars(code, period=period, adjust=adj or "")
+        # ⚠️ 必须透传 count：local_bars 默认 limit=500，不透传会让「请求 count=30」
+        # 在远程源不可用时返回最多 500 根（实测 320 根 = 本地全量），
+        # 前端图表与指标计算随之失真。降级路径与主路径必须给出同一根数契约。
+        dres = local_bars(code, period=period, adjust=adj or "", limit=count)
         if dres is not None:
             return ok(envelope(
                 {"code": code, "period": period, "count": len(dres.results),

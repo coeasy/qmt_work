@@ -124,7 +124,9 @@ async def setup(app: FastAPI) -> dict:
     from gateway.signal_router import SignalRouter
     state.signal_router = SignalRouter(
         state.broker_manager, state.risk, state.db, state.wal,
-        state.notifier, state.ws_manager.broadcast, runtime_config=state.runtime_config)
+        state.notifier, state.ws_manager.broadcast, runtime_config=state.runtime_config,
+        # P0-6：paper 模式统一走 PaperEngine（与策略运行共用同一模拟盘账户）
+        paper_engine=state.paper_engine)
 
     return {}
 

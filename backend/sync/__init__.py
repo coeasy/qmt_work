@@ -257,10 +257,13 @@ class SyncEngine:
                         if self.risk is not None and conn.cfg.active:
                             try:
                                 # 用真实持仓市值 + 总资产喂入风控（接管演示级默认值，来源切 live）
+                                # P0-5：同时喂入可用资金（get_cash 的 cash），
+                                # 使实盘买入做「可用资金充足性」校验。
                                 self.risk.feed_account_snapshot(
                                     {p.get("code", ""): float(p.get("market_value", 0.0) or 0.0)
                                      for p in (pos or [])},
-                                    float((cash.get("assets", 0.0) or 0.0) or snap["net_value"]))
+                                    float((cash.get("assets", 0.0) or 0.0) or snap["net_value"]),
+                                    available_cash=float(cash.get("cash", 0.0) or 0.0))
                                 reason = self.risk.update_net_value(snap["net_value"])
                                 if reason:
                                     log.warning("risk circuit broken: %s", reason)
