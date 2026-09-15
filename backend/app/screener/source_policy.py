@@ -63,6 +63,7 @@ def explicit_provider_of(raw: Optional[str]) -> Optional[str]:
 def resolve_policy(raw: Optional[str], capability: str,
                    *, commercial_mode: bool = False,
                    registered: Optional[set[str]] = None,
+                   declared: Optional[dict] = None,
                    qmt_connected: bool = False) -> ResolvedPolicy:
     """按能力求值 Source Policy，产出实际候选源链（D-J §J.2 求值顺序 ①→⑦）。
 
@@ -88,7 +89,8 @@ def resolve_policy(raw: Optional[str], capability: str,
 
     # auto / prefer_qmt → 能力链求值
     chain = list(provider_catalog.resolve_chain(
-        capability, commercial_mode=commercial_mode, registered=registered))
+        capability, commercial_mode=commercial_mode, registered=registered,
+        declared=declared))
     degraded = False
     qmt_reason = None
     if not qmt_connected:

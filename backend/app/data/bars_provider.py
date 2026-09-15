@@ -178,15 +178,20 @@ class BarsProvider:
 
         # —— 解析能力链 ——
         cap = "kline_qfq" if adjust in ("qfq", "hfq") else "kline"
+        declared = None
         try:
             from datasource.registry import get_manager
-            registered = set(get_manager().list_sources())
+            _mgr = get_manager()
+            registered = set(_mgr.list_sources())
+            # V11 R6：把「实现类自述的能力」一并传入，让 resolve_chain 做能力校验
+            declared = _mgr._declared_map()
         except Exception:  # noqa: BLE001
             registered = None
         resolved = resolve_policy(
             policy_str, cap,
             commercial_mode=self._commercial_mode(),
             registered=registered,
+            declared=declared,
             qmt_connected=self._qmt_connected(),
         )
         chain = list(resolved.chain)

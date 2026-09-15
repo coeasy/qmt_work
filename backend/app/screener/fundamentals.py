@@ -112,7 +112,8 @@ def _resolve_fundamental_chain(policy_str: str, manager) -> List[str]:
         from datasource.providers import provider_catalog
         registered = set(manager.list_sources())
         return list(provider_catalog.resolve_chain(
-            "fundamental", commercial_mode=_commercial_mode(), registered=registered))
+            "fundamental", commercial_mode=_commercial_mode(), registered=registered,
+            declared=manager._declared_map()))
     except Exception:  # noqa: BLE001
         return []
 

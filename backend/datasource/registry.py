@@ -107,7 +107,11 @@ class _BoundBrokerSource:
     """
 
     name = "broker"
-    capabilities = frozenset({"quote", "kline", "instrument_detail"})
+    # V11 R6：补 kline_qfq/kline_hfq —— get_kline 明确透传 adjust（QMT 经 dividend_type
+    # 参数化），契约链也把 broker 列在复权链首位，此前声明漏了两个变体。
+    # 不含 stock_list：get_stock_list 恒返回 None（券商侧无全市场列表接口）。
+    capabilities = frozenset({"quote", "kline", "kline_qfq", "kline_hfq",
+                              "instrument_detail"})
 
     def __init__(self, bridge):
         self._b = bridge
@@ -155,8 +159,16 @@ class DataSourceManager:
     def __init__(self):
         self._plugins: dict[str, DataSource] = {}
         self._broker_factory = None  # conn_id -> _BoundBrokerSource | None
-        # auto 回退顺序：先券商，再各补充源。可在运行时经 set_auto_chain 调整。
-        self._auto_chain: list[str] = ["broker"]
+        # V11 R6：auto 链**默认按能力契约链解析**（provider_catalog.resolve_chain）。
+        # `_auto_chain_override` 只在显式 set_auto_chain() 后生效 —— 一条与能力无关的
+        # 粗粒度覆盖，优先级高于契约链，供运维/测试临时改序（默认 None）。
+        #
+        # 此前 `_auto_chain` 是「注册顺序」的副产物，与契约链**两套规则并存**：
+        # 5 条读路径（quote/detail/minutes/stock_list/search）用注册序，
+        # 只有 K 线用契约链；且 `provider_catalog.set_override()` 只对后者生效 ——
+        # 实测 `set_override('quote',['tencent'])` 后 API 回显 ['tencent']，
+        # 而 get_quote 仍取 sina（改链 API 对 5 条路径静默无效）。
+        self._auto_chain_override: list[str] | None = None
         # 商用模式：True 时链路求值阶段跳过 Research-Only 等禁止商用的源（如 eltdx）。
         self._commercial_mode: bool = False
         self._breakers: dict[str, dict] = {}
@@ -166,8 +178,6 @@ class DataSourceManager:
     # ---------- 注册 ----------
     def register(self, source: DataSource) -> "DataSourceManager":
         self._plugins[source.name] = source
-        if source.name not in self._auto_chain:
-            self._auto_chain.append(source.name)
         return self
 
     def register_broker(self, factory) -> "DataSourceManager":
@@ -175,10 +185,29 @@ class DataSourceManager:
         self._broker_factory = factory
         return self
 
-    def set_auto_chain(self, chain: list[str]) -> "DataSourceManager":
-        """显式设定 auto 回退顺序；未在 chain 中的已注册源不参与 auto。"""
-        self._auto_chain = [c for c in chain if c == "broker" or c in self._plugins]
+    def set_auto_chain(self, chain: list[str] | None) -> "DataSourceManager":
+        """设定**与能力无关**的粗粒度回退序覆盖；传 None 清除、恢复契约链。
+
+        未注册的源名直接丢弃（不静默保留无效项）。这是运维/测试用的逃生口，
+        生产默认路径是 ``provider_catalog.resolve_chain(capability)``。
+
+        与契约链的差别：覆盖链**不做依赖可用性过滤**（它是一条显式指令，调用方自担），
+        但仍做注册 / 许可证 / 能力校验三重过滤。
+        """
+        if chain is None:
+            self._auto_chain_override = None
+            return self
+        self._auto_chain_override = [c for c in chain if c == "broker" or c in self._plugins]
         return self
+
+    @property
+    def _auto_chain(self) -> list[str]:
+        """当前 auto 候选的**只读视图**：有覆盖用覆盖，否则取 kline 契约链的解析结果。
+
+        保留此名字供 ``routes/market.py`` 的 ``/market/sources`` 展示 —— 此前它直接暴露
+        内部注册序（与实际生效链可能不同），现已改为暴露真实生效的链。
+        """
+        return self._resolve_sources("auto", "kline")
 
     # ---------- 多源能力链（Phase 3：CapabilityChain，替代写死的 auto_chain）----------
     def set_commercial_mode(self, value: bool) -> "DataSourceManager":
@@ -189,23 +218,49 @@ class DataSourceManager:
     def _registered_set(self) -> set[str]:
         return set(self.list_sources())
 
-    def _resolve_sources(self, source: str, capability: str) -> list[str]:
-        """按 source 语义 + 能力链解析候选源顺序（D-J §J.2；替代写死的 auto_chain）。
+    def _declared_map(self) -> dict[str, frozenset[str]]:
+        """provider_id -> 实现类自述的能力集。
 
-        - auto/prefer_qmt/空：取该能力默认降级链（QMT→eltdx→baostock→akshare），
-          并按「已注册 + 依赖可用 + 商用许可」过滤；
+        **这是能力的唯一真源**（``DataSource.capabilities``），供 ``resolve_chain`` 做
+        能力校验。broker 不经 ``register`` 注册（它由 ``_BoundBrokerSource`` 按连接动态
+        构造），故在此显式补上其类声明。
+        """
+        out: dict[str, frozenset[str]] = {}
+        if self._broker_factory is not None:
+            out["broker"] = frozenset(_BoundBrokerSource.capabilities)
+        for name, src in self._plugins.items():
+            caps = getattr(type(src), "capabilities", None)
+            if caps:
+                out[name] = frozenset(caps)
+        return out
+
+    def _resolve_sources(self, source: str, capability: str) -> list[str]:
+        """**唯一**的 auto 候选解析入口（D-J §J.2；V11 R6 统一）。
+
+        - auto/prefer_qmt/空：有 ``set_auto_chain`` 覆盖则用覆盖（注册 + 许可 + 能力三重
+          过滤，不做依赖过滤）；否则取 ``provider_catalog.resolve_chain(capability)``
+          （注册 + 依赖 + 许可 + 能力四重过滤）；
         - explicit:<id>：仅该源，不降级（不支持该能力由调用方负责报错）；
         - qmt_only：仅 broker；local_only：空（由 canonical 层处理）；
         - broker / 具体源名：单源。
+
+        V11 R6 之前，5 条读路径走的是「注册序 + 许可证」的 ``_auto_candidates()``，
+        与 K 线的契约链**两套规则并存**，且 ``provider_catalog.set_override()`` 只对
+        后者生效 —— 现已全部收敛到本方法。
         """
         from datasource.providers import provider_catalog
         src = (source or "auto").strip()
         if src.startswith("explicit:"):
             return [src[len("explicit:"):]]
         if src in ("", "auto", "prefer_qmt"):
+            if self._auto_chain_override is not None:
+                declared = self._declared_map()
+                return [n for n in self._auto_chain_override
+                        if (n == "broker" or self._license_ok(n))
+                        and (n not in declared or capability in declared[n])]
             return provider_catalog.resolve_chain(
                 capability, commercial_mode=self._commercial_mode,
-                registered=self._registered_set())
+                registered=self._registered_set(), declared=self._declared_map())
         if src == "qmt_only":
             return ["broker"] if "broker" in self._registered_set() else []
         if src == "local_only":
@@ -262,21 +317,12 @@ class DataSourceManager:
         ``search_stocks`` 都直接遍历 ``_auto_chain``，**绕过了许可证过滤**。
         后果：商用模式下 K 线已正确跳过 eltdx（ELTDX Research-Only，禁止商用），
         行情却仍在用 eltdx —— 等于把禁止商用的数据源用在了商业部署里。
-        现统一走 ``_auto_candidates()``，五条路径与 K 线同规则。
+        现统一走 ``_resolve_sources()``（V11 R6 起按能力契约链），五条路径与 K 线同规则。
         """
         if not self._commercial_mode:
             return True
         from datasource.providers import provider_catalog
         return provider_catalog.is_commercial_ok(name)
-
-    def _auto_candidates(self) -> list[str]:
-        """auto 链候选源：注册顺序 + 商用许可过滤。
-
-        与 ``_resolve_sources`` 的区别：这里保留 ``_auto_chain`` 的注册顺序
-        （含 ``set_auto_chain`` 的运行时覆盖），只叠加许可证过滤；
-        broker 恒不过滤（券商授权终端，授权即合规）。
-        """
-        return [n for n in self._auto_chain if n == "broker" or self._license_ok(n)]
 
     def _record_failure(self, name: str) -> None:
         b = self._breaker(name)
@@ -462,8 +508,8 @@ class DataSourceManager:
             return await _from_broker()
         if source in self._plugins:
             return await _from_plugin(source)
-        # auto：按 auto_chain 依次尝试
-        for name in self._auto_candidates():
+        # auto：按能力契约链依次尝试（V11 R6：与 K 线共用同一解析入口）
+        for name in self._resolve_sources(source, "quote"):
             if name == "broker":
                 q = await _from_broker()
             else:
@@ -533,7 +579,7 @@ class DataSourceManager:
         if source in self._plugins:
             return await _plugin_detail(source)
         last: Optional[dict] = None
-        for name in self._auto_candidates():
+        for name in self._resolve_sources(source, "instrument_detail"):
             det = await (_broker_detail() if name == "broker" else _plugin_detail(name))
             if det is None:
                 continue
@@ -580,10 +626,15 @@ class DataSourceManager:
     # ---------- 当日分时（仅补充源提供；券商 SDK 无分时接口） ----------
     async def get_minutes(self, code: str, trading_date: Optional[str] = None,
                           source: str = "auto") -> Optional[dict]:
-        """当日分时曲线（价格+均价+分钟量）。按 auto 链遍历补充源（跳过券商），
-        全部无数据返回 None。"""
+        """当日分时曲线（价格+均价+分钟量）。按 ``minutes`` 能力链遍历补充源（跳过券商），
+        全部无数据返回 None。
+
+        V11 R6：此前借道「注册序」候选链，会去试 sina/tencent 等**没有 get_minutes**
+        的源（靠 hasattr 事后跳过）；现按 ``minutes`` 能力解析，候选集即「真正实现该
+        能力的源」。
+        """
         source = self._validate_source(source)
-        for name in self._auto_candidates():
+        for name in self._resolve_sources(source, "minutes"):
             if name == "broker":
                 continue
             if source not in ("auto", name):
@@ -597,24 +648,28 @@ class DataSourceManager:
         return None
 
     # ---------- 指数 / 板块 / ETF / 资金流（东财对标能力，仅补充源提供） ----------
-    def _sup_chain(self, source: str = "auto") -> list:
-        """按 source 解析补充源候选链（D9 v1.3：能力链替代写死 _auto_chain）。
+    def _sup_chain(self, source: str = "auto", capability: str = "kline") -> list:
+        """按 source + **真实能力**解析补充源候选链（V11 R6：不再固定借道 kline 链）。
 
         - "broker"：返回空链 → 方法返回 None，绝不悄悄回退补充源行情，
           否则「仅券商」的降级语义失效，用户会误以为看的是券商数据。
         - 具体源名 / explicit:<id>：只用该源（交由 _resolve_sources 处理）。
-        - "auto"/空：按能力链（kline 维度）依次降级，并排除 broker
+        - "auto"/空：按 ``capability`` 的能力链依次降级，并排除 broker
           （本方法服务于「券商 SDK 无此接口」的能力，如分时/板块/资金流）。
+
+        此前无论问什么能力都传 "kline" —— 实测 `get_moneyflow` 拿到的是 kline 链
+        ``[tencent, sina]``，而 moneyflow 的真实链是 ``(broker, eltdx, akshare)``，
+        **两者源集合不相交**（恰好本机无源实现该方法，掩盖了错配）。
         """
         want = self._validate_source(source)
         if want == "broker":
             return []
-        return [n for n in self._resolve_sources(source, "kline") if n != "broker"]
+        return [n for n in self._resolve_sources(source, capability) if n != "broker"]
 
     async def _first_supported(self, method: str, *args, source: str = "auto",
-                               **kwargs):
-        """按 source 解析的链找到第一个实现该方法的补充源并返回 (结果, 源名)。"""
-        for name in self._sup_chain(source):
+                               capability: str = "kline", **kwargs):
+        """按 source + capability 解析的链，找到第一个实现该方法的补充源并返回 (结果, 源名)。"""
+        for name in self._sup_chain(source, capability):
             src = self._plugins.get(name)
             if src is None or not hasattr(src, method):
                 continue
@@ -626,37 +681,43 @@ class DataSourceManager:
     async def get_boards(self, kind: str = "industry", sort_by: str = "pct",
                          limit: int = 50, source: str = "auto") -> tuple[Optional[list], Optional[str]]:
         """板块指数榜单（真实板块指数快照）。返回 (rows, source_name)。"""
-        return await self._first_supported("get_boards", kind, sort_by, limit, source=source)
+        return await self._first_supported("get_boards", kind, sort_by, limit, source=source,
+                                          capability="sector")
 
     async def get_board_constituents(self, code: str, limit: int = 50, page: int = 0,
                                      source: str = "auto") -> tuple[Optional[dict], Optional[str]]:
         """板块成分股。返回 ({code,total,items,page,has_more}, source_name)。"""
-        return await self._first_supported("get_board_constituents", code, limit, page, source=source)
+        return await self._first_supported("get_board_constituents", code, limit, page, source=source,
+                                          capability="sector")
 
     async def get_board_kline(self, code: str, period: str = "1d", count: int = 60,
                               source: str = "auto") -> tuple[Optional[list], Optional[str]]:
         """板块 / 指数 K 线（kind='index'）。"""
-        return await self._first_supported("get_board_kline", code, period, count, source=source)
+        return await self._first_supported("get_board_kline", code, period, count, source=source,
+                                          capability="index_constituent")
 
     async def search_boards(self, name: str, limit: int = 8,
                             source: str = "auto") -> tuple[Optional[list], Optional[str]]:
         """板块名称→代码匹配（深链稳化）。返回 (rows, source_name)。"""
-        return await self._first_supported("search_boards", name, limit, source=source)
+        return await self._first_supported("search_boards", name, limit, source=source,
+                                          capability="sector")
 
     async def get_etf_list(self, limit: int = 0,
                            source: str = "auto") -> tuple[Optional[list], Optional[str]]:
         """ETF 清单（代码 + 名称）。limit<=0 返回全量，避免整段截断。"""
-        return await self._first_supported("get_etf_list", limit, source=source)
+        return await self._first_supported("get_etf_list", limit, source=source,
+                                          capability="etf_list")
 
     async def get_moneyflow(self, code: str,
                             source: str = "auto") -> tuple[Optional[dict], Optional[str]]:
         """个股资金流（真实内外盘口径）。"""
-        return await self._first_supported("get_moneyflow", code, source=source)
+        return await self._first_supported("get_moneyflow", code, source=source,
+                                          capability="moneyflow")
 
     async def get_share_capital(self, codes: list,
                                 source: str = "auto") -> tuple[dict, Optional[str]]:
         """流通股本（换手率分母）。无数据返回空 dict（调用方显式降级）。"""
-        for name in self._sup_chain(source):
+        for name in self._sup_chain(source, "capital"):
             src = self._plugins.get(name)
             if src is None or not hasattr(src, "get_share_capital"):
                 continue
@@ -668,7 +729,7 @@ class DataSourceManager:
     async def get_price_limits(self, codes: list,
                                source: str = "auto") -> tuple[dict, Optional[str]]:
         """涨跌停价。无数据返回空 dict。"""
-        for name in self._sup_chain(source):
+        for name in self._sup_chain(source, "price_limit"):
             src = self._plugins.get(name)
             if src is None or not hasattr(src, "get_price_limits"):
                 continue
@@ -689,7 +750,7 @@ class DataSourceManager:
                 return None
             lst = await self._call_source("broker", b.get_stock_list())
             return lst
-        for name in self._auto_candidates():
+        for name in self._resolve_sources(source, "stock_list"):
             if name == "broker":
                 b = self._broker(conn_id)
                 if b:
@@ -722,7 +783,7 @@ class DataSourceManager:
         q = (q or "").strip()
         if not q:
             return []
-        for name in self._auto_candidates():
+        for name in self._resolve_sources("auto", "search"):
             if name == "broker":
                 continue
             src = self._plugins.get(name)

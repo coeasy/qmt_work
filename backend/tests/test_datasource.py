@@ -40,6 +40,11 @@ class FakeBroker:
 
 class FakeTDX(DataSource):
     name = "eltdx"
+    # V11 R6：替身必须与真实 EltdxSource 的**能力声明**一致 —— 真实源接受 adjust
+    # 参数，故声明复权变体；否则能力校验会把它移出 kline_qfq/kline_hfq 链，
+    # 复权回退测试就测不到「broker 失败 → 落到 eltdx」这条路径。
+    capabilities = frozenset({"quote", "kline", "kline_qfq", "kline_hfq",
+                              "instrument_detail", "stock_list", "search"})
 
     def __init__(self, fail: bool = False):
         self.fail = fail
@@ -274,8 +279,8 @@ def test_license_gate_keeps_broker_and_public_sources():
     assert m._license_ok("eltdx") is False   # Research-Only
     assert m._license_ok("baostock") is True  # BSD-3-Clause
     assert m._license_ok("akshare") is True   # MIT
-    # broker 恒在候选链中，即使商用模式
-    assert "broker" in m._auto_candidates()
+    # broker 恒在候选链中，即使商用模式（V11 R6：统一入口 _resolve_sources）
+    assert "broker" in m._resolve_sources("auto", "quote")
 
 
 # ---------------- 券商详情为空壳时的画像富化（ETF / 指数真实形态） ----------------

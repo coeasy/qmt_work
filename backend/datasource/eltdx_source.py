@@ -71,6 +71,19 @@ _NAME_BATCH = 2000           # 每批经 stock_profile_table 取简称的证券�
 
 class EltdxSource(DataSource):
     name = "eltdx"
+
+    #: V11 R6：能力声明（**能力的唯一真源**）。此前未声明 → 继承基类默认值
+    #: ``{quote, kline, instrument_detail, stock_list}``，与本类实际实现严重不符：
+    #: 本类还实现了 sector / index_constituent / capital / price_limit / moneyflow /
+    #: minutes / etf_list / search —— 补上后 ``resolve_chain`` 的能力校验才不会
+    #: 把 eltdx 从这些能力的链里剔除（它其实是这些能力的**唯一**提供方）。
+    #: 不含 fundamental / calendar / suspend / corporate_action：本类未实现。
+    capabilities = frozenset({
+        "quote", "kline", "kline_qfq", "kline_hfq", "instrument_detail", "stock_list",
+        "sector", "index_constituent", "capital", "price_limit", "moneyflow",
+        "minutes", "etf_list", "search",
+    })
+
     #: 代码->名称 缓存（首次拉全市场列表后常驻进程内存，并持久化到本地 JSON）
     _name_map: dict = {}
     #: 小写检索索引：lower(name/code) -> [(code, name), ...]（名称表加载时一次性建）

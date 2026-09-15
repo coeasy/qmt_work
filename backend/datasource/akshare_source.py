@@ -40,9 +40,13 @@ class AkshareSource(DataSource):
     name = "akshare"
     commercial_ok = True
     capabilities: ClassVar[frozenset[str]] = frozenset({
-        "quote", "kline", "kline_qfq", "kline_hfq", "stock_list", "sector",
-        "index_constituent", "fundamental", "capital", "suspend", "moneyflow",
-        "calendar", "dividend",
+        # V11 R6：按**实际实现**对账后的能力声明。本类只实现 get_quote / get_kline /
+        # get_stock_list / get_instrument_detail / get_index_constituents 五个方法。
+        # 此前声明里的 sector / fundamental / capital / suspend / moneyflow / calendar /
+        # dividend **七个都没有实现** —— 是「想当然」写下的，会让链路求值把 akshare
+        # 排进这些能力的候选链（只能靠 hasattr 事后跳过，白白计入熔断）。
+        "quote", "kline", "kline_qfq", "kline_hfq",
+        "stock_list", "instrument_detail", "index_constituent",
     })
 
     @staticmethod

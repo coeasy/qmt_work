@@ -30,8 +30,12 @@ def _to_baostock_code(code: str) -> str:
 
 class BaoStockSource(DataSource):
     name = "baostock"
-    capabilities = frozenset({"kline", "instrument_detail", "stock_list",
-                              "suspend", "fundamental", "index_constituent", "dividend"})
+    # V11 R6：按**实际实现**对账后的能力声明。本类只实现 get_kline / get_instrument_detail /
+    # get_stock_list（get_quote 是显式 raise，故不声明）。此前声明里的
+    # suspend / fundamental / index_constituent / dividend **四个都没有实现** ——
+    # 是「想当然」写下的，会骗过链路求值（让 baostock 排进这些能力的链里）。
+    capabilities = frozenset({"kline", "kline_qfq", "kline_hfq",
+                              "instrument_detail", "stock_list"})
     commercial_ok = True
 
     @staticmethod
