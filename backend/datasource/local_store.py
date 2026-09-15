@@ -23,6 +23,11 @@ from typing import Any, Dict, List, Optional, Union
 
 from core.db import DB, get_db
 from datasource.models import Bar, BarLite, BoardItem, StockInfo
+from datasource.quality import (
+    PROVIDER_QUALITY_RANK,
+    QUALITY_STATE_RANK,
+    canonical_sort_key,
+)
 
 log = logging.getLogger("qmt_work.datasource.local_store")
 
@@ -41,25 +46,41 @@ def _num(v: Any) -> Optional[float]:
         return None
 
 
-#: Canonical 选主的质量状态优先级（小者优先），与两处窗口函数 CASE 一一对应。
-_QUALITY_RANK = {"validated": 0, "complete": 1, "match": 2}
+#: 窗口函数里的质量状态 ``CASE`` —— 由 :data:`QUALITY_STATE_RANK` **程序化生成**，
+#: 不手写副本（新增一档质量状态时只改 ``quality.py`` 一处，SQL 自动跟上）。
+_QUALITY_STATE_CASE_SQL = "CASE COALESCE(quality_state,'') " + " ".join(
+    f"WHEN '{k}' THEN {v}" for k, v in sorted(QUALITY_STATE_RANK.items())
+) + " ELSE 3 END"
+
+#: 窗口函数里的 provider 质量序 ``CASE`` —— 同样由 :data:`PROVIDER_QUALITY_RANK`
+#: 程序化生成。未登记 / 空 provider 落 ``ELSE 999``（最差），与
+#: :func:`datasource.quality.provider_rank` 同口径。
+_PROVIDER_RANK_CASE_SQL = "CASE LOWER(COALESCE(provider_id,'')) " + " ".join(
+    f"WHEN '{k}' THEN {v}" for k, v in sorted(PROVIDER_QUALITY_RANK.items())
+) + " ELSE 999 END"
+
+#: 读路径的完整 ``ORDER BY`` 片段（小者优先），与 :func:`_canonical_key` 同口径。
+_CANONICAL_ORDER_SQL = (
+    f"{_QUALITY_STATE_CASE_SQL}, {_PROVIDER_RANK_CASE_SQL}, provider_id"
+)
 
 
 def _canonical_key(row: Any) -> tuple:
-    """Canonical 选主排序键 —— 逐项复刻窗口函数里的 ``ORDER BY``（小者优先）。
+    """Canonical 选主排序键 —— 与窗口函数 ``ORDER BY`` 逐项等价（小者优先）。
+
+    **直接复用** :func:`datasource.quality.canonical_sort_key`：读侧与对账侧
+    （``quality.reconcile_bars``）必须选出同一行，故规则只允许有一份实现。
 
     1. 质量状态 ``validated > complete > match > 其他``（对应 CASE ... ELSE 3）；
-    2. ``(provider_id = '') DESC`` —— 空 provider 排在前面（保持既有语义）；
-    3. ``provider_id`` 升序。
+    2. provider 质量序 ``broker/qmt > eltdx > baostock > akshare > 其他``，
+       空 provider 落 **999（最差）**；
+    3. ``provider_id`` 升序（同档位下的确定性 tie-break，不依赖行序）。
 
     注：``local_bars.provider_id`` 是 ``NOT NULL DEFAULT ''``，故无需处理 NULL；
     ``quality_state`` 为 NULL 时与 SQL 的 ``ELSE 3`` 一致，落到最后一档。
     """
-    return (
-        _QUALITY_RANK.get(row["quality_state"], 3),
-        0 if (row["provider_id"] or "") == "" else 1,
-        row["provider_id"] or "",
-    )
+    return canonical_sort_key(row["quality_state"], row["provider_id"])
+
 
 
 def _row_to_bar(row: Any, lite: bool = False) -> Union[Bar, BarLite]:
@@ -150,13 +171,15 @@ class LocalStore:
 
         V9 §10.3：多源 Raw 不互相覆盖（provider_id 入主键）后，同一 dt 可能存在
         多个 provider 的行。读取即 Canonical 选主：按质量状态
-        （validated > complete > match > 其他）优先，其次优先具名 provider，
-        保证消费方每根 K 线只看到一条确定性的主值。
+        （validated > complete > match > 其他）优先，其次按 **provider 质量序**
+        （broker/qmt > eltdx > baostock > akshare > 空），最后按 provider 名升序。
+        保证消费方每根 K 线只看到一条确定性的主值，且与
+        ``quality.reconcile_bars`` 标为 canonical 的行**是同一行**
+        （规则共用 :func:`datasource.quality.canonical_sort_key`）。
         """
         inner = ("SELECT dt, open, high, low, close, volume, amount, provider_id, "
                  "quality_state, ROW_NUMBER() OVER (PARTITION BY dt ORDER BY "
-                 "CASE quality_state WHEN 'validated' THEN 0 WHEN 'complete' THEN 1 "
-                 "WHEN 'match' THEN 2 ELSE 3 END, (provider_id = '') DESC, provider_id"
+                 f"{_CANONICAL_ORDER_SQL}"
                  ") AS rn FROM local_bars WHERE code=? AND period=? AND adjust=?")
         params: List[Any] = [code, period, adjust]
         if start:
@@ -191,7 +214,8 @@ class LocalStore:
 
         设计目标：把「逐只循环 = N 次 SQL」降到「O(块数) 次 SQL」
         （约 5000 只 → 6 块）。SQLite 变量上限安全分块（每块 900 只）。
-        Canonical 选主逻辑与 ``get_bars`` 完全一致（质量状态 + 具名 provider 优先），
+        Canonical 选主逻辑与 ``get_bars`` 完全一致（质量状态 → provider 质量序 →
+        provider 名升序，规则共用 :func:`datasource.quality.canonical_sort_key`），
         每块内对每标的最近 ``limit`` 根按时间升序返回。
 
         2026-09-14 吞吐优化（全市场选股请求自身 ~14.9s → ~10.3s，API 实测中位）：

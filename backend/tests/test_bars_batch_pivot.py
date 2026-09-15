@@ -139,34 +139,46 @@ def test_get_bars_batch_full_market_perf(store):
 # ---------------------------------------------------------------------------
 
 def _seed_multi_source(store, code):
-    """同一 (code, dt) 写多个 provider / 多档质量，覆盖选主三级排序键。"""
+    """同一 (code, dt) 写多个 provider / 多档质量，覆盖选主三级排序键。
+
+    2026-09-15 起选主规则统一为「质量状态 → **provider 质量序** → provider 名」
+    （与 ``quality.reconcile_bars`` 共用 ``canonical_sort_key``），故各 dt 刻意
+    构造「旧规则会选错」的数据，使排序键的每一次改动都能被这里判红。
+    """
     def bar(t, close):
         return Bar(time=t, open=close, high=close + 1, low=close - 1,
                    close=close, volume=100, amount=close * 100)
 
-    # dt1：质量优先 —— validated 的 src_z 应胜过 unknown 的 src_a
+    # dt1：第 1 键「质量状态」—— validated 的 src_z 应胜过 unknown 的 src_a
     store.upsert_bars(code, [bar("20260901", 12.0)], adjust="qfq",
                       provider_id="src_z", quality_state="validated")
     store.upsert_bars(code, [bar("20260901", 10.0)], adjust="qfq",
                       provider_id="src_a", quality_state="unknown")
-    # dt2：同质量 → provider_id 升序 —— src_a 应胜出
-    store.upsert_bars(code, [bar("20260902", 21.0)], adjust="qfq",
-                      provider_id="src_b", quality_state="unknown")
+    # dt2：第 2 键「provider 质量序」—— broker(0) 应胜 akshare(30)。
+    #      若退回「provider 名字典序」则 akshare 胜（20.0），故本项能判别旧规则。
     store.upsert_bars(code, [bar("20260902", 20.0)], adjust="qfq",
-                      provider_id="src_a", quality_state="unknown")
-    # dt3：空 provider 排前 —— 按**现状**钉住，见下方断言处的说明
-    store.upsert_bars(code, [bar("20260903", 31.0)], adjust="qfq",
-                      provider_id="src_a", quality_state="unknown")
+                      provider_id="akshare", quality_state="unknown")
+    store.upsert_bars(code, [bar("20260902", 21.0)], adjust="qfq",
+                      provider_id="broker", quality_state="unknown")
+    # dt3：空 provider = 999（最差）—— 具名 broker 应胜。
+    #      旧规则 `(provider_id='') DESC` 让空 provider 排前（30.0），故本项可判别。
     store.upsert_bars(code, [bar("20260903", 30.0)], adjust="qfq",
                       provider_id="", quality_state="unknown")
+    store.upsert_bars(code, [bar("20260903", 31.0)], adjust="qfq",
+                      provider_id="broker", quality_state="unknown")
+    # dt4：第 3 键「provider 名升序」—— 同档位（broker/qmt 同为 0）时的确定性 tie-break
+    store.upsert_bars(code, [bar("20260904", 41.0)], adjust="qfq",
+                      provider_id="broker", quality_state="unknown")
+    store.upsert_bars(code, [bar("20260904", 40.0)], adjust="qfq",
+                      provider_id="qmt", quality_state="unknown")
 
 
 def test_get_bars_batch_multi_source_selection_matches_per_code(store):
     """多源同 dt：批量取数的 Python 侧选主必须与逐只 get_bars 的窗口选主逐行一致。
 
     这是「把选主从 SQL 窗口函数下沉到 Python」这一改动的**正确性**护栏：
-    任一侧的排序键（质量 → 空 provider 优先 → provider 名）被改动而另一侧没跟上，
-    这里就会红。
+    任一侧的排序键（质量状态 → provider 质量序 → provider 名）被改动而另一侧
+    没跟上，这里就会红。
     """
     codes = [f"60000{i}.SH" for i in range(5)]
     for c in codes:
@@ -178,17 +190,15 @@ def test_get_bars_batch_multi_source_selection_matches_per_code(store):
         assert [b.time for b in batch[c]] == [b.time for b in per], c
         assert [b.close for b in batch[c]] == [b.close for b in per], c
         # 每 dt 只出一条（多源不膨胀）
-        assert len(batch[c]) == 3, c
+        assert len(batch[c]) == 4, c
 
     # 三级排序键各自生效（数值即证据，避免只测「长度相等」）：
-    #   dt1 12.0 = validated 胜 unknown；dt2 20.0 = 同质量下 provider 名升序 src_a 胜；
-    #   dt3 30.0 = 空 provider 胜具名 —— ⚠️ 这是**已知的语义不一致**：
-    #   SQL 的 `(provider_id = '') DESC` 让空 provider 排前，而两处 docstring 写的是
-    #   「优先具名 provider」。当前库里 provider_id 从不为空（只有 auto/broker/tencent），
-    #   故该 bug 一直是空操作。本用例按**现状**钉住，若将来决定修（改成具名优先），
-    #   这里与 `local_store._canonical_key` 需同步改为 31.0。
+    #   dt1 12.0 = validated 胜 unknown；
+    #   dt2 21.0 = provider 质量序 broker(0) 胜 akshare(30)（名字典序会得 20.0）；
+    #   dt3 31.0 = 空 provider 落 999 最差，具名 broker 胜（旧规则会得 30.0）；
+    #   dt4 41.0 = 同档位下 provider 名升序 broker 胜 qmt。
     closes = [b.close for b in batch[codes[0]]]
-    assert closes == [12.0, 20.0, 30.0], closes
+    assert closes == [12.0, 21.0, 31.0, 41.0], closes
 
 
 def test_get_bars_batch_query_plan_has_no_temp_btree(store, monkeypatch):
