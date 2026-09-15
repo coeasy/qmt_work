@@ -8,12 +8,43 @@
    本地 SSD 实测通常 <3s）。
 4. latest-N 语义与 ``get_bars(limit=N)`` 一致（每标的最近 N 根、时间升序返回）。
 """
+import contextlib
 import time
 
 import pytest
 
 from datasource.local_store import LocalStore
 from datasource.models import Bar
+
+
+class _SpyConn:
+    """只读连接包装：记录 ``execute`` 调用（2026-09-15 起批量读改走此路径）。"""
+
+    def __init__(self, conn, calls):
+        self._conn = conn
+        self._calls = calls
+
+    def execute(self, sql, params=()):
+        self._calls.append((sql, tuple(params)))
+        return self._conn.execute(sql, params)
+
+
+def _patch_readonly(monkeypatch, store, calls):
+    """把 ``DB.readonly_conn`` 换成记录版。
+
+    2026-09-15 起 ``get_bars_batch`` 不再走 ``DB.execute()``（主连接 + 写锁，
+    且 ``fetchall`` 在锁外），而是走 ``DB.readonly_conn()`` 的独占只读连接 +
+    游标流式消费。故「SQL 次数 / 执行计划」两条断言的探针要挂在新的取数路径上
+    （断言意图不变：小批只发 1 条 SQL、且该 SQL 必须走索引不排序）。
+    """
+    orig = store._db.readonly_conn
+
+    @contextlib.contextmanager
+    def patched():
+        with orig() as conn:
+            yield _SpyConn(conn, calls)
+
+    monkeypatch.setattr(store._db, "readonly_conn", patched)
 
 
 @pytest.fixture()
@@ -55,19 +86,13 @@ def _seed_bulk(store, codes, n=5, start=20260826):
 
 
 def test_get_bars_batch_single_query_count(store, monkeypatch):
-    """小批（100 只 < 900 分块阈值）应仅触发 1 次 db.execute。"""
+    """小批（100 只 < 900 分块阈值）应仅触发 1 次 SQL。"""
     codes = [f"{i:06d}.SH" for i in range(100)]
     _seed(store, codes, n=3)
-    calls = {"n": 0}
-    orig = store._db.execute
-
-    def spy(sql, params=()):
-        calls["n"] += 1
-        return orig(sql, params)
-
-    monkeypatch.setattr(store._db, "execute", spy)
+    calls: list = []
+    _patch_readonly(monkeypatch, store, calls)
     out = store.get_bars_batch(codes, period="1d", adjust="qfq", limit=250)
-    assert calls["n"] == 1, f"期望 1 次 SQL，实际 {calls['n']} 次"
+    assert len(calls) == 1, f"期望 1 次 SQL，实际 {len(calls)} 次"
     assert len(out) == 100
     for c in codes:
         assert len(out[c]) == 3, c
@@ -178,18 +203,13 @@ def test_get_bars_batch_query_plan_has_no_temp_btree(store, monkeypatch):
     codes = [f"{i:06d}.SH" for i in range(50)]
     _seed(store, codes, n=3)
 
-    captured = {}
-    orig = store._db.execute
-
-    def spy(sql, params=()):
-        captured["sql"], captured["params"] = sql, params
-        return orig(sql, params)
-
-    monkeypatch.setattr(store._db, "execute", spy)
+    calls: list = []
+    _patch_readonly(monkeypatch, store, calls)
     store.get_bars_batch(codes, period="1d", adjust="qfq", limit=250)
 
-    plan_rows = store._db.query("EXPLAIN QUERY PLAN " + captured["sql"],
-                                tuple(captured["params"]))
+    assert calls, "未捕获到批量取数 SQL —— 探针没挂上目标路径"
+    sql, params = calls[0]
+    plan_rows = store._db.query("EXPLAIN QUERY PLAN " + sql, params)
     plan = " | ".join(r["detail"] for r in plan_rows)
     assert "TEMP B-TREE" not in plan.upper(), f"批量取数出现排序开销：{plan}"
     assert "idx_local_bars_lookup" in plan, f"未命中查询索引：{plan}"

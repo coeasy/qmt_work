@@ -211,6 +211,13 @@ class LocalStore:
         取数行数不可再压缩——本库每标的仅 ~168 根，``limit=250`` 根本不生效，
         所以「缩减取数根数」方向无效。
 
+        2026-09-15 吞吐优化 3（取数连接与消费方式）：改走
+        :meth:`core.db.DB.readonly_conn` 的**独占只读连接** + 游标**流式**消费
+        （原先 ``DB.execute()`` 是主连接 + 写锁，``fetchall()`` 还在锁外跑在主连接上）。
+        并发写负载下单次批量读由 3925ms 回到接近空载水平（19.5× → 1.6×），且不再
+        拖慢写者（单次写入 p99 73.6ms → 1.6ms）；流式另省掉整批行列表物化。细节与实测见
+        ``DB.readonly_conn`` 与 ``tests/test_bars_batch_read_path.py``。
+
         ``lite`` 默认 ``False``：对外契约仍返回 ``Bar``；仅**进程内批处理消费方**
         （选股引擎）显式传 ``True``。返回类型因此随 ``lite`` 变化，调用方按属性
         访问即可（两者字段同名同义）。
@@ -224,35 +231,42 @@ class LocalStore:
         out: Dict[str, List[Bar]] = {c: [] for c in uniq}
 
         _CHUNK = 900  # 低于 SQLite 默认变量上限，避免 "too many SQL variables"
-        for i in range(0, len(uniq), _CHUNK):
-            chunk = uniq[i:i + _CHUNK]
-            placeholders = ",".join("?" for _ in chunk)
-            sql = (
-                "SELECT code, dt, open, high, low, close, volume, amount, "
-                "provider_id, quality_state FROM local_bars "
-                f"WHERE code IN ({placeholders}) AND period=? AND adjust=? "
-                "ORDER BY code, dt"
-            )
-            rows = self._db.execute(
-                sql, tuple(list(chunk) + [period, adjust])).fetchall()
-
-            cur_key: Any = None
-            best: Any = None
-            best_key: Any = None
-            for r in rows:
-                key = (r["code"], r["dt"])
-                if key != cur_key:
-                    if best is not None:
-                        out.setdefault(best["code"], []).append(
-                            _row_to_bar(best, lite))
-                    cur_key, best = key, r
-                    best_key = _canonical_key(r)
-                else:
-                    k = _canonical_key(r)
-                    if k < best_key:
-                        best_key, best = k, r
-            if best is not None:
-                out.setdefault(best["code"], []).append(_row_to_bar(best, lite))
+        # 2026-09-15：整批改走**独占只读连接 + 游标流式消费**。
+        # 原先用 ``DB.execute()``：那是「主连接 + 写锁」，且 ``fetchall()`` 还在
+        # 锁外跑在主连接上——既与每次写争抢同一连接的互斥量，又违反 db.py 自己
+        # 写明的「主连接上的读必须与写互斥」。实测（3.2 万行小样）空载 201ms、
+        # 并发写负载下 3925ms（**19.5×**，20s 只完成 3 轮），且把写者 p99 从
+        # 0.15ms 推到 73.6ms。收益与边界见 :meth:`core.db.DB.readonly_conn`。
+        # 另：流式消费不再把整批行物化成列表（117 万行时省约 0.9s）。
+        # 句柄在**分块循环外**开一次，避免每块重连。
+        with self._db.readonly_conn() as conn:
+            for i in range(0, len(uniq), _CHUNK):
+                chunk = uniq[i:i + _CHUNK]
+                placeholders = ",".join("?" for _ in chunk)
+                sql = (
+                    "SELECT code, dt, open, high, low, close, volume, amount, "
+                    "provider_id, quality_state FROM local_bars "
+                    f"WHERE code IN ({placeholders}) AND period=? AND adjust=? "
+                    "ORDER BY code, dt"
+                )
+                cur_key: Any = None
+                best: Any = None
+                best_key: Any = None
+                for r in conn.execute(sql, tuple(list(chunk) + [period, adjust])):
+                    key = (r["code"], r["dt"])
+                    if key != cur_key:
+                        if best is not None:
+                            out.setdefault(best["code"], []).append(
+                                _row_to_bar(best, lite))
+                        cur_key, best = key, r
+                        best_key = _canonical_key(r)
+                    else:
+                        k = _canonical_key(r)
+                        if k < best_key:
+                            best_key, best = k, r
+                if best is not None:
+                    out.setdefault(best["code"], []).append(
+                        _row_to_bar(best, lite))
 
         if limit and limit > 0:
             # 行已按 dt 升序，尾部即最近 limit 根（与 get_bars 的 latest-N 语义一致）。
