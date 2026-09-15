@@ -34,7 +34,7 @@ try:
             "lifecycle.ready=", (d3.get("lifecycle") or {}).get("ready"),
             "required=", d3.get("required_phases"))
         # Required 阶段（db/engines/watchdogs/replay/misc）全 ready 即应就绪；
-        # broker 属 Optional，未连券商不得导致 503（快照同步回归防护）。
+        # broker 属 Optional，未连券商不得导致 503（Required 全 ready 即应就绪）。
         assert r3.status_code == 200, \
             f"/ready 应为 200（Required 全 ready），实际 {r3.status_code}: {r3.text[:400]}"
         has_ctx = hasattr(app.state, "ctx")

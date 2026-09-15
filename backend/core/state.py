@@ -1,9 +1,20 @@
 """运行期单例容器：由 main.create_app 初始化，routes/tools 消费（避免循环 import）。
 
+V11 R5 容器合一：``AppState`` 继承 :class:`core.context.AppContext`，
+**服务槽位只在 AppContext 定义一处**，本模块只补生命周期状态机与券商连接访问器。
+``state`` 本身即 AppContext，故 ``app.main`` 直接 ``set_active_context(state)``
+—— 路由与引擎读写**同一对象**，不再有启动快照，也就没有「快照陈旧」这一类问题。
+
 重点：券商连接由 `broker_manager` 统一管理（多券商 / 多账户 / 多客户端版本）。
 `bridge` / `gateway` 保持为「当前活跃连接」的引用以便单连接调用点兼容；
 多连接场景下请通过 `broker_manager.bridge(conn_id)` 指定。
 """
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from core.context import AppContext
+
 # V10 Phase A2：core 不得反向依赖 xtquant_client，BrokerManager 延迟实例化。
 # 由 app/main.py 或 bootstrap/phase_broker 在装配期显式绑定（见 init_broker_manager）。
 
@@ -20,41 +31,13 @@ MSG_NO_BROKER_EXC = ("当前未连接任何券商客户端：请到「券商连�
 REQUIRED_PHASES: tuple[str, ...] = ("db", "engines", "watchdogs", "replay", "misc")
 
 
-class AppState:
-    db = None
-    broker_manager = None  # 延迟绑定（init_broker_manager）
-    bridge = None          # 活跃连接 bridge（可能为 None）
-    gateway = None         # 活跃连接 gateway（可能为 None）
-    risk = None
-    mcp = None
-    sync_engine = None
-    ws_manager = None
-    backtest_queue = None
-    limitup_monitor = None   # 涨停监控/打板助手
-    algo_engine = None       # 算法单引擎（TWAP/VWAP）
-    condition_engine = None  # 条件单/止损单引擎
-    apikey_store = None      # 多组 API Key 存储（供其他服务调用）
-    rate_limiter = None      # 限流器（每密钥独立配额）
-    notifier = None          # 通知推送中心（钉钉/企微/飞书/邮件）
-    signal_router = None     # 统一信号入口 + 物理旁路
-    wal = None               # WAL 与启动恢复
-    health_monitor = None    # 券商连接健康状态机 + 自动重连
-    quote_bus = None         # 行情共享总线（内存/Redis）
-    metrics = None           # Prometheus 指标收集器
-    reconciler = None        # 委托对账核销器（A2）
-    kline_cache = None       # 历史 K 线本地缓存（C1）
-    webhook_out = None       # 委托/成交/告警事件出站 webhook（B2）
-    runtime_config = None    # 运行时配置中心（热更新）
-    paper_engine = None      # 模拟盘引擎（P1）
-    strategy_runtime = None  # 策略运行容器：在平台内把策略当作实盘/模拟机器人运行（P0）
-    market_sync = None       # 行情缓存定时维护：今年热数据收盘后刷新 + 跨年归档
-    schedule_runner = None   # V9 Phase 7：Durable Scheduler（ScheduleRunner）
-    started_at: float = 0.0  # 进程启动时间戳（健康检查用）
-    latest_quotes: dict = {}
-    # 生命周期状态机：启动阶段可观测，未完成核心阶段不得宣称 ready。
-    phase_status: dict[str, str] = {}
-    lifecycle_ready: bool = False
-    lifecycle_stopping: bool = False
+@dataclass
+class AppState(AppContext):
+    """AppContext + 生命周期状态机 + 券商连接访问器。
+
+    槽位（db / broker_manager / risk / ...）**全部继承自** :class:`AppContext`，
+    本类不再重复声明 —— 新增槽位只改 ``core/context.py`` 一处。
+    """
 
     def begin_startup(self) -> None:
         self.phase_status = {}
@@ -76,9 +59,16 @@ class AppState:
         self.lifecycle_ready = False
 
     def require_bridge(self, conn_id: str | None = None):
-        """返回指定/活跃 bridge；无可用连接时抛 BrokerNotConnectedError。"""
+        """返回指定/活跃 bridge；无可用连接时抛 BrokerNotConnectedError。
+
+        2026-09-15：``broker_manager`` 为 None（未装配 / 未 init）时**也**视为
+        「未连接」—— 此前直接 ``self.broker_manager.bridge(...)`` 会抛
+        ``AttributeError: 'NoneType' object has no attribute 'bridge'``，
+        调用方（如 ``POST /factors/from-kline``）拿到 500 而非契约声明的 503。
+        """
         from xtquant_client.base import BrokerNotConnectedError
-        b = self.broker_manager.bridge(conn_id)
+        mgr = self.broker_manager
+        b = mgr.bridge(conn_id) if mgr is not None else None
         if b is None:
             raise BrokerNotConnectedError(MSG_NO_BROKER_EXC)
         return b

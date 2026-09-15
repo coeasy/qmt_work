@@ -6,7 +6,7 @@ K 线在无券商连接时回退到 eltdx(TDX 公共行情) 数据源。
 """
 import logging
 
-from core.state import MSG_NO_BROKER_EXC, state
+from core.state import state
 from datasource.registry import get_hub
 from xtquant_client.base import BrokerError, BrokerNotConnectedError
 
@@ -14,11 +14,15 @@ log = logging.getLogger("qmt_work.tools")
 
 
 def get_bridge(conn_id: str | None = None):
-    """返回指定/活跃券商连接 bridge；无连接时抛 BrokerNotConnectedError。"""
-    b = state.broker_manager.bridge(conn_id)
-    if b is None:
-        raise BrokerNotConnectedError(MSG_NO_BROKER_EXC)
-    return b
+    """返回指定/活跃券商连接 bridge；无连接时抛 BrokerNotConnectedError。
+
+    V11 R5：**委托** :meth:`core.state.AppState.require_bridge`。
+    此前这里是同一逻辑的第二份实现，且两处都会在 ``broker_manager`` 为 None 时抛
+    ``AttributeError``（而非契约声明的 ``BrokerNotConnectedError``）—— 后果是
+    ``POST /factors/from-kline`` 在无券商时返回 500，而契约要求 503
+    （tests/test_factors.py::test_from_kline_without_broker_contract）。
+    """
+    return state.require_bridge(conn_id)
 
 
 async def fetch_kline_cached(code: str, period: str = "1d", count: int = 250,

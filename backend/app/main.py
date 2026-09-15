@@ -173,17 +173,15 @@ def create_app() -> FastAPI:
         except RuntimeError as exc:
             log.error("startup aborted: %s", exc)
             raise
-        # V10 Phase A：启动完成后显式聚合 AppContext（core 不反向 import 任何外层模块）。
+        # V10 Phase A：启动完成后显式注册 AppContext（core 不反向 import 任何外层模块）。
         # 此处是 app 层装配出口，允许 import 全栈；所有依赖显式注入。
-        # 关键顺序（P1-18 修正）：mark_ready() 必须早于 build_from_state()。
-        # AppContext.lifecycle_ready 是**快照字段**（build_from_state 逐字段拷贝），
-        # 若先建 ctx 并 set_active_context 再 mark_ready，进程级 ctx 将永久停留在
-        # lifecycle_ready=False → /api/v1/ready 恒 503（即便所有 Required 阶段都
-        # ready、db/engines 全绿）。实测：客户端本地启动后 /ready 恒 503 即由此而来。
+        # V11 R5 容器合一：`state` 本身就是 AppContext（AppState 继承之），故直接注册
+        # **同一个对象**——不再有 build_from_state 快照，也就没有「快照字段不随 state
+        # 变化」的坑（旧实现需在 mark_ready 顺序、停机两处手工回同步 lifecycle 字段）。
         state.mark_ready()
         try:
-            from core.context import AppContext, build_from_state, set_active_context
-            ctx = build_from_state(state)
+            from core.context import set_active_context
+            ctx = state
             try:
                 from app.runtime.jobs import get_runtime
                 ctx.job_runtime = get_runtime()
@@ -209,21 +207,13 @@ def create_app() -> FastAPI:
             app.state.ctx = ctx
             set_active_context(ctx)
         except Exception:
-            log.exception("AppContext build failed (non-fatal, degrade to state locator)")
+            log.exception("AppContext 注册失败（非致命，降级为 state locator）")
         try:
             yield
         finally:
             state.begin_shutdown()
-            # 停机标志同步到进程级 ctx（快照字段不随 state 自动变化），
-            # 使停机窗口内 /ready、/health 如实反映 stopping。
-            try:
-                from core.context import active_context
-                live = active_context()
-                if live is not None:
-                    live.lifecycle_ready = False
-                    live.lifecycle_stopping = True
-            except Exception:  # noqa: BLE001
-                pass
+            # 容器合一后 lifecycle 字段即 state 自身字段，`begin_shutdown()` 已生效，
+            # 无需再向快照回同步（旧实现的 `live.lifecycle_* = ...` 已删除）。
             # 优雅停机（逆序关闭所有引擎/服务）
             await _shutdown(app)
 

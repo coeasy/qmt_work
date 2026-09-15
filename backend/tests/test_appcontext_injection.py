@@ -25,11 +25,56 @@ def test_ctx_slots_filled(app_client):
     assert ctx.execution is not None
 
 
+def test_bootstrap_slots_reach_routes_via_ctx(app_client):
+    """**生产级回归**：bootstrap 装配的槽位必须到达路由上下文。
+
+    这两个槽位曾是静默失效的受害者（2026-09-15 实测）：
+    - ``alert_engine``：``bootstrap/phase_db`` 写 ``state.alert_engine``，路由
+      ``POST /alerts/test`` 读 ``ctx.alert_engine`` —— 快照时代恒为 None，
+      端点永远返回 503「告警引擎未初始化」；
+    - ``_market_sync_last``：``gateway.market_sync`` 写，``GET /market/kline/sync-status``
+      读 —— 快照时代 ``last_run`` 恒为 null。
+
+    容器合一（ctx is state）后两者都可见；本用例在**真实 app** 上钉住。
+    """
+    from core.context import active_context
+
+    ctx = active_context()
+    assert ctx.alert_engine is not None, \
+        "alert_engine 未到达路由上下文 → POST /alerts/test 会恒 503"
+    assert ctx.order_watchdog is not None
+    # 该属性由 gateway.market_sync 在运行时写入；未跑同步时值为 None 属正常，
+    # 关键是**属性可读**（声明存在），不再走静默兜底。
+    assert ctx._market_sync_last is None or isinstance(ctx._market_sync_last, dict)
+
+
 def test_active_context_is_process_singleton(app_client):
     from app.main import app
     from core.context import active_context
 
     assert active_context() is app.state.ctx
+    # V11 R5 容器合一：生产路径注册的就是 core.state 单例本身（**不是快照拷贝**）。
+    # 若 main.lifespan 退回「拷贝一份 AppContext」，这条会红 —— 那正是
+    # `alert_engine` / `_market_sync_last` 静默失效的根因。
+    from core.state import state
+    assert active_context() is state
+
+
+def test_slots_written_after_startup_are_visible_via_ctx(app_client):
+    """回归：启动后写入单例的槽位，路由读到的 ctx 必须立即可见（快照时代看不到）。"""
+    from app.main import app
+    from core.context import active_context
+    from core.state import state
+
+    ctx = active_context()
+    assert ctx is app.state.ctx
+    saved = state._market_sync_last
+    try:
+        state._market_sync_last = {"date": "2026-09-15 15:00:00", "codes": 1,
+                                   "ok": 1, "fail": 0}
+        assert ctx._market_sync_last == state._market_sync_last
+    finally:
+        state._market_sync_last = saved
 
 
 def test_route_handlers_inject_ctx():
@@ -56,9 +101,11 @@ def test_health_endpoints_via_ctx(app_client):
     （db/engines/watchdogs/replay/misc），broker 属 Optional —— **未连券商不应影响就绪**
     （见 tests/test_lifecycle_levels.py::test_qmt_broker_failure_does_not_break_ready）。
 
-    此前 lifespan 在 `build_from_state(state)` 之后才 `state.mark_ready()`，而
-    `AppContext.lifecycle_ready` 是快照字段 → 进程级 ctx 永久 lifecycle_ready=False，
-    `/ready` 恒 503（假未就绪）。本用例钉死「就绪即 200」。
+    历史（P1-18）：lifespan 曾在 `build_from_state(state)` 之后才 `state.mark_ready()`，
+    而当时的 `AppContext.lifecycle_ready` 是**快照字段** → 进程级 ctx 永久
+    lifecycle_ready=False，`/ready` 恒 503（假未就绪）。
+    V11 R5 容器合一后 `ctx is state`（同一对象、无快照），该类问题从结构上消失；
+    本用例继续钉死「就绪即 200」。
     """
     r1 = app_client.get("/api/v1/health")
     assert r1.status_code == 200 and r1.json().get("code") == 0
