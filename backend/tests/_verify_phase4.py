@@ -57,6 +57,11 @@ class FakeKlineHub:
 
 
 class FakePlugin:
+    #: 与真实 DataSource.capabilities 同名同义（V11 R6 起链路求值据此做能力校验）。
+    #: 生产代码里目前**没有任何源实现 get_fundamentals**，故 fundamental 链只有 broker
+    #: 占位；下面 test_fundamentals 用 `_fundamental_override()` 临时把链指向本桩。
+    capabilities = frozenset({"fundamental"})
+
     def __init__(self, row):
         self._row = row
 
@@ -71,6 +76,19 @@ class FakeManager:
 
     def list_sources(self):
         return list(self._reg)
+
+    def _declared_map(self):
+        """与真实 DataSourceManager 同名同义（provider_id -> 声明能力集）。
+
+        缺这个方法会被 `fundamentals._resolve_fundamental_chain` 的兜底吞掉，
+        表现为「源在却拿不到数据」—— 必须忠实复刻。
+        """
+        out = {}
+        for name, p in self._plugins.items():
+            caps = getattr(type(p), "capabilities", None)
+            if caps:
+                out[name] = frozenset(caps)
+        return out
 
 
 def fake_reg_manager(registered):
@@ -209,16 +227,23 @@ def test_formula():
 async def test_fundamentals():
     print("[7] 字段级基本面溯源")
     from app.screener.fundamentals import fetch_fundamentals
+    from datasource.providers import provider_catalog
     mgr = FakeManager(
         {"broker", "eltdx", "baostock", "akshare"},
         {"akshare": FakePlugin({"pe": 12.5, "pb": 1.3, "roe": 0.15})})
-    res = await fetch_fundamentals(["600000.SH", "000001.SZ"],
-                                   policy_str="auto", fields=["pe", "pb", "roe"], hub=mgr)
-    check("pe 字段有值", res["fields"]["pe"].get("600000.SH") == 12.5)
-    check("provenance 记录源", res["provenance"]["pe"] == "akshare")
-    check("000001 也有值", res["fields"]["pb"].get("000001.SZ") == 1.3)
-    res2 = await fetch_fundamentals([], fields=["pe"], hub=mgr)
-    check("空标的: 空结构不报错", res2["fields"]["pe"] == {})
+    # fundamental 契约链目前只有 broker 占位（无任何源实现 get_fundamentals），
+    # 故临时 override 到本桩，才能测到字段级溯源逻辑本身。
+    provider_catalog.set_override("fundamental", ["akshare"])
+    try:
+        res = await fetch_fundamentals(["600000.SH", "000001.SZ"],
+                                       policy_str="auto", fields=["pe", "pb", "roe"], hub=mgr)
+        check("pe 字段有值", res["fields"]["pe"].get("600000.SH") == 12.5)
+        check("provenance 记录源", res["provenance"]["pe"] == "akshare")
+        check("000001 也有值", res["fields"]["pb"].get("000001.SZ") == 1.3)
+        res2 = await fetch_fundamentals([], fields=["pe"], hub=mgr)
+        check("空标的: 空结构不报错", res2["fields"]["pe"] == {})
+    finally:
+        provider_catalog.clear_override()
 
 
 def test_chain_override():

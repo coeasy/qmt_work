@@ -72,6 +72,19 @@ class FakeKlineHub:
 
 
 class FakePlugin:
+    """假补充源。
+
+    ``capabilities`` 与真实 ``DataSource.capabilities`` **同名同义** —— 能力的唯一真源
+    （V11 R6 起链路求值会拿它做能力校验）。
+
+    ⚠️ 注意：**生产代码里目前没有任何源实现 ``get_fundamentals``**（逐源核对真实方法集
+    后确认；baostock/akshare 的旧声明是「想当然」，已在 V11 R6 收敛）。因此
+    ``DEFAULT_CAPABILITY_CHAINS["fundamental"]`` 只有 ``broker`` 占位，本桩**不在**链里。
+    要验证 ``fetch_fundamentals`` 的字段级溯源逻辑，必须用 ``fundamental_chain(...)``
+    临时把链指向本桩。
+    """
+    capabilities = frozenset({"fundamental"})
+
     def __init__(self, row):
         self._row = row
 
@@ -80,13 +93,43 @@ class FakePlugin:
 
 
 class FakeManager:
-    """模拟 DataSourceManager（含 _plugins + list_sources）。"""
+    """模拟 ``DataSourceManager``（含 ``_plugins`` / ``list_sources`` / ``_declared_map``）。
+
+    ``_declared_map()`` 必须与真实实现**同名同义**（provider_id -> 声明能力集）：
+    ``fundamentals._resolve_fundamental_chain`` 会调用它，而那里用 ``except Exception``
+    兜底返回空链 —— 替身缺这个方法会被**静默吞掉**，表现为「源明明在却拿不到数据」的
+    伪失败（2026-09-15 R6 真实踩到：`test_fundamental_factors.py` 2 条 KeyError）。
+    """
     def __init__(self, registered, plugins=None):
         self._reg = set(registered)
         self._plugins = plugins or {}
 
     def list_sources(self):
         return list(self._reg)
+
+    def _declared_map(self):
+        out = {}
+        for name, p in self._plugins.items():
+            caps = getattr(type(p), "capabilities", None)
+            if caps:
+                out[name] = frozenset(caps)
+        return out
+
+
+@contextlib.contextmanager
+def fundamental_chain(*names):
+    """临时把 ``fundamental`` 契约链指向给定源（测试专用）。
+
+    为何需要：``DEFAULT_CAPABILITY_CHAINS["fundamental"]`` 目前**只有 broker 占位**
+    （见 ``FakePlugin`` 注释）。所以要验证 ``fetch_fundamentals`` 的字段级溯源逻辑本身，
+    必须临时构造「有源可用」的场景；否则链为空，函数只会返回全 None。
+    """
+    from datasource.providers import provider_catalog
+    provider_catalog.set_override("fundamental", list(names))
+    try:
+        yield
+    finally:
+        provider_catalog.clear_override()
 
 
 def fake_reg_manager(registered):

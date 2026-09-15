@@ -63,7 +63,10 @@ CAP_METHODS: dict[str, tuple[str, ...]] = {
     "search": ("search",),
     # 以下四个能力目前**无任何补充源实现**，链里只有 broker 占位；
     # 登记方法名是为了让「声明 → 实现」检查能覆盖它们（一旦有源声明就必须真有方法）。
-    "fundamental": ("get_fundamental",),
+    # ⚠️ `fundamental` 的方法名是**复数** `get_fundamentals` —— 取自唯一消费方
+    # `app/screener/fundamentals.py` 的实际调用；写成单数会让这条检查变成空转
+    # （2026-09-15 R6 真实踩到）。
+    "fundamental": ("get_fundamentals",),
     "suspend": ("get_suspend",),
     "corporate_action": ("get_corporate_action",),
     "calendar": ("get_calendar",),

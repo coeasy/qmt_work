@@ -114,7 +114,11 @@ def _resolve_fundamental_chain(policy_str: str, manager) -> List[str]:
         return list(provider_catalog.resolve_chain(
             "fundamental", commercial_mode=_commercial_mode(), registered=registered,
             declared=manager._declared_map()))
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        # **不静默**：链解析失败会让所有字段静默变成 None（看起来像「源没数据」），
+        # 必须留痕。V11 R6 教训：测试替身缺 `_declared_map()` 时被这里吞掉，
+        # 表现为「源明明注册了却拿不到数据」的伪失败，排查花了两轮。
+        log.warning("fundamental 链解析失败，回退空链（所有字段将为 None）：%s", exc)
         return []
 
 
