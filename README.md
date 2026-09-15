@@ -20,7 +20,7 @@
 ## 目录
 
 - [核心能力](#核心能力)
-- [界面导航（4 分组 / 17 页）](#界面导航4-分组--17-页)
+- [界面导航（6 分组 / 35 页）](#界面导航6-分组--35-页)
 - [环境要求](#环境要求)
 - [安装](#安装)
   - [方式一：下载安装包（推荐普通用户）](#方式一下载安装包推荐普通用户)
@@ -43,9 +43,9 @@
 
 | 模块 | 说明 |
 |------|------|
-| 可视化界面 | React + Vite + ECharts SPA，纯前端、前后端解耦；4 分组 / 17 页 + keep-alive 多标签工作区 |
+| 可视化界面 | React + Vite + ECharts SPA，纯前端、前后端解耦；6 分组 / 35 页 + keep-alive 多标签工作区 |
 | MCP 接口 | FastMCP Streamable HTTP，Cursor / Claude Desktop 直连 |
-| REST API | FastAPI `/api/v1/*`，34 个路由模块（账户 / 行情 / 下单 / 回测 / 因子 / 再平衡 / 风控 / 配置…） |
+| REST API | FastAPI `/api/v1/*`，36 个路由模块（账户 / 行情 / 下单 / 回测 / 因子 / 再平衡 / 风控 / 配置…） |
 | 实时推送 | WebSocket，活跃券商只订阅一次，多客户端扇出；断线重连补发最近 30s 行情 |
 | 多账户网格 | 多券商 / 多账户统一看板，批量下单 / 撤单 / 重连 |
 | 回测引擎 | 向量化回测 + 参数扫描（与逐根信号一致），真实 K 线 |
@@ -66,16 +66,16 @@
 
 ## 界面导航（6 分组 / 35 页）
 
-页面注册表 `frontend-next/src/app/routes.tsx` 的 `PAGES`（含 `status: "done" | "planned"`）是顶部菜单、命令面板的**单一真相来源**。6 大业务域、35 个页面入口（33 已实现，2 占位：目标持仓 / 分仓再平衡）。占位页会显式展示其后端契约，避免「看起来能用其实是空壳」。
+页面注册表 `frontend-next/src/app/routes.tsx` 的 `PAGES`（含 `status: "done" | "planned"`）是顶部菜单、命令面板的**单一真相来源**。6 大业务域、35 个页面入口（34 已实现，1 占位：分仓再平衡）。占位页会显式展示其后端契约，避免「看起来能用其实是空壳」。
 
 | 分组 | 页面 |
 |------|------|
-| 行情（11） | 仪表盘 · 报价牌 · K 线分析 · 分时图 · 盘口逐笔 · 成交明细 · 板块雷达 · 资金流 · ETF · 市场结构 · 自选股 |
+| 行情（10） | 报价牌 · K 线分析 · 分时图 · 盘口逐笔 · 成交明细 · 板块雷达 · 资金流 · ETF · 市场结构 · 自选股 |
 | 研究（4） | 条件选股 · 公式选股 · 因子研究 · 标的检索 |
-| 交易（6） | 手动交易 · 算法交易 · 条件单 · 涨停监控 · 目标持仓(占位) · 分仓再平衡(占位) |
-| 账户（3） | 多账户网格 · 委托/持仓/成交 · 对账核销 |
+| 交易（6） | 手动交易 · 算法交易 · 条件单 · 涨停监控 · 目标持仓 · 分仓再平衡(占位) |
+| 账户（4） | 多账户网格 · 委托/持仓/成交 · 对账核销 · 模拟盘 |
 | 自动化（4） | 告警规则 · 出站 Webhook · 外部信号 · 定时任务 |
-| 系统（6） | 连接管理 · 系统状态 · 审计日志 · API Key · 设置 · 系统日志 |
+| 系统（7） | 仪表盘 · 连接管理 · 系统状态 · 审计日志 · API Key · 设置 · 系统日志 |
 
 工作区（多标签）约束见 `frontend-next/src/stores/`；页面懒加载与路由见 `routes.tsx`。
 
@@ -452,7 +452,7 @@ qmt_work/
 ├─ backend/              # FastAPI 统一后端（V10 重构：core/ 无依赖内核 + engines/ 引擎）
 │  ├─ run.py            # 启动入口（端口自动扫描 + 单实例锁 + AppContext 装配）
 │  ├─ app/              # 装配层：main / routes / services / gateway
-│  │  ├─ routes/        # 34 个 REST 路由模块（account/market/trade/backtest/broker/…）
+│  │  ├─ routes/        # 36 个 REST 路由模块（account/market/trade/backtest/broker/…）
 │  │  └─ gateway/       # 鉴权 / 限流 / 风控 / 审计 / 脱敏 / K 线缓存 / metrics / 日志告警
 │  ├─ core/             # 无依赖内核（context / crypto / db …）
 │  ├─ engines/          # 交易引擎（signal router / execution / backtest …）
@@ -564,10 +564,11 @@ qmt_work/
 | `backend/gateway/` | 横切关注点（鉴权 / 风控 / 脱敏 / 缓存等） |
 | `backend/xtquant_client/` | 券商连接抽象与实现（不得 import app） |
 | `backend/tests/` | 单测，文件名 `test_*.py`，逐文件独立可跑 |
-| `frontend/src/features/` | 页面级组件（按 market / research / trading / accounts / system 分组） |
-| `frontend/src/components/` | 可复用 UI 组件 |
-| `frontend/src/pagesRegistry.jsx` | 菜单 / 功能树 / 命令面板的单一真源 |
-| `frontend/src/shared/events.ts` | WebSocket 事件类型单一真源 |
+| `frontend-next/src/domains/` | 页面级组件（按 market / research / trading / account / automation / system 分组） |
+| `frontend-next/src/design/` | 设计系统基元（primitives） |
+| `frontend-next/src/app/routes.tsx` | 菜单 / 路由注册的单一真源 |
+| `frontend-next/src/services/api/` | 类型化 API 层（与后端契约一一对应） |
+| `frontend-next/src/shell/` | 多窗格工作台（Workspace / 命令面板 / 快捷键） |
 
 ### 安全红线
 

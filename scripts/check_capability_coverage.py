@@ -59,6 +59,78 @@ EXEMPT: dict[str, str] = {
 }
 
 # ---------------------------------------------------------------------------
+# 按**精确路径**登记的豁免（V11 决策 2，2026-09-15）。
+# 比 category 粒度更严：只豁免下列具体端点，同域未来新增的端点仍会被门禁抓出。
+# 键 = "<METHOD> <path>"；METHOD 大写，path 与 capabilities 一致（含 /api/v1 前缀）。
+# 处置口径：全部标注「仅 API/MCP 可用」。
+# ---------------------------------------------------------------------------
+EXEMPT_PATHS: dict[str, str] = {
+    # —— data：与 market/providers 能力重叠，前端只保留一侧入口 ——
+    "GET /api/v1/data/providers":
+        "V11 决策：数据面管理端点与 market/providers 能力重叠，前端仅保留一侧入口（仅 API/MCP）",
+    "GET /api/v1/data/providers/health":
+        "V11 决策：数据面管理端点（健康检查）与 market/providers 重叠（仅 API/MCP）",
+    "POST /api/v1/data/chain":
+        "V11 决策：数据源链覆盖为运维/脚本向操作，前端不设页（仅 API/MCP）",
+    # —— datahub ——
+    "GET /api/v1/datahub/policies":
+        "V11 决策：数据中枢策略端点，运维/脚本向，前端不设页（仅 API/MCP）",
+    # —— market：增强能力（指标类已由 klinecharts 本地实现覆盖）——
+    "POST /api/v1/market/moneyflow/snapshot":
+        "V11 决策：资金流快照回放为增强能力（仅 API/MCP）",
+    "GET /api/v1/market/moneyflow/replay":
+        "V11 决策：资金流快照回放为增强能力（仅 API/MCP）",
+    "GET /api/v1/market/datasets/snapshots":
+        "V11 决策：数据集快照为运维/脚本向（仅 API/MCP）",
+    "POST /api/v1/market/kline/export":
+        "V11 决策：K 线导出为批量/脚本向能力（仅 API/MCP）",
+    "GET /api/v1/market/kline/export":
+        "V11 决策：K 线导出结果读取（仅 API/MCP）",
+    "POST /api/v1/market/kline/sync":
+        "V11 决策：K 线批量同步为运维向（仅 API/MCP）",
+    "POST /api/v1/market/crawl":
+        "V11 决策：行情爬取为运维/脚本向（仅 API/MCP）",
+    "GET /api/v1/market/indicators":
+        "V11 决策：指标清单/计算已由 klinecharts 本地实现（chart.createIndicator）覆盖，"
+        "后端端点供 MCP/脚本复用（仅 API/MCP）",
+    "GET /api/v1/market/indicators/calc":
+        "V11 决策：指标计算已由 klinecharts 本地实现覆盖（仅 API/MCP）",
+    "GET /api/v1/market/chart-spec":
+        "V11 决策：图表规格为 MCP/脚本向（仅 API/MCP）",
+    "POST /api/v1/market/portfolio/aggregate":
+        "V11 决策：组合聚合为分析脚本向（仅 API/MCP）",
+    "POST /api/v1/market/export":
+        "V11 决策：通用导出为批量/脚本向（仅 API/MCP）",
+    "GET /api/v1/market/analysis/scripts":
+        "V11 决策：分析脚本清单为脚本向（仅 API/MCP）",
+    "POST /api/v1/market/analysis/run":
+        "V11 决策：分析脚本执行为脚本向（仅 API/MCP）",
+    # —— strategies：策略运行容器（前端不建域，与回测/因子同口径）——
+    "POST /api/v1/strategies/generate":
+        "V11 决策：策略**运行**容器前端不建域，后端保留（仅 API/MCP）",
+    "POST /api/v1/strategies/save":
+        "V11 决策：策略保存属运行容器，前端不建域（仅 API/MCP）",
+    "GET /api/v1/strategies/run":
+        "V11 决策：策略运行列表，前端不建域（仅 API/MCP）",
+    "POST /api/v1/strategies/run":
+        "V11 决策：策略运行创建，前端不建域（仅 API/MCP）",
+    "GET /api/v1/strategies/run/{run_id}":
+        "V11 决策：策略运行详情，前端不建域（仅 API/MCP）",
+    "POST /api/v1/strategies/run/{run_id}/start":
+        "V11 决策：策略运行启动，前端不建域（仅 API/MCP）",
+    "POST /api/v1/strategies/run/{run_id}/stop":
+        "V11 决策：策略运行停止，前端不建域（仅 API/MCP）",
+    "DELETE /api/v1/strategies/run/{run_id}":
+        "V11 决策：策略运行删除，前端不建域（仅 API/MCP）",
+    "POST /api/v1/strategies/run/batch-delete":
+        "V11 决策：策略运行批量删除，前端不建域（仅 API/MCP）",
+    "GET /api/v1/strategies/run/{run_id}/logs":
+        "V11 决策：策略运行日志，前端不建域（仅 API/MCP）",
+    "POST /api/v1/strategies/run/precheck":
+        "V11 决策：策略运行风控预检，前端不建域（仅 API/MCP）",
+}
+
+# ---------------------------------------------------------------------------
 # 未覆盖域的处置建议（让报告可行动，而不只是抛一堆路径）。
 # 分三类：add-ui = 建议补前端入口；api-only = 建议标注仅 API/MCP；
 #         decide = 涉及产品形态，需人工决策。
@@ -159,6 +231,10 @@ def main() -> int:
         if hit:
             row["frontend"] = hit
             covered.append(row)
+        elif f"{row['method']} {path}" in EXEMPT_PATHS:
+            # 精确路径豁免（V11 决策 2）：粒度最细，优先于 category 级豁免。
+            row["exempt_reason"] = EXEMPT_PATHS[f"{row['method']} {path}"]
+            exempted.append(row)
         elif category in EXEMPT:
             row["exempt_reason"] = EXEMPT[category]
             exempted.append(row)
@@ -175,11 +251,12 @@ def main() -> int:
 
     if exempted:
         print("\n── 豁免明细（须在文档标注「仅 API/MCP 可用」）──")
-        by_dom: dict[str, int] = defaultdict(int)
+        # 按 (category, 理由) 分组：路径级豁免与 category 级豁免可共存，理由可能不同。
+        groups: dict[tuple[str, str], int] = defaultdict(int)
         for e in exempted:
-            by_dom[e["category"]] += 1
-        for dom, n in sorted(by_dom.items()):
-            print(f"  {dom:<18} {n:>3} 条  {EXEMPT[dom]}")
+            groups[(e["category"], str(e.get("exempt_reason") or ""))] += 1
+        for (dom, reason), n in sorted(groups.items()):
+            print(f"  {dom:<18} {n:>3} 条  {reason}")
 
     if gaps:
         print("\n── 未覆盖且未豁免（按处置建议分类）──")
