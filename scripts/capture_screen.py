@@ -46,7 +46,7 @@ class BITMAPINFOHEADER(ctypes.Structure):
 PW_RENDERFULLCONTENT = 0x00000002  # 让 Chromium/Electron 合成窗口把内容真正画出来
 
 
-_DECLARED = False
+_CACHE = None
 
 
 def _dlls():
@@ -60,11 +60,19 @@ def _dlls():
          `argument 1: OverflowError: int too long to convert`。
     这类故障与句柄的具体数值有关，表现为「同一个脚本有时成功有时失败」的抖动——
     本项目实测开发态成功、打包客户端失败，就是撞在这个点上。
+
+    ⚠️ 反面写法（R8 实测踩到，与 `client_start_test._win32` 同款）：先
+    ``ctypes.WinDLL(...)`` 建新对象、再判 `_DECLARED` 提前 return。ctypes **每次调用
+    都返回新的 CDLL 对象**，``argtypes`` 挂在对象上、**不共享**（实测
+    ``a is b == False``、``b.PrintWindow.argtypes is None``），所以「声明一次」的守卫
+    只在**第一次**调用生效，之后全部退化成「未声明签名」——这正是「时好时坏」的来源。
+    正确做法是**缓存并复用同一个 CDLL 对象**。
     """
-    global _DECLARED
-    user32, gdi32 = ctypes.WinDLL("user32", use_last_error=True), ctypes.WinDLL("gdi32")
-    if _DECLARED:
-        return user32, gdi32
+    global _CACHE
+    if _CACHE is not None:
+        return _CACHE
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    gdi32 = ctypes.WinDLL("gdi32")
     user32.GetDC.argtypes = [wintypes.HWND]
     user32.GetDC.restype = wintypes.HDC
     user32.ReleaseDC.argtypes = [wintypes.HWND, wintypes.HDC]
@@ -93,8 +101,8 @@ def _dlls():
     gdi32.DeleteObject.restype = wintypes.BOOL
     gdi32.DeleteDC.argtypes = [wintypes.HDC]
     gdi32.DeleteDC.restype = wintypes.BOOL
-    _DECLARED = True
-    return user32, gdi32
+    _CACHE = (user32, gdi32)
+    return _CACHE
 
 
 def _rows_from_dc(gdi32, mem, bmp, width: int, height: int) -> list:

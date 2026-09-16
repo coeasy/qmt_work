@@ -328,6 +328,13 @@ function createWindow() {
       sandbox: true, // preload 仅用 ipcRenderer/contextBridge，可安全沙箱化
     },
   });
+  // 自动化测试：把窗口真正置顶。
+  // 为什么必须由**本进程**来做：Windows 的原生窗口遮挡检测一旦判定本窗口被别的窗口
+  // 完全遮住，Chromium 就停止出帧、不再维护合成层，此时 PrintWindow(PW_RENDERFULLCONTENT)
+  // 只能拿到**未合成的空白客户区**（实测 18 色 / PNG 8450 bytes，与页面是否加载成功无关）。
+  // 从外部进程调 SetWindowPos(HWND_TOPMOST) 实测不可靠（返回 1 但 WS_EX_TOPMOST 仍为 False），
+  // 而窗口所有者自己置顶一定生效。生产环境 TEST_MODE 为假，零影响。
+  if (TEST_MODE) win.setAlwaysOnTop(true);
   // 站内导航防护：只允许本机后端源；外链转交系统浏览器而非就地跳转
   win.webContents.on("will-navigate", (e, url) => {
     if (!isLocalOrigin(url)) {

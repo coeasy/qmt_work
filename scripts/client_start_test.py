@@ -204,11 +204,28 @@ def tail(path: Path, lines: int = 12) -> str:
 
 # --------------------------------------------------------------- Windows 窗口探测
 
+_USER32 = None
+
+
 def _win32():
-    """user32 句柄签名（声明一次；不声明会因 64 位句柄带高位而报
-    `OverflowError: int too long to convert`，表现为时好时坏的抖动）。"""
-    user32 = ctypes.WinDLL("user32", use_last_error=True)
-    if not getattr(_win32, "_done", False):
+    """user32 句柄签名 —— **只声明一次，并复用同一个 CDLL 对象**。
+
+    ⚠️ 反面写法（R8 实测踩到）：每次调用都 ``ctypes.WinDLL("user32")`` 再声明 argtypes。
+    ctypes **每次调用都返回新的 CDLL 对象**，而 ``argtypes`` 是挂在对象上的普通属性、
+    **不共享**（实测 ``a is b == False``、``b.SetWindowPos.argtypes is None``）。
+    于是「声明一次」的守卫只在**第一次**调用真正生效，之后每次调用都退化成
+    「未声明签名」——``SetWindowPos(hwnd, HWND_TOPMOST, …)`` 的 ``HWND_TOPMOST = -1``
+    会按 C ``int`` 传成 ``0xFFFFFFFF``（而非 ``0xFFFFFFFFFFFFFFFF``），调用**静默失败**
+    （返回 0），窗口 ``WS_EX_TOPMOST`` 恒为 False、全程被别的窗口遮挡。
+    结果就是本测试阶段 6 时红时绿：被遮挡时 Chromium 不产出合成层，
+    ``PrintWindow(PW_RENDERFULLCONTENT)`` 只能拿到**未合成的空白客户区**
+    （采样 18 色 / PNG 8450 bytes，与页面是否加载成功无关）。
+    未声明签名还会让 64 位句柄被截断（``CreateCompatibleDC`` 实测返回
+    ``0xfffffffff201149c``），报 ``OverflowError: int too long to convert``。
+    """
+    global _USER32
+    if _USER32 is None:
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
         user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND,
                                                     ctypes.POINTER(wintypes.DWORD)]
         user32.GetWindowThreadProcessId.restype = wintypes.DWORD
@@ -224,10 +241,11 @@ def _win32():
         user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
         user32.SetForegroundWindow.argtypes = [wintypes.HWND]
         user32.SetForegroundWindow.restype = wintypes.BOOL
-        # ⚠️ 这两个必须声明：不声明时 ctypes 按 C ``int`` 传参，64 位 HWND 会被截断，
-        # 调用**静默失败**（实测：``SetWindowPos`` 返回 0、窗口 ``WS_EX_TOPMOST`` 恒为 False，
-        # 于是窗口全程被别的窗口遮挡 → Chromium 不产出合成层 → PrintWindow 只能拿到
-        # 未合成的空白客户区，表现为「标题栏/菜单栏正常、内容区纯色」）。
+        # ⚠️ 这两个必须声明（并且**必须作用在会被复用的对象上**，见函数 docstring）：
+        # 未声明时 ctypes 按 C ``int`` 传参，``HWND_TOPMOST = -1`` 会变成 ``0xFFFFFFFF``
+        # 而不是 ``0xFFFFFFFFFFFFFFFF`` → ``SetWindowPos`` 返回 0、窗口 ``WS_EX_TOPMOST``
+        # 恒为 False，于是窗口全程被别的窗口遮挡 → Chromium 不产出合成层 →
+        # PrintWindow 只能拿到未合成的空白客户区，表现为「标题栏/菜单栏正常、内容区纯色」。
         user32.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND,
                                         ctypes.c_int, ctypes.c_int,
                                         ctypes.c_int, ctypes.c_int,
@@ -235,8 +253,8 @@ def _win32():
         user32.SetWindowPos.restype = wintypes.BOOL
         user32.BringWindowToTop.argtypes = [wintypes.HWND]
         user32.BringWindowToTop.restype = wintypes.BOOL
-        _win32._done = True
-    return user32
+        _USER32 = user32
+    return _USER32
 
 
 def find_windows(pid: int) -> list[dict]:
@@ -288,15 +306,18 @@ def pick_main_window(pid: int) -> dict | None:
 
 
 def focus_window(hwnd: int) -> None:
-    """把窗口恢复并**真正**置前，避免截图被其它窗口遮挡（截到一片空白）。
+    """尽力把窗口恢复并置前 —— **辅助手段，不是可靠保证**。
 
-    仅靠 ``SetForegroundWindow`` 不够：Windows 的「防抢焦点」规则会**静默拒绝**
-    非前台进程的置前请求。实测（R8）：``IsWindowVisible=True`` / ``IsIconic=False`` /
-    ``IsZoomed=False``，但 ``GetForegroundWindow() != 本窗口`` —— 窗口一直留在别的
-    窗口后面；被遮挡时 Chromium 不产出合成层，``PrintWindow(PW_RENDERFULLCONTENT)``
-    只能拿到**未合成的空白客户区**，表现为「原生标题栏 + 菜单栏正常、内容区纯色」
-    （采样 18 色 / PNG 字节数每次完全一致 —— 因为客户区确实一个像素都没画）。
-    ``SetWindowPos(HWND_TOPMOST)`` 只改 Z 序、**不受防抢焦点限制**，因此能稳定生效。
+    被其它窗口**完全遮挡**时，Windows 的原生窗口遮挡检测会让 Chromium 停止出帧、
+    不再维护合成层，``PrintWindow(PW_RENDERFULLCONTENT)`` 只能拿到**未合成的空白
+    客户区**（实测 18 色 / PNG 8450 bytes，与页面是否加载成功无关）。
+
+    但**从外部进程**把别人的窗口置顶并不可靠：R8 用「自造一个置顶遮挡窗口」做了
+    A/B —— ``SetWindowPos(hwnd, HWND_TOPMOST, …)`` 返回 1（成功）却 ``WS_EX_TOPMOST``
+    仍为 False、``WindowFromPoint`` 仍返回遮挡者，采样恒 18 色；同样的遮挡下，
+    由**窗口所有者自己**置顶（见 ``frontend-next/electron/main.cjs`` 的 ``TEST_MODE``
+    分支 ``win.setAlwaysOnTop(true)``）立刻恢复 67 色。所以正确性依赖的是后者，
+    这里保留 ``SetWindowPos`` 只是「能成就更好」，**不要**再把它当解药。
     """
     user32 = _win32()
     HWND_TOPMOST = -1
