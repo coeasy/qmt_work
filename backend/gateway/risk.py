@@ -18,6 +18,7 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
+from core.clock import now_iso, today_str
 
 # P0-5：账户快照未就绪时的演示级默认总资产。占比类闸门用它做分母等于「形同虚设」
 # （10 万单 = 演示 100 万的 10%），故实盘（live）买入前必须要求快照就绪。
@@ -44,7 +45,7 @@ _TUNABLES: dict[str, tuple[type, bool]] = {
 
 
 def _today() -> str:
-    return time.strftime("%Y-%m-%d")
+    return today_str()
 
 
 # 交易方向归一化（中英 / 多同义词）。未知方向必须显式拒绝，绝不能按「卖出」处理
@@ -184,11 +185,11 @@ class RiskManager:
         row = db.query_one("SELECT id FROM risk_config WHERE scope='global'")
         if row:
             db.execute("UPDATE risk_config SET params_json=?, updated_at=? WHERE scope='global'",
-                       (json.dumps(self.to_dict()), time.strftime("%Y-%m-%dT%H:%M:%S")))
+                       (json.dumps(self.to_dict()), now_iso()))
         else:
             db.insert("risk_config", {"scope": "global",
                                       "params_json": json.dumps(self.to_dict()),
-                                      "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S")})
+                                      "updated_at": now_iso()})
 
     @classmethod
     def load_from_db(cls, db, defaults: dict | None = None) -> "RiskManager":
@@ -241,7 +242,7 @@ class RiskManager:
         loss = self._day_start_net - nv
         if loss >= self.daily_loss_limit:
             self._broken = True
-            self._broken_at = time.strftime("%Y-%m-%dT%H:%M:%S")
+            self._broken_at = now_iso()
             self._broken_reason = (
                 f"日内亏损熔断：净值 {self._day_start_net:.0f} → {nv:.0f}，"
                 f"回撤 {loss:.0f} ≥ 阈值 {self.daily_loss_limit:.0f}，已禁止买入开仓")
@@ -252,7 +253,7 @@ class RiskManager:
         """手动熔断（一键停止开仓）。"""
         self._roll_day()
         self._broken = True
-        self._broken_at = time.strftime("%Y-%m-%dT%H:%M:%S")
+        self._broken_at = now_iso()
         self._broken_reason = reason
         return reason
 

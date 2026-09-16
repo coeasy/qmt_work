@@ -51,10 +51,15 @@ export function toneColor(v: number | null | undefined): string {
   return "var(--flat)";
 }
 
-/** 时间戳 → HH:MM:SS */
+/** 时间戳 → HH:MM:SS
+ *
+ * 后端时间戳契约（V11 R8 起唯一）：`YYYY-MM-DDTHH:MM:SS`（ISO 本地时间，无偏移）。
+ * ECMAScript 规定「带时间但不带偏移」的串按**本地时间**解析（只有纯日期串才按 UTC），
+ * 故此处直接 `new Date` 即可；存量带偏移/空格分隔的值也能被 V8 正确解析。
+ */
 export function fmtTime(ts: string | number | null | undefined): string {
   if (ts === null || ts === undefined || ts === "") return "--";
-  const d = typeof ts === "number" ? new Date(ts) : new Date(ts);
+  const d = new Date(ts);
   if (Number.isNaN(d.getTime())) return String(ts);
   const p = (n: number) => String(n).padStart(2, "0");
   return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;

@@ -1,12 +1,12 @@
 from core.context import AppContext, get_ctx
 # --- stdlib imports injected by fix_route_imports ---
 import hashlib
-import time
 import uuid
 
 from fastapi import APIRouter, Depends
 
 from app.routes._common import err, ok
+from core.clock import local_now, now_iso, to_iso
 
 router = APIRouter()
 
@@ -34,7 +34,7 @@ async def create_api_key(body: dict, ctx: AppContext = Depends(get_ctx)):
         "rate_limit": int(body.get("rate_limit", 0)), "status": "active",
         "ip_allow": body.get("ip_allow", ""),
         "expires_at": body.get("expires_at", ""),
-        "created_at": time.strftime("%Y-%m-%dT%H:%M:%S")})
+        "created_at": now_iso()})
     if ctx.apikey_store:
         ctx.apikey_store.invalidate()
     ctx.db.audit("admin", "api_key.create", f"#{kid}",
@@ -92,16 +92,16 @@ async def batch_delete_api_keys(body: dict, ctx: AppContext = Depends(get_ctx)):
 @router.post("/api-keys/{kid}/rotate")
 async def rotate_api_key(kid: int, ctx: AppContext = Depends(get_ctx)):
     """轮换密钥：生成新密钥立即生效，旧密钥立即失效；grace_until 记录宽限标记（7天）。"""
-    from datetime import datetime, timedelta
+    from datetime import timedelta
     row = ctx.db.query_one("SELECT id FROM api_keys WHERE id=?", (kid,))
     if not row:
         return err(404, "密钥不存在")
     raw = f"qmt-{uuid.uuid4().hex[:24]}"
-    grace = (datetime.now() + timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%S")
+    grace = to_iso(local_now() + timedelta(days=7))
     ctx.db.execute(
         "UPDATE api_keys SET key_hash=?, grace_until=?, created_at=? WHERE id=?",
         (hashlib.sha256(raw.encode()).hexdigest(), grace,
-         time.strftime("%Y-%m-%dT%H:%M:%S"), kid))
+         now_iso(), kid))
     if ctx.apikey_store:
         ctx.apikey_store.invalidate()
     ctx.db.audit("admin", "api_key.rotate", f"#{kid}", {"grace_until": grace}, "ok")
@@ -115,8 +115,8 @@ async def clean_unused_api_keys(body: dict, ctx: AppContext = Depends(get_ctx)):
     days = int(body.get("days") or 30)
     if days < 1:
         return err(400, "days 至少为 1")
-    from datetime import datetime, timedelta
-    cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%S")
+    from datetime import timedelta
+    cutoff = to_iso(local_now() - timedelta(days=days))
     # 注意：last_used_at 为空视为"从未使用"，也满足"从未使用>days天"条件
     # 保留 active 且：(last_used_at 为空且 created_at < cutoff) OR last_used_at < cutoff
     deleted = 0

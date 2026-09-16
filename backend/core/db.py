@@ -11,8 +11,12 @@ import logging
 import os
 import sqlite3
 import threading
-from datetime import datetime, timezone
 from pathlib import Path
+
+# ``now_iso`` 的唯一实现在 ``core.clock``（V11 R8 收敛）。此处**保留同名 re-export**：
+# 存量代码大量 ``from core.db import now_iso``，删除会引发无谓的大范围改动；
+# 但**不要再在本文件重新定义**（护栏 ``tests/test_clock_unity.py`` 会红）。
+from core.clock import now_iso  # noqa: F401
 
 log = logging.getLogger("qmt_work.db")
 
@@ -103,10 +107,6 @@ class _RWLock:
 
 
 _rw = _RWLock(concurrent_reads=sqlite3.threadsafety >= 3)
-
-
-def now_iso() -> str:
-    return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
 
 
 def audit_chain_hash(prev_hash: str, row: dict) -> str:

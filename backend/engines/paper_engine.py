@@ -13,9 +13,9 @@
 import json
 import logging
 import threading
-from datetime import datetime
 
 from tools.ashare import is_valid_lot, limit_price
+from core.clock import now_iso, today_str
 
 log = logging.getLogger("qmt_work.paper")
 
@@ -24,7 +24,7 @@ MIN_LOT = 100  # A 股 1 手 = 100 股
 
 
 def _today_date() -> str:
-    return datetime.now().strftime("%Y-%m-%d")
+    return today_str()
 
 
 _DDL = (
@@ -53,7 +53,7 @@ _DDL = (
 
 
 def _now() -> str:
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return now_iso()
 
 
 class PaperEngine:

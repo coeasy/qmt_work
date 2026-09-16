@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import time
 from datetime import datetime
 
 from xtquant_client.order_status import (
@@ -22,6 +21,7 @@ from xtquant_client.order_status import (
     is_active,
     normalize_order_status,
 )
+from core.clock import now_iso, today_str
 
 log = logging.getLogger("qmt_work.reconcile")
 
@@ -134,7 +134,7 @@ class OrderReconciler:
                     cdate = created_raw[:10]
                 # 跨日委托（券商当日委托表已清空）→ stale；当日委托连续 N 轮查不到 →
                 # 按成交判定（有成交=已清算，无成交=疑似消失/废单）。
-                if cdate and cdate != datetime.now().strftime("%Y-%m-%d"):
+                if cdate and cdate != today_str():
                     status = "stale"
                 else:
                     status = "filled" if traded > 0 else "stale"
@@ -180,7 +180,7 @@ class OrderReconciler:
         if self._wal is not None:
             try:
                 self._wal.append("reconciled", "order", order_id,
-                                 {**detail, "at": time.strftime("%Y-%m-%dT%H:%M:%S")})
+                                 {**detail, "at": now_iso()})
             except Exception:  # noqa: BLE001
                 pass
         if self._db is not None:

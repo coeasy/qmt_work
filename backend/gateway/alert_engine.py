@@ -11,15 +11,12 @@
 import asyncio
 import logging
 import time
-from datetime import datetime, timezone
 
+from core.clock import now_iso as _now_iso  # 唯一实现在 core.clock（V11 R8 收敛）
+from core.clock import parse_iso
 from gateway.notifier import _event_match
 
 log = logging.getLogger("qmt_work.alert")
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
 
 
 class AlertEngine:
@@ -36,10 +33,13 @@ class AlertEngine:
         cd = 300 if raw in (None, "") else int(raw)
         if cd <= 0:
             return True   # 0 = 不设冷却
-        try:
-            return time.time() - datetime.fromisoformat(last).timestamp() >= cd
-        except Exception:  # noqa: BLE001
+        # V11 R8：经 core.clock.parse_iso 宽容解析 —— 存量 last_triggered 可能是裸值
+        # （本模块旧写法）或带偏移（V9 早期），也兼容测试直接喂的 aware 值。
+        # 解析失败（坏值/空）时维持原语义「放行」。
+        ts = parse_iso(last)
+        if ts is None:
             return True
+        return time.time() - ts.timestamp() >= cd
 
     def _fire(self, rule: dict, event_type: str, payload: dict) -> None:
         title = f"[告警] {rule.get('name', '')}"

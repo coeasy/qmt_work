@@ -1,10 +1,10 @@
 from core.context import AppContext, get_ctx
 # --- stdlib imports injected by fix_route_imports ---
-import time
 
 from fastapi import APIRouter, Depends
 
 from app.routes._common import audit_log, err, ok
+from core.clock import now_iso
 
 router = APIRouter()
 
@@ -30,7 +30,7 @@ async def save_alert_rule(body: dict, ctx: AppContext = Depends(get_ctx)):
         "threshold": float(body.get("threshold", 0) or 0),
         "channel": body.get("channel", "*"),
         "cooldown_seconds": int(body.get("cooldown_seconds", 300)),
-        "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "created_at": now_iso(),
     }
     if body.get("id"):
         fields = [f"{k}=?" for k in payload]

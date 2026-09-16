@@ -27,13 +27,13 @@ import re
 import time
 import urllib.parse  # noqa: E402
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from email.mime.text import MIMEText
 from typing import Any
 
 import httpx
 
 # H3 敏感参数静态加密：落库前加密 secret/password/url/auth，读取时解密
+from core.clock import now_iso as _now_iso  # 唯一实现在 core.clock（V11 R8 收敛）
 from core.crypto import decrypt_fields, encrypt_fields
 
 
@@ -44,10 +44,6 @@ class NotifyMessage:
     body: str
     payload: dict[str, Any] = field(default_factory=dict)
     created_at: float = field(default_factory=time.monotonic)
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
 
 
 def _render(template: str, ctx: dict[str, Any]) -> str:

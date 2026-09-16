@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends
 from app.routes._common import BrokerError, _call, _need, err, no_broker, ok
 from app.services.positions import enrich_positions
 from gateway.execution import get_execution_service
+from core.clock import now_iso
 
 router = APIRouter()
 
@@ -202,7 +203,7 @@ async def account_grid(ctx: AppContext = Depends(get_ctx)):
         "total_market_value": round(total_mv, 2),
         "accounts": rows,
         "positions": positions,
-        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "generated_at": now_iso(),
     })
 
 

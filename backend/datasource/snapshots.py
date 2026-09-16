@@ -4,12 +4,9 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from typing import Iterable
 
-
-def _now() -> str:
-    return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+from core.clock import now_iso as _now  # 唯一实现在 core.clock（V11 R8 收敛）
 
 
 def _digest(rows: Iterable[dict]) -> str:

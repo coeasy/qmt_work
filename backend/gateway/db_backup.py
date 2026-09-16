@@ -13,7 +13,10 @@ import asyncio
 import logging
 import shutil
 import time
+from datetime import datetime
 from pathlib import Path
+
+from core.clock import to_iso
 
 log = logging.getLogger("qmt_work.db_backup")
 
@@ -88,7 +91,7 @@ class DBBackup:
                 st = f.stat()
                 out.append({
                     "name": f.name, "size": st.st_size,
-                    "mtime": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(st.st_mtime)),
+                    "mtime": to_iso(datetime.fromtimestamp(st.st_mtime)),
                 })
             except OSError:
                 continue

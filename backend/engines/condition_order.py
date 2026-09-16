@@ -8,10 +8,10 @@
 """
 import asyncio
 import logging
-import time
 import uuid
-from datetime import datetime, timedelta
+from datetime import timedelta
 
+from core.clock import FORMAT, local_now, now_iso, parse_iso, today_str
 from xtquant_client.base import BrokerError
 from xtquant_client.order_status import (  # P1-5：调用统一状态词汇表做终态核销
     is_active,
@@ -43,18 +43,24 @@ def _safe_int(v, default: int = 0) -> int:
 
 
 def _today() -> str:
-    return time.strftime("%Y-%m-%d")
+    return today_str()
 
 
 def _end_of_day(dt: str = "") -> str:
-    """返回给定日期（或今天）的 23:59:59 本地时间 ISO 串。"""
-    base = datetime.fromisoformat(dt) if dt else datetime.now()
-    return base.replace(hour=23, minute=59, second=59).strftime("%Y-%m-%dT%H:%M:%S")
+    """返回给定日期（或今天）的 23:59:59 本地时间 ISO 串。
+
+    V11 R8：经 ``core.clock`` 统一 —— 解析用宽容的 :func:`parse_iso`（存量值可能是
+    裸值/空格分隔/带偏移），输出用唯一格式 :data:`FORMAT`。
+    """
+    base = parse_iso(dt) if dt else None
+    if base is None:
+        base = local_now()
+    return base.replace(hour=23, minute=59, second=59).strftime(FORMAT)
 
 
 def _compute_expire(valid_days: int) -> str:
     """计算到期时间：valid_days<=0 当日 23:59:59；>0 则从今天起 N 天后 23:59:59。"""
-    now = datetime.now()
+    now = local_now()
     if valid_days and valid_days > 0:
         target = now + timedelta(days=int(valid_days))
     else:
@@ -63,17 +69,22 @@ def _compute_expire(valid_days: int) -> str:
 
 
 def _is_expired(expire_at: str) -> bool:
-    if not expire_at:
+    """是否已过期。
+
+    V11 R8：``local_now()`` 与 :func:`parse_iso` **同口径**（都是 naive 本地时间）。
+    旧写法 ``datetime.now() > datetime.fromisoformat(expire_at)`` 一旦 ``expire_at``
+    带偏移即抛 ``TypeError: can't compare offset-naive and offset-aware datetimes``；
+    解析失败时维持原语义「不视为过期」。
+    """
+    ts = parse_iso(expire_at)
+    if ts is None:
         return False
-    try:
-        return datetime.now() > datetime.fromisoformat(expire_at)
-    except Exception:  # noqa: BLE001
-        return False
+    return local_now() > ts
 
 
 def _tomorrow() -> str:
     """次日日期（YYYY-MM-DD），用于「拒单次日重试」。"""
-    return (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+    return (local_now() + timedelta(days=1)).strftime("%Y-%m-%d")
 
 
 class ConditionOrderEngine:
@@ -120,7 +131,7 @@ class ConditionOrderEngine:
                 # A3：启动时清理已到期但仍是 pending/triggered 的条件单
                 if _is_expired(d.get("expire_at") or ""):
                     d["status"] = "expired"
-                    d["expired_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+                    d["expired_at"] = now_iso()
                     self._db.execute(
                         "UPDATE condition_orders SET status=?, expired_at=? WHERE id=?",
                         ("expired", d["expired_at"], d["id"]))
@@ -192,7 +203,7 @@ class ConditionOrderEngine:
         except (TypeError, ValueError):
             valid_days = 0
         cid = uuid.uuid4().hex[:12]
-        created_at = time.strftime("%Y-%m-%dT%H:%M:%S")
+        created_at = now_iso()
         order = {
             "id": cid, "code": code, "side": side, "trigger_type": trigger_type,
             "trigger_price": float(trigger_price), "price_type": price_type,
@@ -285,11 +296,11 @@ class ConditionOrderEngine:
                         # 当日盘中重试按 next_retry_at 判定是否到点；次日重试按 retry_date 判定
                         nra = o.get("next_retry_at") or ""
                         if nra:
-                            try:
-                                if datetime.now() < datetime.fromisoformat(nra):
-                                    continue
-                            except Exception:  # noqa: BLE001
-                                pass
+                            # V11 R8：local_now() 与 parse_iso() 同口径（均 naive 本地时间），
+                            # 不再出现「裸 now() 比 fromisoformat()」的 aware/naive 混比隐患。
+                            nra_dt = parse_iso(nra)
+                            if nra_dt is not None and local_now() < nra_dt:
+                                continue
                         elif today < (o.get("retry_date") or ""):
                             continue
                         try:
@@ -312,7 +323,7 @@ class ConditionOrderEngine:
     async def _expire(self, o: dict) -> None:
         """A3：条件单到期失效，写库 + 推送 + 通知。"""
         o["status"] = "expired"
-        o["expired_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+        o["expired_at"] = now_iso()
         self._retry_queue.pop(o["id"], None)
         self._persist(o)
         self._wal_append("expire", o["id"], {"status": "expired", "expired_at": o["expired_at"]})
@@ -361,7 +372,7 @@ class ConditionOrderEngine:
         # 首次触发：状态 → triggered 并持久化（保留 triggered 记录待恢复）
         if not is_retry:
             o["status"] = "triggered"
-            o["triggered_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+            o["triggered_at"] = now_iso()
             self._persist(o)
             self._wal_append("trigger", o["id"], self._view(o))
             self._emit({"type": "condition_triggered", "data": self._view(o)})
@@ -449,8 +460,9 @@ class ConditionOrderEngine:
         if intraday < self._intraday_retry_limit:
             o["intraday_retry"] = intraday + 1
             o["status"] = "triggered"          # 保留触发记录待恢复
-            o["next_retry_at"] = time.strftime(
-                "%Y-%m-%dT%H:%M:%S", time.localtime(time.time() + self._intraday_interval))
+            o["next_retry_at"] = (
+                local_now() + timedelta(seconds=self._intraday_interval)
+            ).strftime(FORMAT)
             o["retry_date"] = _today()         # 盘中重试仍属当日
             self._retry_queue[o["id"]] = o
             log.info("condition %s 当日盘中重试(%d/%d，%ds后): %s",

@@ -26,8 +26,8 @@ import asyncio
 import logging
 import threading
 import time
-from datetime import datetime
 from typing import Optional
+from core.clock import now_iso
 
 try:  # 可选依赖：商用部署禁止安装 eltdx（Research-Only 许可）
     from eltdx import TdxClient
@@ -346,7 +346,7 @@ class EltdxSource(DataSource):
             log.warning("eltdx 行业/题材获取失败 %s: %s", code, exc)
 
         rec = {"industry": industry, "concepts": concepts,
-               "ts": datetime.now().isoformat(timespec="seconds")}
+               "ts": now_iso()}
         def _commit() -> None:
             # 锁 + 文件写入整体放线程池：既保并发下不重复落盘，
             # 也不让事件循环线程持 threading.Lock 或同步写磁盘。
@@ -408,7 +408,7 @@ class EltdxSource(DataSource):
                     "current_hand": getattr(s, "current_hand", None),  # 现量（手）
                     "sum_buy_vol": getattr(s, "sum_buy_vol", None),    # 委买五档总量
                     "sum_sell_vol": getattr(s, "sum_sell_vol", None),  # 委卖五档总量
-                    "ts": datetime.now().isoformat(timespec="seconds"),
+                    "ts": now_iso(),
                 }
             out = self._use_client(_inner)
             # 涨跌额/幅：由 last 与 lastClose 真实计算（非估算），供指数条/板块/ETF
@@ -879,7 +879,7 @@ class EltdxSource(DataSource):
                     "strength": points,     # 分钟级主买/主卖
                     "volume_ratio": vol_cmp,  # 量比
                     "est": False,           # 真实口径，非估算
-                    "ts": datetime.now().isoformat(timespec="seconds"),
+                    "ts": now_iso(),
                 }
             return self._use_client(_inner)
         try:

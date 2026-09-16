@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
-import time
+from core.clock import now_iso
 
 log = logging.getLogger("qmt_work.runtime_config")
 
@@ -166,7 +166,7 @@ class RuntimeConfig:
                     self.db.upsert("runtime_config", {
                         "key": key,
                         "value": json.dumps(val, ensure_ascii=False),
-                        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                        "updated_at": now_iso(),
                     })
                     self._record_history(key, "set", old_val, val)
                 changed.append(key)
@@ -201,7 +201,7 @@ class RuntimeConfig:
                 "old_value": json.dumps(old, ensure_ascii=False) if old is not None else "",
                 "new_value": json.dumps(new, ensure_ascii=False) if new is not None else "",
                 "actor": "system", "ip": "",
-                "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                "created_at": now_iso(),
             })
         except Exception as exc:  # noqa: BLE001
             log.warning("config history record failed: %s", exc)

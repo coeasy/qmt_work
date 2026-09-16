@@ -153,19 +153,27 @@ def test_unsigned_subscription_has_no_signature_header():
 
 # ---------------- 3/4. 重试与退避 ----------------
 def test_retry_then_success_with_backoff(monkeypatch):
-    """前 2 次 500、第 3 次成功 → attempts=3，退避序列 = base*backoff^(i-1)。"""
+    """前 2 次 500、第 3 次成功 → attempts=3，退避序列 = base*backoff^(i-1)。
+
+    ★ V11 R8：改打桩 ``gateway.webhook_out._sleep``，**不再**打桩 ``asyncio.sleep``。
+    旧写法 ``monkeypatch.setattr("gateway.webhook_out.asyncio.sleep", fake_sleep)``
+    是**进程级**打桩（``gateway.webhook_out.asyncio`` 就是全局 asyncio 模块），会把
+    app_client（session 级）lifespan 留在 anyio portal 线程上的后台循环一并截走：
+    ``sync/__init__.py::_batch_loop`` 的 100ms 微批窗口被打桩后 ``sleep(0)`` 不再等待
+    → **空转**刷屏，几百个无关 ``0.1`` 混进 ``delays`` → 断言间歇性假失败
+    （R8 实测失败时 ``delays`` 含 276+ 个 ``0.1``，同一命令同代码时好时坏）。
+    """
     wh, db = make_wh([sub(max_retries=3)], base_delay=0.5, backoff=2.0)
     holder = {"script": [(500, "e1"), (500, "e2"), (200, "ok")], "requests": []}
     wh._http = mock_client(holder)
 
     delays = []
-    real_sleep = asyncio.sleep
 
     async def fake_sleep(d, *a, **kw):
         delays.append(d)
-        await real_sleep(0)  # 测试不等真实退避
+        await asyncio.sleep(0)  # 测试不等真实退避
 
-    monkeypatch.setattr("gateway.webhook_out.asyncio.sleep", fake_sleep)
+    monkeypatch.setattr("gateway.webhook_out._sleep", fake_sleep)
 
     asyncio.run(dispatch_and_wait(wh, "order.event", {"v": 1}))
     monkeypatch.undo()

@@ -223,6 +223,18 @@ def _win32():
         user32.IsWindowVisible.restype = wintypes.BOOL
         user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
         user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+        user32.SetForegroundWindow.restype = wintypes.BOOL
+        # ⚠️ 这两个必须声明：不声明时 ctypes 按 C ``int`` 传参，64 位 HWND 会被截断，
+        # 调用**静默失败**（实测：``SetWindowPos`` 返回 0、窗口 ``WS_EX_TOPMOST`` 恒为 False，
+        # 于是窗口全程被别的窗口遮挡 → Chromium 不产出合成层 → PrintWindow 只能拿到
+        # 未合成的空白客户区，表现为「标题栏/菜单栏正常、内容区纯色」）。
+        user32.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND,
+                                        ctypes.c_int, ctypes.c_int,
+                                        ctypes.c_int, ctypes.c_int,
+                                        wintypes.UINT]
+        user32.SetWindowPos.restype = wintypes.BOOL
+        user32.BringWindowToTop.argtypes = [wintypes.HWND]
+        user32.BringWindowToTop.restype = wintypes.BOOL
         _win32._done = True
     return user32
 
@@ -276,11 +288,36 @@ def pick_main_window(pid: int) -> dict | None:
 
 
 def focus_window(hwnd: int) -> None:
-    """把窗口恢复并置前，避免截图被其它窗口遮挡（截到一片空白）。"""
+    """把窗口恢复并**真正**置前，避免截图被其它窗口遮挡（截到一片空白）。
+
+    仅靠 ``SetForegroundWindow`` 不够：Windows 的「防抢焦点」规则会**静默拒绝**
+    非前台进程的置前请求。实测（R8）：``IsWindowVisible=True`` / ``IsIconic=False`` /
+    ``IsZoomed=False``，但 ``GetForegroundWindow() != 本窗口`` —— 窗口一直留在别的
+    窗口后面；被遮挡时 Chromium 不产出合成层，``PrintWindow(PW_RENDERFULLCONTENT)``
+    只能拿到**未合成的空白客户区**，表现为「原生标题栏 + 菜单栏正常、内容区纯色」
+    （采样 18 色 / PNG 字节数每次完全一致 —— 因为客户区确实一个像素都没画）。
+    ``SetWindowPos(HWND_TOPMOST)`` 只改 Z 序、**不受防抢焦点限制**，因此能稳定生效。
+    """
     user32 = _win32()
+    HWND_TOPMOST = -1
+    SWP_NOSIZE, SWP_NOMOVE, SWP_SHOWWINDOW = 0x0001, 0x0002, 0x0040
     try:
-        user32.ShowWindow(hwnd, 9)        # SW_RESTORE
+        user32.ShowWindow(hwnd, 9)                       # SW_RESTORE
+        user32.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                            SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW)
+        user32.BringWindowToTop(hwnd)
         user32.SetForegroundWindow(hwnd)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def unfocus_window(hwnd: int) -> None:
+    """撤掉 ``focus_window`` 临时置顶的 Z 序，不留下「总在最前」的副作用。"""
+    user32 = _win32()
+    HWND_NOTOPMOST = -2
+    SWP_NOSIZE, SWP_NOMOVE = 0x0001, 0x0002
+    try:
+        user32.SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE)
     except Exception:  # noqa: BLE001
         pass
 
@@ -672,14 +709,30 @@ def main() -> int:
             # PrintWindow 本身不需要窗口在前台；但若它失败会回退到屏幕搬运，
             # 所以仍先尝试置前，提高回退路径的成功率。
             focus_window(main_win["hwnd"])
-            time.sleep(0.8)
             shot = OUT_DIR / "client_window.png"
-            detail, colors, size = screenshot_window(main_win["hwnd"], shot, main_win["rect"])
+            # ⚠️ 不要用「固定 sleep 后只抓一次」：`did-finish-load` 只代表**文档**加载完，
+            # 路由 chunk（Dashboard-*.js / account-*.js …）与 echarts 首帧还在异步路上，
+            # 固定等待会与首帧渲染形成竞态 —— 实测同一份代码连续两次都抓到
+            # 「原生标题栏 + 菜单栏 + 纯底色空窗」（18 色 / 8450 bytes，两次字节数**完全一致**），
+            # 而 dev.log 里 `[desktop] window loaded` 之后仍在拉 Dashboard chunk、
+            # `/api/v1/account/status` 已 200 —— 即**页面本身没问题，是截图抢跑了**。
+            # 改为**轮询到渲染出来为止**（最长 12s）。断言强度不变：
+            # 12s 内始终渲染不出来，仍然判失败。
+            t0 = time.time()
+            detail, colors, size = "未截图", 0, 0
+            while True:
+                time.sleep(0.5)
+                detail, colors, size = screenshot_window(
+                    main_win["hwnd"], shot, main_win["rect"])
+                if colors >= 50 or time.time() - t0 >= 12.0:
+                    break
+            waited = round(time.time() - t0, 1)
             record("window", "窗口截图已产出", size > 5000, f"{detail} / {size} bytes")
             # 纯色画面 = 窗口在但页面没渲染出来（白/黑屏），是本项目历史上真实发生过的
             # 故障形态。以「采样到的不同颜色数」作为「是否真的渲染了内容」的交叉验证。
             record("window", "窗口已实际渲染（非纯色空窗）", colors >= 50,
-                   f"采样到的不同颜色数={colors}")
+                   f"采样到的不同颜色数={colors}（等待 {waited}s）")
+            unfocus_window(main_win["hwnd"])
 
     # ---------- 阶段 7：停机 + 零残留 ----------
     print("\n[7/7] 优雅停机与零残留")

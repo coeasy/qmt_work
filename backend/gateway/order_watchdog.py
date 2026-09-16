@@ -12,6 +12,7 @@ import time
 import uuid
 
 from xtquant_client.order_status import is_active
+from core.clock import now_iso
 
 log = logging.getLogger("qmt_work.order_watchdog")
 
@@ -118,7 +119,7 @@ class OrderWatchdog:
                     "intent_id": intent_id, "order_id": oid, "code": code,
                     "conn_id": conn_id, "result": result,
                     "source": "order_watchdog",
-                    "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                    "ts": now_iso(),
                 })
         except Exception as exc:  # noqa: BLE001
             log.warning("watchdog wal append failed: op=%s oid=%s err=%s", op, oid, exc)

@@ -14,13 +14,13 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
 
 from .adapters.juejin import JuejinAdapter
 from .adapters.ptrade import PTradeAdapter
 from .adapters.ths import ThsAdapter
 from .base import BrokerAdapter
 from .xtp import XTPQuantAdapter
+from core.clock import now_iso
 
 log_backend = logging.getLogger("qmt_work.registry")
 
@@ -275,7 +275,7 @@ class Registry:
         if self._db is None:
             return
         data = asdict(profile)
-        now = datetime.now(timezone.utc).isoformat()
+        now = now_iso()
         self._db.execute(
             "INSERT INTO broker_profiles (id,name,adapter,profile_json,is_custom,created_at,updated_at) "
             "VALUES (?,?,?,?,1,?,?) "

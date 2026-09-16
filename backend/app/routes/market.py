@@ -3,7 +3,6 @@ from core.context import AppContext, get_ctx
 import asyncio
 import logging
 import os
-from datetime import datetime
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
@@ -42,6 +41,7 @@ from datasource.registry import (
     UnsupportedDataSource,
     get_hub,
 )
+from core.clock import now_iso
 
 log = logging.getLogger("qmt_work.market")
 
@@ -565,7 +565,7 @@ async def market_moneyflow_snapshot(body: _MoneyflowSnapshotReq, ctx: AppContext
         return err(400, "缺少 codes 或 board")
     inserted = await kline_io.snapshot_codes(codes)
     return ok({"inserted": inserted, "codes": codes,
-               "ts": datetime.now().isoformat(timespec="seconds")})
+               "ts": now_iso()})
 
 
 @router.get("/market/moneyflow/replay")

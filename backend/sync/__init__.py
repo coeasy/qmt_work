@@ -13,6 +13,8 @@ from collections import deque
 
 from fastapi import WebSocket
 
+from core.clock import now_iso, today_str
+
 log = logging.getLogger("qmt_work.sync")
 
 
@@ -191,7 +193,7 @@ class SyncEngine:
         # 不再每 tick 立即 upsert+commit（消除高频订阅多标的时的写盘风暴）。
         self._batch_rows.append((
             code, "quote",
-            data.get("ts", time.strftime("%Y-%m-%dT%H:%M:%S")),
+            data.get("ts", now_iso()),
             json.dumps(data, ensure_ascii=False),
         ))
         # 行情微批聚合：100ms 窗口内批量广播（C2），降低高频帧数
@@ -248,7 +250,7 @@ class SyncEngine:
                                 "account_id": conn.cfg.account_id}
                         # 阶段 3：同步 sqlite 移出事件循环——快照写入走线程池，避免卡事件循环
                         await self.db.ainsert("account_snapshot", {
-                            "account_id": conn.cfg.account_id or conn.cfg.name, "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                            "account_id": conn.cfg.account_id or conn.cfg.name, "ts": now_iso(),
                             "net_value": snap["net_value"],
                             "positions_json": json.dumps(pos, ensure_ascii=False),
                             "cash_json": json.dumps(cash, ensure_ascii=False),
@@ -302,7 +304,7 @@ class SyncEngine:
         - 成交去重键加入 seq（同秒同价量部成不再指纹碰撞丢单）；
         - 状态迁移加终态锁（filled/cancelled/rejected 不可回退，拦截乱序 filled→pending）。
         """
-        today = time.strftime("%Y-%m-%d")
+        today = today_str()
         if self._fp_date != today:
             self._fp_date = today
             self._order_fp.clear()
@@ -342,7 +344,7 @@ class SyncEngine:
 
     def _roll_fp(self) -> None:
         """交易日滚动：跨日清理订单/成交指纹，防止 order_id 跨日复用误判。"""
-        today = time.strftime("%Y-%m-%d")
+        today = today_str()
         if self._fp_date != today:
             self._fp_date = today
             self._order_fp.clear()

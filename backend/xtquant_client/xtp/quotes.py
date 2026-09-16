@@ -1,9 +1,8 @@
 """行情：tick / K 线 / 订阅（QuotesMixin，自原 xtp.py 逐行搬移）。"""
 
-from datetime import datetime
-
 from ..base import BrokerNotConnectedError, BrokerSDKError
 from ._common import _dget, _normalize_kline_period, log
+from core.clock import local_now, now_iso
 
 
 class QuotesMixin:
@@ -72,7 +71,7 @@ class QuotesMixin:
             "ask_vol": _lst(_dget(tick, "askVolume", "ask_volume"), 0),
             "bids": bids,
             "asks": asks,
-            "ts": datetime.now().isoformat(timespec="seconds"),
+            "ts": now_iso(),
         }
 
     def _kline_lookback_days(self, period: str, count: int) -> int:
@@ -97,8 +96,7 @@ class QuotesMixin:
             fn = self._xtdata.download_history_data
             if not start:
                 try:
-                    from datetime import datetime
-                    d0 = datetime.now() - timedelta(days=self._kline_lookback_days(period, count))
+                    d0 = local_now() - timedelta(days=self._kline_lookback_days(period, count))
                     start = d0.strftime("%Y%m%d")
                 except Exception:  # noqa: BLE001
                     start = ""

@@ -5,8 +5,8 @@
 import json
 import uuid
 import zipfile
-from datetime import datetime, timezone
 
+from core.clock import now_iso as _now  # 唯一实现在 core.clock（V11 R8 收敛）
 from core.state import state
 from tools.strategy_gen import _TEMPLATES, save_qmt_strategy
 
@@ -53,10 +53,6 @@ _TYPE_DESCS = {
     "rsi": "RSI 低于买点买入、高于卖点卖出。",
     "limitup": "监控涨停时间窗 + tick 涨幅打板。",
 }
-
-
-def _now() -> str:
-    return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
 
 
 def _safe_name(s: str) -> str:

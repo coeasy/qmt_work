@@ -22,6 +22,8 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
+from core.clock import now_iso
+
 log = logging.getLogger("qmt_work.runtime.jobs")
 
 #: kind -> 并发配额；全局并发上限
@@ -329,7 +331,9 @@ class JobRuntime:
 
     @staticmethod
     def _now() -> str:
-        return time.strftime("%Y-%m-%dT%H:%M:%S%z")
+        # V11 R8：旧写法 ``time.strftime("%Y-%m-%dT%H:%M:%S%z")`` 产出 "+0800"
+        # （非严格 ISO、且与本文件 :503 的裸值写法**同列不同形**）；统一到 core.clock。
+        return now_iso()
 
 
 _runtime: Optional[JobRuntime] = None
@@ -487,7 +491,6 @@ def backtest_runner(params: dict) -> Runner:
             data_meta=meta)
         job["report"](90, "结果落库")
         import json
-        import time as _time
 
         from core.db import get_db
 
@@ -500,7 +503,7 @@ def backtest_runner(params: dict) -> Runner:
             "metrics_json": json.dumps(res.get("metrics", {}), ensure_ascii=False),
             "trades_json": json.dumps(res.get("trades", []), ensure_ascii=False),
             "dataset_snapshot_id": dataset_snapshot_id,
-            "report_path": "", "created_at": _time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "report_path": "", "created_at": now_iso(),
         })
         res["id"] = bid
         res["dataset_snapshot_id"] = dataset_snapshot_id

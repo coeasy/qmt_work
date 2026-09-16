@@ -18,9 +18,9 @@ import hashlib
 import json
 import logging
 import threading
-from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Union
 
+from core.clock import now_iso as _now  # 唯一实现在 core.clock（V11 R8 收敛）
 from core.db import DB, get_db
 from datasource.models import Bar, BarLite, BoardItem, StockInfo
 from datasource.quality import (
@@ -30,10 +30,6 @@ from datasource.quality import (
 )
 
 log = logging.getLogger("qmt_work.datasource.local_store")
-
-
-def _now() -> str:
-    return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
 
 
 def _num(v: Any) -> Optional[float]:

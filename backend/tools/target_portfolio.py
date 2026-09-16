@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import json
 import logging
-import time
 from typing import Any
+from core.clock import now_iso
 
 log = logging.getLogger("qmt_work.target")
 
@@ -78,7 +78,7 @@ class TargetPortfolioEngine:
             signals.append(item)
         result = {"ok": True, "dry_run": dry_run, "mode": mode,
                   "current": cur, "target": resolved, "plan": plan,
-                  "ts": time.strftime("%Y-%m-%dT%H:%M:%S")}
+                  "ts": now_iso()}
         if dry_run or not self._router:
             return result
         # 经 SignalRouter 路由每个差量信号
@@ -98,8 +98,8 @@ class TargetPortfolioEngine:
             return 0
         nid = self._db.insert("target_portfolios", {
             "name": name, "weights_json": json.dumps(weights, ensure_ascii=False),
-            "status": "draft", "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-            "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S")})
+            "status": "draft", "created_at": now_iso(),
+            "updated_at": now_iso()})
         return nid
 
     def list_plans(self) -> list[dict]:

@@ -1,10 +1,10 @@
 """交易：下单 / 撤单 / 委托与成交查询 / 回调闭环（TradingMixin，自原 xtp.py 逐行搬移）。"""
 
 import threading
-from datetime import datetime
 
 from ..base import BrokerError
 from ._common import _dget, _direction_from_order_type, _pick, _shell_attr, log
+from core.clock import now_iso
 
 
 class TradingMixin:
@@ -324,7 +324,7 @@ class TradingMixin:
         status = "unknown" if oid is None else "submitted"
         return {"order_id": order_id, "seq": seq, "code": code, "direction": direction,
                 "price_type": price_type, "price": price, "volume": volume,
-                "status": status, "ts": datetime.now().isoformat(timespec="seconds")}
+                "status": status, "ts": now_iso()}
 
     def cancel_order(self, order_id: str) -> dict:
         trader, acc = self._require_trader()

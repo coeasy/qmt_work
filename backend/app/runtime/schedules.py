@@ -16,6 +16,8 @@ from datetime import datetime
 from typing import Optional
 
 from app.runtime.cron import CronExpr
+from core.clock import local_now, now_iso, parse_iso
+from core.clock import to_iso as _iso  # 唯一实现在 core.clock（V11 R8 收敛）
 
 log = logging.getLogger("qmt_work.runtime.schedules")
 
@@ -37,12 +39,18 @@ class ScheduleStore:
         if misfire_policy not in ("catch_up", "coalesce", "skip"):
             raise ValueError(f"invalid misfire_policy: {misfire_policy}")
         sid = schedule_id or f"sch-{uuid.uuid4().hex[:10]}"
+        # V11 R8：**显式**写 created_at/updated_at。
+        # 旧写法省略这两列 → 走建表时的 DEFAULT ``datetime('now','localtime')``
+        # （产出 "2026-09-16 18:57:49"，**空格分隔**），而 update() 写的是
+        # "2026-09-16T18:57:49"（**T 分隔**）→ **同一列两种形状**。显式写即让
+        # Python 成为唯一真源，DEFAULT 永不生效（不改表结构，零迁移风险）。
         row = {
             "id": sid, "name": name or kind, "kind": kind, "cron": expr.raw,
             "timezone": "Asia/Shanghai", "enabled": 1 if enabled else 0,
             "misfire_policy": misfire_policy,
             "params_json": json.dumps(params or {}, ensure_ascii=False),
-            "last_run_at": "", "next_run_at": _iso(expr.next_after(datetime.now())),
+            "last_run_at": "", "next_run_at": _iso(expr.next_after(local_now())),
+            "created_at": now_iso(), "updated_at": now_iso(),
         }
         self._db.upsert("schedules", row)
         return self.get(sid)  # type: ignore[return-value]
@@ -74,7 +82,7 @@ class ScheduleStore:
         sets = {k: v for k, v in fields.items() if k in allowed}
         if not sets:
             return cur
-        sets["updated_at"] = datetime.now().isoformat(timespec="seconds")
+        sets["updated_at"] = now_iso()
         self._db.upsert("schedules", {**cur_raw(cur), **sets})
         return self.get(sid)
 
@@ -100,10 +108,6 @@ def cur_raw(row: dict) -> dict:
     raw = {k: v for k, v in row.items() if k != "params"}
     raw["params_json"] = json.dumps(row.get("params") or {}, ensure_ascii=False)
     return raw
-
-
-def _iso(dt: Optional[datetime]) -> str:
-    return dt.isoformat(timespec="seconds") if dt else ""
 
 
 class ScheduleRunner:
@@ -143,7 +147,7 @@ class ScheduleRunner:
     # ------------------------------------------------------------------
     def tick_once(self, now: Optional[datetime] = None) -> list[str]:
         """一次调度检查（测试可直接调用）。返回本次提交的 job_id 列表。"""
-        now = now or datetime.now()
+        now = now or local_now()
         submitted: list[str] = []
         for sch in self._store.list(enabled_only=True):
             try:
@@ -160,9 +164,11 @@ class ScheduleRunner:
         if not last_s:
             self._store.update(sch["id"], next_run_at=_iso(expr.next_after(now)))
             return []
-        try:
-            due = datetime.fromisoformat(last_s)
-        except ValueError:
+        # V11 R8：经 core.clock.parse_iso 宽容解析（裸值/空格分隔/带偏移均可），
+        # 并与 tick_once 传入的 naive ``now`` 同口径 —— 旧写法 fromisoformat 遇到
+        # 带偏移的历史值会在 ``due > now`` 处抛 TypeError。
+        due = parse_iso(last_s)
+        if due is None:
             self._store.update(sch["id"], next_run_at=_iso(expr.next_after(now)))
             return []
         if due > now:

@@ -5,11 +5,12 @@
 - scope 分级：market / trade / account / backtest / admin / *（通配）
 - 兼容：settings.api_key 作为"主密钥"拥有全部权限（向后兼容 + loopback 免鉴权）
 """
-import datetime
 import hashlib
 import logging
 import threading
 import time
+
+from core.clock import now_iso, parse_iso
 
 log = logging.getLogger("qmt_work")
 
@@ -161,21 +162,22 @@ class ApiKeyStore:
 
         阶段 0-E：解析失败按「已过期」处理（返回 True）。原实现解析失败返回 False，
         意味着格式损坏/非法日期的 expires_at 会让密钥永不过期。
+
+        V11 R8：改经 ``core.clock.parse_iso`` 宽容解析（裸值 / 空格分隔 / 带偏移均可），
+        保持 fail-closed 语义不变。
         """
         exp = (row.get("expires_at") or "").strip()
         if not exp:
             return False
-        try:
-            exp_ts = datetime.datetime.fromisoformat(exp).timestamp()
-        except Exception:
+        exp_dt = parse_iso(exp)
+        if exp_dt is None:
             return True
-        cutoff = exp_ts
+        cutoff = exp_dt.timestamp()
         grace = (row.get("grace_until") or "").strip()
         if grace:
-            try:
-                cutoff = max(cutoff, datetime.datetime.fromisoformat(grace).timestamp())
-            except Exception:
-                pass
+            grace_dt = parse_iso(grace)
+            if grace_dt is not None:
+                cutoff = max(cutoff, grace_dt.timestamp())
         return time.time() > cutoff
 
     @staticmethod
@@ -211,11 +213,13 @@ class ApiKeyStore:
         if not self._ip_allowed(row, client_ip):
             return None
         # 使用追踪：内存累计 + 节流落库，供列表展示「最近使用 / 调用次数」判断真实有效性
-        now_iso = datetime.datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+        # V11 R8：旧写法在本函数内自带一份裸值实现（``datetime.datetime.now().strftime(...)``），
+        # 且局部变量名 ``now_iso`` 与 core.clock 的同名函数**形同实异**，极易误读；现统一。
+        stamp = now_iso()
         with self._lock:
             row["use_count"] = int(row.get("use_count") or 0) + 1
-            row["last_used_at"] = now_iso
-            self._usage_dirty[row["id"]] = (now_iso, row["use_count"])
+            row["last_used_at"] = stamp
+            self._usage_dirty[row["id"]] = (stamp, row["use_count"])
         self._ensure_flusher()
         return row
 

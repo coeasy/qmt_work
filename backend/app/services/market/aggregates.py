@@ -4,7 +4,6 @@
 由路由层 catch 后转 err() 信封。TTL 缓存与并发信号量参数与重构前一致。
 """
 import asyncio
-from datetime import datetime
 
 from app.services.market.common import (
     BOARD_MF_SEM,
@@ -18,10 +17,11 @@ from app.services.market.common import (
 )
 from core.state import state
 from datasource.registry import get_hub
+from core.clock import now_iso
 
 
 def _now() -> str:
-    return datetime.now().isoformat(timespec="seconds")
+    return now_iso()
 
 
 def _cached(key: str, ttl: int):

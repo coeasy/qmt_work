@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import logging
 
+from core.clock import local_now
+
 log = logging.getLogger("qmt_work.datasource.quality")
 
 #: provider 质量序（越小越优）——与默认数据链 QMT→eltdx→baostock→akshare 对齐
@@ -63,9 +65,14 @@ def _rank(provider_id: str) -> int:
 
 
 def _cutoff_ymd(lookback_days: int) -> str:
-    """Python 侧计算 YYYYMMDD 边界（不依赖 SQLite strftime 修饰符顺序差异）。"""
-    from datetime import date, timedelta
-    return (date.today() - timedelta(days=int(lookback_days))).strftime("%Y%m%d")
+    """Python 侧计算 YYYYMMDD 边界（不依赖 SQLite strftime 修饰符顺序差异）。
+
+    ``YYYYMMDD`` 是**行情交易日格式**（与 K 线 ``dt`` 列同形），不是 ISO 生意时刻，
+    故不走 ``core.clock.to_iso``；但「今天是哪天」仍取自唯一时钟 ``local_now()``
+    （V11 R8：原先的 ``date.today()`` 是第二份当前日期实现）。
+    """
+    from datetime import timedelta
+    return (local_now().date() - timedelta(days=int(lookback_days))).strftime("%Y%m%d")
 
 
 def reconcile_bars(db, *, period: str = "1d", adjust: str = "qfq",

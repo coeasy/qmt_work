@@ -24,9 +24,10 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
+from datetime import date
 from typing import Awaitable, Callable, List, Optional, Sequence
 
+from core.clock import now_iso  # noqa: F401  —— 唯一实现在 core.clock（V11 R8 收敛）
 from datasource.local_store import LocalStore, get_store
 from datasource.registry import get_hub
 
@@ -65,10 +66,6 @@ def _resolve_provider_id(real_src: str, configured: str) -> str:
     if cfg and cfg.lower() != "auto":
         return cfg
     return ""
-
-
-def now_iso() -> str:
-    return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
 
 
 def weekday_calendar(end: date, count: int) -> List[str]:

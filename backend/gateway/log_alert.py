@@ -15,6 +15,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from core.clock import now_iso
 
 
 class LogAlertHandler(logging.Handler):
@@ -63,7 +64,7 @@ class LogAlertHandler(logging.Handler):
             "app": "qmt_work",
             "level": record.levelname,
             "logger": record.name,
-            "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "time": now_iso(),
             "message": self.format(record),
             "pid": os.getpid(),
         }

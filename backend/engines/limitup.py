@@ -9,9 +9,9 @@ import asyncio
 import logging
 import time
 from collections import deque
-from datetime import datetime
 
 from xtquant_client.base import BrokerError
+from core.clock import now_iso
 
 log = logging.getLogger("qmt_work")
 
@@ -164,7 +164,7 @@ class LimitUpMonitor:
             return
         self._triggered.add(code)
         event = {"code": code, "price": last, "limit": limit, "rise": round(rise, 4),
-                 "ts": datetime.now().isoformat(timespec="seconds")}
+                 "ts": now_iso()}
         self._events.append(event)
         self._wal_append("trigger", code, event)
         self._emit({"type": "limitup", "data": event})

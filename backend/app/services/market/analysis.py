@@ -4,6 +4,7 @@ import logging
 from datetime import datetime
 
 from datasource.instrument import classify_instrument, with_exchange_suffix
+from core.clock import local_now, now_iso
 
 log = logging.getLogger("qmt_work.market")
 
@@ -51,7 +52,7 @@ def perf_stale(as_of, max_days: int = 10) -> bool:
         d = datetime.strptime(s, "%Y%m%d").date()
     except ValueError:
         return False
-    return (datetime.now().date() - d).days > max_days
+    return (local_now().date() - d).days > max_days
 
 
 async def build_analysis(m, code: str, conn_id: str = "", source: str = "auto",
@@ -157,7 +158,7 @@ async def build_analysis(m, code: str, conn_id: str = "", source: str = "auto",
     return {
         "code": code, "name": name, "type": cls["type"],
         "exchange": cls["exchange"], "board": cls["board"], "label": cls["label"],
-        "ts": datetime.now().isoformat(timespec="seconds"),
+        "ts": now_iso(),
         "snapshot": snap, "profile": prof, "capital": cap,
         "performance": perf, "moneyflow": mf, "valuation": valuation,
         "availability": availability,

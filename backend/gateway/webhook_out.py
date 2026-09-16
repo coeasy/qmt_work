@@ -23,8 +23,23 @@ import logging
 import time
 
 import httpx
+from core.clock import now_iso
 
 log = logging.getLogger("qmt_work.webhook_out")
+
+# 轻量别名（**测试 monkeypatch 友好**）—— 与 ``app/runtime/schedules.py`` 同款约定。
+#
+# ⚠️ 测试**不要**直接 monkeypatch ``asyncio.sleep``：那是**进程级**打桩，会把
+# app_client（session 级）lifespan 留在 anyio portal 线程上的后台循环一并截走 ——
+# 尤其 ``sync/__init__.py::_batch_loop`` 的 100ms 行情微批窗口，被打桩后
+# ``sleep(0)`` 不再真正等待 → 该循环**空转**，几百次无关的 sleep 记录灌进被测列表，
+# 造成**间歇性假失败**（R8 实测：``delays`` 里混进 276 个 ``0.1``）。
+# 打桩本模块的 ``_sleep`` 即可，作用域仅限本模块的退避调用。
+import asyncio as _asyncio  # noqa: E402
+
+
+async def _sleep(seconds: float) -> None:
+    await _asyncio.sleep(seconds)
 
 
 class WebhookOut:
@@ -129,7 +144,7 @@ class WebhookOut:
         log_id = await self.db.ainsert("webhook_deliveries", {
             "subscription_id": sub["id"], "event": event, "payload_json": body,
             "status": "pending", "attempts": 0, "created_at":
-                time.strftime("%Y-%m-%dT%H:%M:%S")})
+                now_iso()})
         max_tries = max(1, int(sub.get("max_retries") or self.max_retries))
         timeout = max(1.0, int(sub.get("timeout_ms") or 5000) / 1000.0)
         headers = dict(sub.get("headers") or {})
@@ -149,18 +164,18 @@ class WebhookOut:
                         "UPDATE webhook_deliveries SET status=?, attempts=?, "
                         "http_status=?, error='', delivered_at=? WHERE id=?",
                         ("ok", attempt, http_status,
-                         time.strftime("%Y-%m-%dT%H:%M:%S"), log_id))
+                         now_iso(), log_id))
                     await self.db.aexecute(
                         "UPDATE webhook_subscriptions SET success_count=success_count+1, "
                         "last_status=?, last_error='', last_sent_at=? WHERE id=?",
-                        ("ok", time.strftime("%Y-%m-%dT%H:%M:%S"), sub["id"]))
+                        ("ok", now_iso(), sub["id"]))
                     self.sent += 1
                     return
                 last_err = f"HTTP {r.status_code}: {r.text[:200]}"
             except Exception as exc:  # noqa: BLE001
                 last_err = str(exc)[:300]
             if attempt < max_tries:
-                await asyncio.sleep(self.base_delay * (self.backoff ** (attempt - 1)))
+                await _sleep(self.base_delay * (self.backoff ** (attempt - 1)))
         await self.db.aexecute(
             "UPDATE webhook_deliveries SET status=?, attempts=?, http_status=?, error=? WHERE id=?",
             ("failed", max_tries, http_status, last_err, log_id))
@@ -205,7 +220,7 @@ class WebhookOut:
             "max_retries": int(data.get("max_retries", 3)),
             "timeout_ms": int(data.get("timeout_ms", 5000)),
             "headers_json": json.dumps(data.get("headers", {}), ensure_ascii=False),
-            "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "updated_at": now_iso(),
         }
         if not payload["url"]:
             raise ValueError("url 不能为空")
@@ -216,7 +231,7 @@ class WebhookOut:
                 (*payload.values(), data["id"]))
             sid = int(data["id"])
         else:
-            payload["created_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+            payload["created_at"] = now_iso()
             sid = self.db.insert("webhook_subscriptions", payload)
         self.invalidate()
         return sid

@@ -16,6 +16,8 @@ import asyncio
 import logging
 from datetime import datetime
 
+from core.clock import to_iso
+
 log = logging.getLogger("qmt_work.market_sync")
 
 
@@ -194,7 +196,7 @@ class MarketSync:
             batch = codes[i:i + 30]
             await asyncio.gather(*(_one(c) for c in batch))
         # 停机前记录到日志（含 last_run 供前端状态展示）
-        self.state._market_sync_last = {"date": _sh_now().strftime("%Y-%m-%d %H:%M:%S"),
+        self.state._market_sync_last = {"date": to_iso(_sh_now()),
                                         "codes": len(codes), "ok": results["ok"],
                                         "fail": results["fail"]}
         log.info("market sync refresh: codes=%s ok=%s fail=%s",

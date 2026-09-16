@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Optional
 
 from datasource.periods import to_eltdx_period
+from core.clock import local_now
 
 log = logging.getLogger("qmt_work.datasource.eltdx")
 
@@ -129,7 +130,7 @@ def _load_json_cache(path: Path, max_age_days: Optional[float] = None) -> Option
         if not path.exists():
             return None
         if max_age_days is not None:
-            age = (datetime.now() - datetime.fromtimestamp(path.stat().st_mtime)).days
+            age = (local_now() - datetime.fromtimestamp(path.stat().st_mtime)).days
             if age > max_age_days:
                 return None
         return json.loads(path.read_text(encoding="utf-8"))

@@ -25,6 +25,7 @@ from gateway.idempotency import single_flight
 
 # P0-1：WAL 写前日志的操作语义常量（单一真源定义在 gateway.wal，此处复用）
 from gateway.wal import WAL_OP_INTENT, WAL_OP_INTENT_FAILED, WAL_OP_RESULT  # noqa: E402
+from core.clock import now_iso
 
 log = logging.getLogger("qmt_work.signal")
 
@@ -125,7 +126,7 @@ class SignalRouter:
                 import json
                 self._db.upsert("runtime_config", {
                     "key": "signal.mode", "value": json.dumps(mode),
-                    "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S")})
+                    "updated_at": now_iso()})
             except Exception:  # noqa: BLE001
                 pass
         log.info("signal mode: %s -> %s（已持久化）", old, mode)
@@ -191,7 +192,7 @@ class SignalRouter:
         # dry_run：只返回计划
         if self.mode == "dry_run":
             plan = {"mode": "dry_run", "signal": sig.__dict__,
-                    "would_execute": True, "ts": time.strftime("%Y-%m-%dT%H:%M:%S")}
+                    "would_execute": True, "ts": now_iso()}
             self._emit({"type": "signal_dry_run", "data": plan})
             return {"ok": True, **plan}
 
@@ -363,7 +364,7 @@ class SignalRouter:
                     "source": sig.source, "code": sig.code, "side": sig.side,
                     "price": fill.get("price", price), "volume": sig.volume,
                     "price_type": sig.price_type, "remark": sig.remark,
-                    "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                    "created_at": now_iso(),
                 })
             except Exception as exc:  # noqa: BLE001
                 log.warning("paper order persist failed: %s", exc)
@@ -403,7 +404,7 @@ class SignalRouter:
             "price": sig.price, "volume": sig.volume,
             "price_type": sig.price_type, "broker_id": sig.broker_id,
             "mode": self.mode, "remark": sig.remark,
-            "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "ts": now_iso(),
         })
 
     async def _live(self, sig: Signal) -> dict:

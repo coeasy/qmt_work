@@ -18,12 +18,13 @@ import time
 from typing import Dict, List, Optional
 
 import numpy as np
+from core.clock import now_iso
 
 log = logging.getLogger("qmt_work.strategy_runtime")
 
 
 def _now() -> str:
-    return time.strftime("%Y-%m-%d %H:%M:%S")
+    return now_iso()
 
 
 def _now_minutes() -> int:

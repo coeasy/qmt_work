@@ -7,11 +7,11 @@
 import asyncio
 import json
 import logging
-import time
 import uuid
 
 from core.db import get_db
 from tools.backtest import fetch_kline_async, fetch_kline_async_meta, run_backtest_engine, run_param_sweep
+from core.clock import now_iso
 
 log = logging.getLogger("qmt_work.backtest")
 
@@ -44,14 +44,14 @@ class BacktestQueue:
                 (job["id"], job["kind"], json.dumps(job.get("params", {}), ensure_ascii=False),
                  job["status"], job.get("progress", 0),
                  json.dumps(job.get("result", {}), ensure_ascii=False, default=str),
-                 job.get("error", ""), job["created_at"], time.strftime("%Y-%m-%dT%H:%M:%S")))
+                 job.get("error", ""), job["created_at"], now_iso()))
         except Exception as exc:
             log.warning("persist job failed: %s", exc)
 
     def create(self, kind: str, params: dict) -> dict:
         job = {"id": uuid.uuid4().hex[:12], "kind": kind, "params": params,
                "status": "pending", "progress": 0, "result": None, "error": "",
-               "created_at": time.strftime("%Y-%m-%dT%H:%M:%S")}
+               "created_at": now_iso()}
         self._jobs[job["id"]] = job
         self._persist(job)
         return job
@@ -130,7 +130,7 @@ class BacktestQueue:
             "initial_capital": capital,
             "metrics_json": json.dumps(res["metrics"], ensure_ascii=False),
             "trades_json": json.dumps(res["trades"], ensure_ascii=False),
-            "report_path": "", "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "report_path": "", "created_at": now_iso(),
         })
         res["id"] = bid
         return res
@@ -218,7 +218,7 @@ class BacktestQueue:
                  json.dumps({"param_grid": param_grid}, ensure_ascii=False),
                  capital, json.dumps(res.get("best", {}), ensure_ascii=False, default=str),
                  json.dumps(res.get("grid", []), ensure_ascii=False, default=str),
-                 "", time.strftime("%Y-%m-%dT%H:%M:%S")))
+                 "", now_iso()))
         except Exception as exc:  # noqa: BLE001
             log.warning("persist sweep failed: %s", exc)
         _record_backtest_metric("sweep")

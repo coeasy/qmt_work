@@ -8,7 +8,6 @@
 import asyncio
 import logging
 import threading
-import time
 import uuid
 from dataclasses import dataclass, field
 
@@ -17,6 +16,7 @@ from core.db import get_db
 from .base import BrokerAdapter
 from .gateway import XTQuantBridge
 from .registry import create_adapter, get_profile
+from core.clock import now_iso
 
 log = logging.getLogger("qmt_work.manager")
 
@@ -401,7 +401,7 @@ class BrokerManager:
                 "account_id": cfg.account_id,
                 "account_type": cfg.account_type, "session_id": cfg.session_id,
                 "min_version": cfg.min_version, "active": 1 if cfg.active else 0,
-                "created_at": time.strftime("%Y-%m-%dT%H:%M:%S")})
+                "created_at": now_iso()})
 
     def _persist_active(self) -> None:
         db = get_db()

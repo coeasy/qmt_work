@@ -5,19 +5,19 @@
 import asyncio
 import json
 import logging
-from datetime import datetime
 
 from app.services.market.common import BOARD_MF_SEM
 from core.db import get_db
 from core.state import MSG_NO_BROKER, state
 from datasource.registry import get_hub
 from xtquant_client.base import BrokerError
+from core.clock import local_now, now_iso
 
 log = logging.getLogger("qmt_work.market")
 
 
 def _now() -> str:
-    return datetime.now().isoformat(timespec="seconds")
+    return now_iso()
 
 
 # ===================== G3 资金流落库 / 回放 / 自动采集 =====================
@@ -70,7 +70,7 @@ async def _moneyflow_collector_loop():
     """
     while True:
         try:
-            now = datetime.now()
+            now = local_now()
             if now.weekday() < 5:   # 工作日
                 hm = now.hour * 60 + now.minute
                 in_am = 570 <= hm <= 690      # 9:30-11:30

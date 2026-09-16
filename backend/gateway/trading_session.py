@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 from datetime import date, datetime, time
+from core.clock import local_now
 
 log = logging.getLogger("qmt_work")
 
@@ -48,20 +49,21 @@ class TradingSession:
 
     # ---------------- 判定 ----------------
     def is_trading_day(self, d: date | None = None) -> bool:
-        d = d or date.today()
+        # V11 R8：``date.today()`` 是第二份「当前日期」实现，统一取 core.clock。
+        d = d or local_now().date()
         if self._calendar:
             return d.strftime("%Y%m%d") in self._calendar
         return d.weekday() < 5          # 周一~周五
 
     def in_active_hours(self, now: datetime | None = None) -> bool:
         """是否处于盘中活跃时段（9:15–11:35 / 13:00–15:05）。"""
-        now = now or datetime.now().astimezone()
+        now = now or local_now()
         t = now.time()
         return (_AM_START <= t <= _AM_END) or (_PM_START <= t <= _PM_END)
 
     def is_active(self, now: datetime | None = None) -> bool:
         """是否应保持高频轮询：交易日 && 盘中活跃。"""
-        now = now or datetime.now().astimezone()
+        now = now or local_now()
         return self.is_trading_day(now.date()) and self.in_active_hours(now)
 
     def sleep_seconds(self, active: float, idle: float,

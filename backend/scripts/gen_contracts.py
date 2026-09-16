@@ -18,7 +18,7 @@ from __future__ import annotations
 import json
 import os
 import sys
-from datetime import datetime
+from core.clock import now_iso
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tests"))
@@ -54,7 +54,7 @@ def main() -> int:
         print(f"[contracts] {name}: WRITTEN ({_size(new)})")
     if "--diff" not in sys.argv:
         with open(os.path.join(_CONTRACT_DIR, "_meta.json"), "w", encoding="utf-8") as fh:
-            json.dump({"generated_at": datetime.now().isoformat(timespec="seconds"),
+            json.dump({"generated_at": now_iso(),
                        "policy_version": "chain.v1"}, fh, ensure_ascii=False, indent=2)
     print(f"[contracts] done: {changed} file(s) "
           f"{'inspected (diff mode)' if '--diff' in sys.argv else 'written/updated'}")
