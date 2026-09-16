@@ -1,15 +1,23 @@
 """qmt_work 统一指标引擎 · 内置指标（G2-1，向量化实现）。
 
-**契约铁律**：本文件所有指标输出必须与前端 `MarketData.jsx`（calcMA/calcEMA/
-calcMACD/calcKDJ/calcRSI/calcBOLL/calcWR，:87-182）**逐位一致**，包括：
+**契约铁律**：本文件所有指标输出遵循**教科书标准定义**，包括：
 - EMA 首值播种（out[0]=series[0]）、MACD 的 dea 对 dif 做 9 周期 EMA；
 - KDJ k/d 初值 50、n-1 前输出 null、j=3k-2d；
-- RSI Wilder 平滑（首段 j=1..period 平均，此后 avg=(avg*(p-1)+Δ)/p），avgL==0 → 100；
+- RSI **标准 Wilder**（前 period 个涨跌幅简单均值播种 → 首个有效值在下标 period，
+  此后 avg=(avg*(p-1)+Δ)/p），avgL==0 且有涨幅 → 100、全平 → 50；
 - BOLL 用**总体标准差**（ddof=0）乘 m；
 - WR 负刻度（(hn-c)/(hn-ln)×(-100)），hn==ln → 50；
 - 窗口类指标在窗口不足时输出 None（绝不估算填充，零 mock 铁律）。
 
-向量化：窗口极值用 ``sliding_window_view``（O(n)，消除 KDJ/WR 前端 O(n×period)）；
+★ V11 R7 修正（2026-09-15）：原 docstring 称「必须与前端 `MarketData.jsx`（:87-182）
+逐位一致」—— 该锚点**已不存在**：旧前端 `frontend/` 已整体删除，且自 G2-3（`f304f1a`）
+起前端不再本地重算指标、一律调后端接口（`lib/indicators.js` 明确「绝不本地重算」）。
+把已删除的前端代码当作契约锚点，正是 RSI 错位（首个有效值写在下标 ``period+1``、
+递推跳过 ``delta[period]``）长期未被发现的制度性原因 —— 见
+``backend/tests/test_indicators.py::_ref_rsi`` 的循环护栏说明。
+现契约锚点改为**数学定义 + 独立参考实现**（``tests/test_indicator_unity.py``）。
+
+向量化：窗口极值用 ``sliding_window_view``（O(n)，消除 KDJ/WR 的 O(n×period)）；
 MA 用 cumsum 差分；仅递归类（EMA/KDJ/RSI 的 k,d/avg 递推）保留 O(n) 顺序循环——
 这是算法本质（前后依赖），与"嵌套窗口循环"的 O(n×period) 有本质区别。
 """
@@ -95,27 +103,20 @@ def kdj(highs: Sequence, lows: Sequence, closes: Sequence, n: int = 9) -> dict:
 
 
 def rsi(closes: Sequence, period: int = 14) -> np.ndarray:
-    """RSI（Wilder 平滑）：首段 j=1..period 平均，此后 avg=(avg*(p-1)+Δ)/p；
-    avgL==0 → 100（语义同前端 calcRSI）。"""
-    c = _as_float(closes)
-    n = c.shape[0]
-    out = np.full(n, np.nan)
-    if n < period + 2:
-        return out
-    deltas = np.diff(c)                       # 长度 n-1：deltas[0]=c[1]-c[0]
-    g = float(np.sum(np.clip(deltas[:period], 0, None))) / period
-    l_ = float(np.sum(np.clip(-deltas[:period], 0, None))) / period
+    """RSI（标准 Wilder 平滑）。**唯一实现**在 ``tools.indicators.rsi``，此处委托。
 
-    def _v(avg_g: float, avg_l: float) -> float:
-        return 100.0 if avg_l == 0 else 100.0 - 100.0 / (1.0 + avg_g / avg_l)
+    ★ V11 R7 修正（2026-09-15 实测）：此前本文件自带一份实现，且有两个缺陷 ——
+    (1) 首个有效值写在下标 ``period+1``（标准定义应为 ``period``）；
+    (2) 递推从 ``period+2`` 起、用 ``c[i]-c[i-1]``，**跳过了 delta[period]**。
+    于是此后每个值都偏离标准（实测 idx25：75.745 vs 标准 74.101）。
+    更糟的是 ``tests/test_indicators.py::_ref_rsi`` 把这个错位**照抄了一遍**，
+    形成「断言实现等于实现的副本」的**循环护栏**，故长期未被发现。
+    现委托到 ``tools.indicators.rsi``，并由 ``tests/test_indicator_unity.py`` 以
+    **独立参考**（pandas ``ewm`` + 显式播种）锁死三处入口一致。
+    """
+    from tools.indicators import rsi as _impl
 
-    out[period + 1] = _v(g, l_)
-    for i in range(period + 2, n):
-        delta = float(c[i]) - float(c[i - 1])
-        g = (g * (period - 1) + max(delta, 0.0)) / period
-        l_ = (l_ * (period - 1) + max(-delta, 0.0)) / period
-        out[i] = _v(g, l_)
-    return out
+    return _impl(_as_float(closes), period)
 
 
 def boll(closes: Sequence, n: int = 20, m: float = 2.0) -> dict:

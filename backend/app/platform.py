@@ -11,7 +11,6 @@
 """
 from __future__ import annotations
 
-import os
 from typing import Any
 
 
@@ -28,11 +27,10 @@ def _broker_connected_count() -> int:
 
 
 def _commercial_mode() -> bool:
-    try:
-        from datasource.registry import get_manager
-        return get_manager()._commercial_mode
-    except Exception:  # noqa: BLE901
-        return os.environ.get("QMT_COMMERCIAL") == "1"
+    """是否商用模式。**唯一实现**在 ``datasource.registry.commercial_mode``（V11 R7 收敛）。"""
+    from datasource.registry import commercial_mode
+
+    return commercial_mode()
 
 
 def _catalog_describe() -> list[dict]:

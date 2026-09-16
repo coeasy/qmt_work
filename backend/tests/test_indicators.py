@@ -1,10 +1,13 @@
-"""G2-1 指标引擎契约测试（内置指标 vs 前端 JS 语义逐位一致）。
+"""G2-1 指标引擎契约测试（内置指标语义 + 独立参考实现对照）。
 
-核心：**参考镜像**——把 `MarketData.jsx:87-182` 的 7 个 JS 函数逐行翻译为纯
-Python 参考实现，断言向量化实现与参考镜像在确定性数据上逐点一致（null 位置 +
-数值容差 1e-9）。这是「前后端同一指标同参数结果完全一致」的契约锚点。
+核心：**参考镜像**——把每个指标的数学定义独立翻译为纯 Python 参考实现，
+断言向量化实现与参考镜像在确定性数据上逐点一致（null 位置 + 数值容差 1e-9）。
 
-注意：后端测试须逐文件运行（同进程全量会硬崩溃）。
+★ V11 R7 修正两处：
+1. 原 docstring 称参考实现是「把 `MarketData.jsx:87-182` 的 7 个 JS 函数逐行翻译」。
+   旧前端 `frontend/` 已整体删除（G2-3 `f304f1a` 起前端不再本地重算指标），
+   该锚点已不存在，现改为「按数学定义独立实现」。
+2. `_ref_rsi` 原先把 `builtin.rsi` 的错位**照抄**了一遍 → 循环护栏（详见该函数 docstring）。
 """
 import random
 
@@ -79,27 +82,30 @@ def _ref_kdj(highs, lows, closes, n=9):
 
 
 def _ref_rsi(closes, period=14):
-    out = []
-    avg_g = avg_l = 0.0
-    for i in range(len(closes)):
-        if i <= period:
-            out.append(None)
-            continue
-        if i == period + 1:
-            g = l = 0.0
-            for j in range(1, period + 1):
-                d = closes[j] - closes[j - 1]
-                if d > 0:
-                    g += d
-                else:
-                    l -= d
-            avg_g = g / period
-            avg_l = l / period
+    """标准 Wilder RSI 参考实现（**独立于被测实现**，非镜像照抄）。
+
+    ★ V11 R7 修正：此前本函数把 ``builtin.rsi`` 的错位**照抄**了一遍
+    （首个有效值写在下标 ``period+1``，且播种循环取 ``delta[1..period]``
+    之后**跳过** ``delta[period]``）—— 断言「实现 == 实现的副本」，
+    形成**循环护栏**，导致三份 RSI 分歧长期无预警。
+    现按教科书定义独立实现：前 ``period`` 个涨跌幅简单均值播种 →
+    首个有效值在下标 ``period``；递推 ``avg = (avg*(period-1) + Δ) / period``。
+    """
+    out = [None] * min(period, len(closes))
+    if len(closes) < period + 1:
+        return out + [None] * (len(closes) - len(out))
+    gains = [max(closes[i] - closes[i - 1], 0.0) for i in range(1, len(closes))]
+    losses = [max(closes[i - 1] - closes[i], 0.0) for i in range(1, len(closes))]
+    avg_g = sum(gains[:period]) / period
+    avg_l = sum(losses[:period]) / period
+    for i in range(period, len(closes)):
+        if i > period:                       # 下标 period 处直接用播种值
+            avg_g = (avg_g * (period - 1) + gains[i - 1]) / period
+            avg_l = (avg_l * (period - 1) + losses[i - 1]) / period
+        if avg_l == 0:
+            out.append(100.0 if avg_g > 0 else 50.0)
         else:
-            d = closes[i] - closes[i - 1]
-            avg_g = (avg_g * (period - 1) + (d if d > 0 else 0)) / period
-            avg_l = (avg_l * (period - 1) + (-d if d < 0 else 0)) / period
-        out.append(100 if avg_l == 0 else 100 - 100 / (1 + avg_g / avg_l))
+            out.append(100 - 100 / (1 + avg_g / avg_l))
     return out
 
 
@@ -177,7 +183,8 @@ def test_known_ema_seed():
 def test_known_rsi_all_up_is_100():
     up = [100 + i for i in range(30)]
     out = builtin.rsi(up, 14)
-    assert all(v == pytest.approx(100.0) for v in out[16:])  # avgL==0 → 100
+    assert all(np.isnan(v) for v in out[:14])                # 暖机期 14 个 NaN
+    assert all(v == pytest.approx(100.0) for v in out[14:])  # avgL==0 且有涨幅 → 100
 
 
 def test_known_wr_scale():

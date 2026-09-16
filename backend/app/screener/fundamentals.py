@@ -23,12 +23,10 @@ FUNDAMENTAL_FIELDS: tuple[str, ...] = (
 
 
 def _commercial_mode() -> bool:
-    try:
-        from datasource.registry import get_manager
-        return get_manager()._commercial_mode
-    except Exception:  # noqa: BLE001
-        import os
-        return os.environ.get("QMT_COMMERCIAL") == "1"
+    """是否商用模式。**唯一实现**在 ``datasource.registry.commercial_mode``（V11 R7 收敛）。"""
+    from datasource.registry import commercial_mode
+
+    return commercial_mode()
 
 
 async def fetch_fundamentals(

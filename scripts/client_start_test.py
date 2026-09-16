@@ -70,6 +70,19 @@ SMOKE_BROKER_GATED = [
     "/api/v1/trade/conditions", "/api/v1/account/grid", "/api/v1/algo",
 ]
 
+# ---- RSI 标准 Wilder 契约锚点（V11 R7）----
+# 背景：RSI 在仓库里曾有 3 份实现且两两不同，而三条产线路径分别命中其中两份 ——
+#   ① /market/indicators/calc、/screener 的指标叶子 → app.indicators.builtin.rsi
+#   ② /factors/compute（前端「因子研究」面板）     → tools.factors._rsi
+# 同一根 K 线在两处显示不同 RSI（实测最大差 11.7）。R7 统一到标准 Wilder 并加了
+# 单元护栏（backend/tests/test_indicator_unity.py）；此处再从**真实 HTTP 层**钉一次，
+# 因为单元测试证明不了「打包/装配后的服务真的走了新实现」。
+# 序列与单元测试同源（random.Random(42)，120 根），idx25 是实测锁定值。
+RSI_PERIOD = 14
+RSI_REF_IDX = 25
+RSI_REF_VALUE = 58.295751485708756
+RSI_WARMUP = 14          # 标准 Wilder：前 period 个位置为 null
+
 _OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))  # 绕代理
 RESULTS: list[dict] = []
 RUN_STARTED = 0.0          # 本次运行起始时间戳（判定状态文件是否陈旧）
@@ -570,6 +583,32 @@ def main() -> int:
         record("rest", f"{path} 业务码 ∈ {{0,503}}", ok,
                f"HTTP {code} code={bc} | {_brief(jbody(raw), raw)}")
 
+    # ---------- 阶段 3b：RSI 标准 Wilder 契约（真实 HTTP 层）----------
+    print("\n[3b/7] RSI 契约（/factors/compute 走 tools.factors）")
+    rsi_series = _wilder_series()
+    code, raw = http_post(base + "/api/v1/factors/compute",
+                          {"name": "rsi", "values": rsi_series,
+                           "params": {"period": RSI_PERIOD}}, timeout=10)
+    body = jbody(raw)
+    data = body.get("data") if isinstance(body.get("data"), dict) else {}
+    values = data.get("values") if isinstance(data.get("values"), list) else None
+    if values is None:
+        record("rsi", "/factors/compute 返回 RSI 序列", False,
+               f"HTTP {code} code={body.get('code')} | {_brief(body, raw)}")
+    else:
+        record("rsi", "/factors/compute 返回 RSI 序列", True,
+               f"len={len(values)} HTTP {code}")
+        # 暖机期：标准 Wilder 前 period 个位置必须是 null（旧 factors 实现在下标 1
+        # 就给值 —— 这是「ewm 无播种」的可观测特征）
+        warm_ok = all(v is None for v in values[:RSI_WARMUP])
+        record("rsi", f"暖机期前 {RSI_WARMUP} 个为 null（标准 Wilder 播种）", warm_ok,
+               "OK" if warm_ok else f"首个非 null 在下标 "
+               f"{next((i for i, v in enumerate(values) if v is not None), None)}")
+        got = values[RSI_REF_IDX] if len(values) > RSI_REF_IDX else None
+        ok_ref = isinstance(got, (int, float)) and abs(got - RSI_REF_VALUE) <= 1e-6
+        record("rsi", f"idx{RSI_REF_IDX} == 标准 Wilder 锁定值 {RSI_REF_VALUE:.6f}",
+               ok_ref, f"got={got!r}")
+
     # ---------- 阶段 4：前端资源 ----------
     print("\n[4/7] 前端 SPA 与静态资源")
     code, raw = http_get(base + "/", timeout=10)
@@ -655,6 +694,17 @@ def _brief(body: dict, raw: bytes) -> str:
         return raw[:80].decode("utf-8", "replace")
     msg = body.get("message") or body.get("msg") or body.get("detail") or ""
     return (f"code={body.get('code')} msg={str(msg)[:70]}").strip()
+
+
+def _wilder_series(n: int = 120) -> list[float]:
+    """确定性价格序列（与 ``backend/tests/test_indicator_unity.py::_prices`` 同源）。
+
+    用 ``random.Random(42)`` 固定种子，保证 RSI 锁定值在任何机器上一致。
+    """
+    import random
+
+    rng = random.Random(42)
+    return [100.0 + i * 0.5 + rng.uniform(-3, 3) for i in range(n)]
 
 
 def _first_asset(html: str) -> str | None:

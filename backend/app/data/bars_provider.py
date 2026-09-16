@@ -75,12 +75,10 @@ class BarsProvider:
     # ------------------------------------------------------------------
     @staticmethod
     def _commercial_mode() -> bool:
-        try:
-            from datasource.registry import get_manager
-            return get_manager()._commercial_mode
-        except Exception:  # noqa: BLE001
-            import os
-            return os.environ.get("QMT_COMMERCIAL") == "1"
+        """是否商用模式。**唯一实现**在 ``datasource.registry.commercial_mode``（V11 R7 收敛）。"""
+        from datasource.registry import commercial_mode
+
+        return commercial_mode()
 
     @staticmethod
     def _qmt_connected() -> bool:
@@ -178,15 +176,21 @@ class BarsProvider:
 
         # —— 解析能力链 ——
         cap = "kline_qfq" if adjust in ("qfq", "hfq") else "kline"
+        registered = None
         declared = None
         try:
             from datasource.registry import get_manager
             _mgr = get_manager()
             registered = set(_mgr.list_sources())
-            # V11 R6：把「实现类自述的能力」一并传入，让 resolve_chain 做能力校验
-            declared = _mgr._declared_map()
-        except Exception:  # noqa: BLE001
-            registered = None
+            # V11 R6：把「实现类自述的能力」一并传入，让 resolve_chain 做能力校验。
+            # V11 R7：用 getattr 取（缺省即「不做能力校验」），**不能**与上面同一个 try ——
+            # 此前二者同 try，替身/旧实现缺 _declared_map() 时 AttributeError 会把
+            # **已算好的 registered 一并丢弃**，注册态过滤整条静默失效（链里会混进
+            # 本应被注册态排除的源，测试与生产都因此悄悄换了降级链）。
+            _declared = getattr(_mgr, "_declared_map", None)
+            declared = _declared() if callable(_declared) else None
+        except Exception as exc:  # noqa: BLE001
+            log.warning("解析数据源注册态失败，本次不做注册态/能力过滤: %r", exc)
         resolved = resolve_policy(
             policy_str, cap,
             commercial_mode=self._commercial_mode(),

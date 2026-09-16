@@ -19,8 +19,9 @@
 """
 from __future__ import annotations
 
+import contextlib
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Iterator
 
 
 @dataclass
@@ -108,14 +109,48 @@ class AppContext:
 _ACTIVE: "AppContext | None" = None
 
 
-def set_active_context(ctx: AppContext) -> None:
+def set_active_context(ctx: "AppContext | None") -> None:
     """装配出口（main.lifespan）注入当前进程上下文。
 
     生产路径传的是 ``core.state.state`` 单例本身 —— 与 bootstrap 写入侧同一对象。
-    测试可传自建实例以隔离。
+    测试可传自建实例以隔离；**传 None 表示「未注入」**（``active_context()`` 会返回
+    新建的空上下文）。⚠️ 裸调用会**覆盖**进程全局，测试里请改用 ``use_context()``。
     """
     global _ACTIVE
     _ACTIVE = ctx
+
+
+def active_context_or_none() -> "AppContext | None":
+    """返回当前上下文，**未注入时为 None**。
+
+    与 ``active_context()`` 的区别：后者未注入时返回**新建的空** AppContext（调用方
+    可直接取属性）；本函数用于必须区分「未注入」与「注入了空实例」的场景 ——
+    典型是保存/恢复（``prev = active_context_or_none()`` … ``set_active_context(prev)``）。
+    """
+    return _ACTIVE
+
+
+@contextlib.contextmanager
+def use_context(ctx: "AppContext | None") -> Iterator["AppContext | None"]:
+    """临时切换当前上下文，退出时**精确恢复**（包括恢复为「未注入」）。
+
+    **为什么必须有这个原语**（V11 R7 实测）：此前测试直接在 teardown 里
+    ``set_active_context(AppContext())`` 或 ``set_active_context(None)`` —— 它们不是
+    「恢复」，而是**把进程全局换成一个空实例 / 置空**。而 ``conftest.app_client`` 是
+    ``scope="session"`` 的，lifespan 只在**首次**使用时跑一次；于是此后所有用
+    ``app_client`` 的文件读到的槽位全为 None，表现为 5 条**顺序依赖假失败**
+    （``test_risk_regression``「风控未初始化」、``test_ws_contract``×3
+    ``'NoneType' object has no attribute 'connect'``、``test_screen_without_qmt``）。
+    已确定性复现：``appcontext → paper → ws`` = 3 failed；
+    ``appcontext → e2e_flows → risk`` = 1 failed。
+    """
+    global _ACTIVE
+    prev = _ACTIVE
+    _ACTIVE = ctx
+    try:
+        yield ctx
+    finally:
+        _ACTIVE = prev
 
 
 def active_context() -> AppContext:
@@ -134,4 +169,5 @@ def get_ctx() -> AppContext:
 
 __all__ = [
     "AppContext", "get_ctx", "set_active_context", "active_context",
+    "active_context_or_none", "use_context",
 ]

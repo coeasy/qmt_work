@@ -896,6 +896,27 @@ def get_manager() -> DataSourceManager:
     return _manager
 
 
+def commercial_mode() -> bool:
+    """当前是否处于**商用模式**（``QMT_COMMERCIAL=1``）。
+
+    **唯一实现**（V11 R7 收敛）：此前 ``app/platform.py``、``app/data/bars_provider.py``、
+    ``app/screener/fundamentals.py`` 各写了一份**逐字相同**的实现（其中一份还带
+    ``noqa: BLE901`` 笔误），三份都靠「函数内 ``from datasource.registry import get_manager``」
+    让测试的 monkeypatch 生效 —— 重复本身就是漂移风险，故收敛到本函数。
+
+    读的是进程级单例 ``DataSourceManager._commercial_mode``（由 ``get_manager()`` 在
+    构建时按环境变量初始化，可经 ``set_commercial_mode`` 改写）；单例不可用时回退环境变量。
+
+    注意：本函数在**调用时**才解析 ``get_manager``（模块全局），因此
+    ``monkeypatch.setattr(datasource.registry, "get_manager", ...)`` 仍然生效。
+    """
+    try:
+        return get_manager()._commercial_mode
+    except Exception:  # noqa: BLE001 — 单例构建失败（如依赖缺失）时回退环境变量
+        import os
+        return os.environ.get("QMT_COMMERCIAL") == "1"
+
+
 # 统一入口：get_hub() 返回全局 DataSourceManager 单例（旧 app.datasource.manager
 # 兼容层已删除，全部引用收敛到本模块）。MarketDataHub 为历史别名，勿在新代码使用。
 get_hub = get_manager
@@ -904,5 +925,5 @@ MarketDataUnavailable = DataSourceUnavailable
 
 
 __all__ = ["DataSourceManager", "DataSourceUnavailable", "UnsupportedDataSource", "get_manager",
-           "get_hub", "MarketDataHub", "MarketDataUnavailable",
+           "get_hub", "MarketDataHub", "MarketDataUnavailable", "commercial_mode",
            "classify_board", "limit_ratio"]

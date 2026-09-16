@@ -91,16 +91,20 @@ def _ema(values, period: int = 20):
 
 
 def _rsi(values, period: int = 14):
-    s = _to_pd_series(values)
-    delta = s.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1 / period, adjust=False).mean()
-    avg_loss = loss.ewm(alpha=1 / period, adjust=False).mean()
-    rs = avg_gain / avg_loss.replace(0, math.nan)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.where(avg_loss != 0, 100.0)  # 无下跌时 RSI=100
-    return _nan_to_none(rsi.tolist())
+    """RSI（**标准 Wilder**）。唯一实现在 ``tools.indicators.rsi``，此处委托。
+
+    ★ V11 R7 修正：此前用 ``ewm(alpha=1/period, adjust=False)`` **无播种**，
+    导致首个有效值出现在下标 1（而非标准 Wilder 的下标 ``period``），
+    暖机期几乎不生效 —— 与 ``builtin.rsi`` / ``tools.indicators.rsi`` 三者两两不同。
+    现三处统一委托 ``tools.indicators.rsi``，一致性由
+    ``backend/tests/test_indicator_unity.py`` 锁死。
+
+    注：本函数原先经由 ``_to_pd_series``（pd 缺失时直接 ``raise``），
+    并无真实「纯 Python 降级」路径，故改为 numpy 实现不损失任何能力。
+    """
+    from tools.indicators import rsi as _impl
+
+    return _nan_to_none(_impl(_to_floats(values), period).tolist())
 
 
 def _macd(values, fast: int = 12, slow: int = 26, signal: int = 9):

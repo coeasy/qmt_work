@@ -24,6 +24,25 @@ def force_deps():
         importlib.util.find_spec = orig
 
 
+@contextlib.contextmanager
+def no_qmt():
+    """临时把进程级单例 ``core.state.state.broker_manager`` 置为 None。
+
+    即「未连接任何券商」。``BarsProvider._qmt_connected()`` 读的正是这个**全局单例**，
+    而 ``app_client`` 的 lifespan 会把它写成「真实 BrokerManager 且已连接」并**不还原**。
+    凡断言「无 QMT 时如何降级」的用例，都必须**显式建立**该前提，不得依赖环境残留
+    （否则同进程全量跑时顺序一变即假失败 —— 见 ``conftest._restore_process_state``）。
+    """
+    from core.state import state
+
+    prev = getattr(state, "broker_manager", None)
+    state.broker_manager = None
+    try:
+        yield
+    finally:
+        state.broker_manager = prev
+
+
 def make_bar(close, open_=1, high=2, low=1, volume=100, time_="2024-01-02"):
     return Bar(time=time_, open=open_, high=high, low=low, close=close, volume=volume)
 
@@ -132,11 +151,34 @@ def fundamental_chain(*names):
         provider_catalog.clear_override()
 
 
-def fake_reg_manager(registered):
+def fake_reg_manager(registered, commercial_mode: bool = False, declared=None):
+    """鸭子类型的 DataSourceManager 替身（只实现被调用到的方法）。
+
+    ★ V11 R7：补 ``_declared_map()`` 与 ``commercial_mode`` 形参。
+
+    背景（2026-09-15 实测）：``BarsProvider.get_bars_batch`` 原先把
+    ``list_sources()`` 与 ``_declared_map()`` 放在**同一个 try** 里，
+    替身缺 ``_declared_map`` 时 ``AttributeError`` 会把**已算好的 registered 一起丢掉**
+    （静默降级为 ``None``）→ 注册态过滤整条失效 → 链里混进用例本已排除的源
+    （如 ``test_env2`` 去掉 eltdx 却仍走 eltdx）。故替身必须与真实
+    ``DataSourceManager`` 保持接口一致；生产侧亦已拆开 try（见 bars_provider）。
+
+    ``declared`` 默认由 ``registered`` 推导：所有注册源都声明全部常用能力。
+    """
+    declared_map = declared if declared is not None else {
+        pid: frozenset({"kline", "kline_qfq", "quote", "stock_list", "bars"})
+        for pid in registered
+    }
+
     class M:
-        _commercial_mode = False
+        _commercial_mode = commercial_mode
+
         def list_sources(self_inner):
             return list(registered)
+
+        def _declared_map(self_inner):
+            return dict(declared_map)
+
     return M()
 
 
