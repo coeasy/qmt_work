@@ -193,7 +193,12 @@ def test_evaluate_scan():
     res2, scanned2, _ = evaluate_scan(["B"], {"B": bars_miss}, cond)
     check("close>10 命中", len(res1) == 1 and res1[0]["code"] == "A")
     check("close>10 不命中", len(res2) == 0)
-    check("scanned 计数", scanned1 == 1 and scanned2 == 0)
+    # scanned = **已实际评估**的标的数（含未命中），不是命中数 —— 见 engine.evaluate_scan
+    # docstring 与 app/screener/engine.py:100 的注释（产品侧早已修正旧语义，本 harness
+    # 的断言一直停留在「命中数」的过期期望上，是 §8.13.10 登记的既有失败）。
+    _, scanned0, _ = evaluate_scan(["C"], {}, cond)          # 无 bars 的标的不计入
+    check("scanned=已评估数(含未命中)", scanned1 == 1 and scanned2 == 1)
+    check("scanned 缺数据不计入", scanned0 == 0)
     res3, _, _ = evaluate_scan(["A"], {"A": bars_hit}, cond, min_price=100)
     check("min_price 过滤前置", len(res3) == 0)
 
