@@ -6,6 +6,7 @@ import {
   fmtSigned,
   fmtVolume,
   isTradingHours,
+  namePair,
   normalizeCode,
   tone,
   toneColor,
@@ -89,5 +90,45 @@ describe("代码规范化", () => {
 
   it("无法识别的输入原样返回（不猜测）", () => {
     expect(normalizeCode("ABC")).toBe("ABC");
+  });
+});
+
+describe("名称/代码显示契约（防「重影」）", () => {
+  it("名称已知：主标题=名称，副标题=代码", () => {
+    expect(namePair("平安银行", "000001.SZ")).toEqual(["平安银行", "000001.SZ"]);
+  });
+
+  it("名称未知：主标题回退为代码，副标题必须为 null", () => {
+    // 盘前无行情时 q.name 为空。若副标题仍返回代码，
+    // 同一代码会在「名称槽 + 代码槽」各渲染一遍、叠在一起 ——
+    // 就是左侧自选股面板的「重影」（2026-09-17 实测截图确认）。
+    expect(namePair(undefined, "000001.SZ")).toEqual(["000001.SZ", null]);
+    expect(namePair(null, "000001.SZ")).toEqual(["000001.SZ", null]);
+  });
+
+  it("纯空白名称按未知处理（不渲染空白标题）", () => {
+    expect(namePair("", "600519.SH")).toEqual(["600519.SH", null]);
+    expect(namePair("   ", "600519.SH")).toEqual(["600519.SH", null]);
+  });
+
+  it("名称两端空白被裁剪", () => {
+    expect(namePair(" 平安银行 ", "000001.SZ")).toEqual(["平安银行", "000001.SZ"]);
+  });
+
+  it("★不变量：副标题永远不会等于主标题（重影的充要条件）", () => {
+    const cases: Array<[string | null | undefined, string]> = [
+      ["平安银行", "000001.SZ"],
+      [undefined, "000001.SZ"],
+      [null, "600519.SH"],
+      ["", "600519.SH"],
+      ["   ", "399006.SZ"],
+    ];
+    for (const [name, code] of cases) {
+      const [primary, secondary] = namePair(name, code);
+      // 主标题必须非空（否则该行看起来是空的）
+      expect(primary.length).toBeGreaterThan(0);
+      // 副标题要么不渲染，要么与主标题不同 —— 绝不能重复
+      expect(secondary).not.toBe(primary);
+    }
   });
 });

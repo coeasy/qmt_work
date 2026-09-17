@@ -38,7 +38,13 @@ export { accountApi } from "./account";
 export type { BatchBroadcast, BatchOrderItem } from "./account";
 
 export { brokerApi } from "./broker";
-export type { BrokerTestResult, VersionProfile } from "./broker";
+export type {
+  AutoDetectAccount,
+  AutoDetectCandidate,
+  AutoDetectResult,
+  BrokerTestResult,
+  VersionProfile,
+} from "./broker";
 
 export {
   algoApi,

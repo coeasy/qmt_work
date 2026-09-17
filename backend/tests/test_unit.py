@@ -1603,6 +1603,65 @@ def test_discovery_helpers():
     assert _is_qmt_proc("notepad.exe", "") is False
 
 
+def test_looks_like_client_root():
+    """客户端根判定：命中任一标记即真；不存在或未命中即假。"""
+    from xtquant_client.discovery import _looks_like_client_root
+    with tempfile.TemporaryDirectory() as d:
+        empty = os.path.join(d, "empty")
+        os.makedirs(empty)
+        assert _looks_like_client_root(empty) is False
+        for i, marker in enumerate(("bin.x64", "userdata_mini", "XtMiniQmt.exe")):
+            root = os.path.join(d, "root%d" % i)
+            os.makedirs(root)
+            # 标记只按「名字」匹配，目录/文件皆可
+            if marker == "bin.x64":
+                os.makedirs(os.path.join(root, marker))
+            else:
+                open(os.path.join(root, marker), "w").close()
+            assert _looks_like_client_root(root) is True, marker
+        assert _looks_like_client_root(os.path.join(d, "no_such")) is False
+
+
+def test_looks_like_client_root_entries_argument_is_equivalent():
+    """★ 传入「已枚举的子项名」与自行枚举，结果必须完全一致。
+
+    这是 auto-detect 提速的核心契约：全盘 3 层扫描时复用父级已枚举结果，
+    省掉每个目录的一次额外 listdir（实测 19.5s → 2.7s）。
+    两条路径一旦分叉，就会静默漏掉客户端，因此用等价性锁死。
+    """
+    from xtquant_client.discovery import _looks_like_client_root
+    with tempfile.TemporaryDirectory() as d:
+        cases = {
+            "with_dir_marker": ("bin.x64", True),
+            "with_file_marker": ("XtMiniQmt.exe", True),
+            "no_marker": ("readme.txt", False),
+        }
+        for name, (entry, is_marker) in cases.items():
+            root = os.path.join(d, name)
+            os.makedirs(root)
+            if is_marker and entry == "bin.x64":
+                os.makedirs(os.path.join(root, entry))
+            else:
+                open(os.path.join(root, entry), "w").close()
+            entries = os.listdir(root)
+            # 两条路径必须一致，且与预期一致
+            self_enumerated = _looks_like_client_root(root)
+            reused = _looks_like_client_root(root, entries)
+            assert self_enumerated == reused, name
+            assert reused is is_marker, name
+
+
+def test_client_marker_set_matches_tuple():
+    """_CLIENT_MARKER_SET 必须与 _CLIENT_MARKERS 严格一致（且无重复项）。
+
+    判定改用集合做 O(1) 查找后，两份数据若漂移，新增的标记会被静默忽略 ——
+    表现为「某个券商客户端突然发现不了」，且不会有任何报错。
+    """
+    from xtquant_client.discovery import _CLIENT_MARKERS, _CLIENT_MARKER_SET
+    assert _CLIENT_MARKER_SET == frozenset(_CLIENT_MARKERS)
+    assert len(_CLIENT_MARKER_SET) == len(_CLIENT_MARKERS)
+
+
 def test_discovery_candidate():
     from xtquant_client.discovery import _candidate
     with tempfile.TemporaryDirectory() as d:

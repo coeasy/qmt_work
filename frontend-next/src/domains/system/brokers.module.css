@@ -107,6 +107,30 @@
   flex: 0 0 auto;
 }
 
+/* 探测到的客户端候选卡片：与 .item 同构，额外用左边框表达「推荐」 */
+.cand {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-2) var(--sp-3);
+  margin: var(--sp-2);
+  border: 1px solid var(--border);
+  border-left: 3px solid transparent;
+  border-radius: var(--radius);
+  background: var(--bg-2);
+}
+
+/* 推荐项（进程运行中 + 已读到资金账号）：高亮左边框，一眼看出该点哪个 */
+.candTop {
+  border-left-color: var(--info);
+  background: var(--bg-1);
+}
+
+.candMain {
+  flex: 1;
+  min-width: 0;
+}
+
 .err {
   color: var(--danger);
   font-size: var(--font-sm);

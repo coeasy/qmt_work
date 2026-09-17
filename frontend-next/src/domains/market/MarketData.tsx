@@ -5,7 +5,7 @@ import { PERIOD_LABELS } from "@/shared/periods";
 import { useQuotesStore } from "@/stores/quotes";
 import { useWatchlistStore } from "@/stores/watchlist";
 import { useQuoteSubscription } from "@/hooks/useQuoteSubscription";
-import { fmtPct, fmtPrice, fmtVolume, toneColor } from "@/shared/format";
+import { fmtPct, fmtPrice, fmtVolume, namePair, toneColor } from "@/shared/format";
 import type { Period } from "@/shared/types";
 import type { PageProps } from "@/app/routes";
 import s from "./marketdata.module.css";
@@ -28,12 +28,14 @@ export function MarketData({ params }: PageProps) {
   const quote = useQuotesStore((st) => st.quotes[code]);
   const toggle = useWatchlistStore((st) => st.toggle);
   const inWatch = useWatchlistStore((st) => st.codes.includes(code));
+  // 名称未知时只显示一次代码（否则名称槽与代码槽会并排重复，同 DataPanel 的重影）
+  const [title, sub] = namePair(quote?.name, code);
 
   return (
     <div className={s.wrap}>
       <div className={s.header}>
-        <span className={s.name}>{quote?.name ?? code}</span>
-        <span className={s.code}>{code}</span>
+        <span className={s.name}>{title}</span>
+        {sub && <span className={s.code}>{sub}</span>}
         <span className={s.price} style={{ color: toneColor(quote?.change_pct) }}>
           {fmtPrice(quote?.price)}
         </span>

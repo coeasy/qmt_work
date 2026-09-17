@@ -73,6 +73,26 @@ export function isTradingHours(now: Date = new Date()): boolean {
   return (m >= 570 && m <= 690) || (m >= 780 && m <= 900);
 }
 
+/**
+ * 标的「名称 + 代码」的显示契约。
+ *
+ * 返回 `[主标题, 副标题]`：名称已知时为主标题=名称、副标题=代码；
+ * 名称未知时（盘前无行情、后端未回填 name）主标题回退为代码，
+ * 且副标题返回 **null**，调用方必须**跳过代码槽**。
+ *
+ * ⚠️ 之所以把两者绑在一个函数里返回：曾经各写各的
+ * （`{name ?? code}` + 无条件渲染 `{code}`），盘前 name 为空时
+ * 同一个代码被渲染两遍、叠在一起，在左侧自选股面板表现为「重影」
+ * （2026-09-17 实测截图确认）。绑在一起就不可能再漏掉一半。
+ */
+export function namePair(
+  name: string | null | undefined,
+  code: string,
+): [string, string | null] {
+  const n = name?.trim();
+  return n ? [n, code] : [code, null];
+}
+
 /** 代码规范化：600519 → 600519.SH */
 export function normalizeCode(raw: string): string {
   const v = raw.trim().toUpperCase();

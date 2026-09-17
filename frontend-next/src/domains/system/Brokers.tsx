@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   Badge,
   Button,
@@ -10,8 +10,17 @@ import {
   Spinner,
 } from "@/design/primitives";
 import { brokerApi } from "@/services/api";
+import type { AutoDetectCandidate } from "@/services/api";
 import { useBrokerStore } from "@/stores/broker";
 import s from "./brokers.module.css";
+
+/**
+ * 推荐项 = 「在线客户端」：进程正在运行 **且** 已读到资金账号。
+ * 满足这条就无需用户填任何东西，可一键接入。
+ */
+function isRecommended(c: AutoDetectCandidate): boolean {
+  return c.running && !!c.default_account_id;
+}
 
 /**
  * 券商连接管理。
@@ -33,12 +42,22 @@ export function Brokers() {
   const batchRemove = useBrokerStore((st) => st.batchRemove);
   const health = useBrokerStore((st) => st.health);
 
+  // 自动识别：本机 QMT / MiniQMT 客户端探测
+  const candidates = useBrokerStore((st) => st.candidates);
+  const detecting = useBrokerStore((st) => st.detecting);
+  const detected = useBrokerStore((st) => st.detected);
+  const detectError = useBrokerStore((st) => st.detectError);
+  const detect = useBrokerStore((st) => st.detect);
+  const connectCandidate = useBrokerStore((st) => st.connectCandidate);
+
   const [brokerId, setBrokerId] = useState("");
   const [clientPath, setClientPath] = useState("");
   const [accountId, setAccountId] = useState("");
   const [accountType, setAccountType] = useState("STOCK");
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
+  /** 探测/一键连接的结果消息，显示在「检测到的本地客户端」面板内（与表单消息分开） */
+  const [detectMsg, setDetectMsg] = useState("");
 
   /** 批量选择（按 conn_id）。活跃连接不可删，故不计入可选集合。 */
   const [selected, setSelected] = useState<string[]>([]);
@@ -49,7 +68,40 @@ export function Brokers() {
   useEffect(() => {
     void loadProfiles();
     void load();
-  }, [loadProfiles, load]);
+    // 自动识别：进页面即探测本机客户端，不需要用户先点「探测环境」
+    void detect();
+  }, [loadProfiles, load, detect]);
+
+  /** 探测结果排序：推荐项（运行中 + 有账号）置顶 */
+  const ordered = useMemo(
+    () => [...candidates].sort((a, b) => Number(isRecommended(b)) - Number(isRecommended(a))),
+    [candidates],
+  );
+
+  /** 一键建连：add(autoconnect) → 设为活跃 → 回读列表 */
+  const onConnectCandidate = async (c: AutoDetectCandidate) => {
+    setBusy(true);
+    setDetectMsg("");
+    try {
+      const r = await connectCandidate(c);
+      setDetectMsg(
+        r.ok
+          ? `已接入 ${c.broker_name || c.name || c.root}；该连接已持久化，之后每次启动会自动连接`
+          : `接入失败：${r.reason ?? "未知原因"}`,
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /** 把探测结果填进下方手动表单，供用户确认后自行提交 */
+  const onFillForm = (c: AutoDetectCandidate) => {
+    setBrokerId(c.broker_id || "generic");
+    setClientPath(c.client_path);
+    setAccountId(c.default_account_id || c.accounts?.[0]?.account_id || "");
+    setAccountType(c.accounts?.[0]?.account_type || "STOCK");
+    setDetectMsg("已填入下方表单，确认无误后点「添加连接」");
+  };
 
   const onAdd = async () => {
     if (!brokerId || !clientPath || !accountId) {
@@ -150,6 +202,67 @@ export function Brokers() {
 
   return (
     <div className={s.wrap}>
+      <Panel
+        title={detected ? `检测到的本地客户端（${candidates.length}）` : "检测到的本地客户端"}
+        extra={
+          <Button size="sm" variant="ghost" onClick={() => void detect()} disabled={detecting}>
+            {detecting ? "探测中…" : "重新探测"}
+          </Button>
+        }
+      >
+        {detecting && <Spinner label="正在扫描本机 QMT / MiniQMT 客户端…" />}
+        {!detecting && detectError && <div className={s.err}>探测失败：{detectError}</div>}
+        {!detecting && !detectError && detected && candidates.length === 0 && (
+          <EmptyState text="未检测到本机 QMT / MiniQMT 客户端，可在下方手动填写" />
+        )}
+        {!detecting &&
+          ordered.map((c) => (
+            <div
+              key={c.root}
+              className={[s.cand, isRecommended(c) ? s.candTop : ""].filter(Boolean).join(" ")}
+            >
+              <div className={s.candMain}>
+                <div className={s.itemTitle}>
+                  {c.broker_name || c.name || c.root}
+                  {c.running ? (
+                    <Badge tone="success">运行中{c.pid ? ` · pid ${c.pid}` : ""}</Badge>
+                  ) : (
+                    <Badge tone="neutral">未运行</Badge>
+                  )}
+                  {isRecommended(c) && <Badge tone="info">推荐</Badge>}
+                  <Badge tone="neutral">
+                    {c.client_mode === "mini" ? "极速版" : c.client_mode || "未知模式"}
+                  </Badge>
+                </div>
+                <div className={s.itemSub}>{c.root}</div>
+                <div className={s.itemSub}>
+                  {c.default_account_id
+                    ? `资金账号 ${c.default_account_id}${
+                        c.accounts && c.accounts.length > 1 ? `（共 ${c.accounts.length} 个）` : ""
+                      }`
+                    : "未发现资金账号，需手动填写"}
+                  {" · "}
+                  {c.client_path}
+                </div>
+              </div>
+              <div className={s.itemActions}>
+                <Button
+                  size="sm"
+                  variant="primary"
+                  disabled={busy || !c.default_account_id}
+                  onClick={() => void onConnectCandidate(c)}
+                >
+                  连接并设为活跃
+                </Button>
+                <Button size="sm" variant="ghost" onClick={() => onFillForm(c)}>
+                  填入表单
+                </Button>
+              </div>
+            </div>
+          ))}
+        {detectMsg && <div className={s.msg}>{detectMsg}</div>}
+      </Panel>
+
       <Panel title="新增连接">
         <div className={s.form}>
           <FormRow label="券商">

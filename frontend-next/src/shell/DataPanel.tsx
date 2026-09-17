@@ -4,7 +4,7 @@ import { useWatchlistStore } from "@/stores/watchlist";
 import { useQuotesStore } from "@/stores/quotes";
 import { useWorkspaceStore } from "@/stores/workspace";
 import { useQuoteSubscription } from "@/hooks/useQuoteSubscription";
-import { fmtPct, fmtPrice, toneColor } from "@/shared/format";
+import { fmtPct, fmtPrice, namePair, toneColor } from "@/shared/format";
 import s from "./shell.module.css";
 import d from "./datapanel.module.css";
 
@@ -78,6 +78,8 @@ function WatchlistPanel() {
       {codes.map((code) => {
         const q = quotes[code];
         const pct = q?.change_pct;
+        // 名称未知时只显示一次代码，避免「名称槽 + 代码槽」渲染两遍造成重影
+        const [title, sub] = namePair(q?.name, code);
         return (
           <div
             key={code}
@@ -87,8 +89,8 @@ function WatchlistPanel() {
             }
           >
             <div style={{ minWidth: 0 }}>
-              <div className={d.name}>{q?.name ?? code}</div>
-              <div className={d.code}>{code}</div>
+              <div className={d.name}>{title}</div>
+              {sub && <div className={d.code}>{sub}</div>}
             </div>
             <div className={d.price} style={{ color: toneColor(pct) }}>
               {fmtPrice(q?.price)}

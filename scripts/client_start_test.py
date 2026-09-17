@@ -490,6 +490,10 @@ def main() -> int:
     ap.add_argument("--target", choices=["auto", "client", "dev", "backend"], default="auto")
     ap.add_argument("--timeout", type=float, default=90.0, help="等待就绪的最长秒数")
     ap.add_argument("--no-shot", action="store_true", help="跳过截图")
+    ap.add_argument("--settle", type=float, default=0.0,
+                    help="截图后额外等待 N 秒再重拍一次（默认 0=不重拍）。"
+                         "用于页面首帧之后仍有异步内容的情形，例如「连接管理」页"
+                         "进页即自动探测本机 QMT 客户端（全盘扫描约 2~3s）。")
     ap.add_argument("--port", type=int, default=0, help="期望端口（默认读端口文件）")
     args = ap.parse_args()
 
@@ -748,6 +752,14 @@ def main() -> int:
                 if colors >= 50 or time.time() - t0 >= 12.0:
                     break
             waited = round(time.time() - t0, 1)
+            if args.settle > 0:
+                # 首帧渲染 ≠ 异步内容就绪。部分页面进页后还要等一次慢请求
+                # （如「连接管理」的自动探测要全盘扫描本机客户端，约 2~3s），
+                # 上面的轮询在首帧就达标退出了，会拍到「探测中…」。--settle 补这一段。
+                time.sleep(args.settle)
+                detail, colors, size = screenshot_window(
+                    main_win["hwnd"], shot, main_win["rect"])
+                waited = round(waited + args.settle, 1)
             record("window", "窗口截图已产出", size > 5000, f"{detail} / {size} bytes")
             # 纯色画面 = 窗口在但页面没渲染出来（白/黑屏），是本项目历史上真实发生过的
             # 故障形态。以「采样到的不同颜色数」作为「是否真的渲染了内容」的交叉验证。
