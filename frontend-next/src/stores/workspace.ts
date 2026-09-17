@@ -107,6 +107,8 @@ export interface WorkspaceState {
   open: (pageKey: string, params?: Record<string, unknown>, opts?: OpenOptions) => void;
   close: (tabId: string) => void;
   closeOthers: (tabId: string) => void;
+  /** 关闭该 Tab 右侧的全部 Tab（保留它本身与左侧的） */
+  closeRight: (tabId: string) => void;
   activate: (tabId: string) => void;
   moveTab: (from: number, to: number) => void;
 
@@ -211,6 +213,19 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     if (keep.length === 0) return;
     set({ tabs: keep, activeId: tabId, aliveOrder: [tabId] });
     persist({ tabs: keep, activeId: tabId, aliveOrder: [tabId] });
+  },
+
+  closeRight(tabId) {
+    const { tabs, activeId, aliveOrder } = get();
+    const idx = tabs.findIndex((t) => t.id === tabId);
+    if (idx < 0) return;
+    const keep = tabs.slice(0, idx + 1);
+    const keepIds = new Set(keep.map((t) => t.id));
+    // 被关掉的若正好是当前激活页，回退到右键点的那个（用户视线本来就在它上面）
+    const activeOut = keepIds.has(activeId) ? activeId : tabId;
+    const orderOut = aliveOrder.filter((x) => keepIds.has(x));
+    set({ tabs: keep, activeId: activeOut, aliveOrder: orderOut });
+    persist({ tabs: keep, activeId: activeOut, aliveOrder: orderOut });
   },
 
   activate(tabId) {

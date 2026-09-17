@@ -83,6 +83,55 @@ export const useQuotesStore = create<QuotesState>((set, get) => ({
   },
 }));
 
+/**
+ * 从 WS 帧里取出行情数组。
+ *
+ * ★ 后端有**两种**帧形状，历史上前端只认「`data` 是数组或对象」这一种，
+ *   于是两种帧都解析不出来 —— 表现是「行情通道已连接，但价格/涨跌幅永远是 --」，
+ *   既不报错也没有兜底，极难定位：
+ *     - 全量快照：`{"type":"snapshot", "quotes": { CODE: Quote }}`
+ *     - 增量广播：`{"type":"quotes",  "data": {"items": [Quote, ...]}}`
+ *   契约在 backend/sync/__init__.py 的 `send_full_snapshot` / `broadcast`，
+ *   改任一侧都要同步这里（护栏：tests/quoteFrames.test.ts）。
+ */
+export function extractQuotes(msg: WsMessage): Quote[] {
+  const out: Quote[] = [];
+  // 自守卫：本函数只认行情帧。调用方虽已按 type 过滤，但函数自己守住这条
+  // 边界后，将来新增的帧类型（order / account / risk…）不可能被误吞成行情。
+  if (msg.type !== "snapshot" && msg.type !== "quotes") return out;
+
+  if (msg.type === "snapshot") {
+    const snap = msg.quotes;
+    if (snap && typeof snap === "object" && !Array.isArray(snap)) {
+      for (const [code, q] of Object.entries(snap)) {
+        if (q && typeof q === "object") out.push({ ...q, code: q.code ?? code });
+      }
+    }
+    return out;
+  }
+
+  const data = msg.data as unknown;
+  const list = Array.isArray(data)
+    ? (data as Quote[])
+    : data && typeof data === "object" && Array.isArray((data as { items?: unknown }).items)
+      ? (data as { items: Quote[] }).items
+      : null;
+  if (list) {
+    for (const q of list) {
+      if (q && typeof q === "object" && q.code) out.push(q);
+    }
+    return out;
+  }
+
+  // 兼容 `data` 直接是 `{ CODE: Quote }` 的形态
+  if (data && typeof data === "object") {
+    for (const [code, q] of Object.entries(data as Record<string, Quote>)) {
+      if (q && typeof q === "object") out.push({ ...q, code: q.code ?? code });
+    }
+  }
+  return out;
+}
+
 /** 应用启动时调用一次：接管 socket 消息 → store，并同步连接状态 */
 export function initQuotePipeline(): () => void {
   if (initialized) return () => undefined;
@@ -94,15 +143,7 @@ export function initQuotePipeline(): () => void {
       useQuotesStore.setState({ lastSeq: msg.seq });
     }
     if (msg.type === "quotes" || msg.type === "snapshot") {
-      const data = msg.data;
-      if (Array.isArray(data)) {
-        for (const q of data as Quote[]) st.setQuote(q);
-      } else if (data && typeof data === "object") {
-        // 快照形态：{ CODE: Quote }
-        for (const [code, q] of Object.entries(data as Record<string, Quote>)) {
-          st.setQuote({ ...q, code: q.code ?? code });
-        }
-      }
+      for (const q of extractQuotes(msg)) st.setQuote(q);
     }
   });
 

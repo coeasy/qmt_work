@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import { MenuBar } from "@/shell/MenuBar";
+import { TitleBar } from "@/shell/TitleBar";
 import { Toolbar } from "@/shell/Toolbar";
 import { DataPanel } from "@/shell/DataPanel";
 import { Workspace } from "@/shell/Workspace/Workspace";
@@ -16,7 +16,7 @@ import s from "@/shell/shell.module.css";
  * 应用外壳装配。
  *
  * 布局（方案 §4.3）：
- *   MenuBar（6 大业务域）
+ *   TitleBar（自绘标题栏：品牌 + 6 大业务域菜单 + 全局搜索 + 窗口按钮）
  *   Toolbar（上下文工具条）
  *   ├─ DataPanel（左栏数据，非导航）
  *   └─ Workspace（多 Tab + 拖拽分栏）
@@ -36,7 +36,7 @@ export function App() {
 
   return (
     <div className={s.shell}>
-      <MenuBar />
+      <TitleBar />
       <Toolbar />
       <div className={s.main}>
         <DataPanel />

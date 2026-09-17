@@ -191,11 +191,10 @@ class OrderReconciler:
                 pass
 
     def _emit(self, event: dict) -> None:
-        if self._on_event:
-            try:
-                self._on_event(event)
-            except Exception:  # noqa: BLE001
-                pass
+        # 唯一实现见 core/emit.py：on_event 常为 `ws_manager.broadcast`（async），
+        # 直接同步调用只会创建协程、永不 await ⇒ 对账事件静默丢失。
+        from core.emit import emit_event
+        emit_event(self._on_event, event)
 
     # ---------------- 定时巡检 ----------------
     async def start(self, interval: float = 300.0) -> None:

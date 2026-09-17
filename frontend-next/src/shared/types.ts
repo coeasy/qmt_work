@@ -546,4 +546,11 @@ export interface WsMessage<T = unknown> {
   type: WsEventType | string;
   data: T;
   seq?: number;
+  /**
+   * 全量快照帧（`type === "snapshot"`）携带的行情表 `{ CODE: Quote }`。
+   * ⚠️ 与 `data` **互斥**：快照帧用 `quotes` 键，增量帧（`type === "quotes"`）
+   * 才用 `data.items`。契约见 backend/sync/__init__.py 的
+   * `send_full_snapshot` 与 `broadcast`。
+   */
+  quotes?: Record<string, Quote>;
 }

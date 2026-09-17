@@ -1,7 +1,7 @@
 // Electron 主进程（桌面壳）：启动 Python 后端子进程 -> 等待就绪 -> 加载同源前端 URL。
 // 端口发现：后端通过 QMT_PORT_FILE 写出实际端口（run.py 支持端口被占用自动 +1），
 // 桌面壳读取该文件后按实际端口连接，彻底规避端口冲突。
-const { app, BrowserWindow, Tray, Menu, ipcMain, shell, nativeImage, dialog, session } = require("electron");
+const { app, BrowserWindow, Tray, Menu, ipcMain, shell, nativeImage, dialog, session, screen } = require("electron");
 const { spawn, execFile } = require("child_process");
 const path = require("path");
 const fs = require("fs");
@@ -314,10 +314,69 @@ function applySecurityPolicy() {
   });
 }
 
+// ---- 窗口尺寸/位置记忆 ----
+// 交易终端用户几乎总是固定一种布局（多屏、并排看盘），每次启动都回到 1440x900
+// 居中会反复打断工作流。这里把还原态尺寸落盘，下次启动照原样恢复。
+// 两条护栏：
+//   ① 测试模式完全不读不写 —— 自动化用例必须每次拿到确定尺寸；
+//   ② 恢复前校验坐标与显示器仍有交集 —— 否则拔掉副屏后窗口会「消失在屏幕外」。
+function windowStateFile() {
+  return path.join(app.getPath("userData"), "window-state.json");
+}
+
+function loadWindowState() {
+  const fallback = { x: null, y: null, width: 1440, height: 900, maximized: false };
+  if (TEST_MODE) return fallback;
+  try {
+    const s = JSON.parse(fs.readFileSync(windowStateFile(), "utf8"));
+    const width = Number(s.width) > 0 ? Math.round(s.width) : fallback.width;
+    const height = Number(s.height) > 0 ? Math.round(s.height) : fallback.height;
+    let x = Number.isFinite(s.x) ? Math.round(s.x) : null;
+    let y = Number.isFinite(s.y) ? Math.round(s.y) : null;
+    if (x !== null && y !== null) {
+      const onScreen = screen.getAllDisplays().some((d) => {
+        const a = d.workArea;
+        // 至少露出标题栏可拖拽区域（120x40），否则用户拖不动也看不到
+        return x < a.x + a.width && x + 120 > a.x && y < a.y + a.height && y + 40 > a.y;
+      });
+      if (!onScreen) { x = null; y = null; }
+    }
+    return { x, y, width, height, maximized: Boolean(s.maximized) };
+  } catch {
+    return fallback;
+  }
+}
+
+function saveWindowState() {
+  if (TEST_MODE) return;
+  try {
+    if (!win || win.isDestroyed()) return;
+    // 最大化时 getBounds() 返回的是满屏尺寸，直接存会导致下次启动「还原」成满屏；
+    // getNormalBounds() 才是还原态尺寸。
+    const n = (win.getNormalBounds ? win.getNormalBounds() : win.getBounds());
+    fs.writeFileSync(windowStateFile(), JSON.stringify({
+      x: n.x, y: n.y, width: n.width, height: n.height,
+      maximized: win.isMaximized(),
+    }), "utf8");
+  } catch { /* 落盘失败不影响运行 */ }
+}
+
+let saveStateTimer = null;
+function scheduleSaveWindowState() {
+  if (saveStateTimer) clearTimeout(saveStateTimer);
+  saveStateTimer = setTimeout(saveWindowState, 400); // 拖动/缩放过程中别疯狂写盘
+}
+
 function createWindow() {
+  const st = loadWindowState();
   win = new BrowserWindow({
-    width: 1440, height: 900, minWidth: 1024, minHeight: 720,
+    ...(st.x !== null ? { x: st.x, y: st.y } : {}),
+    width: st.width, height: st.height, minWidth: 1024, minHeight: 720,
     backgroundColor: "#0f1420",
+    // 无边框自绘标题栏：原生标题栏在深色终端里是一条刺眼的浅色横条，还会带上
+    // Electron 默认的英文菜单（File/Edit/View/Window/Help），与行情软件观感严重不符。
+    // 改为 frame:false 后由前端 <TitleBar> 自绘（品牌 + 菜单 + 最小化/最大化/关闭）。
+    frame: false,
     // 显式标题：不设置时窗口会先显示 package.json 的 name（qmt-work-frontend），
     // 页面加载完成后才被 <title> 覆盖，观感像未完成品。
     title: "qmt_work · 多券商量化平台",
@@ -335,6 +394,27 @@ function createWindow() {
   // 从外部进程调 SetWindowPos(HWND_TOPMOST) 实测不可靠（返回 1 但 WS_EX_TOPMOST 仍为 False），
   // 而窗口所有者自己置顶一定生效。生产环境 TEST_MODE 为假，零影响。
   if (TEST_MODE) win.setAlwaysOnTop(true);
+
+  // 最大化状态同步给渲染进程：自绘标题栏的「最大化/还原」按钮图标要跟着换
+  const pushMaximized = () => {
+    try { win.webContents.send("window-maximized", win.isMaximized()); } catch { /* 已销毁 */ }
+  };
+  win.on("maximize", pushMaximized);
+  win.on("unmaximize", pushMaximized);
+  win.on("resize", scheduleSaveWindowState);
+  win.on("move", scheduleSaveWindowState);
+  // 恢复上次的最大化状态（尺寸/位置已在 BrowserWindow 构造时恢复）
+  if (st.maximized) win.maximize();
+  // 去掉应用菜单后，开发者工具快捷键需自行接管（F12 / Ctrl+Shift+I）。
+  // 排障入口必须留着：无头/远程会话下这是唯一能看到渲染层报错的地方。
+  win.webContents.on("before-input-event", (e, input) => {
+    if (input.type !== "keyDown") return;
+    const key = (input.key || "").toLowerCase();
+    if (key === "f12" || (input.control && input.shift && key === "i")) {
+      e.preventDefault();
+      win.webContents.toggleDevTools();
+    }
+  });
   // 站内导航防护：只允许本机后端源；外链转交系统浏览器而非就地跳转
   win.webContents.on("will-navigate", (e, url) => {
     if (!isLocalOrigin(url)) {
@@ -367,6 +447,7 @@ function createWindow() {
     writeStartupError(`渲染进程退出：${JSON.stringify(details)}`);
   });
   win.on("close", (e) => {
+    saveWindowState(); // 关闭前落盘尺寸/位置（此刻窗口仍有效）
     if (!quitting) { e.preventDefault(); win.hide(); }
   });
 }
@@ -397,6 +478,11 @@ function createTray() {
 
 app.whenReady().then(async () => {
   applySecurityPolicy(); // CSP 必须在首次建窗前挂上
+  // 去掉 Electron 默认应用菜单（File/Edit/View/Window/Help 一串英文），
+  // 一是它与自绘标题栏重复且语言不符，二是深色终端里原生菜单栏观感割裂。
+  // 代价：菜单提供的加速器（role: editMenu）一并消失 —— 输入框内的
+  // 复制/粘贴/撤销由 Chromium 内建处理，仍然可用；开发者工具改由 F12 显式处理。
+  Menu.setApplicationMenu(null);
   startBackend();
   let ready = true;
   try { await waitReady(); } catch (e) {
@@ -446,3 +532,22 @@ ipcMain.handle("open-external", (e, url) => {
   if (!openExternalSafe(url)) return { ok: false, error: "unsupported url" };
   return { ok: true };
 });
+
+// ---- 自绘标题栏的窗口控制 ----
+// 无边框窗口（frame:false）后，最小化/最大化/关闭必须由页面按钮经 IPC 触发。
+// 这三个 handler 只操作窗口本身，不碰任何业务数据；close 复用主进程既有的
+// 「未退出则隐藏到托盘」语义（见 win.on("close")），因此不会误杀后端。
+ipcMain.handle("window-minimize", () => {
+  if (win && !win.isDestroyed()) win.minimize();
+  return true;
+});
+ipcMain.handle("window-toggle-maximize", () => {
+  if (!win || win.isDestroyed()) return false;
+  if (win.isMaximized()) win.unmaximize(); else win.maximize();
+  return win.isMaximized();
+});
+ipcMain.handle("window-close", () => {
+  if (win && !win.isDestroyed()) win.close();
+  return true;
+});
+ipcMain.handle("window-is-maximized", () => Boolean(win && !win.isDestroyed() && win.isMaximized()));

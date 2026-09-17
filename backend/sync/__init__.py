@@ -49,11 +49,73 @@ class SyncEngine:
         sub = self._client_subscriptions.setdefault(client_id, set())
         new = set(codes) - sub
         sub.update(codes)
-        if new - self._subscribed_codes:
-            self._subscribe_to_qmt(sorted(new - self._subscribed_codes))
+        fresh = sorted(new - self._subscribed_codes)
+        if fresh:
+            self._subscribe_to_qmt(fresh)
+            self._schedule_seed(fresh)
         if self._quote_bus:
             for c in codes:
                 self._quote_bus.add_ref(c)
+
+    def _schedule_seed(self, codes: list[str]) -> None:
+        """把「订阅后回填初始行情」调度到事件循环，**不阻塞**订阅请求本身。
+
+        非事件循环上下文（同步单测、脚本直调）下静默跳过 —— 回填只是体验优化，
+        任何情况下都不该让订阅失败。
+        """
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        loop.create_task(self.seed_snapshot(codes))
+
+    async def seed_snapshot(self, codes: list[str]) -> int:
+        """订阅成功后立刻拉一次全量快照，回填 latest_quotes 并广播。
+
+        为什么必须有这一步：`subscribe_quote` 只注册**推送回调**，不返回当前值。
+        于是「订阅成功」与「界面出现数字」之间隔着第一个 tick ——
+        盘前/休市根本没有 tick，界面就永远显示「--」；盘中也要等下一个 tick 才亮。
+        行情软件不该有这种空窗，因此订阅后主动补一次快照做种子。
+
+        返回回填成功的标的数。任何失败都只记日志（回填是体验优化，不是正确性前提）。
+        """
+        b = self.manager.active_bridge()
+        if b is None or not codes:
+            return 0
+        try:
+            ticks = await b.call(b.gateway.get_full_tick, list(codes))
+        except Exception as exc:  # noqa: BLE001
+            log.debug("seed snapshot failed: %s", exc)
+            return 0
+        if not isinstance(ticks, dict) or not ticks:
+            return 0
+
+        seeded = 0
+        for code, data in ticks.items():
+            if not isinstance(data, dict) or data.get("last") in (None, ""):
+                continue
+            data.setdefault("code", code)
+            if not data.get("name"):
+                try:
+                    from datasource.registry import get_hub
+                    nm = get_hub().lookup_name(code)
+                    if nm:
+                        data["name"] = nm
+                except Exception:  # noqa: BLE001
+                    pass
+            self.latest_quotes[code] = data
+            if self._quote_bus:
+                try:
+                    self._quote_bus.publish(code, data)
+                except Exception as exc:  # noqa: BLE001
+                    log.debug("quote_bus publish failed (seed): %s", exc)
+            # 复用既有 100ms 微批广播通道：与实时 tick 走同一条路径，
+            # 前端不需要为「种子」单独写分支。
+            self._batch_buf.append(data)
+            seeded += 1
+        if seeded:
+            log.info("seed snapshot: %d/%d 个标的已回填初始行情", seeded, len(codes))
+        return seeded
 
     def client_unsubscribe(self, client_id: str, codes: list[str]) -> None:
         sub = self._client_subscriptions.get(client_id)

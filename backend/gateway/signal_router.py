@@ -483,11 +483,10 @@ class SignalRouter:
                         exc, (BrokerNotConnectedError, BrokerSDKError))}
 
     def _emit(self, event: dict):
-        if self._on_event:
-            try:
-                self._on_event(event)
-            except Exception:  # noqa: BLE001
-                pass
+        # 唯一实现见 core/emit.py：on_event 常为 `ws_manager.broadcast`（async），
+        # 直接同步调用只会创建协程、永不 await ⇒ 下单/成交事件静默丢失。
+        from core.emit import emit_event
+        emit_event(self._on_event, event)
 
     def _audit(self, action: str, target: str, params: dict, result: str):
         if self._db is not None:

@@ -148,8 +148,10 @@
   --font-mono: ui-monospace, "Cascadia Mono", "SF Mono", Consolas, monospace;
   --font-sans: system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
 
-  /* 外壳固定高度（布局计算依赖，勿随意改） */
-  --h-menu: 30px;
+  /* 外壳固定高度（布局计算依赖，勿随意改）
+     --h-menu 是自绘标题栏高度（同时容纳品牌 + 菜单 + 窗口按钮），
+     32~36px 是行情软件顶部条的常见区间：再矮则按钮点击区过小。 */
+  --h-menu: 34px;
   --h-toolbar: 34px;
   --h-tab: 32px;
   --h-status: 24px;

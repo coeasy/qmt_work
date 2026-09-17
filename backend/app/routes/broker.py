@@ -22,57 +22,17 @@ async def auto_detect_brokers(ctx: AppContext = Depends(get_ctx)):
     候选含：客户端根、疑似券商档案、userdata_mini、xtquant 定位与可导入状态、
     **自动发现的资金账号**（从 userdata[(_mini)]/users/<登录>/Config.xml 读取，可免手填）。
     前端据此一键填入「添加券商连接」表单。
-    """
-    from xtquant_client.discovery import discover, discover_accounts
-    try:
-        cands = await asyncio.to_thread(discover)
-        for c in cands:
-            try:
-                # 防御性归一化：c["root"] 可能缺失，发现接口也可能非 list
-                scan_path = c.get("client_path") or c.get("root") or ""
-                c["accounts"] = list(discover_accounts(scan_path) or [])
-                if c["accounts"]:
-                    # 取第一个 STOCK 资金账号作为默认补全，供前端「一键填入」
-                    c["default_account_id"] = c["accounts"][0]["account_id"]
-                    c["broker_name"] = c["accounts"][0].get("broker_name") or c.get("broker_name", "")
-                else:
-                    c["default_account_id"] = ""
 
-                # 券商识别（优先级：Config.xml 真实券商名 > 路径猜测 > generic 兜底）。
-                # 路径缩写（gd_qmt）可能指光大或广发，语义有歧义，因此不靠路径猜；
-                # 以 Config.xml 读出的真实券商名为准，识别不到再回退路径猜测/generic。
-                c["broker_id"] = _resolve_broker_id(c)
-                # 通用档案建议用极速版：识别为 generic（含光大/国信等）或无明确券商时，
-                # 完整版大客户端(XtItClient)常对独立外部进程报 'illegal pid' 拒绝接入，
-                # 而极速版 MiniQMT(userdata_mini) 是更稳的程序化通道——优先建议 mini。
-                if c.get("broker_id") == "generic" and c.get("has_userdata_mini"):
-                    c["client_mode"] = "mini"
-                    if not c["client_path"].endswith("userdata_mini"):
-                        c["client_path"] = c.get("client_path_mini") or c["client_path"]
-            except Exception:  # noqa: BLE001
-                c["accounts"] = []
-                c["default_account_id"] = ""
-                if not c.get("broker_id"):
-                    c["broker_id"] = "generic"
+    候选丰富化（账号 / 券商档案 / 极速版改写）的唯一实现是
+    ``xtquant_client.autoconnect.detect_candidates``，与「启动自动连接」共用 ——
+    保证**界面推荐的**与**启动自动连的**永远是同一个客户端。
+    """
+    from xtquant_client.autoconnect import detect_candidates
+    try:
+        cands = await asyncio.to_thread(detect_candidates)
     except Exception as exc:  # noqa: BLE001
         return err(500, f"自动探测失败：{exc}")
     return ok({"candidates": cands, "count": len(cands)})
-
-
-def _resolve_broker_id(c: dict) -> str:
-    """候选券商档案 id（优先级：Config.xml 真实券商名 > 路径猜测 > generic）。
-
-    只认「无歧义」的券商名关键词（光大/国信等确认归入 generic 通用迅投档案，
-    广发/银河/国金等归各自档案）。路径缩写（gd=广发/光大）在这里不猜。
-    真实券商名无法确定识别时不覆盖路径猜测，仍为空则归 generic —— 避免把
-    目录明确的候选（如 银河/国金）在无账号时被误降级成 generic。
-    """
-    # 局部导入：guess_broker_id_by_name 原在端点函数内导入，模块级函数取不到（F821）
-    from xtquant_client.discovery import guess_broker_id_by_name
-    by_name = guess_broker_id_by_name(c.get("broker_name") or "")
-    if by_name:
-        return by_name
-    return c.get("broker_id") or "generic"
 
 
 def _resolve_account(client_path: str, account_id: str, account_type: str = "STOCK") -> dict:

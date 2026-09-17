@@ -19,6 +19,9 @@ function findLeaf(node: PaneNode | undefined, leafId: string): PaneNode | undefi
  *   Alt+1..6  直达第 N 个业务域的首个页面
  *   F5        循环切换当前图表周期
  *   ⌘/Ctrl+B  显示/隐藏左侧数据面板
+ *   ⌘/Ctrl+W  关闭当前标签
+ *   Ctrl+Tab  切换标签（Shift 反向）
+ *   F11       全屏切换
  * 代码直达（输入 6 位代码回车）在菜单栏搜索框与命令面板中均可用。
  */
 export function Hotkeys() {
@@ -47,7 +50,35 @@ export function Hotkeys() {
         return;
       }
 
+      // 关标签 / 切标签：与浏览器一致，**输入态下也生效**（否则在搜索框里按 Ctrl+W
+      // 会走浏览器默认行为，而桌面壳内那是「关掉整个应用窗口」）。
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === "w") {
+        e.preventDefault();
+        const st = useWorkspaceStore.getState();
+        if (st.activeId) st.close(st.activeId);
+        return;
+      }
+
+      if (e.ctrlKey && e.key === "Tab") {
+        e.preventDefault();
+        const st = useWorkspaceStore.getState();
+        const idx = st.tabs.findIndex((t) => t.id === st.activeId);
+        if (idx < 0 || st.tabs.length < 2) return;
+        const step = e.shiftKey ? -1 : 1;
+        const next = st.tabs[(idx + step + st.tabs.length) % st.tabs.length];
+        if (next) st.activate(next.id);
+        return;
+      }
+
       if (typing) return;
+
+      // F11：全屏。用 Fullscreen API 而不是自建 IPC —— Electron 原生支持，
+      // 且无需为「窗口是否全屏」再维护一份主进程/渲染进程同步状态。
+      if (e.key === "F11") {
+        e.preventDefault();
+        toggleFullscreen();
+        return;
+      }
 
       // Alt+数字：直达业务域
       if (e.altKey && /^[1-9]$/.test(e.key)) {
@@ -78,4 +109,17 @@ export function Hotkeys() {
   }, [setCommandOpen, togglePanel]);
 
   return null;
+}
+
+/** 全屏切换；环境不支持 Fullscreen API 时静默忽略（jsdom / 老旧内核）。 */
+function toggleFullscreen(): void {
+  try {
+    if (document.fullscreenElement) {
+      void document.exitFullscreen?.();
+      return;
+    }
+    void document.documentElement.requestFullscreen?.();
+  } catch {
+    /* 忽略：全屏只是便利功能 */
+  }
 }

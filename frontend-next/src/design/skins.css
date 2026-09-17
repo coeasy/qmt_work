@@ -1,0 +1,126 @@
+/* ==========================================================================
+   皮肤令牌（背景配色方案）· 对标同花顺 / 大智慧的「背景色」设置
+   --------------------------------------------------------------------------
+   只覆盖「背景层级 + 文字 + 边框 + 图表底色」这四组。
+   ★ accent / up / down / success / warning / danger **不由皮肤决定** ——
+     涨跌色必须独立于皮肤，否则用户换个底色就会把「红涨绿跌」悄悄改掉。
+     这些语义色统一由 [data-theme] 提供（见 tokens.css）。
+   应用方式：<html data-skin="classic">；自定义皮肤走 JS 内联变量，不在这里定义。
+   ========================================================================== */
+
+/* --- 午夜蓝（默认）--- 与 tokens.css 的 dark 令牌一致，显式写出便于对照与微调 */
+[data-skin="midnight"] {
+  --bg-0: #0d1117;
+  --bg-1: #131a24;
+  --bg-2: #1a2230;
+  --bg-3: #212b3b;
+  --bg-hover: #263244;
+  --bg-active: #2d3b50;
+  --border: #2a3648;
+  --border-strong: #3a4a61;
+  --text: #e6edf6;
+  --text-dim: #9aa8bd;
+  --text-faint: #6b7a91;
+  --text-inverse: #0d1117;
+  --chart-bg: #131a24;
+  --chart-grid: #212b3b;
+  --chart-axis: #6b7a91;
+  --chart-crosshair: #9aa8bd;
+}
+
+/* --- 经典黑（同花顺风格）--- 纯黑底 + 高对比，长时间盯盘最不刺眼 */
+[data-skin="classic"] {
+  --bg-0: #000000;
+  --bg-1: #0a0a0a;
+  --bg-2: #141414;
+  --bg-3: #1d1d1d;
+  --bg-hover: #262626;
+  --bg-active: #333333;
+  --border: #2a2a2a;
+  --border-strong: #3d3d3d;
+  --text: #e8e8e8;
+  --text-dim: #a0a0a0;
+  --text-faint: #6e6e6e;
+  --text-inverse: #000000;
+  --chart-bg: #000000;
+  --chart-grid: #1a1a1a;
+  --chart-axis: #6e6e6e;
+  --chart-crosshair: #a0a0a0;
+}
+
+/* --- 深灰（大智慧风格）--- 略暖的深灰，屏幕反光环境下更舒适 */
+[data-skin="graphite"] {
+  --bg-0: #161616;
+  --bg-1: #1c1c1c;
+  --bg-2: #232323;
+  --bg-3: #2b2b2b;
+  --bg-hover: #343434;
+  --bg-active: #3f3f3f;
+  --border: #333333;
+  --border-strong: #474747;
+  --text: #dedad4;
+  --text-dim: #a39c93;
+  --text-faint: #736d65;
+  --text-inverse: #161616;
+  --chart-bg: #1c1c1c;
+  --chart-grid: #2b2b2b;
+  --chart-axis: #736d65;
+  --chart-crosshair: #a39c93;
+}
+
+/* --- 石板蓝 --- 低饱和蓝灰，介于午夜蓝与深灰之间 */
+[data-skin="slate"] {
+  --bg-0: #101820;
+  --bg-1: #16202c;
+  --bg-2: #1c2836;
+  --bg-3: #233142;
+  --bg-hover: #2a3b4f;
+  --bg-active: #32465e;
+  --border: #2a3a4d;
+  --border-strong: #3b5168;
+  --text: #dbe6f2;
+  --text-dim: #93a6bd;
+  --text-faint: #64768c;
+  --text-inverse: #101820;
+  --chart-bg: #16202c;
+  --chart-grid: #233142;
+  --chart-axis: #64768c;
+  --chart-crosshair: #93a6bd;
+}
+
+/* --- 墨绿 --- 低刺激暖绿，夜间使用更柔和 */
+[data-skin="forest"] {
+  --bg-0: #0b120e;
+  --bg-1: #101a15;
+  --bg-2: #16231c;
+  --bg-3: #1d2d24;
+  --bg-hover: #24382d;
+  --bg-active: #2c4537;
+  --border: #23382c;
+  --border-strong: #325040;
+  --text: #dbe8df;
+  --text-dim: #94ad9f;
+  --text-faint: #667d70;
+  --text-inverse: #0b120e;
+  --chart-bg: #101a15;
+  --chart-grid: #1d2d24;
+  --chart-axis: #667d70;
+  --chart-crosshair: #94ad9f;
+}
+
+/* --- 浅色 --- 与 tokens.css 的 light 令牌一致；浅色皮肤不覆盖图表底色，
+   因为 light 主题已给出白底图表配色（chart-bg: #ffffff）。 */
+[data-skin="light"] {
+  --bg-0: #f2f4f8;
+  --bg-1: #ffffff;
+  --bg-2: #f7f9fc;
+  --bg-3: #eef1f6;
+  --bg-hover: #e6ebf3;
+  --bg-active: #dbe3ee;
+  --border: #d8dee9;
+  --border-strong: #b9c3d3;
+  --text: #16202e;
+  --text-dim: #55637a;
+  --text-faint: #8593a8;
+  --text-inverse: #ffffff;
+}

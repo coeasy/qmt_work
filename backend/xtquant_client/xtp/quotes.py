@@ -56,13 +56,38 @@ class QuotesMixin:
         # 小写（close/open/high/low/volume/amount）。last 缺失用 close 兜底（K 线 bar
         # 无最新价字段）、lastClose 缺失用 preClose/pre_close 兜底，避免旧版 K 线订阅
         # 推送的行情 last/lastClose 为 None。
+        last = _dget(tick, "lastPrice", "close")
+        pre = _dget(tick, "lastClose", "preClose", "pre_close")
+        # 涨跌额 / 涨跌幅：界面契约（shared/types.ts::Quote）要的是 change / change_pct，
+        # 而迅投只给 lastPrice / lastClose。算一次，快照与推送两条路径同时受益。
+        # pre 为 0/空 时不给涨跌幅（除零无意义），而不是硬算出一个 inf。
+        change = None
+        change_pct = None
+        try:
+            if last is not None and last != "" and pre not in (None, "", 0):
+                change = round(float(last) - float(pre), 4)
+                change_pct = round(change / float(pre) * 100.0, 4)
+        except (TypeError, ValueError):
+            change = None
+            change_pct = None
+        ts = now_iso()
         return {
             "code": code,
-            "last": _dget(tick, "lastPrice", "close"),
+            # ---- 迅投原生名：sync 层 schema guard（_QUOTE_REQUIRED）与各引擎在用，勿删 ----
+            "last": last,
+            "lastClose": pre,
+            "ts": ts,
+            # ---- 界面契约名（shared/types.ts::Quote）----
+            # 只给原生名会让界面长期显示「--」：前端读的是 price / change_pct，
+            # 字段名对不上时既没有报错也没有兜底，表现就是「行情通道已连接但没有数字」。
+            "price": last,
+            "pre_close": pre,
+            "change": change,
+            "change_pct": change_pct,
+            "time": ts,
             "open": _dget(tick, "open", "Open"),
             "high": _dget(tick, "high", "High"),
             "low": _dget(tick, "low", "Low"),
-            "lastClose": _dget(tick, "lastClose", "preClose", "pre_close"),
             "volume": _dget(tick, "volume", "Volume"),
             "amount": _dget(tick, "amount", "Amount"),
             "bid": _lst(_dget(tick, "bidPrice", "bid_price"), 0),
@@ -71,7 +96,6 @@ class QuotesMixin:
             "ask_vol": _lst(_dget(tick, "askVolume", "ask_volume"), 0),
             "bids": bids,
             "asks": asks,
-            "ts": now_iso(),
         }
 
     def _kline_lookback_days(self, period: str, count: int) -> int:

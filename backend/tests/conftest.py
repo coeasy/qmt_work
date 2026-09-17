@@ -58,10 +58,19 @@ def pytest_configure(config):  # noqa: ARG001 — pytest 钩子签名
     ``core.state.state`` 是**模块级单例**，``main.create_app`` 的 lifespan 会
     **就地**写入 ``broker_manager`` / ``db`` / ``risk`` 等槽位，且**从不还原**。
     基线必须在 lifespan 跑之前取，否则基线本身就是被污染的状态。
+
+    同时显式关掉「启动自动连接」（``broker_auto_connect``，生产默认开）：
+    否则每次跑测试都会去扫盘探测本机 QMT 并**真的连上用户券商**——
+    既拖慢用例，又会占用真实客户端会话、污染测试前提。
+    测试需要「有/无券商连接」时应自行显式建立前提，不得依赖环境残留。
     """
     global _PROCESS_STATE_BASELINE
     if _PROCESS_STATE_BASELINE is None:
         _PROCESS_STATE_BASELINE = _snapshot_state()
+
+    from core.config import settings
+
+    settings.broker_auto_connect = False
 
 
 @pytest.fixture(autouse=True)

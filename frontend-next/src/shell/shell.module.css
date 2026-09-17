@@ -11,31 +11,101 @@
   background: var(--bg-0);
 }
 
-/* ---------- 顶部菜单栏（替代左侧功能树） ---------- */
-.menubar {
+/* ---------- 自绘标题栏（窗口 frame:false） ---------- */
+/* 这一行同时承担「标题栏 + 菜单栏」两个职责（对标同花顺/大智慧的顶部条）：
+   左边品牌、中间业务域菜单、右边全局搜索与窗口按钮。
+   拖拽：-webkit-app-region: drag 只放在容器上，可点击元素（菜单项/输入框/下拉/
+   窗口按钮）必须显式 no-drag —— 否则点它们会变成拖窗口，看起来像"按钮点不动"。 */
+.titlebar {
   height: var(--h-menu);
   flex: 0 0 auto;
   display: flex;
   align-items: center;
   gap: 2px;
-  padding: 0 var(--sp-2);
+  padding-right: 0;
   background: var(--bg-2);
   border-bottom: 1px solid var(--border);
   user-select: none;
+  -webkit-app-region: drag;
 }
 
-.brand {
+.tbBrand {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  height: 100%;
+  padding: 0 var(--sp-3);
+  flex: 0 0 auto;
+}
+
+/* 品牌色块：比纯文字更有辨识度，也标出可拖拽区域的起点 */
+.tbLogo {
+  width: 13px;
+  height: 13px;
+  border-radius: 3px;
+  background: linear-gradient(135deg, var(--accent), var(--info));
+  box-shadow: 0 0 8px var(--accent-dim);
+  flex: 0 0 auto;
+}
+
+.tbTitle {
   font-size: var(--font-sm);
-  font-weight: 500;
-  color: var(--text-dim);
-  padding-right: var(--sp-3);
+  font-weight: 600;
+  color: var(--text);
+  letter-spacing: 0.4px;
+}
+
+.tbSub {
+  font-size: var(--font-xs);
+  color: var(--text-faint);
   letter-spacing: 0.3px;
+  white-space: nowrap;
+}
+
+/* 窗口按钮（最小化 / 最大化-还原 / 关闭） */
+.tbWinBtns {
+  display: flex;
+  align-items: stretch;
+  height: 100%;
+  margin-left: var(--sp-2);
+  flex: 0 0 auto;
+  -webkit-app-region: no-drag;
+}
+.tbWinBtn {
+  width: 44px;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+.tbWinBtn:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+.tbWinBtnClose:hover {
+  background: var(--danger);
+  color: #fff;
+}
+
+/* ---------- 顶部菜单栏（替代左侧功能树；嵌在标题栏内） ---------- */
+.menubar {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  gap: 2px;
 }
 
 .menuItem {
   position: relative;
   height: 100%;
-  padding: 0 10px;
+  padding: 0 11px;
   display: flex;
   align-items: center;
   background: none;
@@ -43,6 +113,7 @@
   color: var(--text);
   cursor: pointer;
   font-size: var(--font);
+  -webkit-app-region: no-drag;
 }
 .menuItem:hover {
   background: var(--bg-hover);
@@ -65,6 +136,7 @@
   box-shadow: 0 6px 18px rgba(0, 0, 0, 0.28);
   display: flex;
   flex-direction: column;
+  -webkit-app-region: no-drag;
 }
 
 .menuDropItem {
@@ -94,6 +166,7 @@
 .globalSearch {
   position: relative;
   width: 190px;
+  -webkit-app-region: no-drag;
 }
 .globalSearchInput {
   width: 100%;
@@ -335,6 +408,41 @@
 .tabClose:hover {
   background: var(--danger-dim);
   color: var(--danger);
+}
+
+/* Tab 右键菜单：关标签是高频操作，逐个点 × 太慢 */
+.tabMenu {
+  position: fixed;
+  z-index: var(--z-dropdown);
+  min-width: 136px;
+  padding: var(--sp-1) 0;
+  background: var(--bg-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.28);
+  display: flex;
+  flex-direction: column;
+}
+.tabMenuItem {
+  display: flex;
+  align-items: center;
+  height: 26px;
+  padding: 0 var(--sp-3);
+  background: none;
+  border: none;
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+  font-size: var(--font-sm);
+  white-space: nowrap;
+}
+.tabMenuItem:hover:not(:disabled) {
+  background: var(--accent-dim);
+  color: var(--accent);
+}
+.tabMenuItem:disabled {
+  color: var(--text-faint);
+  cursor: default;
 }
 
 .wsBody {

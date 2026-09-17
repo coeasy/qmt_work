@@ -7,11 +7,14 @@ import type { Instrument } from "@/shared/types";
 import s from "./shell.module.css";
 
 /**
- * 顶部菜单栏。
+ * 顶部菜单栏（嵌在自绘标题栏内，见 shell/TitleBar.tsx）。
  *
  * 设计决策（方案 §4.4）：功能树不放左侧，改为顶部「一级菜单 = 业务域 + 下拉二级 = 域内页」。
  * 配套的快捷跳转（代码直达 / 命令面板 / 快捷键）在同批交付，
  * 否则高频操作会比侧边栏更慢 —— 这是顶部菜单能成立的前提。
+ *
+ * 品牌字样由 TitleBar 负责渲染，本组件只出菜单项与全局搜索，
+ * 避免同一行里出现两个「qmt_work」。
  */
 export function MenuBar() {
   const [openKey, setOpenKey] = useState<string>("");
@@ -34,7 +37,6 @@ export function MenuBar() {
 
   return (
     <div className={s.menubar} ref={barRef}>
-      <span className={s.brand}>qmt_work</span>
       {MENU.map((g) => (
         <div key={g.key} style={{ position: "relative", height: "100%" }}>
           <button

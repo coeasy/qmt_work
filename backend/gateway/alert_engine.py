@@ -57,11 +57,12 @@ class AlertEngine:
             asyncio.create_task(self._notifier.notify(
                 "alert.triggered", title, body, payload, channels=channels, _internal=True))
         if self._on_event:
-            try:
-                self._on_event({"type": "alert", "data": {
-                    "rule": rule.get("name"), "event": event_type}})
-            except Exception:  # noqa: BLE001
-                pass
+            # 唯一实现见 core/emit.py：on_event 常为 `ws_manager.broadcast`（async），
+            # 直接同步调用只会创建协程、永不 await ⇒ 告警事件静默丢失。
+            from core.emit import emit_event
+            emit_event(self._on_event,
+                       {"type": "alert", "data": {
+                           "rule": rule.get("name"), "event": event_type}})
 
     def evaluate_event(self, event_type: str, payload: dict | None = None) -> None:
         """事件型规则评估（由 Notifier.on_event 回调）。"""

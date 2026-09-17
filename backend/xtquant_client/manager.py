@@ -7,6 +7,7 @@
 """
 import asyncio
 import logging
+import os
 import threading
 import uuid
 from dataclasses import dataclass, field
@@ -19,6 +20,18 @@ from .registry import create_adapter, get_profile
 from core.clock import now_iso
 
 log = logging.getLogger("qmt_work.manager")
+
+
+def _norm_path(p: str) -> str:
+    """路径归一化（比较用）：Windows 大小写不敏感 + 斜杠/尾斜杠差异。
+
+    用于判断「探测到的客户端」与「已有连接」是不是同一个 —— 直接比字符串会因
+    `P:\\stock\\gd_qmt\\userdata_mini` 与 `p:/stock/gd_qmt/userdata_mini/` 判为不同，
+    导致自动连接重复建连（同一账号多份连接）。
+    """
+    if not p:
+        return ""
+    return os.path.normcase(os.path.normpath(str(p).strip()))
 
 
 def _version_profile(adapter: BrokerAdapter, allow_block: bool = True) -> dict | None:
@@ -172,7 +185,7 @@ class BrokerManager:
             self._persist(conn.cfg)
             if conn.connected and self._active_id is None:
                 self._active_id = conn.cfg.conn_id
-                self._persist_active()
+                self._persist_active(exclusive=False)
         return conn
 
     def connect(self, conn_id: str) -> dict:
@@ -224,9 +237,14 @@ class BrokerManager:
             log.warning("connect 预探测失败（回退到 SDK 报错兜底）: %s", exc)
         conn.adapter.start()
         conn.connected = conn.adapter.is_connected()
+        # 用户点了「连接」= 意图明确要它保持连接：内存与 DB 的 active 必须同义
+        # （内存 `cfg.active` 决定健康监控是否自愈，DB 决定下次启动是否自动拉起）。
+        if conn.connected and not conn.cfg.active:
+            conn.cfg.active = True
+            self._persist(conn.cfg)
         if conn.connected and self._active_id is None:
             self._active_id = conn_id
-            self._persist_active()
+            self._persist_active(exclusive=False)
         res = conn.adapter.test_connection()
         # 打通「版本画像 → 前端」链路：连接成功即带上检测到的客户端类型/版本/能力，
         # 前端据此展示「当前连接的是完整版/极速版、支持哪些功能」（任何客户端版本通用）。
@@ -234,14 +252,22 @@ class BrokerManager:
         res["version_profile"] = _version_profile(conn.adapter)
         return res
 
-    def disconnect(self, conn_id: str) -> None:
+    def disconnect(self, conn_id: str, keep_active: bool = False) -> None:
+        """断开一条连接。
+
+        `keep_active=True`：**只断运行时连接，保留「启动时自动连接」的持久意图**。
+        优雅停机必须走这个分支 —— 否则每次退出都会把 `cfg.active` 抹成 False，
+        下次启动既不自动拉起（`phase_broker` 只看 `cfg.active`）、又因为「连接列表
+        非空」跳过自动连接 ⇒ **第二次启动开始永远连不上**（实测：持久化行
+        `active=0`，`/brokers` 显示「已有连接 (1)」但「未连接」，行情通道空转）。
+        """
         conn = self._conns.get(conn_id)
         if not conn:
             return
         # 阶段 0-D（C16）：手动断开必须清 active + 取消重连任务——
         # 原实现不清 active，健康监控在 5s 内把已断开连接自动重连回来；
         # 不取消 reconnect_task 则后台重连任务继续拉起子进程（已删除连接被"复活"）。
-        if conn.cfg.active:
+        if not keep_active and conn.cfg.active:
             conn.cfg.active = False
             self._persist(conn.cfg)
         if self._active_id == conn_id:
@@ -264,16 +290,19 @@ class BrokerManager:
             log.warning("disconnect %r close 失败: %s", conn_id, exc)
         conn.connected = False
 
-    def disconnect_all(self) -> int:
+    def disconnect_all(self, keep_active: bool = True) -> int:
         """断开全部连接（P2-7：优雅停机用；返回断开数量）。
 
-        与逐个 disconnect 语义一致：清 active、取消重连任务、关闭适配器。
+        与逐个 disconnect 语义一致：清运行时活跃指针、取消重连任务、关闭适配器。
         单个连接失败不阻断其余连接的断开。
+
+        ⚠️ 默认 `keep_active=True`：本方法**只用于停机**，停机不改用户的持久意图
+        （「下次启动自动连接这些连接」）。要连持久意图一起清，显式传 False。
         """
         n = 0
         for conn_id in list(self._conns.keys()):
             try:
-                self.disconnect(conn_id)
+                self.disconnect(conn_id, keep_active=keep_active)
                 n += 1
             except Exception as exc:  # noqa: BLE001
                 log.warning("disconnect_all %r 失败: %s", conn_id, exc)
@@ -331,8 +360,22 @@ class BrokerManager:
                     pass
 
     def set_active(self, conn_id: str) -> None:
+        """显式指定**唯一**活跃连接（用户点「设为活跃」）。
+
+        「活跃」在 DB 里用同一列 `active` 表达「应保持连接」，故这里必须**内存与 DB
+        一起改**：只写 DB 会导致 `cfg.active` 仍为 False ⇒ 健康监控不自愈；
+        只改内存则下次启动不自动拉起。指定唯一活跃时，其余连接的持久意图一并熄灭。
+        """
         if conn_id not in self._conns:
             raise KeyError(f"未知连接：{conn_id}")
+        for cid, c in self._conns.items():
+            if cid != conn_id and c.cfg.active:
+                c.cfg.active = False
+                self._persist(c.cfg)
+        conn = self._conns[conn_id]
+        if not conn.cfg.active:
+            conn.cfg.active = True
+            self._persist(conn.cfg)
         self._active_id = conn_id
         self._persist_active()
 
@@ -403,11 +446,61 @@ class BrokerManager:
                 "min_version": cfg.min_version, "active": 1 if cfg.active else 0,
                 "created_at": now_iso()})
 
-    def _persist_active(self) -> None:
+    def _persist_active(self, exclusive: bool = True) -> None:
+        """把「当前活跃连接」的持久意图写进 DB（`active=1`）。
+
+        ⚠️ **`_active_id is None` 时必须直接返回**：旧实现在这种情况下会执行
+        `UPDATE broker_connections SET active=0`（**全表清零**），而 `_active_id`
+        恰好在「断开连接」后被置空 —— 于是「断开」这个动作会顺手把**所有**连接的
+        「启动时自动连接」意图抹掉（实测：优雅停机后第二次启动 `active=0`，
+        既不自动拉起、又因「列表非空」跳过自动连接 ⇒ 永远连不上）。
+
+        `exclusive` 区分两个调用方语义：
+        - `True`（`set_active` 路由 = 用户显式指定**唯一**活跃连接）：先清零其余；
+        - `False`（连接刚连上、活跃指针自动落到它）：**只标记自己**，绝不触碰其它
+          连接的 active —— 那些是各自独立的「启动时自动连接」意图，被顺手清掉就是
+          「下次启动少拉起一条」的静默故障。
+        """
+        if not self._active_id:
+            return
+        if self._active_id not in self._conns:
+            return
         db = get_db()
-        db.execute("UPDATE broker_connections SET active=0")
-        if self._active_id:
-            conn = self._conns.get(self._active_id)
-            if conn:
-                db.execute("UPDATE broker_connections SET active=1 WHERE conn_id=?",
-                           (self._active_id,))
+        if exclusive:
+            db.execute("UPDATE broker_connections SET active=0")
+        db.execute("UPDATE broker_connections SET active=1 WHERE conn_id=?",
+                   (self._active_id,))
+
+    # ---------------- 自动连接复用 ----------------
+    def find_by_identity(self, broker_id: str, client_path: str,
+                         account_id: str) -> Connection | None:
+        """按「券商 + 客户端路径 + 资金账号」定位已有连接。
+
+        自动连接用它避免重复建连：同一个人客户端被反复探测到时，应该复用那条
+        持久化连接（重新标记 active + 拉起），而不是每次新增一条
+        （实测踩过：三次启动累积出 3 条重复的「迅投 XTQuant 22453951」）。
+        """
+        want = (broker_id or "", _norm_path(client_path), str(account_id or ""))
+        for conn in self._conns.values():
+            c = conn.cfg
+            if (c.broker_id or "", _norm_path(c.client_path),
+                    str(c.account_id or "")) == want:
+                return conn
+        return None
+
+    def activate(self, conn_id: str) -> Connection:
+        """把**已有**连接重新标记为「应保持连接」并启动（自动连接复用路径）。
+
+        与 `add_connection` 的区别：不新建连接、不重复落库，只是把持久意图
+        重新点亮并拉起。供「用户手动断开过、下次启动仍应自动接上」这一路径使用。
+        """
+        conn = self._conns.get(conn_id)
+        if conn is None:
+            raise KeyError(f"未知连接：{conn_id}")
+        conn.cfg.active = True
+        self._persist(conn.cfg)
+        self._safe_start(conn_id)
+        if conn.connected and self._active_id is None:
+            self._active_id = conn_id
+            self._persist_active(exclusive=False)
+        return conn

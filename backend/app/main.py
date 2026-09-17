@@ -299,7 +299,10 @@ def create_app() -> FastAPI:
         try:
             bm = getattr(state, "broker_manager", None)
             if bm and hasattr(bm, "disconnect_all"):
-                bm.disconnect_all()
+                # keep_active=True：停机只断运行时连接，**保留**「启动时自动连接」的
+                # 持久意图。清掉它会让下次启动既不自动拉起、又因「列表非空」跳过
+                # 自动连接 ⇒ 第二次启动开始永远连不上（实测踩到）。
+                bm.disconnect_all(keep_active=True)
         except Exception as exc:  # noqa: BLE001
             log.warning("broker disconnect on shutdown failed: %s", exc)
         return {"ok": True, "shutting_down": True}

@@ -271,3 +271,60 @@
 .logRow:last-child {
   border-bottom: none;
 }
+
+/* ---- 皮肤（背景配色）选择 ---- */
+
+.skinGrid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+}
+
+.skinCard {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-2);
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: var(--font-sm);
+}
+
+.skinCard:hover {
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+
+.skinCardActive {
+  border-color: var(--accent);
+  background: var(--accent-dim);
+  color: var(--accent);
+}
+
+/* 色块的主色由预设定义（内联 background 传入），这里只管形状与描边 */
+.skinSwatch {
+  width: 22px;
+  height: 14px;
+  border-radius: 3px;
+  border: 1px solid var(--border-strong);
+  flex: 0 0 auto;
+}
+
+.skinName {
+  white-space: nowrap;
+}
+
+/* 原生 color input 在各平台观感不一，统一收边以贴合深色终端 */
+.colorInput {
+  width: 34px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-3);
+  cursor: pointer;
+  flex: 0 0 auto;
+}

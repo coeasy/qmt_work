@@ -79,6 +79,9 @@ def _default_config_payload() -> dict[str, Any]:
         "account_id": "",
         "account_type": "STOCK",
         "session_id": 0,
+        # 启动自动连接：true=启动时自动探测本机运行中的 QMT 客户端并接入（无可用连接时）。
+        # 仅「连接」，不会自动下单；关掉则需手动在「券商连接」页添加。
+        "broker_auto_connect": True,
         # ---- 交易二次确认 ----
         "signal_confirm_threshold": 100_000.0,
         "totp_secret": "",
@@ -184,6 +187,10 @@ class Settings(BaseSettings):
     account_id: str = ""
     account_type: str = "STOCK"
     session_id: int = 0
+    # 启动自动连接（默认开）：启动时若**没有任何可用连接**，自动探测本机正在运行
+    # 且已登录资金账号的 QMT 客户端并接入（只连不拉进程；未运行的客户端需用户先登录）。
+    # 关掉即回到「必须手动添加/连接」的行为。
+    broker_auto_connect: bool = True
 
     # 网关鉴权：远程调用必须携带的 API Key（开发默认值，生产必须修改）
     api_key: str = "qmt-dev-key"

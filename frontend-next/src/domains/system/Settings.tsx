@@ -10,6 +10,7 @@ import {
 } from "@/design/primitives";
 import { systemApi } from "@/services/api";
 import { useAsync } from "@/hooks/useAsync";
+import { CUSTOM_SKIN_ID, PRESETS, presetById } from "@/design/skins";
 import { useUiStore, type ThemePref } from "@/stores/ui";
 import type { ConfigHistoryRow, RiskConfig, RuntimeConfig } from "@/shared/types";
 import s from "../domain.module.css";
@@ -342,11 +343,12 @@ const THEME_OPTIONS: Array<{ key: ThemePref; label: string; hint: string }> = [
 ];
 
 /**
- * 界面偏好：主题三态 + 涨跌配色。
+ * 界面偏好：主题三态 + 背景配色（皮肤） + 涨跌配色。
  *
  * 这里的选择与状态栏右下角的快捷开关是同一份状态（stores/ui.ts），
  * 落盘键 `qmt.ui.v1`，刷新后保持。主题通过 <html data-theme> 驱动设计令牌，
- * 组件本身不感知明暗，因此切换是零成本的。
+ * 皮肤通过 <html data-skin>（预设）或内联变量（自定义）驱动，组件本身不感知明暗，
+ * 因此切换是零成本的。
  */
 function UiPrefs() {
   const themePref = useUiStore((st) => st.themePref);
@@ -354,6 +356,23 @@ function UiPrefs() {
   const theme = useUiStore((st) => st.theme);
   const updown = useUiStore((st) => st.updown);
   const setUpdown = useUiStore((st) => st.setUpdown);
+  const activeSkin = useUiStore((st) => st.activeSkin);
+  const customBg = useUiStore((st) => st.customBg);
+  const setSkin = useUiStore((st) => st.setSkin);
+  const setCustomBg = useUiStore((st) => st.setCustomBg);
+
+  // hex 输入框的草稿：只有合法值才即时应用，非法值在失焦时回滚，避免半截输入把界面刷黑
+  const [bgDraft, setBgDraft] = useState(customBg);
+  const applyBg = (raw: string) => {
+    const v = raw.trim();
+    if (/^#[0-9a-f]{6}$/i.test(v)) setCustomBg(v.toLowerCase());
+    else setBgDraft(customBg);
+  };
+
+  const activeLabel =
+    activeSkin === CUSTOM_SKIN_ID
+      ? `自定义 ${customBg}`
+      : (presetById(activeSkin)?.label ?? "默认（随主题）");
 
   return (
     <>
@@ -378,6 +397,62 @@ function UiPrefs() {
         </div>
       </Panel>
 
+      <Panel title="背景配色">
+        <div className={s.skinGrid}>
+          {PRESETS.map((p) => {
+            const on = activeSkin === p.id;
+            return (
+              <button
+                key={p.id}
+                type="button"
+                className={[s.skinCard, on ? s.skinCardActive : ""].filter(Boolean).join(" ")}
+                onClick={() => setSkin(p.id)}
+                title={p.hint}
+                aria-pressed={on}
+              >
+                <span className={s.skinSwatch} style={{ background: p.swatch }} aria-hidden />
+                <span className={s.skinName}>{p.label}</span>
+              </button>
+            );
+          })}
+        </div>
+
+        <div className={s.toolbar} style={{ marginTop: 8 }}>
+          <span className={s.muted}>自定义背景色</span>
+          <input
+            type="color"
+            className={s.colorInput}
+            value={customBg}
+            aria-label="自定义背景色"
+            onChange={(e) => {
+              setBgDraft(e.target.value);
+              setCustomBg(e.target.value.toLowerCase());
+            }}
+          />
+          <Input
+            value={bgDraft}
+            mono
+            style={{ width: 96 }}
+            aria-label="自定义背景色 HEX"
+            onChange={(e) => setBgDraft(e.target.value)}
+            onBlur={() => applyBg(bgDraft)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") applyBg(bgDraft);
+            }}
+          />
+          <span className={s.spacer} />
+          <span className={s.muted}>
+            当前生效：<b>{activeLabel}</b>
+          </span>
+        </div>
+
+        <div className={s.muted} style={{ marginTop: 6, whiteSpace: "normal", lineHeight: 1.5 }}>
+          预设配色对标同花顺 / 大智慧的常用底色（经典黑、深灰、石板蓝、墨绿…）。
+          自定义背景色时会按背景明暗<b>自动配套</b>文字与边框色，不会出现「白底白字」；
+          涨跌色与强调色<b>不受</b>背景色影响，仍是独立设置。
+        </div>
+      </Panel>
+
       <Panel title="涨跌配色">
         <div className={s.toolbar}>
           <Button
@@ -397,7 +472,7 @@ function UiPrefs() {
             绿涨红跌
           </Button>
           <span className={s.spacer} />
-          <span className={s.muted}>独立于明暗主题，仅影响行情涨跌色</span>
+          <span className={s.muted}>独立于明暗主题与背景配色，仅影响行情涨跌色</span>
         </div>
       </Panel>
     </>

@@ -59,7 +59,16 @@ a {
   color: var(--flat);
 }
 
-/* --- 滚动条 --- */
+/* --- 滚动条 ---
+   ⚠️ Windows 上 Chromium 默认启用 overlay scrollbar，此时 ::-webkit-scrollbar
+   系列**完全不生效**，滚动条会用系统主题色 —— 深色终端里就是一条刺眼的浅色竖条。
+   标准属性 scrollbar-color / scrollbar-width 对 overlay 滚动条同样有效，
+   因此两套都写：标准属性负责 overlay，webkit 伪元素负责 classic（细调内边距）。 */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+
 ::-webkit-scrollbar {
   width: 10px;
   height: 10px;

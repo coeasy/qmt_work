@@ -6,4 +6,24 @@ contextBridge.exposeInMainWorld("electronAPI", {
   openExternal: (url) => ipcRenderer.invoke("open-external", url),
   setAutoLaunch: (enabled) => ipcRenderer.invoke("set-auto-launch", enabled),
   getAutoLaunch: () => ipcRenderer.invoke("get-auto-launch"),
+
+  // ---- 自绘标题栏所需的窗口控制（无边框窗口下由页面自己画按钮）----
+  // 说明：这些是**窗口级**操作，不涉及任何业务数据；close 走与标题栏一致的
+  // 「隐藏到托盘」语义（主进程 close 处理器负责），不是强杀。
+  windowMinimize: () => ipcRenderer.invoke("window-minimize"),
+  windowToggleMaximize: () => ipcRenderer.invoke("window-toggle-maximize"),
+  windowClose: () => ipcRenderer.invoke("window-close"),
+  windowIsMaximized: () => ipcRenderer.invoke("window-is-maximized"),
+  /** 订阅最大化状态变化；返回取消订阅函数（组件卸载时务必调用）。 */
+  onWindowMaximizeChange: (cb) => {
+    const handler = (_e, maximized) => {
+      try {
+        cb(Boolean(maximized));
+      } catch {
+        /* 回调异常不应打断主进程事件流 */
+      }
+    };
+    ipcRenderer.on("window-maximized", handler);
+    return () => ipcRenderer.removeListener("window-maximized", handler);
+  },
 });
