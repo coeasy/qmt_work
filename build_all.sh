@@ -28,6 +28,11 @@
 
 set -euo pipefail
 
+# set -e 下的静默失败极难定位：脚本会直接退出、什么都不打印（实测踩过两次，
+# 都是「函数最后一句话是 `[[ ... ]] && cmd`，条件为假时函数返回 1」）。
+# 这里补一条 ERR trap，至少把出错行号与退出码打出来。
+trap 'rc=$?; echo "[error] 构建中止：${BASH_SOURCE[0]:-?}:${BASH_LINENO[0]:-?}（退出码 $rc）" >&2' ERR
+
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 BACKEND="$ROOT/backend"
 FRONTEND="$ROOT/frontend-next"
@@ -155,7 +160,7 @@ verify_static_ready() {
     [[ -f "$idx" ]] || fail "缺少 $idx：请先完成前端构建"
     [[ -d "$assets" ]] || fail "缺少 $assets：请先完成前端构建"
     local n
-    n=$(find "$assets" -name '*.js' 2>/dev/null | wc -l | tr -d ' ')
+    n=$( { find "$assets" -name '*.js' 2>/dev/null || true; } | wc -l | tr -d ' ')
     (( n > 0 )) || fail "$assets 下无 js 分片，前端构建未完成"
     # index.html 引用的入口资源必须真实存在
     local m missing=0
@@ -181,11 +186,19 @@ verify_static_ready() {
 # 确实想彻底清一次时显式加 --clean-dist。
 clean_dist() {
     local d="$BACKEND/dist/qmt_work" n=0
-    n=$(find "$d" -type f 2>/dev/null | wc -l | tr -d ' ')
+    # ⚠️ 不能写成 `n=$(find "$d" ... | wc -l)`：目录不存在时 find 返回 1，脚本又开了
+    # pipefail ⇒ 整个命令替换失败 ⇒ set -e 让构建静默中止（实测：Step 2 刚打印完就退出，
+    # 无任何错误输出）。用 `{ ... || true; }` 兜住，缺失目录等价于「0 个文件」。
+    n=$( { find "$d" -type f 2>/dev/null || true; } | wc -l | tr -d ' ')
     if [[ "$CLEAN_DIST" != true ]]; then
-        [[ "$n" != "0" ]] && \
+        # 同样必须用 if：`[[ ... ]] && log ...` 在 n=0（dist 不存在或刚被清空）时返回 1，
+        # 紧跟的裸 `return` 会把这个 1 带出去，配合 set -e 让构建在 Step 2 静默终止。
+        if [[ "$n" != "0" ]]; then
             log "保留上一轮产物 $d（$n 个文件），PyInstaller 将覆盖同名文件；彻底清理请加 --clean-dist"
-        return
+        else
+            log "无上一轮产物 $d，将全新打包"
+        fi
+        return 0
     fi
     if [[ -d "$d" ]]; then rm -rf "$d" && log "已清理 $d"; fi
 }
@@ -195,9 +208,34 @@ clean_dist() {
 # 完整性仍由 verify_static_ready 兜住（引用缺失 / 无 js 分片 → 直接 fail）。
 clean_static_assets() {
     local n
-    n=$(find "$BACKEND/static" -type f 2>/dev/null | wc -l | tr -d ' ')
-    [[ -n "$n" && "$n" != "0" ]] && \
+    # 同 clean_dist：find 目标不存在会返回 1，配合 pipefail + set -e 静默中止构建。
+    n=$( { find "$BACKEND/static" -type f 2>/dev/null || true; } | wc -l | tr -d ' ')
+    # 必须用 if 而不是 `[[ ... ]] && log ...`：后者在条件为假时让函数返回 1，
+    # 而调用处没有 `|| true`，配合脚本顶部的 set -e 会让整个构建静默 exit 1
+    # （没有任何错误输出）。触发条件是「上一轮前端产物为空」——即首次构建、
+    # 或刚被清空 backend/static 之后，正是最不该失败的时刻。
+    if [[ -n "$n" && "$n" != "0" ]]; then
         log "检测到上一轮前端产物 $n 个文件，vite emptyOutDir 会整体清空"
+    else
+        log "backend/static 为空，vite 将全新写入（无需清理）"
+    fi
+}
+
+# electron-builder 的退出码不足以判定成败：实测在【产物已全部生成之后】，它还会去删除
+# 中间文件（如 *.nsis.7z），这一步会被本机的安全删除护栏拦下 ⇒ 退出码非 0，但
+# qmt_work-Setup-*.exe 与 *.zip 都已落地。此时若直接 fail，后面的「包内 static 核对」
+# 与 Step 4 自检会被整段跳过，把「已完成」误报成「失败」。
+# 判据：win-unpacked/qmt_work.exe 存在 ⇒ 打包本身成功，降级为 warn 并继续。
+run_electron_builder() {
+    if PATH="$NODE_DIR:$PATH" node node_modules/electron-builder/cli.js "$@"; then
+        return 0
+    fi
+    if [[ -f "$FRONTEND/dist-electron/win-unpacked/qmt_work.exe" ]]; then
+        warn "electron-builder 退出码非 0，但 win-unpacked/qmt_work.exe 已生成 —— 视为打包成功"
+        warn "（多为收尾清理中间文件被环境安全删除护栏拦下；中间 *.nsis.7z 可手动清理）"
+        return 0
+    fi
+    return 1
 }
 
 # ────────────────────────── 开始 ──────────────────────────
@@ -280,11 +318,11 @@ if [[ "$USE_NSIS" == true ]]; then
         warn "本机未检测到 NSIS，electron-builder 将尝试按需下载；失败则退回仅 zip"
     fi
     log "打包 NSIS 安装包 + zip 便携版"
-    PATH="$NODE_DIR:$PATH" node node_modules/electron-builder/cli.js --win nsis zip \
+    run_electron_builder --win nsis zip \
         || { cd "$ROOT"; fail "Electron 打包失败（NSIS）：可用 --portable 仅出 zip"; }
 else
     log "打包 zip 便携版（--nsis 可同时产出 NSIS 安装包）"
-    PATH="$NODE_DIR:$PATH" node node_modules/electron-builder/cli.js --win zip \
+    run_electron_builder --win zip \
         || { cd "$ROOT"; fail "Electron 打包失败"; }
 fi
 cd "$ROOT"
@@ -298,8 +336,8 @@ UNPACKED="$FRONTEND/dist-electron/win-unpacked/qmt_work.exe"
 PACKED_STATIC="$FRONTEND/dist-electron/win-unpacked/resources/backend/qmt_work/_internal/static"
 [[ -d "$PACKED_STATIC" ]] || PACKED_STATIC="$FRONTEND/dist-electron/win-unpacked/resources/backend/dist/qmt_work/_internal/static"
 if [[ -d "$PACKED_STATIC" ]]; then
-    src_n=$(find "$BACKEND/static" -type f | wc -l | tr -d ' ')
-    out_n=$(find "$PACKED_STATIC" -type f | wc -l | tr -d ' ')
+    src_n=$( { find "$BACKEND/static" -type f 2>/dev/null || true; } | wc -l | tr -d ' ')
+    out_n=$( { find "$PACKED_STATIC" -type f 2>/dev/null || true; } | wc -l | tr -d ' ')
     info "  包内 static: $out_n / $src_n 个文件"
     if [[ "$out_n" != "$src_n" ]]; then
         if (( out_n > src_n )); then
