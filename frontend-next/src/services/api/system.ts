@@ -54,7 +54,12 @@ export interface HealthResponse {
   db: boolean;
   brokers: Array<{ conn_id: string; broker: string; connected: boolean; active: boolean }>;
   engines: { backtest_queue: boolean; limitup: boolean; algo: boolean; ws: boolean };
-  trading_session: { mode: string; active: boolean | null };
+  trading_session: {
+    mode: string;
+    active: boolean | null;
+    /** 今日是否交易日（节假日为 false）。mode=weekday-fallback 时不可靠，需据 mode 标注。 */
+    trading_day: boolean | null;
+  };
   checks: HealthCheck[];
   lifecycle: { ready: boolean; stopping: boolean; phases: Record<string, string> };
 }

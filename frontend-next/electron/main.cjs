@@ -47,6 +47,15 @@ let quitting = false;
 let shuttingDown = false; // 异步停机中标志（防止 before-quit 重入）
 let activePort = DEFAULT_PORT;
 let backendExit = null;   // 后端已退出记录 {code, signal}
+// 启动编排状态（见文件末尾 bootSequence）：
+//   bootSettled —— 首次启动流程是否已判定（成功/失败）。用于区分「启动期后端退出」
+//                  与「运行期后端崩溃」：前者由加载页呈现原因，后者才弹模态框；
+//   booting     —— 正在执行启动流程，防止「重试」连点造成并发重启；
+//   backendGen  —— 后端进程「代」计数。重试会重启后端，上一代进程的 exit 事件
+//                  必须被忽略，否则刚拉起的新进程会被误判成「已退出」而立即失败。
+let bootSettled = false;
+let booting = false;
+let backendGen = 0;
 // 后端 stdout/stderr 环形缓冲（最近 40 行）：启动失败时随 startup-error.log 落盘，
 // 无头环境下模态框不可见，只能靠这份日志定位根因。
 const BACKEND_TAIL = [];
@@ -91,6 +100,7 @@ function backendEntry() {
 }
 
 function startBackend() {
+  const gen = ++backendGen;
   const { cmd, args } = backendEntry();
   // 启动前清理陈旧端口文件（上次异常退出可能残留过期端口，导致健康检查等错端口）
   try { fs.unlinkSync(portFile()); } catch { /* 不存在则忽略 */ }
@@ -127,9 +137,16 @@ function startBackend() {
     _tail("[spawn-error] " + String(err));
   });
   backend.on("exit", (code) => {
+    if (gen !== backendGen) return; // 上一代进程（重试重启时被 kill）的退出事件，忽略
     backendExit = { code, signal: null };
     if (quitting) return;
     console.error("backend exited", code);
+    if (!bootSettled) {
+      // 启动期退出：原因由 bootSequence 统一呈现在加载页上（带重试按钮），
+      // 这里只落盘诊断信息，不再叠加一个模态框。
+      writeStartupError(`后端进程异常退出（code=${code}）`);
+      return;
+    }
     reportStartupFailure(`后端进程异常退出（code=${code}）`);
   });
 }
@@ -367,6 +384,59 @@ function scheduleSaveWindowState() {
   saveStateTimer = setTimeout(saveWindowState, 400); // 拖动/缩放过程中别疯狂写盘
 }
 
+// ---- 启动期加载页 ----
+// 后端冷启动实测 7.7~10.7s（QMT 客户端探测 + 券商自动连接 + 交易日历加载），
+// 慢的时候能到 30s+。旧流程把 createWindow() 放在 waitReady() **之后** ⇒
+// 用户双击图标后这 7~30 秒里**完全没有窗口**，观感就是「点了没反应 / 是不是没启动」
+// ——这是客户端最差的第一次印象。A/B 实测：旧顺序首窗 7.62s，新顺序 0.53s。
+// 改为：窗口立刻建、先显示加载页，后端就绪后再 loadURL 切到真实应用 URL。
+//
+// 页面本体（booting / failed 两态）抽在 ./loadingPage.cjs —— 纯函数、零 Electron 依赖，
+// 因而可以脱离主进程直接渲染验证（见 frontend-next/tests/loadingPage.test.ts）。
+const { loadingPageUrl } = require("./loadingPage.cjs");
+
+function showLoading(phase, message, error) {
+  if (!win || win.isDestroyed()) return;
+  try { win.loadURL(loadingPageUrl(phase, message, error)); }
+  catch { /* 窗口已销毁 */ }
+}
+
+function appUrl() {
+  return `http://127.0.0.1:${activePort}/`;
+}
+
+// 启动编排：等待后端就绪 → 切到应用 URL；失败则把中文原因呈现在加载页上（可重试）。
+// respawn=true 表示这是「重试」：先杀掉可能已退出的旧后端进程再重新拉起。
+async function bootSequence(respawn) {
+  if (booting) return;
+  booting = true;
+  try {
+    if (respawn) {
+      showLoading("booting", "正在重新启动后端服务…");
+      killBackendTree();
+      backendExit = null;
+      BACKEND_TAIL.length = 0;
+      startBackend();
+    }
+    await waitReady();
+    bootSettled = true;
+    if (!win || win.isDestroyed()) return;
+    console.log("[desktop] backend ready ->", appUrl());
+    win.loadURL(appUrl());
+  } catch (e) {
+    bootSettled = true;
+    console.error(e.message);
+    writeStartupError(`startup failed: ${e.message}`);
+    // 测试模式：以 exit 2 结束，让自动化用例拿到确定性信号（无头环境下模态框不可见）。
+    if (TEST_MODE) { quitting = true; app.exit(2); return; }
+    // 交互模式：不再弹「启动失败」模态框（那会盖住界面、也没有出路），
+    // 改为在加载页里给出中文原因 + 「重新启动后端」按钮。
+    showLoading("failed", "后端服务启动失败，无法进入主界面。", e.message);
+  } finally {
+    booting = false;
+  }
+}
+
 function createWindow() {
   const st = loadWindowState();
   win = new BrowserWindow({
@@ -417,28 +487,39 @@ function createWindow() {
   });
   // 站内导航防护：只允许本机后端源；外链转交系统浏览器而非就地跳转
   win.webContents.on("will-navigate", (e, url) => {
-    if (!isLocalOrigin(url)) {
-      e.preventDefault();
-      openExternalSafe(url);
-    }
+    if (isLocalOrigin(url)) return;
+    // 加载页（data:）自身的刷新不算外链，放行，免得 Ctrl+R / location.reload 被拦
+    if (url === win.webContents.getURL()) return;
+    e.preventDefault();
+    openExternalSafe(url);
   });
   // window.open / target=_blank 一律拒绝建窗；外链转系统浏览器
   win.webContents.setWindowOpenHandler(({ url }) => {
     if (isSafeExternalUrl(url)) shell.openExternal(url);
     return { action: "deny" };
   });
-  win.loadURL(`http://127.0.0.1:${activePort}/`);
+  // 先显示加载页 —— 后端就绪由 bootSequence 负责切到真实应用 URL。
+  // 这样「双击图标 → 见到窗口」是即时的，等待期有明确的中文进度反馈。
+  win.loadURL(loadingPageUrl("booting",
+    "正在启动后端服务，首次启动需加载行情与交易日历，请稍候…"));
   // 页面加载结果必须显式留痕：无头/自动化场景下没有控制台可看，
   // 「窗口在但白屏」曾是最难定位的故障形态。这里同时打日志 + 写就绪标记文件，
   // 失败路径写 startup-error.log，供 scripts/client_start_test.py 判定。
   win.webContents.on("did-finish-load", () => {
+    // ⚠️ 加载页是 data: URL，它**不是**「应用就绪」。若在这里也写 window-ready.txt，
+    // 自动化用例会把加载页当成加载成功并据此截图（拍到的是加载页而非应用）。
+    if (!isLocalOrigin(win.webContents.getURL())) return;
     console.log("[desktop] window loaded");
     try {
       fs.writeFileSync(path.join(app.getPath("userData"), "window-ready.txt"),
                        `${Date.now()}\n`, "utf8");
     } catch { /* 标记文件写失败不影响运行 */ }
   });
-  win.webContents.on("did-fail-load", (_e, code, desc, url) => {
+  win.webContents.on("did-fail-load", (_e, code, desc, url, isMainFrame) => {
+    // -3 = ERR_ABORTED：loadURL 打断上一次导航时的正常中止（加载页 → 应用页切换、
+    // 重试时重载加载页都会命中），不是故障。子框架失败同理不影响主文档。
+    // 不加这个过滤会把正常的页面切换写成 startup-error.log，让自动化用例误判。
+    if (code === -3 || isMainFrame === false) return;
     console.error(`[desktop] window load FAILED code=${code} desc=${desc} url=${url}`);
     writeStartupError(`前端页面加载失败 code=${code} ${desc} url=${url}`);
   });
@@ -484,17 +565,13 @@ app.whenReady().then(async () => {
   // 复制/粘贴/撤销由 Chromium 内建处理，仍然可用；开发者工具改由 F12 显式处理。
   Menu.setApplicationMenu(null);
   startBackend();
-  let ready = true;
-  try { await waitReady(); } catch (e) {
-    ready = false;
-    console.error(e.message);
-    // 测试模式：落盘诊断信息并以 exit 2 结束（模态框在无头环境不可见，会永久挂起）；
-    // 交互模式：保持原有「弹框提示」行为，随后照常建窗便于用户看到界面与日志入口。
-    reportStartupFailure(e.message);
-  }
-  if (!ready && TEST_MODE) return;
+  // ★ 先建窗、再等后端。窗口立刻可见（显示加载页），后端就绪后由 bootSequence
+  // 切到真实应用 URL。旧顺序（`await waitReady()` 之后才 createWindow）会让用户
+  // 面对 7~11 秒的「什么都没有」——最容易被理解成「程序没启动起来」。
+  // A/B 实测：旧顺序首窗 7.62s（且首帧已是应用页）；新顺序 0.86s。
   createWindow();
   createTray();
+  void bootSequence(false);
   if (TEST_MODE) return; // 自动化测试不触发联网检查更新，保证用例确定性
   // 自动更新：启动后静默检查一次（打包环境生效）
   updater.init(win);
@@ -551,3 +628,8 @@ ipcMain.handle("window-close", () => {
   return true;
 });
 ipcMain.handle("window-is-maximized", () => Boolean(win && !win.isDestroyed() && win.isMaximized()));
+
+// ---- 启动失败页的「重新启动后端」----
+// 加载页是 data: URL，不能直接驱动主进程重启后端，只能经 IPC 请求。
+// 只重跑启动流程，不涉及任何业务数据；bootSequence 内的 booting 标志防连点。
+ipcMain.handle("boot-retry", () => { void bootSequence(true); return true; });

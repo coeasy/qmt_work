@@ -7,6 +7,11 @@ contextBridge.exposeInMainWorld("electronAPI", {
   setAutoLaunch: (enabled) => ipcRenderer.invoke("set-auto-launch", enabled),
   getAutoLaunch: () => ipcRenderer.invoke("get-auto-launch"),
 
+  // ---- 启动失败页的「重新启动后端」----
+  // 加载页是 data: URL，无法直接驱动主进程，只能经 IPC 请求重跑启动流程。
+  // 该操作只重启后端进程 + 重新等待就绪，不触碰任何业务数据。
+  bootRetry: () => ipcRenderer.invoke("boot-retry"),
+
   // ---- 自绘标题栏所需的窗口控制（无边框窗口下由页面自己画按钮）----
   // 说明：这些是**窗口级**操作，不涉及任何业务数据；close 走与标题栏一致的
   // 「隐藏到托盘」语义（主进程 close 处理器负责），不是强杀。

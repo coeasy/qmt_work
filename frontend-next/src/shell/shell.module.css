@@ -587,6 +587,28 @@
 .statusSpacer {
   flex: 1;
 }
+/* 可点击的状态项：与 .statusItem 同观感，但带 hover 反馈 —— 状态栏里的
+   「未连接券商」这类非正常态必须能点进对应的处置页，否则用户只能自己猜。 */
+.statusItemBtn {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  white-space: nowrap;
+  background: none;
+  border: none;
+  color: inherit;
+  font: inherit;
+  padding: 0 4px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.statusItemBtn:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+.statusItemBtn:disabled {
+  cursor: default;
+}
 .dot {
   width: 6px;
   height: 6px;

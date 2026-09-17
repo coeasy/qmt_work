@@ -52,6 +52,79 @@ interface BrokerState {
   health: (connId: string) => Promise<Record<string, unknown>>;
 }
 
+export type BrokerTone = "ok" | "warn" | "err" | "idle";
+/** 角标点击后要触发的动作。`null` = 不可点击 —— 没有出路时不要假装能点。 */
+export type BrokerAction = "retry" | "manage" | null;
+
+export interface BrokerBadge {
+  label: string;
+  tone: BrokerTone;
+  title: string;
+  action: BrokerAction;
+}
+
+/**
+ * 状态栏「券商」角标的纯函数（便于单测锁定语义）。
+ *
+ * ★ 基础状态设计原则（2026-09-17）：**每一个非正常态都要给出路**。
+ * 旧实现里未连券商时显示的是 `券商 0/0` 且不可点击 —— 用户只知道「没连上」，
+ * 不知道「为什么」也「该做什么」。现在三档非正常态各自带明确处置：
+ *   读取中 → 不可点（本来就没得点）
+ *   读取失败 → 点击重试
+ *   未配置 / 已配置但未连上 → 点击进「连接管理」（含自动识别本机 QMT 客户端）
+ * 注意「未配置」与「配了但没连上」必须分开 —— 前者要引导去建连，后者要引导去排障，
+ * 合并成一句「0/0」会让后者以为自己去错地方了。
+ */
+export function brokerBadge(
+  connections: Array<Pick<BrokerConnection, "connected">>,
+  loading: boolean,
+  error: string,
+): BrokerBadge {
+  const total = connections.length;
+  const connected = connections.filter((c) => c.connected).length;
+  // 顺序有讲究：失败信息比进度信息更该被看到。`load()` 在开始时会把 error 清空，
+  // 所以两者正常不会同时存在；但万一并存，不能用一个「读取中…」把失败盖住
+  // （用户会一直等一个永远不会来的结果）。
+  if (total === 0 && error) {
+    return {
+      label: "券商 状态未知",
+      tone: "err",
+      title: `读取券商连接失败：${error}\n点击重试`,
+      action: "retry",
+    };
+  }
+  if (total === 0 && loading) {
+    return {
+      label: "券商 读取中…",
+      tone: "idle",
+      title: "正在读取券商连接列表",
+      action: null,
+    };
+  }
+  if (total === 0) {
+    return {
+      label: "未连接券商",
+      tone: "err",
+      title: "尚未配置任何券商连接 —— 点击进入「连接管理」自动识别本机 QMT 客户端",
+      action: "manage",
+    };
+  }
+  if (connected === 0) {
+    return {
+      label: `券商 0/${total}`,
+      tone: "err",
+      title: "已配置连接但均未连上 —— 点击进入「连接管理」查看原因并重连",
+      action: "manage",
+    };
+  }
+  return {
+    label: `券商 ${connected}/${total}`,
+    tone: "ok",
+    title: "券商连接正常 —— 点击进入「连接管理」",
+    action: "manage",
+  };
+}
+
 export const useBrokerStore = create<BrokerState>((set, get) => ({
   profiles: [],
   connections: [],

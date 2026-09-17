@@ -39,11 +39,16 @@ async def health_check(ctx: AppContext = Depends(get_ctx)):
     }
     uptime = int(_t.time() - ctx.started_at) if ctx.started_at else 0
     # 交易时段状态（盘中/休眠，用于判断引擎是否高频轮询）
+    # trading_day 单列出来：前端状态栏要区分「今日休市」（节假日）与「非交易时段」
+    # （盘中之外的时间）—— 只看 active=False 两者混在一起，用户会误以为「今天该开盘
+    # 却没开」。is_trading_day() 用的是券商真实日历（mode=calendar 时），
+    # 节假日能准确判出（周末规则回退时不可靠，故 mode 一并返回给前端标注）。
     try:
         from gateway.trading_session import default_session as _ts
-        trading = {"mode": _ts.stats()["mode"], "active": _ts.is_active()}
+        trading = {"mode": _ts.stats()["mode"], "active": _ts.is_active(),
+                   "trading_day": _ts.is_trading_day()}
     except Exception:  # noqa: BLE001
-        trading = {"mode": "unknown", "active": None}
+        trading = {"mode": "unknown", "active": None, "trading_day": None}
     # 标准化的 checks 汇总（pass/warn/fail），便于外部监控按组件告警
     checks = [
         {"name": "db", "status": "pass" if db_ok else "fail"},

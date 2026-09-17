@@ -18,6 +18,8 @@ interface QmtElectronApi {
     enabled: boolean,
   ) => Promise<{ ok: boolean; enabled?: boolean; error?: string }>;
   getAutoLaunch: () => Promise<{ enabled: boolean; error?: string }>;
+  /** 启动失败页的「重新启动后端」：重跑启动流程（不触碰业务数据）。 */
+  bootRetry?: () => Promise<boolean>;
 
   // ---- 自绘标题栏的窗口控制（frame:false 后由页面按钮触发）----
   windowMinimize?: () => Promise<boolean>;
