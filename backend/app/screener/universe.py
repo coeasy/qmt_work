@@ -87,9 +87,26 @@ async def resolve_universe(spec: UniverseSpec, *, policy_str: str = "auto",
         rows = st.get_stock_list()
         codes = [r["code"] for r in rows]
         names = {r["code"]: r.get("name", "") or "" for r in rows}
-        return {"codes": codes, "names": names, "provider_used": "local",
-                "as_of": None, "degraded": len(codes) == 0,
-                "degraded_reason": ("local_empty" if not codes else None)}
+        if codes:
+            return {"codes": codes, "names": names, "provider_used": "local",
+                    "as_of": None, "degraded": False, "degraded_reason": None}
+        # 本地股票列表为空 ⇒ 退化到券商「沪深A股」成分（实测 5224 只）。
+        # 此前直接返回空池，使**定时自动选股在纯券商环境下恒不可用**
+        # （system_jobs 默认就是 all 池）—— 明明连着券商却永远选不出票。
+        hb_all = _hub(hub)
+        for sec in ("沪深A股", "沪A", "深A"):
+            try:
+                codes_b, src_b = await hb_all.get_sector_stocks(sec)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("券商全市场兜底失败 %s: %s", sec, exc)
+                continue
+            if codes_b:
+                return {"codes": codes_b, "names": {}, "provider_used": src_b or "broker",
+                        "as_of": None, "degraded": False,
+                        "degraded_reason": f"local_empty_fallback:{sec}"}
+        return {"codes": [], "names": {}, "provider_used": "local",
+                "as_of": None, "degraded": True,
+                "degraded_reason": "local_empty_and_no_broker_sector"}
 
     if spec.kind == "custom":
         codes = [str(c) for c in (spec.codes or [])]
@@ -138,6 +155,18 @@ async def resolve_universe(spec: UniverseSpec, *, policy_str: str = "auto",
             log.warning("板块成分获取失败 %s: %s", value, exc)
             return _empty("sector:source_error")
         if not res or not res.get("items"):
+            # 券商兜底：在线板块源不可用时，**券商其实能提供成分股代码**
+            # （实测「沪深A股」返回 5224 只，见 _BoundBrokerSource.get_sector_stocks）。
+            # 缺了这一步，纯券商环境（无网络补充源）下选股池恒为空 ——
+            # 而同一份能力在「K 线同步」那条路径上是可用的。
+            try:
+                codes_b, src_b = await hb.get_sector_stocks(value)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("券商板块成分兜底失败 %s: %s", value, exc)
+                codes_b, src_b = None, None
+            if codes_b:
+                return {"codes": codes_b, "names": {}, "provider_used": src_b or "broker",
+                        "as_of": None, "degraded": False, "degraded_reason": None}
             return _empty("sector:empty")
         items = res["items"]
         codes = [it["code"] for it in items]

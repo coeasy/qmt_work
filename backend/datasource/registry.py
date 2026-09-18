@@ -152,6 +152,26 @@ class _BoundBrokerSource:
         # 券商侧无统一全市场股票列表接口；auto 链中跳过。
         return None
 
+    async def get_sector_stocks(self, sector: str = "沪深A股") -> Optional[list[str]]:
+        """板块成分股代码列表（实测「沪深A股」返回 5224 只）。
+
+        ★ 为什么需要它：``_sup_chain`` 对 ``sector`` 能力**刻意排除 broker**
+        （历史上券商未实现 ``get_board_constituents``），但券商其实有
+        ``gateway.get_sector_stocks`` —— 同一个能力，K 线同步那条路走得通
+        （``app/routes/market.py::_get_sector_stocks``），选股池那条路却走不通，
+        于是**纯券商环境下选股永远报「股票池为空」**。本方法把这条能力接进
+        ``DataSource`` 抽象，供 universe 作券商兜底。
+        """
+        try:
+            res = await self._b.call(self._b.gateway.get_sector_stocks, sector)
+        except (BrokerError, AttributeError):
+            return None
+        if isinstance(res, dict) and res.get("code"):
+            return None
+        if isinstance(res, list) and res:
+            return [str(c) for c in res]
+        return None
+
 
 class DataSourceManager:
     """多源行情路由中心（进程级单例，见 get_manager）。"""
@@ -696,6 +716,23 @@ class DataSourceManager:
                 return res, name
             self._last_trace.append(f"{name}: 调用失败或返回空")
         return None, None
+
+    async def get_sector_stocks(self, sector: str = "沪深A股",
+                                conn_id: Optional[str] = None) -> tuple[Optional[list], Optional[str]]:
+        """券商板块成分股（代码列表, 源名）；未连接券商或不支持时返回 (None, None)。
+
+        与 :meth:`get_board_constituents` 的区别：后者走「在线补充源」能力链
+        （**刻意排除 broker**，见 :meth:`_sup_chain`），本方法**只用券商**。
+        两者是互补的两条路，不是重复实现 —— 在线源给的是带名称/权重的成分明细，
+        券商给的是纯代码列表，够选股池用。
+        """
+        b = self._broker(conn_id)
+        if b is None or not hasattr(b, "get_sector_stocks"):
+            return None, None
+        codes = await self._call_source("broker", b.get_sector_stocks(sector))
+        if not codes:
+            return None, None
+        return list(codes), "broker"
 
     def last_failure_trace(self) -> dict:
         """最近一次 :meth:`_first_supported` 的失败溯源。

@@ -235,11 +235,26 @@ class BarsSyncer:
         """同步全市场股票列表（先刷列表，再按需同步 K 线）。"""
         from datasource.registry import get_hub as _hub
         items = await _hub().get_stock_list(source="auto")
+        fallback = False
+        if not items:
+            # 券商兜底：券商侧**没有**「全市场股票列表」接口（get_stock_list 恒 None），
+            # 但**能**提供板块成分代码（实测「沪深A股」5224 只）。
+            # 缺了这一步，纯券商环境下「定时更新日线」每天静默空转、一只都不写，
+            # 而任务状态还是 done —— 数据停更，界面却显示「已完成」。
+            try:
+                codes_fb, _src = await _hub().get_sector_stocks("沪深A股")
+            except Exception:  # noqa: BLE001
+                codes_fb = None
+            if codes_fb:
+                items = [{"code": str(c), "name": ""} for c in codes_fb]
+                fallback = True
         if not items:
             return SyncSummary(started=now_iso(), finished=now_iso(),
                                total=0, failed=0, ok=0, errors=[],
                                elapsed_ms=0)
-        self._store.upsert_stock_list(items)
+        if not fallback:
+            # 兜底路径只有代码没有名称，写进股票列表会把名称覆盖成空 —— 不写。
+            self._store.upsert_stock_list(items)
         codes = [str(i.get("code")) for i in items if i.get("code")]
         if limit:
             codes = codes[: int(limit)]

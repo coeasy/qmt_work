@@ -433,6 +433,14 @@ def sync_runner(params: dict) -> Runner:
                 job["report"](0, f"第 {attempt} 次失败，准备重试")
                 await asyncio.sleep(min(30.0, 2.0 ** (attempt - 1)))
         result = summary.to_dict() if summary is not None else {}
+        # ★ 绝不把「一只都没同步」报成成功。
+        # 实测（2026-09-19）：定时任务 status=done / progress=100%，而
+        # total=0、bars_written=0、elapsed_ms=0 —— 每天跑、数据一天没更新，
+        # 界面还显示「已完成」。静默空转比直接失败危险得多：用户不会去看日志。
+        if not result.get("total"):
+            raise RuntimeError(
+                "日线同步未获取到任何股票（股票池为空）——"
+                "请检查数据源是否可用，或连接券商后重试")
         # EOD/全市场同步只有在本地批次实际写入后才发布 snapshot；部分失败明确
         # 标成 partial，研究/回测不能把它当成完整数据集使用。
         try:
