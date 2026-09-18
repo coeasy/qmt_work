@@ -406,11 +406,17 @@ def runner_factory_for(kind: str) -> Optional[Callable[[dict], Runner]]:
 
 
 # ---------------- 内置 runner：sync / screen ----------------
+#: 陈旧比例达到该值即判任务失败（V11 R13）。
+#: 实测全市场同步 5224 只里 5095 只陈旧（98.4%）却仍显示 done —— 界面看不出
+#: 数据根本没追上。零星几只新鲜说明在线源已被限流/熔断，整体不可用。
+STALE_FAIL_RATIO = 0.9
+
+
 def sync_runner(params: dict) -> Runner:
     """全市场日线同步任务（params: {limit, concurrency, lookback, adjust}）。"""
 
     async def _run(job: dict) -> dict:
-        from app.sync.bars import BarsSyncer
+        from app.sync.bars import STALE_DAYS_DEFAULT, BarsSyncer
 
         def _cb(done: int, total: int, code: str) -> None:
             pct = int(done / total * 100) if total else 100
@@ -421,6 +427,20 @@ def sync_runner(params: dict) -> Runner:
             lookback=int(params.get("lookback") or 320),
             provider_id=str(params.get("provider_id") or "auto"),
             batch_id=str(params.get("batch_id") or "") or None,
+            # ★ params.adjust 此前**根本没传给同步器**（只用在 snapshot 的
+            # adjustment_version 标签上）—— 用户指定「不复权同步」时照跑 qfq。
+            # 区别很实际：qfq 链只含真做复权的源（新浪只回不复权，按设计不在
+            # 该链内），而 adjust="" 的不复权链含新浪，在线源多一条活路。
+            #
+            # ⚠️ 不能用 ``params.get("adjust") or "qfq"``：**空字符串是 falsy**，
+            # 显式传 ``adjust=""``（不复权）会被静默兜底成 "qfq"，用户的选择丢失
+            # 且毫无提示（实测：传 "" 后链里仍无 sina，数据照样追不上）。
+            # 只有**未传**（None）才用默认值。
+            adjust=("qfq" if params.get("adjust") is None
+                    else str(params.get("adjust"))),
+            # 新鲜度门槛：最后一根距今超过 N 个自然日即判陈旧并继续降级换源。
+            # 传 0/负 = 关闭（恢复「非空即算数」的旧行为）。
+            stale_days=int(params.get("stale_days") or STALE_DAYS_DEFAULT),
         )
         attempts = max(1, int(params.get("max_attempts") or 1))
         summary = None
@@ -461,6 +481,34 @@ def sync_runner(params: dict) -> Runner:
         except Exception as exc:  # noqa: BLE001
             # Snapshot 发布失败不能伪装成完整同步；保留同步结果并显式告警。
             result["dataset_snapshot_error"] = str(exc)
+        # ★★ 绝不把「有数据但全是陈的」报成成功（V11 R13）。
+        # 实测（2026-09-18）全市场同步：total=5224 ok=5153 bars=1630066，
+        # 界面显示「已完成」—— 但 5093 只的最后一根停在 **20250418**（一年多前），
+        # 因为券商本地历史只下载到那天却照样非空，源链「第一个非空即返回」永不降级。
+        # 这是继「空转报成功」「对账假空态」之后**第三种假成功**：写了 163 万根
+        # 历史数据，选股/回测全在用一年前的行情，而任务状态是 done。
+        _ok = int(result.get("ok") or 0)
+        _stale = int(result.get("stale") or 0)
+        if _stale:
+            result["stale_warning"] = (
+                f"{_stale}/{_ok} 只标的的数据陈旧（最新 as_of="
+                f"{result.get('as_of_max') or '未知'}）")
+            job["report"](100, result["stale_warning"])
+        if _ok and _stale >= _ok:
+            raise RuntimeError(
+                f"日线同步写入的 {_ok} 只标的**数据全部陈旧**"
+                f"（最新 as_of={result.get('as_of_max') or '未知'}）——"
+                f"数据源没有提供近期数据。常见原因：券商客户端本地历史未下载到近期"
+                f"（QMT 需手动补下行情）、或未启用在线数据源。")
+        # 「几乎全是陈的」同样算失败：实测全市场 5224 只里 5095 只陈旧
+        # （98.4%）时任务仍显示 done，界面看不出数据根本没追上。
+        # 只有零星几只新鲜 ⇒ 在线源其实已被限流/熔断，整体不可用。
+        if _ok and _stale >= _ok * STALE_FAIL_RATIO:
+            raise RuntimeError(
+                f"日线同步 {_stale}/{_ok} 只标的的数据陈旧"
+                f"（{_stale / _ok:.0%}，超过 {STALE_FAIL_RATIO:.0%} 阈值）——"
+                f"在线数据源基本不可用（可能已被限流或熔断），只有极少数标的拿到新数据。"
+                f"请稍后重试、降低并发，或在 QMT 客户端补齐本地历史行情下载范围。")
         return result
 
     return _run

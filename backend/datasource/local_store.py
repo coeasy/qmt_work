@@ -20,6 +20,7 @@ import logging
 import threading
 from typing import Any, Dict, List, Optional, Union
 
+from core.clock import bar_date as _bar_date  # K 线交易日格式唯一入口（V11 R13）
 from core.clock import now_iso as _now  # 唯一实现在 core.clock（V11 R8 收敛）
 from core.db import DB, get_db
 from datasource.models import Bar, BarLite, BoardItem, StockInfo
@@ -126,8 +127,18 @@ class LocalStore:
         rows: List[tuple] = []
         for b in bars:
             d = b.model_dump() if isinstance(b, Bar) else dict(b)
+            # ★ dt 归一化（V11 R13）：各源原样形状（"20260825" / "2026-09-18" /
+            # datetime / "2026/09/18"）**不许直接落库**，一律收敛到 "YYYYMMDD"。
+            # 归一前混存两种字符串 ⇒ 排序错乱、同日双行、区间过滤失效（详见
+            # core.clock.bar_date 的实测说明）。解析不出合法日期的行整行丢弃，
+            # 绝不让坏 dt 进入主键。
+            _dt = _bar_date(d.get("time"))
+            if not _dt:
+                log.warning("upsert_bars 跳过日期无法解析的 K 线：code=%s time=%r",
+                            code, d.get("time"))
+                continue
             values = {
-                "time": str(d.get("time", "")),
+                "time": _dt,
                 "open": _num(d.get("open")),
                 "high": _num(d.get("high")),
                 "low": _num(d.get("low")),
@@ -178,12 +189,16 @@ class LocalStore:
                  f"{_CANONICAL_ORDER_SQL}"
                  ") AS rn FROM local_bars WHERE code=? AND period=? AND adjust=?")
         params: List[Any] = [code, period, adjust]
-        if start:
+        # 区间参数同样归一到 "YYYYMMDD"（V11 R13）：dt 是**字符串**列，
+        # 传 "2026-09-18" 去比较 "20260918" 会静默什么都筛不到。
+        start_d = _bar_date(start) if start else ""
+        end_d = _bar_date(end) if end else ""
+        if start_d:
             inner += " AND dt >= ?"
-            params.append(start)
-        if end:
+            params.append(start_d)
+        if end_d:
             inner += " AND dt <= ?"
-            params.append(end)
+            params.append(end_d)
         sql = (f"SELECT dt AS time, open, high, low, close, volume, amount "
                f"FROM ({inner}) WHERE rn=1")
         if limit and limit > 0:

@@ -58,7 +58,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
-__all__ = ["FORMAT", "local_now", "now_iso", "parse_iso", "today_str", "to_iso"]
+__all__ = ["FORMAT", "bar_date", "local_now", "now_iso", "parse_iso", "today_str", "to_iso"]
 
 #: 唯一写格式：ISO 本地时间、秒精度、无偏移。
 FORMAT = "%Y-%m-%dT%H:%M:%S"
@@ -139,3 +139,51 @@ def parse_iso(s: Optional[str]) -> Optional[datetime]:
     if dt.tzinfo is not None:
         dt = dt.astimezone().replace(tzinfo=None)
     return dt
+
+
+def bar_date(value) -> str:
+    """把任意形状的行情日期规范化成 **K 线唯一交易日格式** ``"YYYYMMDD"``。
+
+    ★ 唯一入口（V11 R13）：此前各数据源各写各的形状并**直接落库** ——
+    QMT/券商给 ``"20260825"``、腾讯在线源给 ``"2026-09-18"``、东财给
+    ``datetime``/``"2026/09/18"``，``local_bars.dt`` 因此**混存两种字符串**。
+    后果不是「看着不整齐」，而是四处**静默错误**：
+
+    1. 字符串排序错乱：``'2026-09-18' < '20260825'``（``'-'`` 0x2D < ``'0'`` 0x30），
+       ``MAX(dt)`` 永远取不到真正的最后一根；
+    2. 主键 ``(code, period, adjust, dt, provider_id)`` 对**同一天**产出两行，
+       跨源对账把它们当成「两个不同交易日」而永远对不上；
+    3. ``WHERE dt BETWEEN start AND end`` 区间过滤对另一种格式整体失效；
+    4. 消费方按 ``"%Y%m%d"`` 硬解析时直接抛 ``ValueError``。
+
+    实测（2026-09-18 全市场同步）：163 万根里 3894 根是带横线格式，
+    ``MAX(dt)='20260825'`` 由**唯一一只**股票贡献，而 5093 只实际停在 ``20250418``
+    —— 「数据看着是新的，实际全是陈的」。
+
+    无法解析时返回 ``""``（**不抛异常、不兜底为今天**）：坏日期应当暴露成
+    「这一行不可用」，而不是被改写成「最新」。
+
+    注：``datetime`` 入参走 ``strftime`` 而非 ``parse_iso``，避免
+    ``datetime -> str -> datetime`` 的无谓往返；``date`` 同理。
+    """
+    if value is None:
+        return ""
+    if hasattr(value, "strftime"):  # datetime / date
+        return value.strftime("%Y%m%d")
+    t = str(value).strip()
+    if not t:
+        return ""
+    # 快路径：已经是规范形状且是合法日期（拦住 "20261332" 这类数字垃圾）
+    if len(t) == 8 and t.isdigit():
+        return t if _valid_ymd(t) else ""
+    dt = parse_iso(t)
+    return dt.strftime("%Y%m%d") if dt is not None else ""
+
+
+def _valid_ymd(s: str) -> bool:
+    """``"YYYYMMDD"`` 是否为真实存在的日期（拦 ``20260231`` / ``20261332``）。"""
+    try:
+        datetime.strptime(s, "%Y%m%d")
+    except ValueError:
+        return False
+    return True

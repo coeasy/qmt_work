@@ -24,14 +24,19 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime, timedelta
 from typing import Awaitable, Callable, List, Optional, Sequence
 
+from core.clock import bar_date, local_now  # 唯一时钟在 core.clock（V11 R8 收敛）
 from core.clock import now_iso  # noqa: F401  —— 唯一实现在 core.clock（V11 R8 收敛）
 from datasource.local_store import LocalStore, get_store
-from datasource.registry import get_hub
+from datasource.registry import bars_last_date, get_hub
 
 log = logging.getLogger("qmt_work.sync.bars")
+
+#: 日线「新鲜」的默认判定窗口（自然日）。A 股最长休市是春节（约 9~10 天），
+#: 取 10 可覆盖长假而不误判；周末 3 天、清明/五一等短假 3~5 天均在窗口内。
+STALE_DAYS_DEFAULT = 10
 
 #: 抓取器签名：(code, period, adjust, count) -> Optional[list[dict|Bar]]
 #: 生产路径返回 ``(bars, source)`` 元组以便落库写入**真实来源名**；注入式测试可返回纯 list。
@@ -49,6 +54,23 @@ def _split_fetch_result(raw) -> tuple[Optional[list], str]:
         src = raw[1] if len(raw) > 1 and raw[1] else ""
         return bars, str(src).strip()
     return raw, ""
+
+
+def _is_stale(as_of: str, stale_days: int = STALE_DAYS_DEFAULT) -> bool:
+    """最后一根交易日是否陈旧（距今超过 ``stale_days`` 个自然日）。
+
+    ``as_of`` 为空 / 无法解析时返回 **False** —— 不是「判它新鲜」，而是
+    「无从判断」：这种行由 :meth:`SyncOutcome.as_of` 的空值单独暴露，
+    不应被计进陈旧统计而淹没真正陈旧的标的。
+    """
+    d = bar_date(as_of)
+    if not d:
+        return False
+    try:
+        day = datetime.strptime(d, "%Y%m%d").date()
+    except ValueError:
+        return False
+    return (local_now().date() - day).days > int(stale_days)
 
 
 def _resolve_provider_id(real_src: str, configured: str) -> str:
@@ -88,10 +110,16 @@ class SyncOutcome:
     ok: bool = False
     bars_written: int = 0
     error: str = ""
+    #: 最后一根 K 线的交易日（``""`` = 未知）。**有数据不等于够新**，
+    #: 调用方（任务报告 / 界面）必须同时看这个字段。
+    as_of: str = ""
+    #: 数据是否陈旧（最后一根距今超过 ``stale_days`` 个自然日）。
+    stale: bool = False
 
     def to_dict(self) -> dict:
         return {"code": self.code, "ok": self.ok,
-                "bars_written": self.bars_written, "error": self.error}
+                "bars_written": self.bars_written, "error": self.error,
+                "as_of": self.as_of, "stale": self.stale}
 
 
 @dataclass
@@ -106,13 +134,20 @@ class SyncSummary:
     bars_written: int = 0
     elapsed_ms: int = 0
     errors: List[dict] = field(default_factory=list)
+    #: 成功但**数据陈旧**的标的数（V11 R13）。
+    #: ★ 这是「假成功」的显影剂：``ok`` 很高、``stale`` 也很高 ⇒
+    #: 写入了一堆历史数据却宣称完成，界面与报告必须把它摆到台面上。
+    stale: int = 0
+    #: 全批中最新的最后一根交易日（``""`` = 全部未知）。
+    as_of_max: str = ""
 
     def to_dict(self) -> dict:
         return {
             "started": self.started, "finished": self.finished,
             "total": self.total, "ok": self.ok, "failed": self.failed,
             "bars_written": self.bars_written, "elapsed_ms": self.elapsed_ms,
-            "errors": self.errors,
+            "errors": self.errors, "stale": self.stale,
+            "as_of_max": self.as_of_max,
         }
 
 
@@ -129,6 +164,7 @@ class BarsSyncer:
         adjust: str = "qfq",
         provider_id: str = "auto",
         batch_id: Optional[str] = None,
+        stale_days: int = STALE_DAYS_DEFAULT,
     ):
         self._store = store or get_store()
         self._fetch = fetch_bars or self._default_fetch
@@ -136,6 +172,9 @@ class BarsSyncer:
         self._lookback = int(lookback)
         self._period = period
         self._adjust = adjust
+        #: 新鲜度门槛：最后一根距今超过该自然日数即判「陈旧」。
+        #: 0 / 负数 = 关闭门槛（恢复改造前「非空即算数」的行为）。
+        self._stale_days = int(stale_days)
         # provider_id 既是「请求的数据源」（"auto" = 按能力链自动降级），
         # 也是拿到真实来源名之前的溯源兜底标签。
         self._provider_id = provider_id
@@ -155,11 +194,23 @@ class BarsSyncer:
         """
         try:
             bars, src = await get_hub().get_kline(
-                code, period, count, source=self._source, adjust=adjust)
+                code, period, count, source=self._source, adjust=adjust,
+                min_date=self._min_date())
         except Exception as exc:  # noqa: BLE001 单标的失败不击穿整批
             log.warning("sync fetch %s(%s) 失败：%s", code, self._source, exc)
             return None
         return bars, src
+
+    def _min_date(self) -> str:
+        """本次同步要求的**最低**最后一根交易日（``""`` = 不设门槛）。
+
+        从唯一时钟取「今天」回推 ``stale_days`` 个自然日 —— 数据源链据此在
+        「非空但陈旧」时继续降级，而不是停在第一个非空源上（V11 R13）。
+        """
+        if self._stale_days <= 0:
+            return ""
+        from core.clock import local_now
+        return (local_now().date() - timedelta(days=self._stale_days)).strftime("%Y%m%d")
 
     # ------------------------------------------------------------------
     # 核心
@@ -175,6 +226,13 @@ class BarsSyncer:
                 return SyncOutcome(code=code, error="源无数据（非交易时段或代码不受支持）")
             # 溯源为真：写真实命中来源名，绝不用 "auto" 冒充（P3-4）
             provider_id = _resolve_provider_id(real_src, self._provider_id)
+            # 新鲜度判定（V11 R13）：拿到数据 ≠ 数据够新。券商本地历史可能只到
+            # 一年多前却照样非空，不标注就会让「同步完成」变成一句谎话。
+            as_of = bars_last_date(bars)
+            stale = self._stale_days > 0 and _is_stale(as_of, self._stale_days)
+            if stale:
+                log.info("sync %s 数据陈旧：as_of=%s（要求 >= %s）", code, as_of,
+                         self._min_date())
             try:
                 # 同步 sqlite 写必须移出事件循环：EOD 全市场同步（实测 7175 只）期间
                 # 逐只在事件循环里落库，会持续阻塞**所有** HTTP 请求——实测
@@ -188,7 +246,8 @@ class BarsSyncer:
                     schema_version="bars.v2", quality_state="raw")
             except Exception as exc:  # noqa: BLE001
                 return SyncOutcome(code=code, error=f"落库失败：{exc}")
-            return SyncOutcome(code=code, ok=True, bars_written=n)
+            return SyncOutcome(code=code, ok=True, bars_written=n,
+                               as_of=as_of, stale=stale)
 
     async def sync_many(self, codes: Sequence[str],
                         progress_cb: Optional[Callable[[int, int, str], None]] = None
@@ -219,6 +278,8 @@ class BarsSyncer:
             bars_written=sum(o.bars_written for o in ok),
             elapsed_ms=int((time.perf_counter() - t0) * 1000),
             errors=[o.to_dict() for o in failed],
+            stale=sum(1 for o in ok if o.stale),
+            as_of_max=max((o.as_of for o in ok if o.as_of), default=""),
         )
         self._store.set_meta("last_sync_at", summary.finished)
         if summary.failed:
@@ -227,6 +288,13 @@ class BarsSyncer:
         else:
             log.info("同步完成：ok=%d bars=%d elapsed=%dms",
                      summary.ok, summary.bars_written, summary.elapsed_ms)
+        # ★ 陈旧必须显式报警：ok 高 + stale 高 = 写了大量历史数据却宣称完成，
+        # 这是最容易被忽略的失败（界面显示「已完成」，数据其实没更新）。
+        if summary.stale:
+            log.warning(
+                "同步数据陈旧：%d/%d 只标的最后一根早于 %s 天前（最新 as_of=%s）——"
+                "数据源可能未更新或无近期历史，请检查数据源与券商本地数据下载范围",
+                summary.stale, summary.ok, self._stale_days, summary.as_of_max or "未知")
         return summary
 
     async def sync_stock_list(self, limit: Optional[int] = None,

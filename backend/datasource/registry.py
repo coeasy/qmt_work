@@ -20,6 +20,7 @@ import asyncio
 import time
 from typing import Optional
 
+from core.clock import bar_date  # K 线交易日格式唯一入口（V11 R13）
 from datasource.base import DataSource
 from datasource.board import classify_board, limit_ratio
 from datasource.instrument import with_exchange_suffix
@@ -31,6 +32,27 @@ from datasource.periods import (
 from xtquant_client.base import BrokerError
 
 log = __import__("logging").getLogger("qmt_work.datasource.registry")
+
+
+def bars_last_date(bars) -> str:
+    """取一批 K 线里**最后一根**的交易日（``"YYYYMMDD"``；无法解析返回 ``""``）。
+
+    ★ 不假设 bars 已按时间升序：实测券商与在线源都升序，但补洞/合并路径不保证，
+    直接取 ``bars[-1]`` 会拿错。这里对所有行归一化后取最大，代价 O(n)，
+    n 通常 <= 320，可接受。
+    """
+    if not bars:
+        return ""
+    latest = ""
+    for b in bars:
+        if isinstance(b, dict):
+            raw = b.get("time")
+        else:
+            raw = getattr(b, "time", None)
+        d = bar_date(raw)
+        if d and d > latest:
+            latest = d
+    return latest
 
 # 单源调用超时与熔断参数
 _PER_SOURCE_TIMEOUT = 8.0
@@ -617,11 +639,26 @@ class DataSourceManager:
     # ---------- 历史 K 线 ----------
     async def get_kline(self, code: str, period: str = "1d", count: int = 250,
                         source: str = "auto", conn_id: Optional[str] = None,
-                        adjust: Optional[str] = None) -> tuple[Optional[list], Optional[str]]:
+                        adjust: Optional[str] = None,
+                        min_date: Optional[str] = None) -> tuple[Optional[list], Optional[str]]:
         """返回 (bars, source_name)；bars 为 None 表示无可用源。
 
         复权（qfq/hfq）经 dividend_type 参数化后，QMT 同样参与复权链（不再强制跳过
         broker）；其余按能力链 QMT→eltdx→baostock→akshare 依次降级（D9 v1.3 锁定）。
+
+        ``min_date``（V11 R13，**新鲜度门槛**）：要求最后一根交易日 >= 该值才算
+        「够新」，不满足则**继续降级**到链上下一个源。
+
+        ★ 为什么需要它：源链是「第一个**非空**即返回」，而「非空」≠「够新」。
+        实测（2026-09-18）全市场同步 5153 只：
+        ``broker`` 本地历史只下载到 ``20250418``（一年多前）却**非空**，于是
+        **永不降级**，163 万根陈旧数据被写成成功，界面显示「已完成」。
+        这是继「空转报成功」「对账假空态」之后**第三种假成功**形态 ——
+        有数据，但是陈的。
+
+        全链都不满足时返回**其中最接近**的一份（有数据总优于无数据），
+        是否算陈旧由调用方（同步器）按 :func:`bars_last_date` 自行判定并标注，
+        本方法**不谎报**新鲜度。``min_date`` 为 None 时行为与改造前完全一致。
         """
         source = self._validate_source(source)
         try:
@@ -631,6 +668,7 @@ class DataSourceManager:
         cap = ("kline_qfq" if (adjust in ("qfq", "hfq")
                                and _canon in adjust_allowed_periods()) else "kline")
         chain = self._resolve_sources(source, cap)
+        fallback: Optional[tuple] = None  # (bars, name, last_dt)
         for name in chain:
             if name == "broker":
                 b = self._broker(conn_id)
@@ -642,8 +680,19 @@ class DataSourceManager:
                 if src is None or not hasattr(src, "get_kline"):
                     continue
                 bars = await self._call_source(name, src.get_kline(code, period, count, adjust))
-            if bars:
+            if not bars:
+                continue
+            if not min_date:
                 return bars, name
+            last = bars_last_date(bars)
+            if last and last >= min_date:
+                return bars, name
+            if fallback is None or last > fallback[2]:
+                fallback = (bars, name, last)
+        if fallback is not None:
+            log.debug("get_kline %s：全链数据均未达 min_date=%s，返回最接近的 %s(%s)",
+                      code, min_date, fallback[1], fallback[2] or "无日期")
+            return fallback[0], fallback[1]
         return None, None
 
     # ---------- 当日分时（仅补充源提供；券商 SDK 无分时接口） ----------

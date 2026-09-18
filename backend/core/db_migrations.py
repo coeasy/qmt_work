@@ -628,6 +628,29 @@ CREATE TABLE IF NOT EXISTS schedules (
 );
 CREATE INDEX IF NOT EXISTS idx_schedules_next ON schedules(enabled, next_run_at);
 """),
+    # ------------------------------------------------------------------
+    # v25：local_bars.dt 形状归一（V11 R13）
+    # ------------------------------------------------------------------
+    # 写入侧此前把各数据源的**原始形状**直接入库：券商/QMT 给 "20260825"，
+    # 腾讯在线源给 "2026-09-18"。两种字符串混存后：
+    #   1) 字典序错乱 —— '-'(0x2D) < '0'(0x30)，故 '2026-09-18' < '20260825'，
+    #      MAX(dt)/ORDER BY dt 永远取不到真正的最后一根；
+    #   2) 主键 (code, period, adjust, dt, provider_id) 对**同一天**产出两行，
+    #      跨源对账把它们当成两个不同交易日而恒对不上；
+    #   3) WHERE dt BETWEEN ? AND ? 对另一种形状整体失效；
+    #   4) 消费方按 "%Y%m%d" 硬解析时抛 ValueError。
+    # 实测 2026-09-18 全市场同步：163 万根里 3894 根是带横线形状，
+    # MAX(dt)='20260825' 由唯一一只股票贡献，而 5093 只实际停在 20250418 ——
+    # 「数据看着是新的，实际全是陈的」。
+    #
+    # 写入侧已改为一律经 core.clock.bar_date 归一；本条迁移负责**存量**。
+    # 只动 "_ _ _ - _ _ - _ _" 这一种已知形状；OR IGNORE 保证万一目标键已存在时
+    # 不破坏既有行（保留先入库的那条），迁移绝不因个别行冲突而整体失败。
+    (25, """
+UPDATE OR IGNORE local_bars
+   SET dt = substr(dt, 1, 4) || substr(dt, 6, 2) || substr(dt, 9, 2)
+ WHERE length(dt) = 10 AND substr(dt, 5, 1) = '-' AND substr(dt, 8, 1) = '-';
+"""),
 ]
 
 

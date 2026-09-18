@@ -199,9 +199,11 @@ def test_default_fetch_passes_configured_source(monkeypatch, store):
     seen = {}
 
     class _Hub:
-        async def get_kline(self, code, period, count, source="auto", adjust=None):
+        async def get_kline(self, code, period, count, source="auto", adjust=None,
+                            min_date=None):
             seen["source"] = source
             seen["adjust"] = adjust
+            seen["min_date"] = min_date
             return [_bar()], "baostock"
 
     monkeypatch.setattr("app.sync.bars.get_hub", lambda: _Hub())
@@ -211,3 +213,5 @@ def test_default_fetch_passes_configured_source(monkeypatch, store):
     assert seen["source"] == "baostock"
     assert seen["adjust"] == "qfq"
     assert _providers(store, "600005.SH") == ["baostock"]
+    # 同步路径必须带上新鲜度门槛，否则「非空但陈旧」的源会永远霸占链路（V11 R13）
+    assert seen["min_date"], "同步必须传 min_date，否则券商陈旧历史不会被降级"
