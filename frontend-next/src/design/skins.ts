@@ -26,32 +26,40 @@ export interface SkinDef {
 /**
  * 预设皮肤。
  *
- * 颜色取向参考主流行情终端：
- * - 同花顺经典：纯黑底 + 高对比，长时间盯盘最不刺眼；
- * - 大智慧：深灰底（略暖），屏幕反光环境下更舒服；
- * - 石板蓝 / 墨绿：低饱和冷/暖调，介于两者之间。
+ * 颜色取向对标主流 A 股行情终端（通达信 / 大智慧 / 同花顺），
+ * 它们默认都是「黑底」——这也正是本软件的默认背景：
+ * - 通达信黑：纯黑底，A 股终端最经典的配色；
+ * - 大智慧黑：近黑微冷灰，屏幕反光环境下更舒适；
+ * - 同花顺黑：纯黑高对比，长盯盘最不刺眼；
+ * - 石板蓝 / 墨绿：低饱和冷/暖调，介于两者之间；
+ * - 浅色：明亮环境 / 投影演示。
+ *
+ * 默认皮肤见 `DEFAULT_SKIN_ID`（通达信黑）。每套皮肤自带明暗方向（tone），
+ * 选中时一并切换 `data-theme`，避免「深色皮肤 + 浅色主题」这类错配。
  */
+export const DEFAULT_SKIN_ID = "tongdaxin";
+
 export const PRESETS: SkinDef[] = [
   {
-    id: "midnight",
-    label: "午夜蓝",
+    id: "tongdaxin",
+    label: "通达信黑",
     tone: "dark",
-    hint: "默认配色，冷调深蓝灰",
-    swatch: "#0d1117",
-  },
-  {
-    id: "classic",
-    label: "经典黑",
-    tone: "dark",
-    hint: "同花顺风格：纯黑底，对比最强",
+    hint: "通达信经典纯黑底，A 股终端标配",
     swatch: "#000000",
   },
   {
-    id: "graphite",
-    label: "深灰",
+    id: "dazhihui",
+    label: "大智慧黑",
     tone: "dark",
-    hint: "大智慧风格：深灰底，反光环境更舒适",
-    swatch: "#1c1c1c",
+    hint: "大智慧风格：近黑微冷灰，反光屏更柔和",
+    swatch: "#0a0a0c",
+  },
+  {
+    id: "ths",
+    label: "同花顺黑",
+    tone: "dark",
+    hint: "同花顺风格：纯黑高对比",
+    swatch: "#050608",
   },
   {
     id: "slate",

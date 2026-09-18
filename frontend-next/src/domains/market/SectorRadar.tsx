@@ -14,7 +14,9 @@ import { EChart } from "@/charts/EChart";
 import type { EChartsOption } from "@/charts/echartsSetup";
 import { marketApi, type BoardItem } from "@/services/api";
 import { useAsync } from "@/hooks/useAsync";
-import { fmtAmount, fmtPct, toneColor } from "@/shared/format";
+import { useLiveQuotes } from "@/hooks/useLiveQuotes";
+import { useWatchlistStore } from "@/stores/watchlist";
+import { fmtAmount, fmtPct, fmtPrice, toneColor } from "@/shared/format";
 import type { Instrument } from "@/shared/types";
 import s from "../domain.module.css";
 
@@ -115,11 +117,52 @@ export function SectorRadar() {
     { key: "amount", header: "成交额", width: 96, align: "right", mono: true, render: (r) => fmtAmount(r.amount) },
   ];
 
+  // 成分股接口只给静态档案（代码/名称/交易所），不给价格 ⇒ 叠加实时行情，
+  // 否则「板块涨了哪些成分股在跟涨」必须逐个点开才知道。
+  const consCodes = useMemo(() => (cons.data?.items ?? []).map((r) => r.code), [cons.data]);
+  const consQuotes = useLiveQuotes(consCodes);
+  const watchToggle = useWatchlistStore((st) => st.toggle);
+  const watchCodes = useWatchlistStore((st) => st.codes);
+
   const consCols: Column<Instrument>[] = [
     { key: "code", header: "代码", width: 100, mono: true, render: (r) => r.code },
     { key: "name", header: "名称", render: (r) => r.name },
+    {
+      key: "last",
+      header: "最新",
+      width: 78,
+      align: "right",
+      mono: true,
+      render: (r) => fmtPrice(consQuotes[r.code]?.price),
+    },
+    {
+      key: "chg",
+      header: "涨跌幅",
+      width: 82,
+      align: "right",
+      mono: true,
+      render: (r) => {
+        const pct = consQuotes[r.code]?.change_pct;
+        return <span style={{ color: toneColor(pct) }}>{fmtPct(pct)}</span>;
+      },
+    },
     { key: "exchange", header: "交易所", width: 80, render: (r) => r.exchange ?? "--" },
     { key: "category", header: "类别", width: 100, render: (r) => r.category ?? "--" },
+    {
+      key: "act",
+      header: "操作",
+      width: 96,
+      render: (r) => (
+        <Button
+          size="sm"
+          variant="ghost"
+          onClick={() => watchToggle(r.code)}
+          title={watchCodes.includes(r.code) ? "从自选股移除" : "加入自选股"}
+        >
+          {watchCodes.includes(r.code) ? "移出自选" : "加自选"}
+        </Button>
+      ),
+    },
   ];
 
   return (

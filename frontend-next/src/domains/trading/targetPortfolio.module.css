@@ -34,6 +34,27 @@
   font-size: var(--font-sm);
 }
 
+/* 权重列：把 {code: 权重} 渲染成「代码 · 权重% · 最新价」的筹码列表。
+   修复前是 `JSON.stringify(weights)` 的原始 JSON 串 —— 既不可读也完全没有行情，
+   用户要自己从 `{"600519.SH":0.3,...}` 里认票。 */
+.weightList {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px var(--sp-2);
+  padding: 1px 0;
+}
+.weightChip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--sp-1);
+  font-size: var(--font-sm);
+  white-space: nowrap;
+}
+.weightPct {
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
 .json {
   width: 100%;
   font-family: var(--font-mono);

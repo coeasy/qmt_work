@@ -307,6 +307,22 @@ def create_app() -> FastAPI:
             log.warning("broker disconnect on shutdown failed: %s", exc)
         return {"ok": True, "shutting_down": True}
 
+    # ★ MCP 无斜杠别名（/mcp → /mcp/）：不加这个别名，``POST /mcp`` 会 405。
+    #
+    # 为什么必须修：文档、README、``GET /capabilities/mcp`` 返回的 ``endpoint``
+    # 一律写成 ``/mcp``（无尾斜杠），而 Starlette 的 Mount 只在 ``/mcp/`` 上命中 ——
+    # 于是**照文档配置的 MCP 客户端全部握手失败**（405），且报错信息完全看不出
+    # 「加个斜杠就好」。MCP 客户端通常不会自动补尾斜杠重试。
+    #
+    # 用 ASGI 层重写而不是 HTTP 307 重定向：部分 MCP 客户端不跟随重定向，
+    # 或对 3xx 直接判定为接入失败。重写 path 对调用方完全透明。
+    @app.middleware("http")
+    async def mcp_no_slash_alias(request, call_next):
+        if request.scope.get("path") == "/mcp":
+            request.scope["path"] = "/mcp/"
+            request.scope["raw_path"] = b"/mcp/"
+        return await call_next(request)
+
     app.mount("/mcp", mcp_app, name="mcp")
 
     # UTF-8 强制声明中间件（P1 修复）：StaticFiles 默认给 .js/.css 返回的

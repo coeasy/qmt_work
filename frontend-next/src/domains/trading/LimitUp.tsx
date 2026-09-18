@@ -1,7 +1,9 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import {
   Badge,
   Button,
+  ConfirmButton,
+  ConfirmModal,
   DataTable,
   EmptyState,
   FormRow,
@@ -14,6 +16,7 @@ import {
 } from "@/design/primitives";
 import { limitupApi, marketApi, type LimitUpRow, type LimitUpScanResponse } from "@/services/api";
 import { useAsync } from "@/hooks/useAsync";
+import { useLiveQuotes } from "@/hooks/useLiveQuotes";
 import { fmtAmount, fmtPct, fmtPrice, normalizeCode, toneColor } from "@/shared/format";
 import type { LimitUpStatus } from "@/shared/types";
 import s from "../domain.module.css";
@@ -34,6 +37,9 @@ export function LimitUp() {
 
   const st = useAsync<LimitUpStatus>(() => limitupApi.status(), []);
   const status = st.data;
+  // 监控池里的标的叠加实时行情（status 接口只给 code + name，没有价格）
+  const poolCodes = useMemo(() => (status?.pool ?? []).map((p) => p.code), [status?.pool]);
+  const poolQuotes = useLiveQuotes(poolCodes);
 
   const [newCode, setNewCode] = useState("");
   const [busy, setBusy] = useState(false);
@@ -45,6 +51,8 @@ export function LimitUp() {
   const [minRise, setMinRise] = useState("0.03");
   const [buyVolume, setBuyVolume] = useState("0");
   const [doTrade, setDoTrade] = useState(false);
+  /** 真实下单模式的启动确认 */
+  const [confirmStart, setConfirmStart] = useState(false);
   const [interval, setIntervalSec] = useState("2");
 
   // 扫描参数
@@ -54,6 +62,9 @@ export function LimitUp() {
     () => marketApi.limitupScan(sector, Number(minScanPct) || 9.5, true, 200, "change"),
     [sector, minScanPct],
   );
+  // 扫描结果同样是**发起扫描那一刻**的快照，之后不会自己更新 ⇒ 叠加实时行情。
+  const scanCodes = useMemo(() => (scan.data?.rows ?? []).map((r) => r.code), [scan.data]);
+  const scanQuotes = useLiveQuotes(scanCodes);
 
   const wrap = async (fn: () => Promise<unknown>, okText: string) => {
     setBusy(true);
@@ -75,9 +86,9 @@ export function LimitUp() {
     void wrap(() => limitupApi.addPool(c), `已加入监控池：${c}`).then(() => setNewCode(""));
   };
 
-  const start = () => {
-    if (doTrade && !window.confirm("do_trade=true 会在触发时真实下单，确认启动？")) return;
-    void wrap(
+  /** 启动监控的真实执行体（与确认逻辑分开，避免确认后再弹一次） */
+  const doStart = () =>
+    wrap(
       () =>
         limitupApi.start({
           limit_pct: Number(limitPct) || 0.1,
@@ -89,6 +100,18 @@ export function LimitUp() {
         }),
       "涨停监控已启动",
     );
+
+  /**
+   * ★ 真实下单（do_trade）必须用 ConfirmModal 而不是 window.confirm：
+   * 原生弹窗不受主题/皮肤控制、无法说明影响范围，且项目规范把资金动作列为
+   * 禁用写法。更关键的是——「触发时会真实下单」这件事必须让用户**明确读一遍**再确认。
+   */
+  const start = () => {
+    if (doTrade) {
+      setConfirmStart(true);
+      return;
+    }
+    void doStart();
   };
 
   const scanCols: Column<LimitUpRow>[] = [
@@ -100,9 +123,12 @@ export function LimitUp() {
       width: 88,
       align: "right",
       mono: true,
-      render: (r) => (
-        <span style={{ color: toneColor(r.change_pct) }}>{fmtPrice(r.last)}</span>
-      ),
+      // 扫描结果是**发起扫描那一刻**的快照；叠加实时行情后数字才会继续走。
+      render: (r) => {
+        const q = scanQuotes[r.code]?.price;
+        const last = q !== undefined && q > 0 ? q : r.last;
+        return <span style={{ color: toneColor(r.change_pct) }}>{fmtPrice(last)}</span>;
+      },
     },
     {
       key: "pct",
@@ -110,9 +136,10 @@ export function LimitUp() {
       width: 88,
       align: "right",
       mono: true,
-      render: (r) => (
-        <span style={{ color: toneColor(r.change_pct) }}>{fmtPct(r.change_pct)}</span>
-      ),
+      render: (r) => {
+        const pct = scanQuotes[r.code]?.change_pct ?? r.change_pct;
+        return <span style={{ color: toneColor(pct) }}>{fmtPct(pct)}</span>;
+      },
     },
     { key: "amount", header: "成交额", width: 110, align: "right", mono: true, render: (r) => fmtAmount(r.amount) },
   ];
@@ -264,22 +291,24 @@ export function LimitUp() {
                     >
                       <span className={s.mono}>{p.code}</span>
                       <span className={s.muted}>{p.name}</span>
-                      <button
-                        type="button"
-                        aria-label={`移除 ${p.code}`}
+                      {/* 叠加实时行情：池里这些票本来只有代码和名字，看不出当前价位 */}
+                      <span
+                        className={s.mono}
+                        style={{ color: toneColor(poolQuotes[p.code]?.change_pct) }}
+                      >
+                        {fmtPrice(poolQuotes[p.code]?.price)}
+                      </span>
+                      {/* 修复前是一个「点一下就直接删」的裸 ×，且紧贴代码文字 */}
+                      <ConfirmButton
+                        title={`移除 ${p.code}`}
+                        confirmText="确认"
                         disabled={busy}
-                        style={{
-                          border: "none",
-                          background: "transparent",
-                          color: "var(--danger)",
-                          cursor: "pointer",
-                          padding: 0,
-                          lineHeight: 1,
-                        }}
-                        onClick={() => void wrap(() => limitupApi.removePool(p.code), `已移除 ${p.code}`)}
+                        onConfirm={() =>
+                          void wrap(() => limitupApi.removePool(p.code), `已移除 ${p.code}`)
+                        }
                       >
                         ×
-                      </button>
+                      </ConfirmButton>
                     </span>
                   ))}
                 </div>
@@ -351,6 +380,27 @@ export function LimitUp() {
           </div>
         </Panel>
       )}
+
+      <ConfirmModal
+        open={confirmStart}
+        title="启动涨停监控（真实下单）"
+        danger
+        confirmText="确认启动"
+        message={
+          <>
+            当前已勾选 <b>do_trade</b>：监控触发时会<b>用真实资金下单</b>
+            （单笔买入量 {buyVolume || 0} 股）。
+            <br />
+            若只想观察信号、不想实际成交，请先取消勾选。
+          </>
+        }
+        warn="触发即真实下单，资金风险自负"
+        onConfirm={() => {
+          setConfirmStart(false);
+          void doStart();
+        }}
+        onCancel={() => setConfirmStart(false)}
+      />
     </div>
   );
 }

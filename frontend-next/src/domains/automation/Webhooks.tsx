@@ -2,6 +2,7 @@ import { useState } from "react";
 import {
   Badge,
   Button,
+  ConfirmButton,
   DataTable,
   EmptyState,
   FormRow,
@@ -138,9 +139,9 @@ export function Webhooks() {
           <Button size="sm" variant="ghost" disabled={busy} onClick={() => void test(r.id)}>
             测试
           </Button>
-          <Button size="sm" variant="ghost" disabled={busy} onClick={() => void remove(r.id)}>
+          <ConfirmButton disabled={busy} onConfirm={() => void remove(r.id)}>
             删除
-          </Button>
+          </ConfirmButton>
         </div>
       ),
     },
@@ -178,9 +179,13 @@ export function Webhooks() {
   return (
     <div className={s.page}>
       <div className={s.toolbar}>
-        <Button size="sm" variant="ghost" disabled={busy || selected.length === 0} onClick={() => void batchRemove()}>
+        <ConfirmButton
+          disabled={busy || selected.length === 0}
+          confirmText={`确认删除 ${selected.length} 条`}
+          onConfirm={() => void batchRemove()}
+        >
           批量删除（{selected.length}）
-        </Button>
+        </ConfirmButton>
         <span className={s.spacer} />
         <Button
           size="sm"

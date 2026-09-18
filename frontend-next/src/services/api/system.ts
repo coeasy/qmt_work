@@ -109,6 +109,27 @@ export interface CapabilitiesSummary {
   by_category: Record<string, { total: number; agent_visible: number; write: number; read: number }>;
 }
 
+/**
+ * MCP 工具清单与接入信息（capabilities.py:capabilities_mcp）。
+ *
+ * ★ 为什么界面要读它：MCP 工具此前只能靠 `tools/list` 协议调用才能看见，
+ * 界面完全无从得知自己有多少工具可给 Agent 用 —— 能力存在但不可发现。
+ * 本端点把它变成可浏览的清单。
+ */
+export interface McpCapabilities {
+  /** 工具名全表（与 tests/contracts/mcp_tools.json 基线一致） */
+  tools: string[];
+  count: number;
+  /** 按「首个下划线前的前缀」粗分组，仅用于界面浏览，不是权威分类 */
+  by_prefix: Record<string, number>;
+  endpoint: string;
+  transport: string;
+  auth: string;
+  bind: string;
+  /** 非空 = 当前用的是默认密钥远程监听风险提示 */
+  local_only_note: string;
+}
+
 /** 运行时作业提交载荷（runtime.py:runtime_jobs_submit）。 */
 export interface RuntimeJobSubmit {
   /** system.* | sync | screen */
@@ -151,6 +172,9 @@ export const systemApi = {
     http.get<CapabilitiesResponse>("/capabilities", { query: { category, method } }),
 
   capabilitiesSummary: () => http.get<CapabilitiesSummary>("/capabilities/summary"),
+
+  /** MCP 工具清单（自省），用于界面浏览 + 接入说明 */
+  capabilitiesMcp: () => http.get<McpCapabilities>("/capabilities/mcp"),
 
   platformStatus: () => http.get<Record<string, unknown>>("/platform/status"),
 
@@ -292,14 +316,24 @@ export const referenceApi = {
 
 /* ---------------- 选股（app/routes/screen.py + app/screener/engine.py） ---------------- */
 
-/** 选股结果行（evaluate_scan 产出的行结构）。 */
+/** 选股结果行（evaluate_scan / run_classic 产出的行结构）。 */
 export interface ScreenRow {
   code: string;
   name?: string;
   close?: number;
   change_pct?: number;
   score?: number;
+  /** 经典策略：命中的策略 id（run_classic 补） */
+  strategy?: string;
   [k: string]: unknown;
+}
+
+/** 经典策略元信息（GET /market/screen/strategies）。 */
+export interface ClassicStrategy {
+  id: string;
+  label: string;
+  desc: string;
+  params: Record<string, number>;
 }
 
 /** 选股响应（scan_async 返回体）。 */
@@ -318,11 +352,22 @@ export interface ScreenResponse {
   provider_policy_version?: string;
   dataset_snapshot_id?: string | null;
   fundamentals?: unknown;
+  /** 走经典策略时回显策略 id；空串表示走的是条件树 */
+  classic?: string;
 }
 
 export interface ScreenRunQuery {
-  /** 条件树 JSON 字符串（**必填**，后端 _parse_conditions 解析） */
-  conditions: string;
+  /**
+   * 条件树 JSON 字符串。
+   *
+   * ★ 2026-09-18 起**不再无条件必填**：传 `classic` 走经典策略时可省略
+   * （后端此时只回显 conditions、不参与求值）。两者都不传 → 400 并给出原因。
+   */
+  conditions?: string;
+  /** 经典策略 id（见 screenApi.strategies）；非空时 conditions 不参与求值 */
+  classic?: string;
+  /** 覆盖策略默认参数的 JSON 字符串，如 '{"breakout_days":30}' */
+  classic_params?: string;
   limit?: number;
   sort_by?: string;
   sort_desc?: number;
@@ -356,10 +401,39 @@ export interface NlScreenResult {
  *     body 须含 name(str) / conditions(obj) / results(list)
  *   - GET /market/screen/boards 列出已保存的动态板块，返回 {items, count}
  *   - POST /market/screen/nl 只返回可编辑条件树，需再调 run/expr 才会真正执行
+ *   - GET /market/screen/strategies 列举经典策略（id/label/desc/params）
+ *   - POST /market/screen/classic 一次跑多个经典策略，按策略 id 分组返回
+ *   - GET /market/screen 传 `classic` 时走经典策略分支，此时 conditions 可省略
  */
 export const screenApi = {
   run: (query: ScreenRunQuery) =>
     http.get<ScreenResponse>("/market/screen", { query: { ...query } }),
+
+  /** 经典策略清单（用于下拉与参数表单） */
+  strategies: () =>
+    http.get<{ items: ClassicStrategy[]; count: number }>("/market/screen/strategies"),
+
+  /** 经典策略选股（多策略批量，与定时任务 system.classic_screen 同一内核） */
+  classic: (body: {
+    strategies: string[];
+    params?: Record<string, Record<string, number>>;
+    limit?: number;
+    universe?: unknown;
+    source_policy?: string;
+    adjust?: string;
+    period?: string;
+    max_codes?: number;
+    offline?: number;
+  }) =>
+    http.post<{
+      strategies: string[];
+      scanned: number;
+      total_hits: number;
+      results: Record<string, ScreenRow[]>;
+      degraded: boolean;
+      degraded_reason?: string;
+      provenance: Record<string, unknown>;
+    }>("/market/screen/classic", body),
 
   /** 公式 DSL 选股（如 "C > MA(20) AND RSI(14) < 30"） */
   expr: (body: {

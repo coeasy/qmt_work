@@ -23,8 +23,18 @@ async def prometheus_metrics(ctx: AppContext = Depends(get_ctx)):
 
 @router.get("/quote-bus/stats")
 async def quote_bus_stats(ctx: AppContext = Depends(get_ctx)):
-    """获取quote-bus / stats（GET /quote-bus/stats）。"""
-    out = {"bus": ctx.quote_bus.stats() if ctx.quote_bus else {"mode": "none"}}
+    """获取quote-bus / stats（GET /quote-bus/stats）。
+
+    ★ 行情总线未启用时要**说清楚是没启用**，而不是给一个看起来正常的空态。
+    曾返回 `{"mode": "none"}`，界面读过去就是一个「各项计数为 0」的面板 ——
+    与「总线在跑但当前没有流量」长得一样，排障时会被误导成后者。
+    """
+    if not ctx.quote_bus:
+        out = {"bus": {"mode": "none", "enabled": False,
+                       "reason": "行情总线未启用（当前为进程内直推模式）"}}
+    else:
+        out = {"bus": ctx.quote_bus.stats()}
+        out["bus"].setdefault("enabled", True)
     if ctx.sync_engine:
         out["latency"] = ctx.sync_engine.latency_stats()
         out["subscribed_codes"] = sorted(ctx.sync_engine._subscribed_codes)

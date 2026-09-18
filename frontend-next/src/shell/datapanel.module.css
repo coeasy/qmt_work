@@ -5,10 +5,15 @@
 
 .row {
   display: grid;
-  grid-template-columns: 1fr auto auto;
+  /* ⚠️ 必须是 4 列：JSX 里是「名称块 / 价格 / 涨幅 / 移除按钮」4 个子元素。
+     修复前写的是 3 列（`1fr auto auto`）⇒ 第 4 个孩子落进**隐式的第 2 行**，
+     而 .row 高度被固定成 26px ⇒ 那个「×」**溢出并压在下一行上** ——
+     用户点第 N+1 行时会打到第 N 行的「×」，表现为「点击自动就删除了」。
+     行高也一并改为自适应：名称/代码两行本来就需要 ~32px，写死 26px 必然溢出。 */
+  grid-template-columns: minmax(0, 1fr) auto auto auto;
   align-items: center;
   gap: var(--sp-1);
-  height: 26px;
+  min-height: 32px;
   padding: 0 var(--sp-2);
   cursor: pointer;
   border-bottom: 1px solid var(--border);
@@ -49,20 +54,20 @@
   min-width: 52px;
 }
 
+/* ⚠️ 修复前这里是 `opacity: 0` + `.row:hover .remove { opacity: 1 }` ——
+   按钮会在**光标正下方凭空出现**：用户移动到行上本想点选，落下时就删掉了。
+   现在常驻可见（半透明，hover 加深），并由 ConfirmButton 提供两段式确认。 */
 .remove {
-  background: none;
-  border: none;
   color: var(--text-faint);
   cursor: pointer;
   font-size: 12px;
-  padding: 0 2px;
-  line-height: 1;
-  opacity: 0;
-}
-.row:hover .remove {
-  opacity: 1;
+  min-width: 20px;
+  padding: 0 3px;
+  opacity: 0.6;
+  flex: 0 0 auto;
 }
 .remove:hover {
+  opacity: 1;
   color: var(--danger);
 }
 
@@ -77,6 +82,20 @@
   padding: var(--sp-2);
   color: var(--text-dim);
   font-size: var(--font-sm);
+}
+
+/* 左栏内的「出路」按钮（如「打开告警页 →」）：外观是链接，行为是导航 */
+.link {
+  margin-top: var(--sp-2);
+  padding: 0;
+  background: none;
+  border: none;
+  color: var(--accent);
+  cursor: pointer;
+  font-size: var(--font-sm);
+}
+.link:hover {
+  text-decoration: underline;
 }
 
 .stale {

@@ -42,6 +42,20 @@ _EXEC_DENY_DOMAINS = {
     "scheduler", "ws", "health", "metrics", "capabilities",
 }
 
+# 「执行域」里的**只读豁免**域（2026-09-18 放开，经用户确认）。
+#
+# 为什么敢放开：``_EXEC_DENY_DOMAINS`` 是**按域整体拒绝**，把 alerts/notifications 的
+# GET 只读查询也一并挡了 —— 但「查告警规则 / 查通知列表」既不产生委托也不动资金，
+# 风险面与 market 的只读端点同量级，整体拒绝属于**过度保守**。
+#
+# 为什么仍然安全：写入型（POST/PUT/DELETE）**永不自动暴露**，由 ``_classify`` 的
+# ``method != "GET"`` 分支拒绝，并由 ``tests/test_capabilities.py::
+# test_no_write_auto_exposed`` 单独锁死 —— 本豁免表**只影响 GET**，不构成旁路。
+#
+# ⚠️ 不要把 trade/algo/signal 这类会产生委托的域加进来：它们的 GET 也可能是
+# 「查询即触发」型语义，风险不可控。
+_READ_ALLOWED_EXEC_DENY_DOMAINS = {"alerts", "notifications"}
+
 # 需「人工确认护栏」的写入型域（交易/资金执行类）。
 _CONFIRM_DOMAINS = {
     "trade", "target-portfolio", "rebalance", "algo",
@@ -154,15 +168,24 @@ def _classify(cap: "Capability") -> None:
     自动暴露策略（安全优先，对齐 G8 风控铁律）：
     - 基础设施/密钥路径（_DENY_TOOL_PATHS）→ 不暴露 tool
     - 执行/密钥/基础设施域（_EXEC_DENY_DOMAINS）→ 不暴露 tool（保持人工确认护栏）
+      ★ 例外：``_READ_ALLOWED_EXEC_DENY_DOMAINS`` 内的域，其 **GET** 仍走下面的只读分支
     - 已有手工 tool 的域（_MANUAL_TOOL_DOMAINS，market 除外）→ 不暴露（避免重复）
     - 其余 GET 只读端点 → agent_visible=True，交给自动生成器
     - 写入型端点 → 不自动暴露，confirm_required 视域而定
     """
-    if cap.path in _DENY_TOOL_PATHS or cap.category in _EXEC_DENY_DOMAINS:
+    if cap.path in _DENY_TOOL_PATHS:
         cap.agent_visible = False
         cap.risk_level = "low"
         cap.confirm_required = False
         return
+    if cap.category in _EXEC_DENY_DOMAINS:
+        # 只读豁免：仅限 GET，且仅限显式登记的无副作用查询域。
+        if not (cap.method == "GET"
+                and cap.category in _READ_ALLOWED_EXEC_DENY_DOMAINS):
+            cap.agent_visible = False
+            cap.risk_level = "low"
+            cap.confirm_required = False
+            return
     if cap.method == "GET":
         # market 域仅补齐手工未覆盖的缺口（其余靠 _MARKET_NAME_OVERRIDES 碰撞跳过）
         in_manual_domain = cap.category in _MANUAL_TOOL_DOMAINS and cap.category != "market"

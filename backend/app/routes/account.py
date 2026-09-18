@@ -92,15 +92,46 @@ async def account_aggregate(ctx: AppContext = Depends(get_ctx)):
     })
 
 @router.get("/account/pnl")
-async def account_pnl(ctx: AppContext = Depends(get_ctx)):
-    """净值/月度收益（账户快照数据仓库；无数据时返回空序列）。"""
-    rows = ctx.db.query(
-        "SELECT ts, net_value FROM account_snapshot ORDER BY ts DESC LIMIT 50")
-    return ok({"net_value_series": [{"ts": r["ts"], "net_value": r["net_value"]} for r in reversed(rows)]})
+async def account_pnl(account_id: str = "", ctx: AppContext = Depends(get_ctx)):
+    """净值/月度收益（账户快照数据仓库；无数据时返回空序列）。
+
+    ★ 多账户必须可隔离：此前无条件 ``SELECT`` 全表，多账户同时使用时净值曲线是
+    **几个账户混在一起**的 —— 曲线形状完全失真，而界面不会有任何提示，
+    用户会以为自己的策略亏了/赚了。
+
+    - 传 ``account_id`` → 只取该账户；
+    - 不传 → 取全部，但回报 ``mixed_accounts=true`` 与账户清单，
+      让调用方（界面）能显式提示「当前为多账户合并曲线」，而不是默默混算。
+    """
+    if account_id:
+        rows = ctx.db.query(
+            "SELECT ts, net_value FROM account_snapshot WHERE account_id=? "
+            "ORDER BY ts DESC LIMIT 50", (account_id,))
+        accounts = [account_id]
+    else:
+        rows = ctx.db.query(
+            "SELECT ts, net_value FROM account_snapshot ORDER BY ts DESC LIMIT 50")
+        accounts = sorted(
+            {r["account_id"] for r in ctx.db.query(
+                "SELECT DISTINCT account_id FROM account_snapshot") if r.get("account_id")})
+    series = [{"ts": r["ts"], "net_value": r["net_value"]} for r in reversed(rows)]
+    return ok({
+        "net_value_series": series,
+        "account_id": account_id or "",
+        "accounts": accounts,
+        "mixed_accounts": (not account_id) and len(accounts) > 1,
+    })
 
 @router.get("/account/slippage")
-async def account_slippage(code: str = "600519.SH", conn_id: str = "", ctx: AppContext = Depends(get_ctx)):
-    """滑点分析（EzQmt cal_deal_comm：成交价 vs 当日 open/close/avg 基点差）。"""
+async def account_slippage(code: str = "", conn_id: str = "", ctx: AppContext = Depends(get_ctx)):
+    """滑点分析（EzQmt cal_deal_comm：成交价 vs 当日 open/close/avg 基点差）。
+
+    ★ ``code`` 必填：此前默认值是 ``600519.SH``（贵州茅台），不传参就**静默分析一只
+    写死的示例股票** —— 调用方拿到的是一份看似正常的滑点报告，实际跟自己的交易
+    毫无关系。宁可报错，也不要给人一份"看起来对"的假报告。
+    """
+    if not code:
+        return err(400, "code 必填（指定要分析滑点的标的代码）")
     b = _need(conn_id or None)
     if b is None:
         return no_broker()

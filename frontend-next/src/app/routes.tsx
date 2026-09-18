@@ -31,22 +31,16 @@ export interface PageDef {
 const P = (loader: () => Promise<{ default: ComponentType<PageProps> }>): PageComponent =>
   lazy(loader);
 
-/** 占位页工厂：把后端契约显式写在页面上，避免「看起来能用其实是空壳」 */
-function placeholder(
-  title: string,
-  endpoints: string[],
-  note: string,
-): PageComponent {
-  return lazy(() =>
-    import("@/domains/_shared/PagePlaceholder").then((m) => ({
-      default: m.makePlaceholder(title, endpoints, note),
-    })),
-  );
-}
-
 export const PAGES: Record<string, PageDef> = {
   /* ---------- 行情 ---------- */
   dashboard: { key: "dashboard", label: "仪表盘", comp: P(() => import("@/domains/Dashboard")), status: "done" },
+  workbench: {
+    key: "workbench",
+    label: "行情工作台",
+    comp: P(() => import("@/domains/market/MarketWorkbench")),
+    fullBleed: true,
+    status: "done",
+  },
   quoteboard: {
     key: "quoteboard",
     label: "报价牌",
@@ -119,6 +113,12 @@ export const PAGES: Record<string, PageDef> = {
   },
 
   /* ---------- 研究 ---------- */
+  screen_workbench: {
+    key: "screen_workbench",
+    label: "选股工作台",
+    comp: P(() => import("@/domains/research/ScreenWorkbench")),
+    status: "done",
+  },
   screen: {
     key: "screen",
     label: "条件选股",
@@ -175,8 +175,8 @@ export const PAGES: Record<string, PageDef> = {
   rebalance: {
     key: "rebalance",
     label: "分仓再平衡",
-    comp: placeholder("分仓再平衡", ["POST /rebalance"], "再平衡端点已就绪，页面待实现。"),
-    status: "planned",
+    comp: P(() => import("@/domains/trading/Rebalance")),
+    status: "done",
   },
 
   /* ---------- 账户 ---------- */
@@ -252,6 +252,12 @@ export const PAGES: Record<string, PageDef> = {
     comp: P(() => import("@/domains/system/ApiKeys")),
     status: "done",
   },
+  mcp: {
+    key: "mcp",
+    label: "MCP 工具",
+    comp: P(() => import("@/domains/system/McpTools")),
+    status: "done",
+  },
   settings: {
     key: "settings",
     label: "设置",
@@ -279,6 +285,9 @@ export const MENU: MenuGroup[] = [
     key: "market",
     label: "行情",
     items: [
+      // 工作台 = 报价牌 + K 线 + 分时 + 盘口 + 成交流合并展示；后面 5 项保留为独立页
+      // （多显示器 / 分栏对照时仍需要），工作台头部有「独立打开」直达按钮。
+      "workbench",
       "quoteboard",
       "quote",
       "minutes",
@@ -291,7 +300,11 @@ export const MENU: MenuGroup[] = [
       "watchlist",
     ],
   },
-  { key: "research", label: "研究", items: ["screen", "formula", "factor_hub", "search"] },
+  {
+    key: "research",
+    label: "研究",
+    items: ["screen_workbench", "screen", "formula", "factor_hub", "search"],
+  },
   {
     key: "trading",
     label: "交易",
@@ -302,7 +315,16 @@ export const MENU: MenuGroup[] = [
   {
     key: "system",
     label: "系统",
-    items: ["dashboard", "brokers", "sysstatus", "audit", "apikeys", "settings", "system_log"],
+    items: [
+      "dashboard",
+      "brokers",
+      "sysstatus",
+      "audit",
+      "apikeys",
+      "mcp",
+      "settings",
+      "system_log",
+    ],
   },
 ];
 

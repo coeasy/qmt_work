@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import {
   Badge,
   Button,
+  ConfirmButton,
   DataTable,
   EmptyState,
   FormRow,
@@ -178,9 +179,15 @@ export function Algo() {
             </Button>
           )}
           {(r.status === "running" || r.status === "paused" || r.status === "pending") && (
-            <Button size="sm" variant="ghost" onClick={() => void act(() => algoApi.cancel(r.algo_id), "撤销")}>
+            // 撤销是**不可逆**的资金动作（未成交部分直接作废、已成交量不会回滚），
+            // 与其他「暂停/恢复」并列放在行内，点一下就没了太容易误触 ⇒ 两段式确认。
+            <ConfirmButton
+              confirmText="确认撤销"
+              title={`撤销算法单 ${r.algo_id}`}
+              onConfirm={() => void act(() => algoApi.cancel(r.algo_id), "撤销")}
+            >
               撤销
-            </Button>
+            </ConfirmButton>
           )}
         </div>
       ),

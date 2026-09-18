@@ -10,6 +10,7 @@ import sys
 import tempfile
 import threading
 import time
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -973,14 +974,41 @@ def _cleanup(db, d):
     shutil.rmtree(d, ignore_errors=True)
 
 
+def _hot_dates(n: int, offset: int = 0) -> list[str]:
+    """热窗口内连续 ``n`` 个日期（升序）。``offset`` = 最后一根距今天数。
+
+    ★ 日期一律**相对今天**生成，不写死年月：冷热边界是「今天 - bars_hot_days」，
+    写死日期后用例会随运行日期漂移（写死的 6 月日期在 9 月跑就已经出窗口了）。
+    """
+    from datetime import timedelta
+
+    from core.clock import local_now, to_iso
+    today = local_now()
+    return [to_iso(today - timedelta(days=offset + n - 1 - i))[:10] for i in range(n)]
+
+
+def _cold_date(days_before: int = 200) -> str:
+    """冷窗口内的一个日期（默认 200 天前，必然早于默认 92 天的热窗口）。"""
+    from datetime import timedelta
+
+    from core.clock import local_now, to_iso
+    return to_iso(local_now() - timedelta(days=days_before))[:10]
+
+
+def _kline_dates(kc=None) -> tuple[str, str]:
+    """返回 ``(热窗口内日期, 冷窗口日期)``，随被测缓存的 ``hot_days`` 自适应。"""
+    days = int(getattr(kc, "hot_days", 92) or 92)
+    return _hot_dates(1)[0], _cold_date(days + 30)
+
+
 def test_kline_cache_basic():
     from gateway.kline_cache import KlineCache
     db, d = _tmp_db()
     try:
         kc = KlineCache(db)
-        bars = [{"time": f"2026-01-{i+1:02d}", "open": 10.0, "high": 11.0,
+        bars = [{"time": t, "open": 10.0, "high": 11.0,
                  "low": 9.0, "close": 10.5, "volume": 1000, "amount": 10500.0}
-                for i in range(5)]
+                for t in _hot_dates(5)]
         n = kc.put("600519.SH", "1d", bars)
         assert n == 5
         assert kc.count("600519.SH", "1d") == 5
@@ -1000,17 +1028,17 @@ def test_kline_cache_freshness_and_stale():
     db, d = _tmp_db()
     try:
         kc = KlineCache(db, ttl_daily=3600)
-        bars = [{"time": f"2026-01-{i+1:02d}", "open": 1, "high": 2,
+        bars = [{"time": t, "open": 1, "high": 2,
                  "low": 0.5, "close": 1.5, "volume": 100, "amount": 150.0}
-                for i in range(10)]
+                for t in _hot_dates(10)]
         kc.put("000001.SZ", "1d", bars)
         # 缓存命中
         res = _a.run(kc.get_or_fetch("000001.SZ", "1d", 10,
                                      lambda c, p, n: (_a.sleep(0), [])))
         assert res["source"] == "cache" and len(res["bars"]) == 10
         # 券商返回空 → cache_stale 兜底
-        kc._cache = None
-        # 伪造过期：把 fetched_at 改老
+        # 伪造过期：把 fetched_at 改老。★ 必须改**热表** —— 数据若落在冷仓，
+        # 这条 UPDATE 打不中，用例会因「其实没过期」而假绿。
         db.execute("UPDATE kline_cache SET fetched_at=0")
         res = _a.run(kc.get_or_fetch("000001.SZ", "1d", 10,
                                      lambda c, p, n: []))
@@ -1019,52 +1047,45 @@ def test_kline_cache_freshness_and_stale():
         _cleanup(db, d)
 
 
-def _kline_years():
-    """返回 (今年, 去年) 字符串，兼容任意运行年份。"""
-    import time as _t
-    y = _t.localtime().tm_year
-    return f"{y}-06-15", f"{y - 1}-12-31"
-
-
-def test_kline_hot_archive_routing_and_rollover():
-    """热/归档按年份路由 + 跨年 rollover（今年入热表，去年以前入归档）。"""
+def test_kline_hot_window_routing_and_rollover():
+    """热/冷按**热窗口**路由 + 滚动搬移（窗口内入热表，窗口外入冷仓）。"""
     from gateway.kline_cache import KlineCache
     db, d = _tmp_db()
     try:
         kc = KlineCache(db)
-        this_y, last_y = _kline_years()
-        bars = [{"time": last_y, "open": 1.0, "close": 1.1},
-                {"time": this_y, "open": 2.0, "close": 2.2}]
+        hot, cold = _kline_dates(kc)
+        bars = [{"time": cold, "open": 1.0, "close": 1.1},
+                {"time": hot, "open": 2.0, "close": 2.2}]
         kc.put("600519.SH", "1d", bars)
-        # 去年落归档、今年落热表
+        # 窗口外落归档、窗口内落热表
         assert db.query_one("SELECT COUNT(1) c FROM kline_archive "
                             "WHERE code='600519.SH'")["c"] == 1
         assert db.query_one("SELECT COUNT(1) c FROM kline_cache "
                             "WHERE code='600519.SH'")["c"] == 1
-        # 合并读取=2 根且升序
+        # 合并读取=2 根且升序（冷热分层对调用方透明）
         got = kc.get("600519.SH", "1d", 2)
-        assert [b["time"] for b in got] == [last_y, this_y]
-        # rollover 幂等、总数不变
+        assert [b["time"] for b in got] == [cold, hot]
+        # 边界未变 ⇒ 无可搬；rollover 幂等、总数不变
         pre = kc.count("600519.SH", "1d")
-        assert kc.archive_rollover()["moved"] == 0  # 已路由到位，无旧到新
+        assert kc.archive_rollover()["moved"] == 0
         assert kc.count("600519.SH", "1d") == pre
     finally:
         _cleanup(db, d)
 
 
-def test_kline_rollover_moves_stale_hot_rows():
-    """今年写入、跨年后已成去年的热表行应被搬入归档。"""
+def test_kline_rollover_moves_rows_that_left_the_window():
+    """已滑出热窗口的热表行应被搬入冷仓（边界随日期前进时每天发生）。"""
     from gateway.kline_cache import KlineCache
     db, d = _tmp_db()
     try:
         kc = KlineCache(db)
-        this_y, last_y = _kline_years()
-        # 直接注入：今年热表里残留去年数据（模拟未归档的旧热行）
+        hot, cold = _kline_dates(kc)
+        # 直接注入：热表里残留窗口外数据（模拟未及时归档的旧热行）
         db.executemany_in_txn(
             "INSERT OR REPLACE INTO kline_cache "
             "(code,period,dt,open,high,low,close,volume,amount,fetched_at,adjust) "
             "VALUES ('600001.SH','1d',?,?,NULL,NULL,NULL,0,0,0,'')",
-            [(dt, 5.0) for dt in (last_y, this_y)])
+            [(dt, 5.0) for dt in (cold, hot)])
         res = kc.archive_rollover()
         assert res["moved"] == 1
         assert db.query_one("SELECT COUNT(1) c FROM kline_cache "
@@ -1083,12 +1104,12 @@ def test_kline_adjust_dimension_isolation():
     db, d = _tmp_db()
     try:
         kc = KlineCache(db)
-        this_y, _ = _kline_years()
-        kc.put("000001.SZ", "1d", [{"time": this_y, "open": 10.0, "close": 10.5}],
+        hot = _hot_dates(1)[0]
+        kc.put("000001.SZ", "1d", [{"time": hot, "open": 10.0, "close": 10.5}],
                adjust="qfq")
 
         async def _fetcher(c, p, n):
-            return [{"time": this_y, "open": 11.0, "high": 11.5, "low": 10.8,
+            return [{"time": hot, "open": 11.0, "high": 11.5, "low": 10.8,
                      "close": 11.2, "volume": 100, "amount": 1100.0}]
         # adjust=''（券商原始价）抓取：按本请求维度独立落库，不复用现存 qfq 标记
         _a.run(kc.get_or_fetch("000001.SZ", "1d", 1, _fetcher, force=True))
@@ -1106,18 +1127,140 @@ def test_kline_adjust_dimension_isolation():
 
 
 def test_kline_full_read_dedup_and_export_path():
-    """全量读取（count=0）不抛错、不重复时间点；含热表与归档。"""
+    """全量读取（count=0）不抛错、不重复时间点；含热表与冷仓。"""
     from gateway.kline_cache import KlineCache
     db, d = _tmp_db()
     try:
         kc = KlineCache(db)
-        this_y, last_y = _kline_years()
-        for t in (last_y, this_y):
+        hot, cold = _kline_dates(kc)
+        for t in (cold, hot):
             kc.put("300001.SZ", "1d", [{"time": t, "open": 1.0, "close": 1.0}])
         all_bars = kc._read_all_bars("300001.SZ", "1d", 0)
         times = [b["time"] for b in all_bars]
         assert len(times) == len(set(times)) and len(times) >= 2
     finally:
+        _cleanup(db, d)
+
+
+# ---------------- K 线冷热分层（冷仓独立文件） ----------------
+
+def test_hot_cutoff_and_dt_normalization():
+    """热窗口边界 = 今天 - hot_days；两种落库日期格式都要判对冷热。"""
+    from datetime import timedelta
+
+    from core.clock import local_now, to_iso
+    from gateway.kline_cache import KlineCache
+    db, d = _tmp_db()
+    try:
+        kc = KlineCache(db, hot_days=92)
+        today = local_now()
+        assert kc.hot_cutoff() == to_iso(today - timedelta(days=92))[:10]
+        inside = to_iso(today - timedelta(days=10))[:10]
+        outside = to_iso(today - timedelta(days=100))[:10]
+        assert kc._is_hot(inside) is True
+        assert kc._is_hot(outside) is False
+        # YYYYMMDD 形态（历史遗留格式）同样要判对，不能因格式差异错分冷热
+        assert kc._is_hot(inside.replace("-", "")) is True
+        assert kc._is_hot(outside.replace("-", "")) is False
+        # 边界当天算热（含），与 SQL 粗筛 `dt < cutoff` 的口径一致
+        assert kc._is_hot(kc.hot_cutoff()) is True
+        # ★ 解析不出的坏值判为**冷**：绝不能留在热表里被每天反复刷新
+        assert kc._is_hot("") is False
+        assert kc._is_hot("garbage") is False
+        assert kc._is_hot(None) is False
+    finally:
+        _cleanup(db, d)
+
+
+def test_cold_store_is_separate_file_and_migrates_legacy_rows():
+    """冷仓是**独立文件**；主库遗留的归档行一次性搬出，主库表随后保持为空（幂等）。"""
+    from datasource.cold_store import ColdStore
+    db, d = _tmp_db()
+    cold = None
+    try:
+        # 模拟旧版本：历史归档躺在主库的 kline_archive 表里
+        db.executemany_in_txn(
+            "INSERT OR REPLACE INTO kline_archive "
+            "(code,period,dt,open,high,low,close,volume,amount,fetched_at,adjust) "
+            "VALUES ('600519.SH','1d',?,?,NULL,NULL,NULL,0,0,0,'')",
+            [(f"2020-01-{i+1:02d}", 1.0) for i in range(3)])
+        cold = ColdStore(Path(d) / "bars_cold.db")
+        assert cold.count() == 0
+        res = cold.migrate_from(db)
+        assert res == {"moved": 3, "batches": 1, "done": True}
+        assert cold.count() == 3
+        assert db.query_one("SELECT COUNT(1) c FROM kline_archive")["c"] == 0
+        # 幂等：主库表已空 ⇒ 再跑是空操作
+        assert cold.migrate_from(db)["moved"] == 0
+        # 主库归档表不存在时也不能抛（老库未迁移到 v18）
+        db.execute("DROP TABLE kline_archive")
+        assert cold.migrate_from(db)["moved"] == 0
+    finally:
+        if cold is not None:
+            cold.close()
+        _cleanup(db, d)
+
+
+def test_kline_cold_tier_keeps_history_readable():
+    """★ 冷仓接管归档后历史仍读得到 —— 「单独存放」不等于「读不到」的护栏。
+
+    这条用例守的是最容易踩的坑：把冷数据挪到独立文件后，若读路径没跟着改，
+    表现是「图表历史静默变短」——不报错、不提示，最难查。
+    """
+    from datasource.cold_store import ColdStore
+    from gateway.kline_cache import KlineCache
+    db, d = _tmp_db()
+    cold = None
+    try:
+        cold = ColdStore(Path(d) / "bars_cold.db")
+        kc = KlineCache(db, cold=cold)
+        hot, cold_dt = _kline_dates(kc)
+        kc.put("600519.SH", "1d", [{"time": cold_dt, "open": 1.0, "close": 1.1}])
+        # 冷数据确实落在**独立文件**里，主库同名表一行都没有
+        assert cold.count() == 1
+        assert db.query_one("SELECT COUNT(1) c FROM kline_archive")["c"] == 0
+        # 但读路径照旧取得到
+        got = kc.get("600519.SH", "1d", 10)
+        assert [b["time"] for b in got] == [cold_dt]
+        assert kc.count("600519.SH", "1d") == 1
+        assert [b["time"] for b in kc._read_all_bars("600519.SH", "1d", 0)] == [cold_dt]
+        assert [s["code"] for s in kc.all_series()] == ["600519.SH"]
+        # 热表清单里**没有**它（每日刷新因此不会碰冷数据）
+        assert kc.hot_series() == []
+        st = kc.stats()
+        assert st["cold_enabled"] is True and st["cold_path"].endswith("bars_cold.db")
+        assert st["hot_rows"] == 0 and st["archive_rows"] == 1
+        assert st["hot_days"] == 92 and st["hot_cutoff"] == kc.hot_cutoff()
+        # 清空也要覆盖冷仓（否则「清理缓存」清不干净）
+        assert kc.clear("600519.SH", "1d") == 1
+        assert cold.count() == 0
+    finally:
+        if cold is not None:
+            cold.close()
+        _cleanup(db, d)
+
+
+def test_kline_rollover_writes_to_cold_file_not_main_db():
+    """滚动搬移的目标是冷仓文件；主库归档表保持为空（否则热窗口白拆）。"""
+    from datasource.cold_store import ColdStore
+    from gateway.kline_cache import KlineCache
+    db, d = _tmp_db()
+    cold = None
+    try:
+        cold = ColdStore(Path(d) / "bars_cold.db")
+        kc = KlineCache(db, cold=cold)
+        hot, cold_dt = _kline_dates(kc)
+        db.executemany_in_txn(
+            "INSERT OR REPLACE INTO kline_cache "
+            "(code,period,dt,open,high,low,close,volume,amount,fetched_at,adjust) "
+            "VALUES ('600001.SH','1d',?,?,NULL,NULL,NULL,0,0,0,'')",
+            [(dt, 5.0) for dt in (cold_dt, hot)])
+        assert kc.archive_rollover()["moved"] == 1
+        assert cold.count() == 1
+        assert db.query_one("SELECT COUNT(1) c FROM kline_archive")["c"] == 0
+    finally:
+        if cold is not None:
+            cold.close()
         _cleanup(db, d)
 
 

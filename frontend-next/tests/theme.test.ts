@@ -49,20 +49,36 @@ afterEach(() => {
 });
 
 describe("主题偏好 · 默认与系统跟随", () => {
-  it("无持久化记录时默认为 auto，并解析为系统主题", async () => {
+  it("无持久化记录时默认深色 + 通达信黑背景", async () => {
     setSystemDark(true);
     const store = await freshStore();
-    expect(store.getState().themePref).toBe("auto");
+    expect(store.getState().themePref).toBe("dark");
     expect(store.getState().theme).toBe("dark");
+    expect(store.getState().activeSkin).toBe("tongdaxin");
 
     setSystemDark(false);
     const lightStore = await freshStore();
-    expect(lightStore.getState().themePref).toBe("auto");
-    expect(lightStore.getState().theme).toBe("light");
+    expect(lightStore.getState().themePref).toBe("dark");
+    expect(lightStore.getState().theme).toBe("dark");
+    expect(lightStore.getState().activeSkin).toBe("tongdaxin");
+  });
+
+  it("显式选择 跟随系统(auto) 时按系统主题解析", async () => {
+    setSystemDark(false);
+    localStorage.setItem(KEY, JSON.stringify({ themePref: "auto" }));
+    const store = await freshStore();
+    expect(store.getState().themePref).toBe("auto");
+    expect(store.getState().theme).toBe("light");
+
+    setSystemDark(true);
+    const darkStore = await freshStore();
+    expect(darkStore.getState().themePref).toBe("auto");
+    expect(darkStore.getState().theme).toBe("dark");
   });
 
   it("auto 模式下 init() 把系统主题写入 <html data-theme>", async () => {
     setSystemDark(false);
+    localStorage.setItem(KEY, JSON.stringify({ themePref: "auto" }));
     const store = await freshStore();
     store.getState().init();
     expect(document.documentElement.dataset.theme).toBe("light");
@@ -71,6 +87,7 @@ describe("主题偏好 · 默认与系统跟随", () => {
 
   it("init() 在 auto 模式下响应系统主题变化", async () => {
     setSystemDark(false);
+    localStorage.setItem(KEY, JSON.stringify({ themePref: "auto" }));
     const store = await freshStore();
     store.getState().init();
     expect(store.getState().theme).toBe("light");
@@ -94,12 +111,12 @@ describe("主题偏好 · 持久化与迁移", () => {
     expect(store.getState().theme).toBe("light");
   });
 
-  it("老版本 theme 值非法时回退 auto", async () => {
+  it("老版本 theme 值非法时回退默认（深色）", async () => {
     setSystemDark(false);
     localStorage.setItem(KEY, JSON.stringify({ theme: "solarized" }));
     const store = await freshStore();
-    expect(store.getState().themePref).toBe("auto");
-    expect(store.getState().theme).toBe("light");
+    expect(store.getState().themePref).toBe("dark");
+    expect(store.getState().theme).toBe("dark");
   });
 
   it("setThemePref 立即改写 DOM 并落盘", async () => {
@@ -131,12 +148,12 @@ describe("主题偏好 · 持久化与迁移", () => {
     expect(store.getState().themePref).toBe("dark");
   });
 
-  it("损坏的 localStorage 内容不会抛错，回退 auto", async () => {
+  it("损坏的 localStorage 内容不会抛错，回退默认（深色）", async () => {
     setSystemDark(false);
     localStorage.setItem(KEY, "{ 这不是 JSON");
     const store = await freshStore();
-    expect(store.getState().themePref).toBe("auto");
-    expect(store.getState().theme).toBe("light");
+    expect(store.getState().themePref).toBe("dark");
+    expect(store.getState().theme).toBe("dark");
   });
 });
 

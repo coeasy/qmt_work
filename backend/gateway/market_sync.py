@@ -1,12 +1,22 @@
-"""行情缓存定时维护：收盘后刷新今年热数据 + 跨年归档（行情基础设施专用）。
+"""行情缓存定时维护：每日刷新**热窗口**数据 + 冷数据分层（行情基础设施专用）。
 
 区别于被移除的通用「Scheduler / 定时任务」特性：这里是行情数据自维护的、
 轻量的进程内异步循环，仅维护 K 线缓存，不做任意任务调度。
 
-- 跨年归档：每天兜底把热表中早于今年的行搬入归档表（幂等）。
-- 定时刷新：每日收盘后（配置 market.sync.time）对本地已缓存的今年热序列
-  force 回源刷新一次，保证今年的数据新而全。
-- 全部经 runtime_config 热更新（market.sync.*），默认关闭。
+冷热分层（2026-09-17）：
+- **热窗口** = 最近 ``market.hot_days`` 天（默认 92 ≈ 3 个月），落在主库热表；
+- **冷仓** = 更早的历史，放在**独立 SQLite 文件**（``bars_cold.db``），
+  每日同步**不再更新**它 —— 老数据既不用重下（省带宽），也不用重写（省写放大）；
+- 读路径对冷热透明（``KlineCache.get`` 先取热表、不足从冷仓补足）。
+
+每日维护三件事：
+- **热窗口滚动**：把热表里早于窗口的行搬入冷仓（幂等，每次 tick 兜底执行）。
+- **定时刷新**：每日 ``market.sync.time``（默认 **16:00**）对**热表内**的日线序列
+  force 回源刷新一次，取数根数按热窗口换算（见 :func:`hot_fetch_count`）。
+- **过点补跑**：触发时间已过而当天还没跑过 ⇒ 启动后立刻补跑（判据是
+  ``_last_run_date != today`` 且 ``now >= sync_time``，与是否刚启动无关）。
+- 全部经 runtime_config 热更新（``market.sync.*`` / ``market.hot_days``）；
+  ``market.sync.enabled`` 默认**开**。
 
 挂载：main.py lifespan 内 start，停机 finally 内 stop。
 """
@@ -36,6 +46,25 @@ def _sh_now() -> datetime:
         return datetime.now()
 
 
+#: 单次回源多取的余量（根）：覆盖「窗口边界那几天正好是长假」与最后一根未收盘的情况。
+_HOT_FETCH_MARGIN = 15
+
+
+def hot_fetch_count(hot_days: int) -> int:
+    """把「热窗口天数（自然日）」换算成回源要取的 **K 线根数（交易日）**。
+
+    热窗口按自然日定义（``bars_hot_days``，默认 92 天 ≈ 3 个月），而回源接口按
+    「最近 N 根」取数，两者单位不同 —— 直接用 92 会少取（92 个交易日 ≈ 4.5 个月），
+    用 250 会多取（≈ 1 年，把冷数据天天重拉一遍）。
+
+    换算：一年约 250 个交易日 / 365 个自然日 ≈ 0.685，再留 ``_HOT_FETCH_MARGIN``
+    根余量兜住长假与未收盘的最后一根。取够即可：多取的根由 ``KlineCache.put``
+    按日期路由，落在窗口外的自然进冷仓，不会污染热表。
+    """
+    days = max(1, int(hot_days or 1))
+    return int(days * 250 / 365) + _HOT_FETCH_MARGIN
+
+
 class MarketSync:
     def __init__(self, state, runtime_config, interval: float = 60.0,
                  job_runtime=None, sync_job_factory=None):
@@ -58,6 +87,8 @@ class MarketSync:
                                ("eod_last_run_date",))
             self._eod_last_run_date = row.get("value") if row else None
         self._eod_job_id: str | None = None
+        #: 上次滚动搬移时的热窗口边界（None = 本次进程还没搬过 ⇒ 启动必搬一次）
+        self._rollover_cutoff: str | None = None
 
     @property
     def enabled(self) -> bool:
@@ -76,7 +107,9 @@ class MarketSync:
         return str(self.cfg.get("market.eod.time") or "18:00")
 
     async def start(self):
-        # 启动即做一次跨年归档维护（幂等，热表小，成本可忽略）
+        # 启动即做一次热窗口滚动维护（幂等；首次调用必定执行，因为
+        # `_rollover_cutoff` 初值为 None）。热表已被窗口约束到 ~3 个月，
+        # 扫描成本可忽略。
         await self._rollover()
         if self._task is None or self._task.done():
             self._task = asyncio.create_task(self._loop())
@@ -92,18 +125,50 @@ class MarketSync:
             self._task = None
 
     async def _rollover(self) -> dict:
+        """把热表中早于热窗口的行搬入冷仓（幂等）。
+
+        **按边界变化去重**：滚动搬移的结果只取决于「热窗口边界」这一个变量，
+        而边界每天才变一次（``hot_days`` 天前的那一天）。原实现每个 tick（默认
+        60s）都全表扫一遍热表 —— 一天 1440 次无意义的全扫。现在边界没变就直接
+        跳过，边界一变立刻执行；``start()`` 里额外无条件跑一次兜底
+        （覆盖「进程跨天运行但边界刚好在启动前已变」的情形）。
+        """
         kc = getattr(self.state, "kline_cache", None)
         if kc is None:
             return {"moved": 0, "deleted": 0}
         try:
+            cutoff = kc.hot_cutoff()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("hot cutoff unavailable: %s", exc)
+            return {"moved": 0, "deleted": 0}
+        if cutoff == self._rollover_cutoff:
+            return {"moved": 0, "deleted": 0}
+        try:
             res = await asyncio.to_thread(kc.archive_rollover)
+            self._rollover_cutoff = cutoff
             if res.get("moved"):
-                log.info("kline archive rollover: moved=%s deleted=%s",
-                         res["moved"], res["deleted"])
+                log.info("kline hot-window rollover: moved=%s deleted=%s (cutoff=%s)",
+                         res["moved"], res["deleted"], cutoff)
             return res
         except Exception as exc:  # noqa: BLE001
-            log.warning("kline archive rollover failed: %s", exc)
+            log.warning("kline hot-window rollover failed: %s", exc)
             return {"moved": 0, "deleted": 0}
+
+    def _apply_hot_days(self) -> None:
+        """把 runtime_config 的 ``market.hot_days`` 热更新到 K 线缓存。
+
+        「热窗口多久」是运维想随时调的参数（磁盘紧张就调小），不该要求重启客户端。
+        """
+        kc = getattr(self.state, "kline_cache", None)
+        if kc is None:
+            return
+        try:
+            want = int(self.cfg.get("market.hot_days") or 0)
+        except (TypeError, ValueError):
+            return
+        if want > 0 and want != getattr(kc, "hot_days", None):
+            log.info("hot_days 热更新：%s → %s", getattr(kc, "hot_days", None), want)
+            kc.hot_days = want
 
     async def _loop(self):
         while True:
@@ -117,10 +182,15 @@ class MarketSync:
             await asyncio.sleep(max(10.0, interval))
 
     async def _tick(self):
+        self._apply_hot_days()
         await self._rollover()
         sh = _sh_now()
         today = sh.strftime("%Y-%m-%d")
         now_hm = sh.strftime("%H:%M")
+        # 到点判据 = 开关开 + 今天没跑过 + 触发时刻**已过**。
+        # 「已过」这一个条件同时覆盖两种情形：① 到点触发；② **启动时已经过了 16:00**
+        # —— 后者正是需求里的「超过 16 点未同步，启动之后继续检查同步」。
+        # 刻意不为补跑单开分支：两套判据迟早漂移，一套天然包含它更稳。
         hot_due = self.enabled and self._last_run_date != today and now_hm >= self.sync_time
         eod_due = self.eod_enabled and self._eod_last_run_date != today and now_hm >= self.eod_time
         if not hot_due and not eod_due:
@@ -134,6 +204,9 @@ class MarketSync:
             pass
         if hot_due:
             self._last_run_date = today
+            if now_hm > self.sync_time:
+                log.info("行情缓存同步补跑：触发时刻 %s 已过（当前 %s），立即刷新热数据",
+                         self.sync_time, now_hm)
             await self._refresh_hot()
         if eod_due:
             await self._schedule_eod(today, now_hm)
@@ -167,25 +240,36 @@ class MarketSync:
         log.info("EOD sync scheduled: %s", self._eod_job_id)
 
     async def _refresh_hot(self):
+        """刷新**热窗口**内的日线序列（冷仓历史一概不碰）。
+
+        两条与「冷热分层」配套的关键点：
+
+        1. **清单取热表**（``kc.hot_series()``）而不是 ``all_series()``：
+           冷仓里的老标的不会被每日重新下载 —— 这正是「只更新热数据」。
+        2. **取数根数按热窗口算**（不再是固定 250 根 ≈ 1 年）：
+           固定 250 根时，每次刷新都会把窗口外的历史重新拉一遍并写进冷仓，
+           既浪费带宽，又把冷仓天天重写一遍。现在只取覆盖热窗口 + 余量的根数。
+        """
         kc = getattr(self.state, "kline_cache", None)
         if kc is None:
             return
         try:
-            series = await asyncio.to_thread(kc.all_series)
+            series = await asyncio.to_thread(kc.hot_series)
         except Exception as exc:  # noqa: BLE001
             log.warning("market sync list series failed: %s", exc)
             return
         codes = sorted({s["code"] for s in series if s.get("period") in ("1d", "1w", "1mo")})
         if not codes:
-            log.info("market sync: no cached series to refresh")
+            log.info("market sync: no cached hot series to refresh")
             return
         from tools import fetch_kline_cached
 
+        count = hot_fetch_count(getattr(kc, "hot_days", 92))
         results = {"ok": 0, "fail": 0}
 
         async def _one(code: str):
             try:
-                await fetch_kline_cached(code, "1d", 250, force=True)
+                await fetch_kline_cached(code, "1d", count, force=True)
                 results["ok"] += 1
             except Exception as exc:  # noqa: BLE001
                 results["fail"] += 1
@@ -198,6 +282,9 @@ class MarketSync:
         # 停机前记录到日志（含 last_run 供前端状态展示）
         self.state._market_sync_last = {"date": to_iso(_sh_now()),
                                         "codes": len(codes), "ok": results["ok"],
-                                        "fail": results["fail"]}
-        log.info("market sync refresh: codes=%s ok=%s fail=%s",
-                 len(codes), results["ok"], results["fail"])
+                                        "fail": results["fail"],
+                                        "hot_days": getattr(kc, "hot_days", None),
+                                        "count_per_code": count}
+        log.info("market sync refresh: codes=%s ok=%s fail=%s (hot_days=%s count=%s)",
+                 len(codes), results["ok"], results["fail"],
+                 getattr(kc, "hot_days", None), count)

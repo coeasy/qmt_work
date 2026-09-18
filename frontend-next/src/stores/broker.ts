@@ -37,11 +37,14 @@ interface BrokerState {
    * 连接一旦建立就会被后端持久化，之后每次启动都会自动连接
    * （bootstrap/phase_broker.py 会 load_persisted() 并启动所有 active 连接），
    * 所以「自动连接」只需用户确认这一次。
+   *
+   * ★ 幂等：后端按「券商 + 客户端路径 + 资金账号」复用既有连接（返回 `reused`）。
+   *   连点同一个候选不会再堆出重复条目，调用方应据 `reused` 如实提示。
    */
   connectCandidate: (
     candidate: AutoDetectCandidate,
     accountId?: string,
-  ) => Promise<{ ok: boolean; reason?: string }>;
+  ) => Promise<{ ok: boolean; reason?: string; reused?: boolean }>;
   connect: (connId: string) => Promise<{ ok: boolean; reason?: string }>;
   disconnect: (connId: string) => Promise<void>;
   setActive: (connId: string) => Promise<void>;
@@ -195,6 +198,8 @@ export const useBrokerStore = create<BrokerState>((set, get) => ({
       });
       // 活跃连接全局唯一：一键连接即把下单通道切到它，避免「连上了但没生效」
       const connId = created?.conn_id;
+      // reused=true 表示后端复用了既有连接（同客户端 + 同资金账号），没新建。
+      const reused = created?.reused === true;
       if (connId) {
         try {
           await brokerApi.setActive(connId);
@@ -203,7 +208,7 @@ export const useBrokerStore = create<BrokerState>((set, get) => ({
         }
       }
       await get().load();
-      return { ok: true };
+      return { ok: true, reused };
     } catch (e) {
       const reason = e instanceof Error ? e.message : String(e);
       set({ error: reason });

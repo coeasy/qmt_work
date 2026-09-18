@@ -3,7 +3,7 @@ import { Badge, Button, EmptyState, Panel } from "@/design/primitives";
 import { accountApi, systemApi, type HealthResponse } from "@/services/api";
 import { useBrokerStore } from "@/stores/broker";
 import { useWorkspaceStore } from "@/stores/workspace";
-import { fmtAmount, fmtPrice, toneColor } from "@/shared/format";
+import { fmtMoney, fmtPrice, toneColor } from "@/shared/format";
 import type { AccountStatus } from "@/shared/types";
 import s from "./dashboard.module.css";
 
@@ -81,17 +81,20 @@ export function Dashboard() {
           <div className={s.cardBody}>
             {acct ? (
               <>
-                <div className={s.big}>{fmtAmount(acct.assets)}</div>
+                {/* ★ 账户金额一律 fmtMoney（2 位小数）：fmtAmount 是给成交额/量做
+                    万/亿缩写的，<1 万时会 toFixed(0) 丢掉角分 —— 总资产与券商
+                    对账单永远差几元，用户会以为账算错了。 */}
+                <div className={s.big}>{fmtMoney(acct.assets)}</div>
                 <div className={s.sub} style={{ color: toneColor(posProfit) }}>
-                  持仓盈亏 {fmtAmount(posProfit)} · {acct.position_count ?? 0} 只
+                  持仓盈亏 {fmtMoney(posProfit)} · {acct.position_count ?? 0} 只
                 </div>
                 <div className={s.kvRow}>
                   <span>可用</span>
-                  <span className={s.mono}>{fmtAmount(acct.cash)}</span>
+                  <span className={s.mono}>{fmtMoney(acct.cash)}</span>
                 </div>
                 <div className={s.kvRow}>
                   <span>持仓市值</span>
-                  <span className={s.mono}>{fmtAmount(posMv)}</span>
+                  <span className={s.mono}>{fmtMoney(posMv)}</span>
                 </div>
               </>
             ) : (

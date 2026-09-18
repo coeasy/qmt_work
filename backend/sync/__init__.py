@@ -18,6 +18,27 @@ from core.clock import now_iso, today_str
 log = logging.getLogger("qmt_work.sync")
 
 
+def deal_fingerprint(d: dict) -> tuple:
+    """成交去重指纹 —— **唯一入口**，两条推送路径必须算出同一个键。
+
+    ★ 为什么必须收敛到一处：轮询路径（``get_deals``）与实时回报路径
+    （``on_stock_trade`` 回调）原先各自拼键，且**拼法不同** ——
+    一个取 ``seq or deal_id`` + ``time``，另一个取 ``seq or trade_id`` + ``trade_time``。
+    同一笔成交走两条路径会得到两个不同的键，去重集拦不住 ⇒ **成交流水重复一行**，
+    用户看到的成交量是实际的两倍。
+
+    取号优先级与命名差异都在这里一并吞掉：``seq`` 是真实回报唯一号，
+    不同 SDK/路径下也可能叫 ``trade_id`` / ``deal_id``；时间同理。
+    """
+    return (
+        str(d.get("order_id") or ""),
+        str(d.get("seq") or d.get("trade_id") or d.get("deal_id") or ""),
+        str(d.get("price")),
+        str(d.get("volume")),
+        str(d.get("time") or d.get("trade_time") or d.get("deal_time") or ""),
+    )
+
+
 class SyncEngine:
     def __init__(self, manager, db, quote_bus=None, risk=None, notifier=None,
                  webhook_out=None, runtime_config=None):
@@ -49,10 +70,18 @@ class SyncEngine:
         sub = self._client_subscriptions.setdefault(client_id, set())
         new = set(codes) - sub
         sub.update(codes)
+        # 「向券商下发订阅」只需**全系统**首次（幂等，重复下发会累积回调）
         fresh = sorted(new - self._subscribed_codes)
         if fresh:
             self._subscribe_to_qmt(fresh)
-            self._schedule_seed(fresh)
+        # ★「回填初始行情」必须按**本客户端**的新增来判定，且只补缓存里还没有的：
+        #   修复前这里复用 fresh，于是「已被别处订阅过的代码」在界面首次订阅时
+        #   **不会回填** —— 而持仓代码恰恰由启动期的 subscribe_positions 预先订阅，
+        #   盘前又没有 tick，latest_quotes 里永远没有它 ⇒ 持仓页价格恒为「--」。
+        #   （实测：订阅 513090.SH + 000001.SZ，日志只有 `seed snapshot: 1/1`。）
+        need_seed = sorted(c for c in new if c not in self.latest_quotes)
+        if need_seed:
+            self._schedule_seed(need_seed)
         if self._quote_bus:
             for c in codes:
                 self._quote_bus.add_ref(c)
@@ -396,9 +425,8 @@ class SyncEngine:
             fp[oid] = st
         seen = self._deal_seen.setdefault(acc_key, set())
         for d in deals:
-            # 成交去重键加入 seq/回报唯一 id，避免同秒同价量部成指纹碰撞丢单
-            key = (str(d.get("order_id", "")), str(d.get("seq", "") or d.get("deal_id", "")),
-                   str(d.get("price")), str(d.get("volume")), str(d.get("time", "")))
+            # 去重键走唯一入口（与实时回报路径一致），否则同一笔会被推两次
+            key = deal_fingerprint(d)
             if key not in seen:
                 seen.add(key)
                 await self._notify("deal", {"type": "deal_event", "data": d,
@@ -468,10 +496,7 @@ class SyncEngine:
     async def _on_realtime_deal(self, acc_key: str, event: dict) -> None:
         """桥接子进程实时成交回报 → 推送前端（与轮询共享成交去重键）。"""
         data = event.get("data") or {}
-        oid = str(data.get("order_id") or "")
-        key = (oid, str(data.get("seq") or data.get("trade_id") or ""),
-               str(data.get("price")), str(data.get("volume")),
-               str(data.get("trade_time") or ""))
+        key = deal_fingerprint(data)
         self._roll_fp()
         seen = self._deal_seen.setdefault(acc_key, set())
         if key in seen:

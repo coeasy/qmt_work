@@ -26,6 +26,24 @@ export function fmtAmount(v: number | null | undefined): string {
   return v.toFixed(0);
 }
 
+/**
+ * 金额（元）：大额走万/亿，**小额保留 2 位小数**。
+ *
+ * ⚠️ 与 `fmtAmount` 的区别不是洁癖，是一条真实缺陷：
+ * `fmtAmount` 对 |v| < 1万 走 `toFixed(0)`，于是
+ *   持仓市值 177.1 → "177"、浮动盈亏 -14.7 → "-15"
+ * 用户拿它对券商对账单（**-14.70**）会发现**永远差一块钱**，且无从判断是算错还是显示错。
+ * 成交额/成交量那种本来就是大数的列继续用 `fmtAmount` / `fmtVolume`；
+ * **市值、盈亏、成本这类「账户金额」一律用 `fmtMoney`**。
+ */
+export function fmtMoney(v: number | null | undefined): string {
+  if (v === null || v === undefined || Number.isNaN(v)) return "--";
+  const abs = Math.abs(v);
+  if (abs >= 1e8) return `${(v / 1e8).toFixed(2)}亿`;
+  if (abs >= 1e4) return `${(v / 1e4).toFixed(2)}万`;
+  return v.toFixed(2);
+}
+
 export function fmtVolume(v: number | null | undefined): string {
   if (v === null || v === undefined || Number.isNaN(v)) return "--";
   const abs = Math.abs(v);
@@ -91,6 +109,54 @@ export function namePair(
 ): [string, string | null] {
   const n = name?.trim();
   return n ? [n, code] : [code, null];
+}
+
+/**
+ * 订单状态 → 中文文案（**唯一入口**）。
+ *
+ * ★ 为什么必须有：此前 Trade 页直接 `{r.status}` 裸渲染英文串，用户看到
+ * `partial` / `cancelled` 这类原始词；Positions 页另写一套映射且键名对不上
+ * （`part_filled`），两边各说各话。键与后端平台标准词表严格一致
+ * （backend/xtquant_client/order_status.py）。
+ *
+ * 未知值原样返回（绝不静默显示成"已成交"之类），便于立刻发现新状态。
+ */
+export function orderStatusLabel(status: string | null | undefined): string {
+  switch (status) {
+    case "pending":
+      return "待成交";
+    case "partial":
+      return "部分成交";
+    case "filled":
+      return "已成交";
+    case "cancelled":
+      return "已撤单";
+    case "rejected":
+      return "废单";
+    case "unknown":
+      return "未知";
+    default:
+      return status?.trim() ? status : "--";
+  }
+}
+
+/** 订单状态 → Badge tone（与 orderStatusLabel 配套，避免各页重复三元表达式）。 */
+export function orderStatusTone(
+  status: string | null | undefined,
+): "success" | "danger" | "neutral" | "info" | "warning" {
+  switch (status) {
+    case "filled":
+      return "success";
+    case "rejected":
+      return "danger";
+    case "partial":
+      return "warning";
+    case "cancelled":
+    case "unknown":
+      return "neutral";
+    default:
+      return "info";
+  }
 }
 
 /** 代码规范化：600519 → 600519.SH */

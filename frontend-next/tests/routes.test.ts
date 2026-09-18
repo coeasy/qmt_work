@@ -66,10 +66,35 @@ describe("页面注册表", () => {
     // 核心链路必须已有真实页面：行情、下单、连接、健康
     expect(done).toContain("quote");
     expect(done).toContain("quoteboard");
+    expect(done).toContain("workbench");
     expect(done).toContain("trade");
     expect(done).toContain("brokers");
     expect(done).toContain("sysstatus");
   });
+
+  // 合并展示的反面是「合并即删除」：把被合并的页面从注册表/菜单摘掉，会让多显示器
+  // 与分栏对照的用户失去入口。这里同时钉住「工作台存在」与「原页面仍在」。
+  const WORKBENCHES = [
+    {
+      page: "workbench",
+      group: "market",
+      merged: ["quoteboard", "quote", "minutes", "orderbook", "deal_feed"],
+    },
+    { page: "screen_workbench", group: "research", merged: ["screen", "formula"] },
+  ];
+
+  it.each(WORKBENCHES)(
+    "$page 已注册且为 $group 域首个入口，被合并的页面仍可独立打开",
+    ({ page, group, merged }) => {
+      expect(PAGES[page]?.status).toBe("done");
+      const g = MENU.find((x) => x.key === group);
+      expect(g?.items[0]).toBe(page);
+      for (const k of merged) {
+        expect(PAGES[k], `${k} 不应被移除`).toBeTruthy();
+        expect(g?.items, `${k} 不应从菜单摘掉`).toContain(k);
+      }
+    },
+  );
 
   it("方案 §5 核心流程对应页面均已实现（不再是占位）", () => {
     // 这些页面各自承载一条端到端流程的验证点：
@@ -108,14 +133,18 @@ describe("页面注册表", () => {
     expect(notDone).toEqual([]);
   });
 
-  it("仅剩 1 个占位页（分仓再平衡）", () => {
-    // 系统日志已由占位实现为真实 WS 事件流页（旧 frontend 退役移植），不再占位。
-    // 目标持仓（target_portfolio）已按 backend /target-portfolio/* 契约实现为真实页面（210 行）。
+  it("已无占位页（分仓再平衡已实现为真实页面）", () => {
+    // 逐个消灭占位页的进度：
+    //   系统日志 → 真实 WS 事件流页（旧 frontend 退役移植）；
+    //   目标持仓 → 按 backend /target-portfolio/* 契约实现；
+    //   分仓再平衡 → 按 backend POST /rebalance 契约实现（含涨跌停跳过与拆单展示）。
+    // ★ 这条钉的是「不再新增占位页」：后端已就绪的端点不该长期停在 planned，
+    //   那等于这项能力对使用者不存在。
     const planned = allPages()
       .filter((p) => p.status === "planned")
       .map((p) => p.key)
       .sort();
-    expect(planned).toEqual(["rebalance"]);
+    expect(planned).toEqual([]);
   });
 
   it("回测页仍未开放，但因子研究已按退役决策移植回来", () => {

@@ -9,6 +9,13 @@
 - 日线（1d/1w/1mon）：当天已抓过即视为新鲜（`ttl_daily`，默认 6h）；
 - 分钟线及更细粒度：短 TTL（`ttl_intraday`，默认 60s）。
 历史 bar 本身不可变，只有"最后一根"会变化，因此 TTL 只用于决定是否回源刷新。
+
+冷热分层（2026-09-17）：
+- **热表** ``kline_cache``（主库）只留最近 ``hot_days`` 天（默认 92 天 ≈ 3 个月）；
+- **冷仓** ``kline_archive`` 放在**独立 SQLite 文件**（``datasource/cold_store.py``），
+  早于热窗口的行搬过去，此后每日定时同步**只刷新热窗口内的数据**；
+- 读路径 ``get()`` / ``aget()`` 对冷热**透明**：先取热表，不足部分从冷仓补足，
+  消费方（图表/回测/选股）无需知道数据分了几层。
 """
 from __future__ import annotations
 
@@ -18,6 +25,9 @@ import logging
 import os
 import re
 import time
+from datetime import timedelta
+
+from core.clock import local_now, to_iso
 
 log = logging.getLogger("qmt_work.kline_cache")
 
@@ -97,10 +107,18 @@ def _load_arrow():
 
 
 class KlineCache:
-    def __init__(self, db, ttl_daily: float = 6 * 3600.0, ttl_intraday: float = 60.0):
+    def __init__(self, db, ttl_daily: float = 6 * 3600.0, ttl_intraday: float = 60.0,
+                 hot_days: int = 92, cold=None):
+        """``cold`` 是冷仓（:class:`datasource.cold_store.ColdStore`）或 ``None``。
+
+        ``cold=None`` 时归档访问**回退主库**的同名表 —— 老库、单元测试、以及
+        「冷仓文件还没建起来」的启动早期都走这条路，行为与改造前完全一致。
+        """
         self.db = db
         self.ttl_daily = ttl_daily
         self.ttl_intraday = ttl_intraday
+        self.hot_days = max(1, int(hot_days))
+        self._cold = cold
         self.hits = 0
         self.misses = 0
         self.stale_serves = 0
@@ -109,30 +127,52 @@ class KlineCache:
     def ttl_for(self, period: str) -> float:
         return self.ttl_daily if str(period).lower() in _DAILY_PERIODS else self.ttl_intraday
 
-    # ---------------- 热/归档路由（核心架构：热表=今年，归档表=今年以前） ----------------
+    # ---------------- 热/归档路由（核心架构：热表=最近 hot_days 天，冷仓=更早） ----------------
     _HOT = "kline_cache"
     _ARCHIVE = "kline_archive"
 
-    @staticmethod
-    def _year_start() -> str:
-        """今年 1 月 1 日字符串（作为动态分区界）。"""
-        return f"{time.localtime().tm_year}-01-01"
+    @property
+    def _arch(self):
+        """归档表的宿主：冷仓可用时是冷仓，否则回退主库（老库/测试环境）。
+
+        所有归档读写都必须经这里 —— 直接写 ``self.db`` 会把冷数据又写回主库，
+        热窗口就白拆了。
+        """
+        return self._cold if self._cold is not None else self.db
+
+    @property
+    def cold_enabled(self) -> bool:
+        return self._cold is not None
+
+    @property
+    def cold_path(self) -> str:
+        return str(getattr(self._cold, "path", "") or "")
+
+    def hot_cutoff(self) -> str:
+        """热窗口起点（**含**）：``今天 - hot_days`` 的 ``"YYYY-MM-DD"``。
+
+        早于该日期的 K 线判为**冷数据**（搬进冷仓，不再被每日同步刷新）。
+        边界只在这里算一次，是全模块（以及冷热判定）的唯一真源。
+        """
+        return to_iso(local_now() - timedelta(days=self.hot_days))[:10]
 
     @staticmethod
-    def _year_of(dt) -> int:
-        """稳健提取 dt 的年份：兼容 YYYY-MM-DD[ 时间] 与 YYYYMMDD 两种格式。
-        取前 4 位数字，解析失败按 0 处理（避免路由错表）。"""
-        s = str(dt or "")
-        digits = "".join(ch for ch in s if ch.isdigit())[:4]
-        try:
-            return int(digits)
-        except ValueError:
-            return 0
+    def _dt_date(dt) -> str:
+        """把 dt 规范成 ``"YYYY-MM-DD"`` 以便与热窗口边界做**字典序**比较。
 
-    @staticmethod
-    def _is_hot(dt: str) -> bool:
-        """dt 是否属于今年（写入热表）：仅按年份比较，不依赖日期字符串格式。"""
-        return KlineCache._year_of(dt) >= time.localtime().tm_year
+        兼容两种落库格式（历史遗留，见 V9 迁移 v14）：``YYYY-MM-DD[ 时间]`` 与
+        ``YYYYMMDD``。取前 8 位数字重组；**不足 8 位数字 → 返回 ""**，此时
+        ``"" < cutoff`` 恒成立 ⇒ 判为冷。这是刻意的：格式坏掉的行绝不该留在热表里
+        被每天反复刷新（那既刷不出正确数据，又白占热表）。
+        """
+        digits = "".join(ch for ch in str(dt or "") if ch.isdigit())[:8]
+        if len(digits) < 8:
+            return ""
+        return f"{digits[:4]}-{digits[4:6]}-{digits[6:8]}"
+
+    def _is_hot(self, dt: str) -> bool:
+        """dt 是否落在热窗口内（写入热表）。按**日期**比较，不依赖年份。"""
+        return self._dt_date(dt) >= self.hot_cutoff()
 
     def _where(self, table: str, code: str, period: str, adjust: str = "") -> str:
         # M6：复权维度入唯一键后，读路径必须按 adjust 过滤，
@@ -141,7 +181,9 @@ class KlineCache:
                 f"WHERE code=? AND period=? AND adjust=? ORDER BY dt DESC")
 
     def get(self, code: str, period: str, count: int, adjust: str = "") -> list[dict]:
-        """取最近 count 根（今年热表优先 + 历史归档补足），按时间升序返回。
+        """取最近 count 根（热表优先 + 冷仓历史补足），按时间升序返回。
+
+        对调用方**透明**：冷热分了几层是实现细节，消费方只看到一条连续序列。
 
         adjust: ''=券商原始价 / qfq / hfq —— 只返回该复权维度的数据。
         """
@@ -154,16 +196,16 @@ class KlineCache:
         need = count - len(hot)
         arch: list[dict] = []
         if need > 0:
-            arch = self.db.query(self._where(self._ARCHIVE, code, period, adj) + " LIMIT ?",
-                                 (code, period, adj, need))
+            arch = self._arch.query(self._where(self._ARCHIVE, code, period, adj) + " LIMIT ?",
+                                    (code, period, adj, need))
         rows = _rows_from(arch + hot)
         rows.sort(key=lambda x: str(x["time"] or ""))
         return rows
 
     def put(self, code: str, period: str, bars: list[dict], adjust: str = "") -> int:
-        """写入/刷新 K 线（按年份路由热/归档表，单事务批量 upsert）。
+        """写入/刷新 K 线（按热窗口路由热表/冷仓，单事务批量 upsert）。
 
-        去年以前的历史落归档表，今年数据落热表（由同步任务定时更新）。
+        早于热窗口的历史落冷仓，热窗口内的数据落热表（由每日同步任务刷新）。
         返回写入热表的条数。
         """
         if self.db is None or not bars:
@@ -190,7 +232,7 @@ class KlineCache:
                 f"INSERT OR REPLACE INTO {self._HOT} ({cols}) VALUES ({','.join('?' * 11)})",
                 hot_rows)
         if arch_rows:
-            self.db.executemany_in_txn(
+            self._arch.executemany_in_txn(
                 f"INSERT OR REPLACE INTO {self._ARCHIVE} ({cols}) VALUES ({','.join('?' * 11)})",
                 arch_rows)
         return len(hot_rows)
@@ -202,7 +244,7 @@ class KlineCache:
         row = self.db.query_one(
             f"SELECT MAX(fetched_at) AS f FROM {self._HOT} "
             "WHERE code=? AND period=? AND adjust=?", (code, period, adj))
-        a = self.db.query_one(
+        a = self._arch.query_one(
             f"SELECT MAX(fetched_at) AS f FROM {self._ARCHIVE} "
             "WHERE code=? AND period=? AND adjust=?", (code, period, adj))
         return max(float((row or {}).get("f") or 0.0),
@@ -214,7 +256,7 @@ class KlineCache:
         row = self.db.query_one(
             f"SELECT COUNT(1) AS c FROM {self._HOT} WHERE code=? AND period=?",
             (code, period))
-        a = self.db.query_one(
+        a = self._arch.query_one(
             f"SELECT COUNT(1) AS c FROM {self._ARCHIVE} WHERE code=? AND period=?",
             (code, period))
         return int((row or {}).get("c") or 0) + int((a or {}).get("c") or 0)
@@ -237,8 +279,9 @@ class KlineCache:
         need = count - len(hot)
         arch: list[dict] = []
         if need > 0:
-            arch = await self.db.aquery(self._where(self._ARCHIVE, code, period, adj) + " LIMIT ?",
-                                        (code, period, adj, need))
+            arch = await self._arch.aquery(
+                self._where(self._ARCHIVE, code, period, adj) + " LIMIT ?",
+                (code, period, adj, need))
         rows = _rows_from(arch + hot)
         rows.sort(key=lambda x: str(x["time"] or ""))
         return rows
@@ -268,7 +311,7 @@ class KlineCache:
                 f"INSERT OR REPLACE INTO {self._HOT} ({cols}) VALUES ({','.join('?' * 11)})",
                 hot_rows)
         if arch_rows:
-            await self.db.aexecutemany_in_txn(
+            await self._arch.aexecutemany_in_txn(
                 f"INSERT OR REPLACE INTO {self._ARCHIVE} ({cols}) VALUES ({','.join('?' * 11)})",
                 arch_rows)
         return len(hot_rows)
@@ -280,7 +323,7 @@ class KlineCache:
         row = await self.db.aquery_one(
             f"SELECT MAX(fetched_at) AS f FROM {self._HOT} WHERE code=? AND period=? AND adjust=?",
             (code, period, adj))
-        a = await self.db.aquery_one(
+        a = await self._arch.aquery_one(
             f"SELECT MAX(fetched_at) AS f FROM {self._ARCHIVE} WHERE code=? AND period=? AND adjust=?",
             (code, period, adj))
         return max(float((row or {}).get("f") or 0.0), float((a or {}).get("f") or 0.0))
@@ -292,7 +335,7 @@ class KlineCache:
         row = await self.db.aquery_one(
             f"SELECT COUNT(1) AS c FROM {self._HOT} WHERE code=? AND period=? AND adjust=?",
             (code, period, adj))
-        a = await self.db.aquery_one(
+        a = await self._arch.aquery_one(
             f"SELECT COUNT(1) AS c FROM {self._ARCHIVE} WHERE code=? AND period=? AND adjust=?",
             (code, period, adj))
         return int((row or {}).get("c") or 0) + int((a or {}).get("c") or 0)
@@ -364,7 +407,7 @@ class KlineCache:
                 f"SELECT dt, open, high, low, close, volume, amount, adjust "
                 f"FROM {self._HOT} WHERE code=? AND period=? ORDER BY dt DESC",
                 (code, period))
-            rows += self.db.query(
+            rows += self._arch.query(
                 f"SELECT dt, open, high, low, close, volume, amount, adjust "
                 f"FROM {self._ARCHIVE} WHERE code=? AND period=? ORDER BY dt DESC",
                 (code, period))
@@ -382,29 +425,49 @@ class KlineCache:
             raw = dedup
         return raw
 
+    _SERIES_SQL = ("SELECT code, period, COUNT(1) AS rows, MAX(fetched_at) AS last_fetch "
+                   "FROM {table} GROUP BY code, period")
+
+    @staticmethod
+    def _merge_series(*groups: list[dict]) -> list[dict]:
+        """把多张表的 (code, period) 计数合并成一份清单（行数相加、时间取最大）。"""
+        merged: dict = {}
+        for rows in groups:
+            for r in rows or []:
+                k = (r["code"], r["period"])
+                m = merged.setdefault(
+                    k, {"code": r["code"], "period": r["period"],
+                        "rows": 0, "last_fetch": r.get("last_fetch")})
+                m["rows"] += int(r.get("rows") or 0)
+                if r.get("last_fetch") and m["last_fetch"]:
+                    m["last_fetch"] = max(m["last_fetch"], r["last_fetch"])
+                elif r.get("last_fetch"):
+                    m["last_fetch"] = r["last_fetch"]
+        return sorted(merged.values(), key=lambda x: (x["code"], x["period"]))
+
     def all_series(self) -> list[dict]:
-        """列出缓存中全部 code×period 序列及行数/最近抓取时间（含热表与归档）。"""
+        """列出缓存中全部 code×period 序列及行数/最近抓取时间（**热表 + 冷仓**）。
+
+        冷热分了两层，但序列清单是**一份** —— 消费方（导出、状态页）看到的必须是
+        「这个 code 一共有多少根」，而不是「热表里有多少根」。
+        """
         if self.db is None:
             return []
-        rows = self.db.query(
-            f"SELECT code, period, COUNT(1) AS rows, MAX(fetched_at) AS last_fetch "
-            f"FROM {self._HOT} GROUP BY code, period "
-            f"UNION ALL SELECT code, period, COUNT(1) AS rows, MAX(fetched_at) AS last_fetch "
-            f"FROM {self._ARCHIVE} GROUP BY code, period "
-            f"ORDER BY code, period")
-        merged: dict = {}
-        for r in rows:
-            k = (r["code"], r["period"])
-            if k not in merged:
-                merged[k] = {"code": r["code"], "period": r["period"],
-                             "rows": 0, "last_fetch": r["last_fetch"]}
-            m = merged[k]
-            m["rows"] += int(r.get("rows") or 0)
-            if r.get("last_fetch") and m["last_fetch"]:
-                m["last_fetch"] = max(m["last_fetch"], r["last_fetch"])
-            elif r.get("last_fetch"):
-                m["last_fetch"] = r["last_fetch"]
-        return list(merged.values())
+        return self._merge_series(
+            self.db.query(self._SERIES_SQL.format(table=self._HOT)),
+            self._arch.query(self._SERIES_SQL.format(table=self._ARCHIVE)))
+
+    def hot_series(self) -> list[dict]:
+        """只列**热表**中的序列（每日定时刷新用）。
+
+        「只更新热数据」的落地：定时同步按本清单回源，冷仓里的历史**完全不碰** ——
+        既不重新下载（省流量/省时间），也不重写（省磁盘写放大）。
+        用户真正翻到某个老标的时，``get_or_fetch`` 会按需回源补热窗口。
+        """
+        if self.db is None:
+            return []
+        return self._merge_series(
+            self.db.query(self._SERIES_SQL.format(table=self._HOT)))
 
     def export_to(self, code: str, period: str, dest_dir: str,
                   fmt: str = "csv", count: int = 0) -> dict:
@@ -478,29 +541,40 @@ class KlineCache:
                 bars.append(b)
         return bars
 
-    # ---------------- 年度归档维护 ----------------
+    # ---------------- 热窗口滚动维护 ----------------
     def archive_rollover(self) -> dict:
-        """把热表中早于今年的行搬入归档（跨年维护，幂等）。
+        """把热表中**早于热窗口**的行搬入冷仓（每日维护，幂等）。
 
-        年份判断按 Python 侧稳健提取的年份，避免 YYYYMMDD / YYYY-MM-DD 混排
-        导致的字符串比较错位；用 id 精确删除，不误删今年数据。
-        返回 {"moved": N, "deleted": N}。
+        判定统一走 :meth:`_is_hot`（→ :meth:`hot_cutoff` → ``bars_hot_days``），
+        不另写一套比较 —— 边界只允许有一份实现，否则「写入路由」与「滚动搬移」
+        迟早用两个不同的边界，出现「刚搬走又被写回热表」的抖动。
+
+        SQL 侧先用 ``dt < cutoff`` 粗筛（把要搬的行降到少量），Python 侧再用
+        ``_is_hot`` 精确复核：粗筛是为了避免把整个热表拉进内存（历史实现拉的是
+        一整年，现在是 3 个月，但仍然没必要全量物化），复核是为了兜住
+        ``YYYYMMDD`` / ``YYYY-MM-DD`` 混排等格式差异。
+
+        搬移目标 = :attr:`_arch`（冷仓可用即冷仓）。用 ``id`` 精确删除热行，
+        不会误删窗口内的数据。返回 ``{"moved": N, "deleted": N}``。
         """
         if self.db is None:
             return {"moved": 0, "deleted": 0}
-        now_year = time.localtime().tm_year
+        cutoff = self.hot_cutoff()
         rows = self.db.query(
             f"SELECT id, code, period, dt, open, high, low, close, volume, amount, "
-            f"fetched_at, adjust FROM {self._HOT}")
-        to_move = [r for r in rows if self._year_of(r["dt"]) < now_year]
+            f"fetched_at, adjust FROM {self._HOT} WHERE dt < ? OR dt < ?",
+            (cutoff, cutoff.replace("-", "")))
+        to_move = [r for r in rows if not self._is_hot(r["dt"])]
         if not to_move:
             return {"moved": 0, "deleted": 0}
         cols = ("code,period,dt," + ",".join(_FIELDS) + ",fetched_at,adjust")
-        self.db.executemany_in_txn(
+        # ① 先写冷仓（幂等：UNIQUE 冲突时 REPLACE）
+        self._arch.executemany_in_txn(
             f"INSERT OR REPLACE INTO {self._ARCHIVE} ({cols}) VALUES ({','.join('?' * 11)})",
             [(r["code"], r["period"], r["dt"], r["open"], r["high"], r["low"],
               r["close"], r["volume"], r["amount"], r["fetched_at"], r["adjust"])
              for r in to_move])
+        # ② 再删热表（冷仓写成功才删 —— 中途失败只会留下重复行，绝不丢数据）
         self.db.executemany_in_txn(
             f"DELETE FROM {self._HOT} WHERE id=?",
             [(r["id"],) for r in to_move])
@@ -518,7 +592,7 @@ class KlineCache:
             total = int((row or {}).get("c") or 0)
             symbols = int((row or {}).get("s") or 0)
             hot = total
-            a = self.db.query_one(
+            a = self._arch.query_one(
                 f"SELECT COUNT(1) AS c, COUNT(DISTINCT code||'|'||period) AS s "
                 f"FROM {self._ARCHIVE}")
             archive_rows = int((a or {}).get("c") or 0)
@@ -526,24 +600,28 @@ class KlineCache:
             total += archive_rows
         served = self.hits + self.misses + self.stale_serves
         return {"rows": total, "hot_rows": hot, "archive_rows": archive_rows,
-                "series": symbols, "current_year": self._year_start(),
+                "series": symbols,
+                # 冷热分层口径（前端/运维页据此展示「热窗口」与冷仓位置）
+                "hot_days": self.hot_days, "hot_cutoff": self.hot_cutoff(),
+                "cold_enabled": self.cold_enabled, "cold_path": self.cold_path,
                 "hits": self.hits, "misses": self.misses,
                 "stale_serves": self.stale_serves,
                 "hit_rate": round(self.hits / served, 4) if served else None,
                 "ttl_daily": self.ttl_daily, "ttl_intraday": self.ttl_intraday}
 
     def clear(self, code: str = "", period: str = "") -> int:
-        """清空整表（或按 code/period）。热表与归档一并清理。"""
+        """清空整表（或按 code/period）。热表与冷仓一并清理。"""
         if self.db is None:
             return 0
         n = 0
-        for table in (self._HOT, self._ARCHIVE):
+        # 热表在主库、归档在冷仓，各自用自己的宿主执行 DELETE。
+        for host, table in ((self.db, self._HOT), (self._arch, self._ARCHIVE)):
             if code and period:
-                cur = self.db.execute(f"DELETE FROM {table} WHERE code=? AND period=?",
-                                      (code, period))
+                cur = host.execute(f"DELETE FROM {table} WHERE code=? AND period=?",
+                                   (code, period))
             elif code:
-                cur = self.db.execute(f"DELETE FROM {table} WHERE code=?", (code,))
+                cur = host.execute(f"DELETE FROM {table} WHERE code=?", (code,))
             else:
-                cur = self.db.execute(f"DELETE FROM {table}")
+                cur = host.execute(f"DELETE FROM {table}")
             n += int(cur.rowcount or 0)
         return n

@@ -378,6 +378,23 @@ if [[ "$VERIFY" == true ]]; then
     else
         warn "未找到 scripts/client_start_test.py，跳过自检"
     fi
+
+    # ---- Step 4.5: MCP 协议端到端（打包态） ----
+    #
+    # 为什么要单列这一步：REST 自省能列出 116 个工具，**不等于 Agent 真能连上**。
+    # 实测撞到过 ``POST /mcp`` 405（文档三处都写 ``/mcp``，照文档配的客户端全挂），
+    # 而自省走的是另一条代码路径，照样返回 116 —— 只有按协议握手才暴露。
+    if [[ -f "$ROOT/scripts/verify_packaged_mcp_boot.sh" && -f "$BACKEND/dist/qmt_work/qmt_work.exe" ]]; then
+        log "Step 4.5: MCP 协议端到端（启动打包态后端 → 真握手 → tools/call）"
+        if bash "$ROOT/scripts/verify_packaged_mcp_boot.sh" 21189; then
+            log "MCP 端到端通过：Agent 可接入"
+        else
+            warn "MCP 端到端未通过（见上方输出）。产物已生成，但 Agent 可能无法接入，请人工复核。"
+            VERIFY_RC=1
+        fi
+    else
+        info "未找到 MCP 冒烟脚本或后端 EXE，跳过 MCP 端到端"
+    fi
 else
     info "跳过自检（--no-verify）"
 fi

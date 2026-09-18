@@ -18,6 +18,11 @@ async def reconcile_now(body: dict | None = None, ctx: AppContext = Depends(get_
         res = await ctx.reconciler.reconcile(conn_id)
     except Exception as exc:  # noqa: BLE001
         return err(500, f"对账失败：{exc}")
+    # ★ 对账器内部已判定的「查不了」（如 WAL 读取失败）必须**如实报错**，
+    # 不能用 HTTP 200 + code=0 把它包装成一次成功的对账 —— 那样调用方
+    # 只会看到 checked=0，以为「一切正常」。
+    if isinstance(res, dict) and res.get("ok") is False:
+        return err(503, res.get("error") or res.get("note") or "对账未能执行", res)
     return ok(res)
 
 @router.get("/reconcile/last", tags=["reconcile"], summary="最近一次对账结果")

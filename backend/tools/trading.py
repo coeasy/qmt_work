@@ -31,6 +31,7 @@ def register_trading_tools(mcp, risk):
         remark: str = "",
         broker_id: str = "",
         idempotency_key: str = "",
+        auto_confirm: bool = False,
     ) -> dict:
         """下单（限价/市价）。direction: buy/sell。下单前过统一风控。
 
@@ -39,6 +40,13 @@ def register_trading_tools(mcp, risk):
         与 REST/引擎单语义完全一致，不再拥有独立执行路径。
 
         idempotency_key：可选幂等键，窗口内同键直接返回首次结果（防重复提交/网络重试双单）。
+
+        auto_confirm：是否跳过「大额 TOTP 二次确认挂起」。
+        ★ 默认 **False**。此前这里写死 True —— MCP 是面向外部 Agent 的**开放入口**，
+        写死 True 等于让任何拿到 admin key 的调用方都能绕过二次确认直接下大额单，
+        仅靠 instructions 文本约束（文本不是权限）。默认关闭后，超额单会返回
+        ``pending_confirmation`` + ``confirm_token``，由调用方显式确认后再成交。
+        确需无人值守的自动化场景，请**显式**传 auto_confirm=True 并自行承担后果。
         """
         if state.signal_router is None:
             return {"ok": False, "reason": "统一信号入口未初始化"}
@@ -46,7 +54,8 @@ def register_trading_tools(mcp, risk):
             code, direction, int(volume), float(price or 0), price_type,
             source=str(strategy_name or "mcp"),
             broker_id=str(broker_id or ""), remark=str(remark or ""),
-            idempotency_key=str(idempotency_key or ""), auto_confirm=True)
+            idempotency_key=str(idempotency_key or ""),
+            auto_confirm=bool(auto_confirm))
 
     @mcp.tool()
     async def cancel_order(order_id: str, broker_id: str = "") -> dict:

@@ -110,6 +110,31 @@ class _FakeBrokerManager:
     def all_connections(self):
         return self._conns
 
+    def find_by_identity(self, broker_id, client_path, account_id):
+        """镜像真实 ``BrokerManager.find_by_identity`` 的判据。
+
+        路由 ``POST /brokers`` 的去重分支依赖本方法。替身缺它会让「新增的幂等
+        逻辑」与「替身缺口」混为一谈 —— AttributeError 看起来像产品缺陷，
+        实际是测试替身没跟上契约。归一化**复用真实实现**（``_norm_path``），
+        不在这里另写一套，否则测的是替身而不是产品。
+        """
+        from xtquant_client.manager import _norm_path
+        want = (broker_id or "", _norm_path(client_path), str(account_id or ""))
+        for conn in self._conns:
+            c = conn.cfg
+            if (c.broker_id or "", _norm_path(c.client_path),
+                    str(c.account_id or "")) == want:
+                return conn
+        return None
+
+    def activate(self, conn_id):
+        """镜像真实 ``activate``：把既有连接重新点亮并拉起，**不新建**。"""
+        for conn in self._conns:
+            if conn.cfg.conn_id == conn_id:
+                conn.cfg.active = True
+                return conn
+        raise KeyError(f"未知连接：{conn_id}")
+
     def status_list(self):
         out = []
         for conn in self._conns:

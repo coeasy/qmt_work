@@ -202,6 +202,32 @@ def tail(path: Path, lines: int = 12) -> str:
         return "(无内容)"
 
 
+def backend_file_log_tail(dirs: list[Path], lines: int = 25) -> str:
+    """后端**文件日志**（`<数据目录>/logs/qmt_work.log`）的尾部 —— 启动失败时的权威诊断。
+
+    ⚠️ 为什么不能只看 `startup-error.log`：它里面的 `backend tail` 来自 Electron 的
+    `BACKEND_TAIL` 环形缓冲，有两个固有缺陷 ——
+      ① 只留最后 40 行，且**在 `exit` 事件里读**（Node 的 `exit` 早于 stdio 排空），
+         最后几行有概率丢失 —— 而最后几行恰恰是根因所在；
+      ② 经 `[err] ` 前缀拼装后按系统 ANSI 代码页解读，中文会变成「锟斤拷」。
+    文件日志则是后端自己以 UTF-8 写的、完整且带毫秒时间戳的。实测案例：一次启动失败
+    在 `startup-error.log` 里只留下「监听端口」5 行，而文件日志直接给出
+    `bridge 握手失败: _ping 调用超时（30.0s）`；另一次「无 traceback + 退出码 1」
+    也是靠它才判定为**被外部强制终止**（taskkill 的退出码就是 1）而非 Python 启动失败。
+    """
+    best: Path | None = None
+    for d in dirs:
+        try:
+            cand = d / "logs" / "qmt_work.log"
+            if cand.exists() and (best is None or cand.stat().st_mtime > best.stat().st_mtime):
+                best = cand
+        except OSError:
+            continue
+    if best is None:
+        return "(未找到后端文件日志)"
+    return f"{best}\n{tail(best, lines)}"
+
+
 # --------------------------------------------------------------- Windows 窗口探测
 
 _USER32 = None
@@ -622,6 +648,9 @@ def main() -> int:
             diag.append("startup-error.log: 本次运行未产生（可能未进入主进程启动阶段）")
         diag.append(f"进程退出码: {proc.poll()}")
         diag.append("日志尾部:\n" + tail(log_path, 20))
+        # 权威诊断：后端文件日志（UTF-8、完整、带毫秒时间戳），见 backend_file_log_tail 注释
+        diag.append("后端文件日志尾部:\n"
+                    + backend_file_log_tail([profile] + ([run_dir] if run_dir else [])))
         record("ready", "启动失败诊断信息", False, "\n".join(diag))
         teardown(proc, port, image_name)
         return _finish(report_path, started, target)

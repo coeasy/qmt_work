@@ -1,0 +1,285 @@
+/* 行情面板通用样式（报价牌 / K 线 / 分时 / 盘口 / 逐笔 / 成交流）。
+   这些面板被「行情工作台」与各自独立页面共用，故样式放在面板层而不是页面层 ——
+   页面层各建 module 会导致同一个面板在两处长得不一样。
+   令牌口径见 design/tokens.css（--bg-N / --border / --text* / --up / --down）。 */
+
+.fill {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+}
+
+/* 面板顶部的一行小信息（交易日 / 昨收 / 刷新按钮等） */
+.miniBar {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  padding: 2px 8px 6px;
+  font-size: var(--font-xs);
+  flex: 0 0 auto;
+}
+
+.chartBody {
+  flex: 1 1 auto;
+  min-height: 180px;
+  position: relative;
+}
+
+/* ---- 五档盘口 ---- */
+
+.book {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-family: var(--font-mono);
+}
+
+.bookRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 4px;
+  border-radius: var(--radius-sm);
+  position: relative;
+  overflow: hidden;
+}
+
+/* 量能条：以该档位委托量占最大量的比例做背景填充 */
+.bookBar {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  background: var(--bg-hover);
+  opacity: 0.5;
+}
+
+.bookLabel {
+  position: relative;
+  width: 36px;
+  color: var(--text-dim);
+}
+
+.bookPrice {
+  position: relative;
+  flex: 1;
+  text-align: right;
+}
+
+.bookVol {
+  position: relative;
+  width: 72px;
+  text-align: right;
+  color: var(--text-dim);
+}
+
+/* ---- 关键数据 2×N ---- */
+
+.kvGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px 10px;
+  font-size: var(--font-xs);
+  font-family: var(--font-mono);
+}
+
+.kvCell {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  justify-content: space-between;
+}
+
+.kvCellKey {
+  color: var(--text-faint);
+}
+
+.kvCellVal {
+  color: var(--text);
+}
+
+/* ---- 逐笔 / 成交流表格 ---- */
+
+.tickTable {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--font-xs);
+}
+
+.tickTable thead th {
+  position: sticky;
+  top: 0;
+  background: var(--bg-2);
+  padding: 4px 8px;
+  color: var(--text-faint);
+  font-weight: 400;
+  z-index: 1;
+}
+
+.tickTable tbody td {
+  padding: 2px 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.tickTime {
+  color: var(--text-dim);
+}
+
+.tickNum {
+  text-align: right;
+  font-family: var(--font-mono);
+}
+
+.tickDir {
+  text-align: center;
+}
+
+.bigDeal {
+  color: var(--warning);
+  font-weight: 600;
+}
+
+/* ---- 工作台布局 ---- */
+
+.work {
+  display: grid;
+  grid-template-columns: minmax(240px, 300px) minmax(0, 1fr) minmax(260px, 320px);
+  gap: var(--sp-2);
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: var(--sp-2);
+}
+
+/* 窄屏（窗口被拖窄 / 笔记本小屏）：收起左侧报价牌，只留图表 + 盘口 */
+@media (max-width: 1180px) {
+  .work {
+    grid-template-columns: minmax(0, 1fr) minmax(240px, 300px);
+  }
+  .workAside {
+    display: none;
+  }
+}
+
+.workAside {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  min-height: 0;
+  min-width: 0;
+}
+
+.workMain {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  min-height: 0;
+  min-width: 0;
+}
+
+.workRight {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  min-height: 0;
+  min-width: 0;
+  overflow: auto;
+}
+
+.workHeader {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  flex: 0 0 auto;
+  padding: 0 var(--sp-2) var(--sp-1);
+}
+
+.symbolName {
+  font-size: var(--font-lg);
+  font-weight: 600;
+}
+
+.symbolCode {
+  font-family: var(--font-mono);
+  color: var(--text-dim);
+}
+
+.symbolPrice {
+  font-family: var(--font-mono);
+  font-size: var(--font-lg);
+  font-weight: 600;
+}
+
+/* 让 Panel 撑满所在网格单元（Panel 自身是 flex column，此处只补 flex 增长） */
+.grow {
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+}
+
+/* Panel 内容区改成纵向 flex —— 图表/列表要「填满剩余高度」就必须让 body 成为
+   flex 容器；否则子元素的 flex:1 在块级父元素里不生效，图表会塌成 min-height。
+   配合 Panel 的 bodyClassName 使用（panelBodyFlush 本身只有 overflow:hidden）。 */
+.bodyCol {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+/* 中列图表容器：随窗口高度伸缩 */
+.chartArea {
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+}
+
+/* 右列下半区（逐笔 / 成交流）—— 给个下限，避免窗口矮时被压成一条线 */
+.flowArea {
+  flex: 1 1 auto;
+  min-height: 140px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 头部右侧的「在独立页打开」按钮组 */
+.linkBar {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  flex-wrap: wrap;
+}
+
+/* 周期切换条（与 miniBar 同构，但贴在中列图表上方） */
+.periodBar {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: 0 0 auto;
+  padding: 0 0 var(--sp-1);
+}
+
+.periodBtn {
+  padding: 1px 8px;
+  font-size: var(--font-xs);
+  color: var(--text-dim);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.periodBtn:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.periodBtnActive {
+  background: var(--bg-active);
+  border-color: var(--border);
+  color: var(--text);
+  font-weight: 600;
+}

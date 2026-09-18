@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 
 from fastapi import FastAPI
@@ -20,6 +21,26 @@ from core.state import init_broker_manager
 from xtquant_client.manager import ConnectionConfig
 
 log = logging.getLogger("qmt_work.bootstrap.broker")
+
+
+def path_usable(client_path: str) -> bool:
+    """客户端路径是否**有可能**连上（唯一入口，界面与启动共用同一判据）。
+
+    ★ 为什么需要它：指向不存在目录的历史/测试残留连接（如
+    ``C:/no_such_qmt/userdata_mini``）永远连不上，但启动时仍会被逐个
+    ``wait_for(bridge.start(), 32s)`` —— 本机 17 条这类残留就把启动拖到 ~90s，
+    用户看到的是「软件半天打不开」，而不是「有 17 条无效连接」。
+
+    路径为空时返回 True：空路径走「adapter 自行探测」，**不能**因此判定不可用
+    （否则会把合法配置误杀）。
+
+    注：与 ``manager.status()`` 的 ``path_exists`` 不是同一个问题 —— 那个是给界面
+    显示的「路径是否存在」（空路径也算不存在），这里是「值不值得尝试连接」。
+    """
+    p = (client_path or "").strip()
+    if not p:
+        return True
+    return os.path.isdir(p)
 
 
 def _bootstrap_from_env() -> None:
@@ -69,6 +90,14 @@ async def _auto_connect_active() -> str:
         existing = state.broker_manager.find_by_identity(
             fields["broker_id"], fields["client_path"], fields["account_id"])
         if existing is not None:
+            # 复用前先修路径：持久化写法（客户端根）与探测到的数据目录
+            # （userdata_mini / userdata）常常不一致，不改会让这条连接一直连不上，
+            # 又因为它「已存在」把自动连接挡在外面。只在未连上时修（能连上就别动）。
+            if not existing.connected:
+                await asyncio.to_thread(
+                    state.broker_manager.repair_client_path,
+                    existing.cfg.conn_id, fields["client_path"],
+                    fields.get("client_mode") or "")
             conn = await asyncio.to_thread(
                 state.broker_manager.activate, existing.cfg.conn_id)
             conn.connected = conn.adapter.is_connected()
@@ -87,6 +116,48 @@ async def _auto_connect_active() -> str:
     return conn.cfg.conn_id
 
 
+async def start_persisted_connections(mgr) -> dict:
+    """拉起所有「应保持连接」的持久连接，返回 ``{started, failed, skipped}``。
+
+    ★ 单独抽成函数（而非内联在 ``setup`` 里）是为了**可测**：启动期逻辑最难验证，
+    内联就只能用真库真适配器跑，而真适配器在 CI 里根本不存在。抽出来后可用
+    桩 manager 断言「无效路径被跳过、且不占用 32s 超时预算」。
+
+    ``skipped`` = 客户端路径不存在的连接（直接跳过，不尝试连接）。
+    """
+    started = 0
+    failed = 0
+    skipped = 0
+    for conn in mgr.all_connections():
+        if not conn.cfg.active:
+            continue
+        # 路径不存在 ⇒ 不可能连上，**立刻跳过**而不是烧掉 32s 超时。
+        # 这类条目是历史/测试残留（界面已标「路径无效」），等待它们只会拖慢启动：
+        # 每条 32s，十几条就把「打开软件」变成一件要等几分钟的事。
+        if not path_usable(conn.cfg.client_path):
+            conn.connected = False
+            conn.last_error = f"客户端路径不存在：{conn.cfg.client_path}"
+            skipped += 1
+            log.warning("跳过无效连接 %s（%s）：客户端路径不存在 %s —— 请在「连接管理」中修正或删除",
+                        conn.cfg.name, conn.cfg.conn_id, conn.cfg.client_path)
+            continue
+        try:
+            await asyncio.wait_for(conn.bridge.start(), timeout=32.0)
+            conn.connected = conn.adapter.is_connected()
+            log.info("broker connection started: %s (%s) connected=%s",
+                     conn.cfg.name, conn.cfg.conn_id, conn.connected)
+            started += 1
+        except asyncio.TimeoutError:
+            log.warning("broker start timed out (32s) for %s: 券商客户端未就绪，已跳过自动连接",
+                        conn.cfg.conn_id)
+            conn.connected = False
+            failed += 1
+        except Exception as exc:  # noqa: BLE001
+            log.warning("broker start failed %s: %s", conn.cfg.conn_id, exc)
+            failed += 1
+    return {"started": started, "failed": failed, "skipped": skipped}
+
+
 async def setup(app: FastAPI) -> dict:
     init_broker_manager()  # V10 A2：core 延迟绑定，避免在 core 顶层 import xtquant_client
     # V10 A4：注入连接事件指标回调（xtquant_client 不再反向依赖 gateway.metrics）
@@ -99,24 +170,7 @@ async def setup(app: FastAPI) -> dict:
     state.broker_manager.load_persisted()
     _bootstrap_from_env()
 
-    started = 0
-    failed = 0
-    for conn in state.broker_manager.all_connections():
-        if conn.cfg.active:
-            try:
-                await asyncio.wait_for(conn.bridge.start(), timeout=32.0)
-                conn.connected = conn.adapter.is_connected()
-                log.info("broker connection started: %s (%s) connected=%s",
-                         conn.cfg.name, conn.cfg.conn_id, conn.connected)
-                started += 1
-            except asyncio.TimeoutError:
-                log.warning("broker start timed out (32s) for %s: 券商客户端未就绪，已跳过自动连接",
-                            conn.cfg.conn_id)
-                conn.connected = False
-                failed += 1
-            except Exception as exc:  # noqa: BLE001
-                log.warning("broker start failed %s: %s", conn.cfg.conn_id, exc)
-                failed += 1
+    stats = await start_persisted_connections(state.broker_manager)
 
     state.bridge = state.broker_manager.active_bridge()
     state.gateway = state.bridge.gateway if state.bridge else None
@@ -132,13 +186,18 @@ async def setup(app: FastAPI) -> dict:
     # `cfg.active` 是**持久意图**（用户显式断开才熄灭），因此这个判据既幂等
     # （复用既有连接，见 `_auto_connect_active`）又能覆盖上述两种情形。
     auto_conn_id = ""
-    has_intent = any(c.cfg.active for c in state.broker_manager.all_connections())
+    # ★ 路径不存在的连接不算「意图」：它永远连不上，若把它当意图就会**永久挡住**
+    # 自动连接 —— 用户明明开着客户端，软件却始终连不上，且界面只显示一堆无效条目。
+    has_intent = any(
+        c.cfg.active and path_usable(c.cfg.client_path)
+        for c in state.broker_manager.all_connections()
+    )
     if settings.broker_auto_connect and not has_intent:
         auto_conn_id = await _auto_connect_active()
         if auto_conn_id:
             state.bridge = state.broker_manager.active_bridge()
             state.gateway = state.bridge.gateway if state.bridge else None
-            started += 1
+            stats["started"] += 1
 
     # 交易日历感知调度
     from gateway.trading_session import default_session
@@ -153,8 +212,8 @@ async def setup(app: FastAPI) -> dict:
     log.info("trading session: %s", default_session.stats())
 
     state.started_at = time.time()
-    return {"started": started, "failed": failed, "auto_connected": auto_conn_id}
+    return {**stats, "auto_connected": auto_conn_id}
 
 
-__all__ = ["setup"]
+__all__ = ["setup", "path_usable", "start_persisted_connections"]
 

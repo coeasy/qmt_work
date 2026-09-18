@@ -29,6 +29,20 @@ log = logging.getLogger("qmt_work.runtime.jobs")
 #: kind -> 并发配额；全局并发上限
 QUOTA: Dict[str, int] = {"sync": 1, "screen": 1, "backtest": 2, "report": 2}
 GLOBAL_MAX = 4
+
+#: kind -> 互斥资源组。**同一组内同时只允许一个 job 运行。**
+#:
+#: 为什么不能只看 kind 配额：``system.eod`` 内部本就包含日线同步，若与
+#: ``system.sync_bars``（或滚动修复 / 对账）并发跑，它们会**同时写 local_bars** ——
+#: 互相覆盖、重复计数，且结果取决于谁后写完，完全不可复现。
+#: kind 不同 ≠ 不冲突，冲突的是**底层数据资源**，故按资源组互斥。
+RESOURCE_GROUP: Dict[str, str] = {
+    "system.eod": "local_bars",
+    "system.sync_bars": "local_bars",
+    "system.rolling_repair": "local_bars",
+    "system.reconcile_bars": "local_bars",
+    "sync": "local_bars",
+}
 LEASE_SECONDS = 90.0
 #: 进度落库的最小间隔（秒）。见 JobRuntime._make_report 的说明：
 #: 高频 report（如 EOD 每完成一只股票一次）若每次都同步写 DB，会把事件循环阻塞住。
@@ -57,6 +71,22 @@ class JobRuntime:
         self._dispatcher: Optional[asyncio.Task] = None
         self._db = db
         self._owner = owner or uuid.uuid4().hex
+        #: 任务失败回调（由装配层注入 notifier / 告警引擎）。
+        #: 本模块刻意**不直接依赖**告警实现 —— 那样会让运行时与通知耦合，
+        #: 且在测试里必须伪造一整套通知栈才能跑。
+        self._on_failure: Optional[Callable[[dict], None]] = None
+
+    def set_failure_hook(self, hook) -> None:
+        """注册任务失败回调：``hook(job)``，异常被吞掉（通知失败不能拖垮任务）。"""
+        self._on_failure = hook
+
+    def _fire_failure(self, job: dict) -> None:
+        if self._on_failure is None:
+            return
+        try:
+            self._on_failure(job)
+        except Exception as exc:  # noqa: BLE001 — 通知失败绝不能影响任务本身
+            log.warning("任务失败回调异常（已忽略）：%s", exc)
 
     def _persist(self, job: dict) -> None:
         """把可序列化状态写入 durable ledger；runner/task 不落库。"""
@@ -228,14 +258,22 @@ class JobRuntime:
             self._dispatcher = asyncio.create_task(self._dispatch_loop())
 
     def _next_ready(self) -> Optional[dict]:
-        """按配额挑下一个可执行 job：kind 配额 + 全局上限，优先级高的先。"""
+        """按配额挑下一个可执行 job：kind 配额 + **资源组互斥** + 全局上限，优先级高的先。"""
         running_by_kind: Dict[str, int] = {}
+        busy_groups: set[str] = set()
         for kind in self._running.values():
             running_by_kind[kind] = running_by_kind.get(kind, 0) + 1
+            grp = RESOURCE_GROUP.get(kind)
+            if grp:
+                busy_groups.add(grp)
         if len(self._running) >= GLOBAL_MAX:
             return None
-        ready = [j for j in (self._jobs[i] for i in self._queue)
-                 if running_by_kind.get(j["kind"], 0) < QUOTA.get(j["kind"], 1)]
+        ready = [
+            j for j in (self._jobs[i] for i in self._queue)
+            if running_by_kind.get(j["kind"], 0) < QUOTA.get(j["kind"], 1)
+            # 同组已有 job 在跑 ⇒ 排队等它结束，绝不并发写同一份数据
+            and RESOURCE_GROUP.get(j["kind"], "") not in busy_groups
+        ]
         if not ready:
             return None
         ready.sort(key=lambda j: (j["priority"], j["seq"]))
@@ -276,6 +314,11 @@ class JobRuntime:
             job["error"] = str(exc)
             job["message"] = f"失败：{exc}"
             log.warning("任务 %s 失败：%s", job["id"], exc)
+            # ★ 失败必须**有人知道**：定时任务最典型的失效模式就是「某天开始
+            # 一直失败，但没人看日志」，于是日线不再更新、选股结果一直是旧的，
+            # 用户却以为系统在正常跑。日志不是告警 —— 这里把失败抛给外部
+            # （notifier / 告警引擎），由装配层决定通知到哪里。
+            self._fire_failure(job)
         finally:
             job["finished_at"] = self._now()
             job["lease_owner"] = ""
@@ -519,4 +562,4 @@ def backtest_runner(params: dict) -> Runner:
 
 __all__ = ["JobRuntime", "JobSpec", "get_runtime",
            "sync_runner", "screen_runner", "backtest_runner",
-           "QUOTA", "GLOBAL_MAX"]
+           "QUOTA", "GLOBAL_MAX", "RESOURCE_GROUP"]

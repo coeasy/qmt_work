@@ -233,6 +233,176 @@ def test_auto_connect_creates_connection_when_client_running(monkeypatch):
     assert conn_id == cfg.conn_id                # 返回值即新连接 id
 
 
+# ---------------- 客户端根归一 / 复用既有连接（防重复建连 + 自愈） ----------------
+# 背景真缺陷：持久化连接写客户端根（P:\stock\gd_qmt），自动探测给出数据目录
+# （P:\stock\gd_qmt\userdata_mini）。精确字符串比对判为两个客户端 ⇒
+# ① 每次守护都新建一条（同账号堆多份）；②「已存在」又把自动连接挡在外面，
+# 表现为「客户端明明开着却永远连不上」。
+
+def test_client_root_strips_data_dir_tails():
+    """根写法与数据目录写法必须归一到同一个客户端根。"""
+    from xtquant_client.manager import _client_root
+    assert _client_root(r"P:\stock\gd_qmt\userdata_mini") == _client_root(r"P:\stock\gd_qmt")
+    assert _client_root(r"P:\stock\gd_qmt\userdata") == _client_root(r"P:\stock\gd_qmt")
+    assert _client_root(r"P:\stock\gd_qmt\bin.x64") == _client_root(r"P:\stock\gd_qmt")
+    # 不同客户端不能归一到一处
+    assert _client_root(r"P:\stock\gd_qmt") != _client_root(r"P:\stock\zj_QMT")
+
+
+def _mk_manager_with_conn(client_path: str, account_id: str = "22453951",
+                          broker_id: str = "generic", active: bool = True):
+    """造一个只含内存连接的 BrokerManager（不落库、不建真实适配器）。"""
+    from xtquant_client.manager import BrokerManager, Connection, ConnectionConfig
+    mgr = BrokerManager()
+    cfg = ConnectionConfig(conn_id="c1", name="x", broker_id=broker_id,
+                           client_path=client_path, account_id=account_id, active=active)
+    mgr._conns["c1"] = Connection(cfg=cfg, adapter=None, bridge=None)
+    return mgr
+
+
+def test_find_by_identity_matches_root_when_path_form_differs():
+    """★回归：根写法 vs userdata_mini 写法 + 同账号 → 必须判定为同一客户端。"""
+    mgr = _mk_manager_with_conn(r"P:\stock\gd_qmt")
+    hit = mgr.find_by_identity("generic", r"P:\stock\gd_qmt\userdata_mini", "22453951")
+    assert hit is not None and hit.cfg.conn_id == "c1"
+
+
+def test_find_by_identity_tolerates_broker_id_drift():
+    """券商档案漂移（手填 guojin / 探测 generic）不应导致重复建连。"""
+    mgr = _mk_manager_with_conn(r"P:\stock\gd_qmt", broker_id="guojin")
+    hit = mgr.find_by_identity("generic", r"P:\stock\gd_qmt\userdata_mini", "22453951")
+    assert hit is not None and hit.cfg.conn_id == "c1"
+
+
+def test_find_by_identity_still_distinguishes_other_accounts():
+    """同客户端不同账号 → 不是同一条连接（多账户必须各自一条）。"""
+    mgr = _mk_manager_with_conn(r"P:\stock\gd_qmt")
+    assert mgr.find_by_identity("generic", r"P:\stock\gd_qmt\userdata_mini", "99999999") is None
+
+
+def test_repair_client_path_rebuilds_adapter_and_persists(monkeypatch):
+    """★自愈：把持久连接的路径修正为探测到的数据目录，且必须重建适配器。
+
+    适配器在 _build 时就绑定了 client_path，只改 cfg 不生效 ⇒ 必须连同
+    adapter / bridge 一起重建，否则「修了等于没修」。
+    """
+    from xtquant_client import manager as mgr_mod
+
+    class _A:
+        def __init__(self):
+            self.closed = False
+        def close(self):
+            self.closed = True
+        def is_connected(self):
+            return False
+
+    mgr = _mk_manager_with_conn(r"P:\stock\gd_qmt")
+    conn = mgr._conns["c1"]
+    conn.adapter = _A()
+
+    persisted = []
+    monkeypatch.setattr(mgr, "_persist", lambda cfg: persisted.append(cfg.client_path))
+    monkeypatch.setattr(mgr_mod, "create_adapter", lambda *a, **kw: "NEW_ADAPTER")
+    monkeypatch.setattr(mgr_mod, "XTQuantBridge", lambda a: "NEW_BRIDGE")
+
+    out = mgr.repair_client_path("c1", r"P:\stock\gd_qmt\userdata_mini", "mini")
+    assert out is conn
+    assert conn.cfg.client_path == r"P:\stock\gd_qmt\userdata_mini"
+    assert conn.cfg.client_mode == "mini"
+    assert conn.adapter == "NEW_ADAPTER"      # 重建，不是沿用旧的
+    assert conn.bridge == "NEW_BRIDGE"
+    assert conn.connected is False
+    assert persisted == [r"P:\stock\gd_qmt\userdata_mini"]   # 修正已落库
+
+
+def test_repair_client_path_is_noop_when_already_correct():
+    """路径已经一致 → 不动（避免无谓重建与断连）。"""
+    mgr = _mk_manager_with_conn(r"P:\stock\gd_qmt\userdata_mini")
+    conn = mgr._conns["c1"]
+    assert mgr.repair_client_path("c1", r"P:\stock\gd_qmt\userdata_mini") is conn
+
+
+# ---------------- 守护触发判据（自愈 vs 尊重手动断开） ----------------
+
+def _fake_conn(connected: bool = False, active: bool = True):
+    class _Cfg:
+        def __init__(self, a):
+            self.active = a
+    class _C:
+        def __init__(self, c, a):
+            self.connected = c
+            self.cfg = _Cfg(a)
+    return _C(connected, active)
+
+
+def test_should_auto_connect_decision_table():
+    """★判据：以「有没有真正连上」为准，不是「列表是否为空」。
+
+    这条错了就会出现真故障：存在一条坏连接 ⇒ 守护永不介入 ⇒
+    「先开软件、后开 QMT 客户端」永远连不上。
+    """
+    from app.bootstrap.phase_watchdogs import _should_auto_connect
+
+    assert _should_auto_connect([]) is True                       # 全新安装
+    assert _should_auto_connect([_fake_conn(connected=True)]) is False   # 已连上
+    # ★核心回归：有持久意图但没连上 → 必须自愈（旧判据「列表非空」会漏掉这个）
+    assert _should_auto_connect([_fake_conn(False, True)]) is True
+    assert _should_auto_connect([_fake_conn(False, True),
+                                 _fake_conn(False, False)]) is True
+    # 用户手动断开过（非空且全部 inactive）→ 尊重意图，不介入
+    assert _should_auto_connect([_fake_conn(False, False)]) is False
+    assert _should_auto_connect([_fake_conn(False, False),
+                                 _fake_conn(False, False)]) is False
+
+
+def test_status_list_marks_invalid_client_path(tmp_path):
+    """界面要能识别「指向不存在目录」的残留连接（永远连不上，必须可一键清理）。"""
+    from xtquant_client.manager import BrokerManager, Connection, ConnectionConfig
+
+    class _Adapter:
+        broker_name = "测试券商"
+        adapter_id = "xtp"
+        client_version = ""
+        supported_periods = ["1d"]
+        supported_account_types = ["STOCK"]
+
+    mgr = BrokerManager()
+    good = tmp_path / "real_client"
+    good.mkdir()
+    mgr._conns["ok"] = Connection(
+        cfg=ConnectionConfig(conn_id="ok", name="有效", broker_id="generic",
+                             client_path=str(good), account_id="1"),
+        adapter=_Adapter(), bridge=None)
+    mgr._conns["bad"] = Connection(
+        cfg=ConnectionConfig(conn_id="bad", name="无效", broker_id="generic",
+                             client_path=str(tmp_path / "no_such_dir"), account_id="2"),
+        adapter=_Adapter(), bridge=None)
+
+    out = {r["conn_id"]: r for r in mgr.status_list()}
+    assert out["ok"]["path_exists"] is True
+    assert out["bad"]["path_exists"] is False
+    assert out["ok"]["client_path"] == str(good)   # 界面要展示路径，不能是缺失字段
+
+
+def test_status_list_path_exists_false_when_empty():
+    """未填 client_path → 判定为不存在（不能因缺字段而误判有效）。"""
+    from xtquant_client.manager import BrokerManager, Connection, ConnectionConfig
+
+    class _Adapter:
+        broker_name = "x"
+        adapter_id = "xtp"
+        client_version = ""
+        supported_periods = []
+        supported_account_types = []
+
+    mgr = BrokerManager()
+    mgr._conns["e"] = Connection(
+        cfg=ConnectionConfig(conn_id="e", name="空", broker_id="generic",
+                             client_path="", account_id="3"),
+        adapter=_Adapter(), bridge=None)
+    assert mgr.status_list()[0]["path_exists"] is False
+
+
 def test_broker_auto_connect_defaults_on():
     """★产品契约：启动自动连接**默认开启**（「启动默认自动连接当前活跃客户端」）。
 

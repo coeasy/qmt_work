@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   fmtAmount,
+  fmtMoney,
   fmtPct,
   fmtPrice,
   fmtSigned,
@@ -42,6 +43,31 @@ describe("格式化工具", () => {
     expect(fmtAmount(12345)).toBe("1.23万");
     expect(fmtAmount(123456789)).toBe("1.23亿");
     expect(fmtVolume(25000)).toBe("2.50万");
+  });
+
+  it("账户金额 fmtMoney 保留两位小数（对得上券商对账单）", () => {
+    // 「界面真实数据」核心修复：fmtAmount 对 |v|<1万 走 toFixed(0)，
+    // 于是 持仓市值 177.1 → "177"、浮动盈亏 -14.7 → "-15"，
+    // 用户对账单是 -14.70，会发现永远差一块钱且无从判断算错还是显示错。
+    // fmtMoney 统一保留 2 位小数。
+    expect(fmtMoney(177.1)).toBe("177.10");
+    expect(fmtMoney(-14.7)).toBe("-14.70");
+    expect(fmtMoney(1234)).toBe("1234.00");
+    expect(fmtMoney(0)).toBe("0.00");
+  });
+
+  it("fmtMoney 与 fmtAmount 的分歧只在 |v|<1万 的小金额", () => {
+    // 大数都走 万/亿 缩写且一致；真正的对账失真只发生在小金额上。
+    expect(fmtMoney(123456789)).toBe("1.23亿");
+    expect(fmtAmount(123456789)).toBe("1.23亿"); // 大数一致
+    expect(fmtMoney(1234)).toBe("1234.00");
+    expect(fmtAmount(1234)).toBe("1234"); // 整数 → 对账失真，故账户金额必须用 fmtMoney
+  });
+
+  it("fmtMoney 空值统一显示 --", () => {
+    expect(fmtMoney(null)).toBe("--");
+    expect(fmtMoney(undefined)).toBe("--");
+    expect(fmtMoney(Number.NaN)).toBe("--");
   });
 
   it("涨跌方向判定", () => {

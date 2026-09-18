@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import {
   Badge,
   Button,
+  ConfirmModal,
   EmptyState,
   Input,
   Panel,
@@ -10,7 +11,7 @@ import {
 } from "@/design/primitives";
 import { systemApi } from "@/services/api";
 import { useAsync } from "@/hooks/useAsync";
-import { CUSTOM_SKIN_ID, PRESETS, presetById } from "@/design/skins";
+import { CUSTOM_SKIN_ID, DEFAULT_SKIN_ID, PRESETS, presetById } from "@/design/skins";
 import { useUiStore, type ThemePref } from "@/stores/ui";
 import type { ConfigHistoryRow, RiskConfig, RuntimeConfig } from "@/shared/types";
 import s from "../domain.module.css";
@@ -59,6 +60,20 @@ export function Settings() {
   const [riskDraft, setRiskDraft] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
   const [banner, setBanner] = useState<{ tone: "ok" | "error"; text: string } | null>(null);
+  /**
+   * 危险操作的统一确认（熔断 / 配置回滚）。
+   *
+   * ★ 为什么替换掉 `window.confirm`：原生弹窗不受应用主题与皮肤控制（深色界面里
+   * 弹出一个白框）、文案无法承载「影响范围」说明、且在项目规范里被明确列为
+   * 资金/不可逆动作的禁用写法（应走 ConfirmModal / ConfirmButton）。
+   * 回滚此前更是**零确认**直接生效 —— 运行时配置被改错只能靠重新改回来。
+   */
+  const [confirm, setConfirm] = useState<{
+    title: string;
+    message: string;
+    warn?: string;
+    run: () => Promise<void>;
+  } | null>(null);
 
   const entries = useMemo(() => Object.entries(cfg.data ?? {}), [cfg.data]);
 
@@ -122,8 +137,8 @@ export function Settings() {
     }
   };
 
-  const circuit = async (action: "trip" | "reset") => {
-    if (action === "trip" && !window.confirm("手动熔断将立即暂停一切买入开仓，确认？")) return;
+  /** 熔断的真实执行体（确认逻辑在 circuit 里，分开写避免确认后递归再弹一次） */
+  const doCircuit = async (action: "trip" | "reset") => {
     setBusy(true);
     setBanner(null);
     try {
@@ -137,7 +152,21 @@ export function Settings() {
     }
   };
 
-  const rollback = async (id: number) => {
+  const circuit = (action: "trip" | "reset") => {
+    if (action === "trip") {
+      setConfirm({
+        title: "手动熔断",
+        message: "熔断将立即暂停一切买入开仓，直到手动解除。",
+        warn: "影响全部策略与手动下单",
+        run: () => doCircuit("trip"),
+      });
+      return;
+    }
+    void doCircuit("reset");
+  };
+
+  /** 配置回滚的真实执行体 */
+  const doRollback = async (id: number) => {
     setBusy(true);
     setBanner(null);
     try {
@@ -150,6 +179,16 @@ export function Settings() {
     } finally {
       setBusy(false);
     }
+  };
+
+  /** 回滚会**直接改写运行时配置**（此前零确认即生效），必须两段式 */
+  const rollback = (id: number) => {
+    setConfirm({
+      title: "回滚运行时配置",
+      message: `将把运行时配置整体回滚到历史记录 #${id}，当前未保存的改动会丢失。`,
+      warn: "立即生效，不可撤销",
+      run: () => doRollback(id),
+    });
   };
 
   const daily = risk.data?.daily;
@@ -332,6 +371,21 @@ export function Settings() {
       ) : (
         <UiPrefs />
       )}
+
+      <ConfirmModal
+        open={confirm !== null}
+        title={confirm?.title ?? ""}
+        danger
+        confirmText="确认执行"
+        message={confirm?.message ?? null}
+        warn={confirm?.warn}
+        onConfirm={() => {
+          const run = confirm?.run;
+          setConfirm(null);
+          if (run) void run();
+        }}
+        onCancel={() => setConfirm(null)}
+      />
     </div>
   );
 }
@@ -411,7 +465,7 @@ function UiPrefs() {
                 aria-pressed={on}
               >
                 <span className={s.skinSwatch} style={{ background: p.swatch }} aria-hidden />
-                <span className={s.skinName}>{p.label}</span>
+                <span className={s.skinName}>{p.label}{p.id === DEFAULT_SKIN_ID ? "（默认）" : ""}</span>
               </button>
             );
           })}
@@ -447,7 +501,7 @@ function UiPrefs() {
         </div>
 
         <div className={s.muted} style={{ marginTop: 6, whiteSpace: "normal", lineHeight: 1.5 }}>
-          预设配色对标同花顺 / 大智慧的常用底色（经典黑、深灰、石板蓝、墨绿…）。
+          预设配色对标通达信 / 大智慧 / 同花顺 的经典黑底（纯黑、近黑微灰、石板蓝、墨绿…），默认即为通达信黑。
           自定义背景色时会按背景明暗<b>自动配套</b>文字与边框色，不会出现「白底白字」；
           涨跌色与强调色<b>不受</b>背景色影响，仍是独立设置。
         </div>

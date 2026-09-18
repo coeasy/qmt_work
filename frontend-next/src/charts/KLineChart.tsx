@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { dispose, init, type Chart, type KLineData } from "klinecharts";
 import { marketApi } from "@/services/api";
 import { useQuotesStore } from "@/stores/quotes";
@@ -99,6 +99,17 @@ export interface KLineChartProps {
   subIndicators?: string[];
   /** 是否显示左上角最新价读数 */
   showReadout?: boolean;
+  /**
+   * 复权方式：'' = 不复权 / 'qfq' = 前复权 / 'hfq' = 后复权。
+   *
+   * ★ 默认 **qfq**：此前根本不传这个参数（恒不复权），而券商 `get_kline`
+   * **不支持复权** —— 用户看到的是原始价，除权和除息日会出现巨大跳空缺口，
+   * 形态判断（如海龟 20 日新高、均线多头）会被严重误导。后端注释已明示
+   * 「显式复权时走 TDX 复权源，避免静默返回原始价误导用户」。
+   */
+  adj?: string;
+  /** 是否显示右上角「复权 / 数据源 / 是否陈旧」角标 */
+  showMeta?: boolean;
 }
 
 export function KLineChart({
@@ -109,12 +120,16 @@ export function KLineChart({
   indicators = ["MA"],
   subIndicators = ["VOL"],
   showReadout = true,
+  adj = "qfq",
+  showMeta = true,
 }: KLineChartProps) {
   const elRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<Chart | null>(null);
   const linkHandlerRef = useRef<((p: CrosshairPayload) => void) | null>(null);
 
   const quote = useQuotesStore((st) => st.quotes[code]);
+  /** K 线元数据（数据源 / 是否陈旧）：后端给了就必须让用户看见，不能悄悄丢掉 */
+  const [meta, setMeta] = useState<{ stale?: boolean; source?: string; note?: string }>({});
 
   useEffect(() => {
     const el = elRef.current;
@@ -130,10 +145,18 @@ export function KLineChart({
     chart.setDataLoader({
       getBars: ({ type, timestamp, callback }) => {
         void marketApi
-          .kline(code, period, count)
+          .kline(code, period, count, adj)
           .then((res) => {
             // 契约：/market/kline 返回 { bars: [...], stale, source, ... }，不是裸数组
             // toKLineData 对无法解析的时间返回 null（见其注释），此处过滤掉
+            // ★ stale / source / note 必须留下来告诉用户：此前整包丢弃，
+            //   于是「数据源已降级、K 线是陈旧的」这件事完全不可见 ——
+            //   用户以为在看实时数据，实际在看几天前的缓存。
+            setMeta({
+              stale: res.stale,
+              source: typeof res.source === "string" ? res.source : undefined,
+              note: typeof res.note === "string" ? res.note : undefined,
+            });
             let data = (res.bars ?? [])
               .map(toKLineData)
               .filter((d): d is KLineData => d !== null);
@@ -188,13 +211,24 @@ export function KLineChart({
       dispose(el);
       chartRef.current = null;
     };
-  }, [code, period, count, linkGroupName, indicators, subIndicators]);
+  }, [code, period, count, adj, linkGroupName, indicators, subIndicators]);
 
   const price = quote?.price;
   const changePct = quote?.change_pct;
+  const adjLabel = adj === "qfq" ? "前复权" : adj === "hfq" ? "后复权" : "不复权";
 
   return (
     <div className={s.wrap}>
+      {showMeta && (
+        <div
+          className={s.meta}
+          title={meta.note || `复权：${adjLabel}${meta.source ? ` · 数据源：${meta.source}` : ""}`}
+        >
+          <span>{adjLabel}</span>
+          {meta.source && <span>· {meta.source}</span>}
+          {meta.stale && <span className={s.metaStale}>· 数据陈旧</span>}
+        </div>
+      )}
       {showReadout && quote && (
         <div className={s.readout}>
           <span className={s.readoutName}>{quote.name ?? code}</span>

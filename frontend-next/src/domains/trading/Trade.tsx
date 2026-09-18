@@ -16,7 +16,14 @@ import { signalApi, tradeApi, type OrderResult } from "@/services/api";
 import { useBrokerStore } from "@/stores/broker";
 import { useQuotesStore } from "@/stores/quotes";
 import { useQuoteSubscription } from "@/hooks/useQuoteSubscription";
-import { fmtPct, fmtPrice, normalizeCode, toneColor } from "@/shared/format";
+import {
+  fmtPct,
+  fmtPrice,
+  normalizeCode,
+  orderStatusLabel,
+  orderStatusTone,
+  toneColor,
+} from "@/shared/format";
 import type { Deal, Order, Position, PriceType, Side } from "@/shared/types";
 import s from "./trade.module.css";
 
@@ -54,6 +61,8 @@ export function Trade() {
   const [busy, setBusy] = useState(false);
   const [pending, setPending] = useState<OrderResult | null>(null);
   const [totp, setTotp] = useState("");
+  /** 待撤单委托：撤单不可逆（已成交部分不回滚），必须模态确认后才发请求 */
+  const [cancelTarget, setCancelTarget] = useState<Order | null>(null);
 
   /** 目标持仓调仓（POST /trade/target） */
   const [targetCode, setTargetCode] = useState("");
@@ -72,6 +81,21 @@ export function Trade() {
   const sub = useMemo(() => (normCode ? [normCode] : []), [normCode]);
   useQuoteSubscription(sub);
   const quote = useQuotesStore((st) => st.quotes[normCode]);
+
+  /**
+   * 预估金额。
+   *
+   * ⚠️ 修复前市价单在**没拿到行情**时按 `quote?.price ?? 0` 计算，界面显示
+   * 「预估金额 0.00」—— 这会被读成「这笔不花钱」，比显示 `--` 危险得多。
+   * 拿不到价格就如实说拿不到，不编数字。
+   */
+  const estText = useMemo(() => {
+    const vol = Number(volume) || 0;
+    if (vol <= 0) return "--";
+    const p = priceType === "market" ? quote?.price : Number(price) || 0;
+    if (p === undefined || p <= 0) return priceType === "market" ? "未取到市价" : "--";
+    return (p * vol).toFixed(2);
+  }, [priceType, price, volume, quote?.price]);
 
   const refresh = useCallback(async () => {
     try {
@@ -229,19 +253,8 @@ export function Trade() {
       header: "状态",
       width: 76,
       render: (r) => (
-        <Badge
-          tone={
-            r.status === "filled"
-              ? "success"
-              : r.status === "rejected"
-                ? "danger"
-                : r.status === "canceled"
-                  ? "neutral"
-                  : "info"
-          }
-        >
-          {r.status}
-        </Badge>
+        // ★ 走唯一入口：此前裸渲染 {r.status}，用户看到 partial/cancelled 原始词
+        <Badge tone={orderStatusTone(r.status)}>{orderStatusLabel(r.status)}</Badge>
       ),
     },
     { key: "time", header: "时间", width: 82, mono: true, render: (r) => r.time ?? "--" },
@@ -250,18 +263,7 @@ export function Trade() {
       header: "",
       width: 54,
       render: (r) => (
-        <Button
-          size="sm"
-          variant="ghost"
-          onClick={() => {
-            void tradeApi
-              .cancel(r.order_id, activeConn)
-              .then(refresh)
-              .catch((e: unknown) =>
-                setBanner({ tone: "danger", text: e instanceof Error ? e.message : String(e) }),
-              );
-          }}
-        >
+        <Button size="sm" variant="ghost" onClick={() => setCancelTarget(r)}>
           撤单
         </Button>
       ),
@@ -393,12 +395,7 @@ export function Trade() {
 
             <div className={s.est}>
               预估金额{" "}
-              <span className={s.mono}>
-                {(
-                  (priceType === "market" ? (quote?.price ?? 0) : Number(price) || 0) *
-                  (Number(volume) || 0)
-                ).toFixed(2)}
-              </span>
+              <span className={s.mono}>{estText}</span>
             </div>
 
             <div className={s.actions}>
@@ -520,6 +517,38 @@ export function Trade() {
           )}
         </div>
       </Panel>
+
+      <ConfirmModal
+        open={cancelTarget !== null}
+        danger
+        title="撤单确认"
+        warn="撤单不可撤销，已成交部分不会回滚"
+        confirmText="确认撤单"
+        loading={busy}
+        message={
+          cancelTarget ? (
+            <>
+              即将撤销委托 <b>{cancelTarget.order_id}</b>
+              {cancelTarget.name ? `（${cancelTarget.name} ${cancelTarget.code}）` : `（${cancelTarget.code}）`}
+              ：{cancelTarget.side === "buy" ? "买入" : "卖出"} {cancelTarget.volume} 股 @ {fmtPrice(cancelTarget.price)}。
+              <br />
+              已成交的 <b>{cancelTarget.filled ?? 0}</b> 股<b>不会回滚</b>。
+            </>
+          ) : null
+        }
+        onCancel={() => setCancelTarget(null)}
+        onConfirm={() => {
+          const id = cancelTarget?.order_id;
+          setCancelTarget(null);
+          if (!id) return;
+          void tradeApi
+            .cancel(id, activeConn)
+            .then(refresh)
+            .catch((e: unknown) =>
+              setBanner({ tone: "danger", text: e instanceof Error ? e.message : String(e) }),
+            );
+        }}
+      />
 
       <ConfirmModal
         open={pending !== null}

@@ -2,6 +2,7 @@ import { useState } from "react";
 import {
   Badge,
   Button,
+  ConfirmButton,
   DataTable,
   EmptyState,
   FormRow,
@@ -158,9 +159,9 @@ export function Alerts() {
           <Button size="sm" variant="ghost" disabled={busy} onClick={() => void testRule(r)}>
             测试
           </Button>
-          <Button size="sm" variant="ghost" disabled={busy} onClick={() => void remove(r.id)}>
+          <ConfirmButton disabled={busy} onConfirm={() => void remove(r.id)}>
             删除
-          </Button>
+          </ConfirmButton>
         </div>
       ),
     },

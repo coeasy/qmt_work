@@ -2,6 +2,8 @@ import { useEffect, useMemo, useState } from "react";
 import {
   Badge,
   Button,
+  ConfirmButton,
+  ConfirmModal,
   EmptyState,
   FormRow,
   Input,
@@ -10,7 +12,7 @@ import {
   Spinner,
 } from "@/design/primitives";
 import { brokerApi } from "@/services/api";
-import type { AutoDetectCandidate } from "@/services/api";
+import type { AutoDetectCandidate, BrokerDiagnostics } from "@/services/api";
 import { useBrokerStore } from "@/stores/broker";
 import s from "./brokers.module.css";
 
@@ -20,6 +22,20 @@ import s from "./brokers.module.css";
  */
 function isRecommended(c: AutoDetectCandidate): boolean {
   return c.running && !!c.default_account_id;
+}
+
+/**
+ * 无效连接 = 后端判定 client_path **不存在**。
+ *
+ * 这类条目（历史版本 / 自动化测试残留，如 `C:/no_such_qmt/userdata_mini`）永远连不上，
+ * 却安静地占满列表，让用户以为「配了很多连接却都不可用」。必须在界面上显式标记，
+ * 并提供「一键选中」以便批量清理。
+ *
+ * ★ 只在后端明确返回 `path_exists === false` 时判定为无效；
+ * undefined（旧后端未返回该字段）视为未知，**不**标记 —— 宁可漏标也不能误标。
+ */
+function isInvalidPath(c: { path_exists?: boolean }): boolean {
+  return c.path_exists === false;
 }
 
 /**
@@ -61,9 +77,29 @@ export function Brokers() {
 
   /** 批量选择（按 conn_id）。活跃连接不可删，故不计入可选集合。 */
   const [selected, setSelected] = useState<string[]>([]);
+  /** 批量删除是破坏性动作 ⇒ 走模态确认，不用 window.confirm */
+  const [confirmBatch, setConfirmBatch] = useState(false);
   const [healthBusy, setHealthBusy] = useState("");
   /** conn_id → 最近一次健康探测结果 */
   const [healthMap, setHealthMap] = useState<Record<string, Record<string, unknown>>>({});
+
+  /** 端到端诊断快照（宿主 ABI / 随包运行时 / 各连接适配器与行情泵） */
+  const [diag, setDiag] = useState<BrokerDiagnostics | null>(null);
+  const [diagBusy, setDiagBusy] = useState(false);
+  const [diagErr, setDiagErr] = useState("");
+
+  const runDiag = async (deep: boolean) => {
+    setDiagBusy(true);
+    setDiagErr("");
+    try {
+      setDiag(await brokerApi.diagnostics(deep));
+    } catch (e) {
+      setDiag(null);
+      setDiagErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setDiagBusy(false);
+    }
+  };
 
   useEffect(() => {
     void loadProfiles();
@@ -84,9 +120,14 @@ export function Brokers() {
     setDetectMsg("");
     try {
       const r = await connectCandidate(c);
+      const who = c.broker_name || c.name || c.root;
       setDetectMsg(
         r.ok
-          ? `已接入 ${c.broker_name || c.name || c.root}；该连接已持久化，之后每次启动会自动连接`
+          ? r.reused
+            // 后端按「券商 + 客户端路径 + 资金账号」复用既有连接：连点同一个候选
+            // 不会再堆出重复条目，这里必须如实说「复用」而不是「已接入」。
+            ? `该客户端（${who}）已存在相同连接（同客户端 + 同资金账号），已直接复用，未重复添加`
+            : `已接入 ${who}；该连接已持久化，之后每次启动会自动连接`
           : `接入失败：${r.reason ?? "未知原因"}`,
       );
     } finally {
@@ -111,11 +152,21 @@ export function Brokers() {
     setBusy(true);
     setMsg("");
     try {
-      await brokerApi.add({ broker_id: brokerId, client_path: clientPath, account_id: accountId, account_type: accountType });
+      // 不传 autoconnect ⇒ 后端默认 true：建连即拉起子进程握手（add_broker）。
+      // 因此这里不能再写「点击『连接』建立会话」—— 那会引导用户去点一个已经连上的
+      // 连接，把「重复操作」误当成「必要步骤」。
+      const created = await brokerApi.add({
+        broker_id: brokerId, client_path: clientPath,
+        account_id: accountId, account_type: accountType,
+      });
       setClientPath("");
       setAccountId("");
       await load();
-      setMsg("已添加连接，点击「连接」建立会话");
+      setMsg(
+        created?.reused
+          ? "已存在相同连接（同客户端 + 同资金账号），已复用，未重复添加"
+          : "已添加连接并尝试建立会话；结果见下方「已有连接」列表",
+      );
     } catch (e) {
       setMsg(e instanceof Error ? e.message : String(e));
     } finally {
@@ -150,9 +201,6 @@ export function Brokers() {
 
   const onBatchRemove = async () => {
     if (selected.length === 0) return;
-    if (!window.confirm(`确认批量删除 ${selected.length} 个连接？活跃连接不会被选中，但其余连接将全部移除。`)) {
-      return;
-    }
     setBusy(true);
     setMsg("");
     try {
@@ -199,6 +247,8 @@ export function Brokers() {
 
   const removable = connections.filter((c) => !c.active);
   const allSelected = removable.length > 0 && removable.every((c) => selected.includes(c.conn_id));
+  /** 可删且路径无效的连接 —— 供「选中无效项」一键勾选后批量清理 */
+  const invalidRemovable = removable.filter(isInvalidPath);
 
   return (
     <div className={s.wrap}>
@@ -334,11 +384,24 @@ export function Brokers() {
             全选可删
           </label>
           <span className={s.selCount}>已选 {selected.length} 项</span>
+          {/* 无效连接（路径不存在）永远连不上，一键勾选后走批量删除清理 */}
+          {invalidRemovable.length > 0 && (
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={busy}
+              onClick={() => setSelected(invalidRemovable.map((c) => c.conn_id))}
+              title="勾选所有「客户端路径不存在」的连接（永远连不上的历史/测试残留）"
+            >
+              选中无效项（{invalidRemovable.length}）
+            </Button>
+          )}
+          {/* 批量删除是破坏性动作 ⇒ 模态确认（行内逐条删除才用两段式） */}
           <Button
             size="sm"
             variant="danger"
             disabled={busy || selected.length === 0}
-            onClick={() => void onBatchRemove()}
+            onClick={() => setConfirmBatch(true)}
           >
             批量删除
           </Button>
@@ -373,6 +436,8 @@ export function Brokers() {
                   <Badge tone={c.connected ? "success" : "danger"}>
                     {c.connected ? "已连接" : "未连接"}
                   </Badge>
+                  {/* 路径不存在的残留连接：永远连不上，必须让用户一眼看出来 */}
+                  {isInvalidPath(c) && <Badge tone="danger">路径无效</Badge>}
                   {c.runtime_mode && <Badge tone="neutral">{c.runtime_mode}</Badge>}
                 </div>
                 <div className={s.itemSub}>
@@ -420,21 +485,101 @@ export function Brokers() {
                 >
                   {healthBusy === c.conn_id ? "探测中…" : "健康"}
                 </Button>
-                <Button
-                  size="sm"
+                {/* 列表行内删除 ⇒ 两段式确认。删除**活跃连接**已由 disabled 挡住
+                    （后端约束：活跃连接全局唯一），不必再在文案里重复解释。 */}
+                <ConfirmButton
                   variant="danger"
                   disabled={c.active === true}
-                  onClick={() => {
-                    if (window.confirm(`确认删除连接 ${c.broker_name ?? c.broker_id}？`)) {
-                      void remove(c.conn_id);
-                    }
-                  }}
+                  confirmText="确认删除"
+                  title={`删除连接 ${c.broker_name ?? c.broker_id}`}
+                  onConfirm={() => void remove(c.conn_id)}
                 >
                   删除
-                </Button>
+                </ConfirmButton>
               </div>
             </div>
           ))}
+        </div>
+      </Panel>
+
+      <Panel
+        title="连接诊断"
+        extra={
+          <div style={{ display: "flex", gap: 6 }}>
+            <Button size="sm" variant="ghost" disabled={diagBusy} onClick={() => void runDiag(false)}>
+              {diagBusy ? "诊断中…" : "运行诊断"}
+            </Button>
+            <Button size="sm" variant="ghost" disabled={diagBusy} onClick={() => void runDiag(true)}>
+              深度诊断
+            </Button>
+          </div>
+        }
+      >
+        <div className={s.diagBody}>
+          {diagErr && <div className={s.err}>{diagErr}</div>}
+          {!diag && !diagErr && (
+            <EmptyState text="尚未运行诊断。若出现「桥接子进程握手失败」，先跑一次诊断看宿主 ABI 与随包桥接运行时是否匹配 —— 不必去翻被截断的 stderr。" />
+          )}
+          {diag && (
+            <>
+              <div className={s.diagRow}>
+                <span>宿主 Python</span>
+                <span className={s.mono}>{diag.host_python ?? "—"}</span>
+              </div>
+              <div className={s.diagRow}>
+                <span>宿主 ABI</span>
+                <span className={s.mono}>{String(diag.host_abi ?? "—")}</span>
+              </div>
+              <div className={s.diagRow}>
+                <span>随包桥接运行时</span>
+                <span className={s.mono}>
+                  {Object.keys(diag.bundled_runtimes ?? {}).length === 0
+                    ? "无（桥接子进程将回退系统解释器）"
+                    : Object.entries(diag.bundled_runtimes ?? {})
+                        .map(([abi, p]) => `ABI ${abi} → ${p}`)
+                        .join("；")}
+                </span>
+              </div>
+              {diag.system_runtimes && (
+                <div className={s.diagRow}>
+                  <span>系统运行时</span>
+                  <span className={s.mono}>
+                    {Object.entries(diag.system_runtimes)
+                      .map(([abi, p]) => `ABI ${abi} → ${p}`)
+                      .join("；") || "未发现"}
+                  </span>
+                </div>
+              )}
+
+              {(diag.connections ?? []).length === 0 ? (
+                <EmptyState text="无已添加的连接（诊断快照本身正常）" />
+              ) : (
+                (diag.connections ?? []).map((c) => (
+                  <div key={c.conn_id} className={s.diagConn}>
+                    <div className={s.diagConnTitle}>
+                      <span>{c.broker_name ?? c.broker_id ?? c.conn_id}</span>
+                      <Badge tone={c.connected ? "success" : "danger"}>
+                        {c.connected ? "已连接" : "未连接"}
+                      </Badge>
+                      {/* 「握手成功」与「行情在推」是两件事：泵没跑时界面会一直空 */}
+                      <Badge tone={c.pump_running ? "success" : "warning"}>
+                        行情泵 {c.pump_running ? "运行中" : "未运行"}
+                      </Badge>
+                      {c.active && <Badge tone="info">活跃</Badge>}
+                    </div>
+                    <div className={s.diagConnSub}>
+                      适配器 {c.adapter ?? "—"} · 健康 {c.health_status ?? "—"} · 重连{" "}
+                      {c.reconnect_attempts ?? 0} 次 · {c.client_path ?? "—"}
+                    </div>
+                    {c.last_error && <div className={s.err}>最近错误：{c.last_error}</div>}
+                    {c.runtime_plan && (
+                      <div className={s.diagConnSub}>桥接方案：{JSON.stringify(c.runtime_plan)}</div>
+                    )}
+                  </div>
+                ))
+              )}
+            </>
+          )}
         </div>
       </Panel>
 
@@ -442,6 +587,24 @@ export function Brokers() {
         当前活跃连接：<strong>{active?.broker_name ?? active?.broker_id ?? "无"}</strong>
         。后端活跃连接全局唯一，多账户并行下单需经「多账户网格」批量接口。
       </div>
+
+      <ConfirmModal
+        open={confirmBatch}
+        danger
+        title="批量删除连接"
+        confirmText={`确认删除 ${selected.length} 个`}
+        message={
+          <>
+            将移除 <b>{selected.length}</b> 个券商连接。活跃连接不会被选中，但其余连接将全部移除，
+            且<b>不可恢复</b>（需重新添加并重新连接）。
+          </>
+        }
+        onCancel={() => setConfirmBatch(false)}
+        onConfirm={() => {
+          setConfirmBatch(false);
+          void onBatchRemove();
+        }}
+      />
     </div>
   );
 }

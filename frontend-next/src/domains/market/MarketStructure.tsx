@@ -4,6 +4,7 @@ import { EChart } from "@/charts/EChart";
 import type { EChartsOption } from "@/charts/echartsSetup";
 import { marketApi, type OverviewResponse } from "@/services/api";
 import { useAsync } from "@/hooks/useAsync";
+import { useLiveQuotes } from "@/hooks/useLiveQuotes";
 import { fmtAmount, fmtPct, fmtPrice, toneColor } from "@/shared/format";
 import s from "../domain.module.css";
 
@@ -72,6 +73,15 @@ export function MarketStructure() {
     { key: "unit", header: "单位", width: 80, render: (r) => r.unit ?? "--" },
   ];
 
+  // 指数快照同样是**查询那一刻**的值 ⇒ 叠加实时行情，否则必须手动刷新才动。
+  const indexCodes = useMemo(() => (d?.indices ?? []).map((r) => r.code), [d?.indices]);
+  const indexQuotes = useLiveQuotes(indexCodes);
+  const indexLast = (r: IndexRow): number | undefined => {
+    const q = indexQuotes[r.code]?.price;
+    if (q !== undefined && q > 0) return q;
+    return r.last !== undefined && r.last > 0 ? r.last : undefined;
+  };
+
   const indexCols: Column<IndexRow>[] = [
     { key: "code", header: "代码", width: 100, mono: true, render: (r) => r.code },
     { key: "name", header: "指数", render: (r) => r.name || "--" },
@@ -81,7 +91,10 @@ export function MarketStructure() {
       width: 100,
       align: "right",
       mono: true,
-      render: (r) => <span style={{ color: toneColor(r.change_pct) }}>{fmtPrice(r.last)}</span>,
+      render: (r) => {
+        const pct = indexQuotes[r.code]?.change_pct ?? r.change_pct;
+        return <span style={{ color: toneColor(pct) }}>{fmtPrice(indexLast(r))}</span>;
+      },
     },
     {
       key: "pct",
@@ -89,7 +102,10 @@ export function MarketStructure() {
       width: 88,
       align: "right",
       mono: true,
-      render: (r) => <span style={{ color: toneColor(r.change_pct) }}>{fmtPct(r.change_pct)}</span>,
+      render: (r) => {
+        const pct = indexQuotes[r.code]?.change_pct ?? r.change_pct;
+        return <span style={{ color: toneColor(pct) }}>{fmtPct(pct)}</span>;
+      },
     },
     { key: "amount", header: "成交额", width: 110, align: "right", mono: true, render: (r) => fmtAmount(r.amount) },
   ];
@@ -154,7 +170,17 @@ export function MarketStructure() {
                 {d.indices.length === 0 ? (
                   <EmptyState text="无指数快照" />
                 ) : (
-                  <DataTable columns={indexCols} rows={d.indices} rowKey={(r) => r.code} rowHeight={24} rowTone={(r) => (r.change_pct && r.change_pct > 0 ? 1 : r.change_pct && r.change_pct < 0 ? -1 : 0)} />
+                  <DataTable
+                    columns={indexCols}
+                    rows={d.indices}
+                    rowKey={(r) => r.code}
+                    rowHeight={24}
+                    rowTone={(r) => {
+                      // 行底色也要跟着实时值走，否则「数字绿了、底色还红」
+                      const pct = indexQuotes[r.code]?.change_pct ?? r.change_pct;
+                      return pct && pct > 0 ? 1 : pct && pct < 0 ? -1 : 0;
+                    }}
+                  />
                 )}
               </div>
             </Panel>

@@ -97,14 +97,14 @@ describe("自定义背景色 → 成套令牌", () => {
 
 describe("皮肤与明暗方向的匹配", () => {
   it("★不变量：错配（深色皮肤 + 浅色主题）必须退回主题默认，不写内联令牌", () => {
-    // 经典黑是深色皮肤，配浅色主题 → 不生效
-    const mismatched = resolveSkin("classic", "#000000", "light");
+    // 通达信黑是深色皮肤，配浅色主题 → 不生效
+    const mismatched = resolveSkin("tongdaxin", "#000000", "light");
     expect(mismatched.active).toBe("");
     expect(mismatched.tokens).toBeNull();
 
     // 同一皮肤配深色主题 → 生效（预设走 CSS，不需要内联令牌）
-    const matched = resolveSkin("classic", "#000000", "dark");
-    expect(matched.active).toBe("classic");
+    const matched = resolveSkin("tongdaxin", "#000000", "dark");
+    expect(matched.active).toBe("tongdaxin");
     expect(matched.tokens).toBeNull();
   });
 
@@ -133,10 +133,10 @@ describe("预设皮肤自洽性", () => {
     expect(new Set(ids).size).toBe(ids.length);
   });
 
-  it("提供同花顺 / 大智慧风格的经典底色", () => {
+  it("提供通达信 / 大智慧 / 同花顺 风格的经典黑底", () => {
     const ids = PRESETS.map((p) => p.id);
-    expect(ids).toContain("classic"); // 同花顺：经典黑
-    expect(ids).toContain("graphite"); // 大智慧：深灰
-    expect(ids).toContain("midnight"); // 默认
+    expect(ids).toContain("tongdaxin"); // 通达信黑：默认
+    expect(ids).toContain("dazhihui"); // 大智慧黑
+    expect(ids).toContain("light"); // 浅色：明暗另一端
   });
 });

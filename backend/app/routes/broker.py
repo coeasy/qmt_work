@@ -196,7 +196,16 @@ async def list_brokers(ctx: AppContext = Depends(get_ctx)):
 
 @router.post("/brokers")
 async def add_broker(body: dict, ctx: AppContext = Depends(get_ctx)):
-    """创建/提交brokers（POST /brokers）。"""
+    """创建/提交brokers（POST /brokers）。
+
+    ★ 幂等：同一「券商 + 客户端路径 + 资金账号」重复提交**复用既有连接**，不新建。
+    实测反馈：在「连接管理」页连点同一个「检测到的本地客户端」，每点一次下方就多出
+    一条完全相同的连接（同客户端同资金账号）。后果不只是列表变脏 —— 两条连接指向
+    同一个 QMT userdata 目录会互相抢占，第二条必然连不上，用户看到的就是
+    「点击连接报错」。判据复用 `find_by_identity`（与启动自动连接 `_auto_connect_active`
+    同一实现），保证「界面点的」与「启动自动连的」永远指向同一条连接。
+    返回体带 `reused` 标记，前端据此如实告知「已复用」而不是假装新建。
+    """
     target = _resolve_account(body.get("client_path", ""), body.get("account_id", ""),
                               body.get("account_type", "STOCK"))
     broker_id = body.get("broker_id") or ""
@@ -211,6 +220,24 @@ async def add_broker(body: dict, ctx: AppContext = Depends(get_ctx)):
                 "note": "自动登记：QMT 全券商通用迅投适配器"})
         except Exception as exc:  # noqa: BLE001
             log.warning("hotplug 自动登记失败 %r: %s", broker_id, exc)
+    # 显式带 conn_id = 编辑既有连接，不做去重（去重只针对「新建」语义）。
+    if not body.get("conn_id"):
+        existing = ctx.broker_manager.find_by_identity(
+            broker_id, body.get("client_path", ""), target["account_id"])
+        if existing is not None:
+            if bool(body.get("autoconnect", True)):
+                # activate：重新点亮持久意图 + 拉起；不新建、不重复落库
+                existing = await asyncio.to_thread(
+                    ctx.broker_manager.activate, existing.cfg.conn_id)
+            ctx.db.audit("broker", "broker.add_reused", existing.cfg.conn_id,
+                         {"client_path": existing.cfg.client_path,
+                          "account_id": existing.cfg.account_id}, "ok")
+            return ok({"conn_id": existing.cfg.conn_id, "name": existing.cfg.name,
+                       "connected": existing.connected,
+                       "account_id": existing.cfg.account_id,
+                       "account_type": existing.cfg.account_type,
+                       "account_discovered": target["discovered"],
+                       "accounts": target["accounts"], "reused": True})
     cfg = ConnectionConfig(
         conn_id=body.get("conn_id", ""), name=body.get("name", "") or agent_broker_name(body, broker_id),
         broker_id=broker_id, client_path=body.get("client_path", ""),
@@ -231,7 +258,7 @@ async def add_broker(body: dict, ctx: AppContext = Depends(get_ctx)):
                "connected": conn.connected,
                "account_id": conn.cfg.account_id, "account_type": conn.cfg.account_type,
                "account_discovered": target["discovered"],
-               "accounts": target["accounts"]})
+               "accounts": target["accounts"], "reused": False})
 
 
 def agent_broker_name(body: dict, broker_id: str) -> str:

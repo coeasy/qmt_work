@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import {
   Badge,
   Button,
+  ConfirmButton,
   DataTable,
   EmptyState,
   FormRow,
@@ -162,9 +163,15 @@ export function Conditions() {
       width: 64,
       render: (r) =>
         r.status === "pending" || r.status === "triggered" ? (
-          <Button size="sm" variant="ghost" disabled={busy} onClick={() => void cancel(r.id)}>
+          // 撤销不可逆 ⇒ 两段式确认（与 Algo 页同口径）
+          <ConfirmButton
+            disabled={busy}
+            confirmText="确认撤销"
+            title={`撤销条件单 ${r.id}`}
+            onConfirm={() => void cancel(r.id)}
+          >
             撤销
-          </Button>
+          </ConfirmButton>
         ) : null,
     },
   ];

@@ -63,12 +63,33 @@ async def batch_delete_alert_rules(body: dict, ctx: AppContext = Depends(get_ctx
 
 @router.post("/alerts/test")
 async def test_alert(body: dict, ctx: AppContext = Depends(get_ctx)):
-    """创建/提交alerts / test（POST /alerts/test）。"""
+    """创建/提交alerts / test（POST /alerts/test）。
+
+    ★ 必须如实回报「到底有没有规则被触发」。
+    曾无条件返回 `{"fired": True}`，而 `evaluate_event` 实际返回 None ——
+    一条规则都没命中时也显示「已触发」。用户据此以为告警链路是通的，
+    等真出事时才发现根本没配规则。这是**假成功**，比报错危险。
+    """
     if ctx.alert_engine is None:
         return err(503, "告警引擎未初始化")
     event = body.get("event", "system.test")
-    ctx.alert_engine.evaluate_event(event, body.get("payload", {}))
-    return ok({"fired": True, "event": event})
+    payload = body.get("payload", {})
+    fired = ctx.alert_engine.evaluate_event(event, payload)
+    # 各实现的返回值形态不一（None / list / dict），统一成「数量 + 明细」
+    if fired is None:
+        items: list = []
+    elif isinstance(fired, list):
+        items = fired
+    elif isinstance(fired, dict):
+        items = [fired]
+    else:
+        items = [{"raw": fired}]
+    return ok({
+        "fired": bool(items),
+        "count": len(items),
+        "event": event,
+        "items": items,
+    })
 
 @router.get("/alerts/history")
 async def alert_history(limit: int = 50, ctx: AppContext = Depends(get_ctx)):

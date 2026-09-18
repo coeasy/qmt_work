@@ -222,6 +222,60 @@ export interface L2Transaction {
 }
 
 /**
+ * `/market/kline/sync-status` 返回体 —— 「每日定时下载 K 线 + 冷热分层」的观测面。
+ *
+ * 前端据此能如实告诉用户「今日已同步 / 待同步 / 未启用」以及冷热怎么分的，
+ * 而不是只给一个开关（开关开着不代表今天跑过）。
+ * `last_run` 只在**本进程**跑过之后才有值（重启后为空，属正常）。
+ */
+export interface KlineSyncStatus {
+  initialized: boolean;
+  enabled?: boolean;
+  /** 触发时刻 `HH:MM`（默认 16:00） */
+  sync_time?: string;
+  /** runtime_config 的 domain key，供「设置」页写入同一份配置 */
+  keys?: { enabled: string; sync_time: string; hot_days: string };
+  last_run?: {
+    date?: string;
+    codes?: number;
+    ok?: number;
+    fail?: number;
+    hot_days?: number;
+    count_per_code?: number;
+  } | null;
+  hot?: {
+    /** 热窗口天数（自然日，默认 92 ≈ 3 个月） */
+    hot_days?: number;
+    /** 冷热边界 `YYYY-MM-DD`，早于它的为冷数据 */
+    hot_cutoff?: string;
+    hot_rows?: number;
+    cold_rows?: number;
+    cold_enabled?: boolean;
+    cold_path?: string;
+  };
+}
+
+/** `/market/kline/cache` 返回体（KlineCache.stats 的口径） */
+export interface KlineCacheStats {
+  rows?: number;
+  hot_rows?: number;
+  archive_rows?: number;
+  /** 热表 + 冷仓去重后的「代码|周期」序列数 */
+  series?: number;
+  hot_days?: number;
+  hot_cutoff?: string;
+  cold_enabled?: boolean;
+  cold_path?: string;
+  hits?: number;
+  misses?: number;
+  stale_serves?: number;
+  /** 未命中过任何请求时为 null（不是 0 —— 0 会被误读成「全部未命中」） */
+  hit_rate?: number | null;
+  ttl_daily?: number;
+  ttl_intraday?: number;
+}
+
+/**
  * 行情域 API。路径与 backend/app/routes/market.py 一一对应。
  *
  * ★ 契约修正（相对初版，逐端点核对后）：
@@ -231,10 +285,23 @@ export interface L2Transaction {
  *   - kline 的参数名是 adj（不是 adjust）
  */
 export const marketApi = {
+  /**
+   * 单标的快照。
+   *
+   * ⚠️ 目前**无调用方**（界面行情一律走 WS 订阅 + `stores/quotes.ts`）。
+   * 重新启用前必须确认契约：eltdx 路径返回的是 `last` 而非界面契约名 `price`，
+   * 直接用会得到一堆 `undefined` —— 与「订阅到了但没数字」是同一个坑。
+   */
   quote: (code: string, connId = "", source = "auto") =>
     http.get<Quote>("/market/quote", { query: { code, conn_id: connId, source } }),
 
-  /** 批量快照。优先命中 SyncEngine 已订阅缓存，缺失项再打源补齐 */
+  /**
+   * 批量快照。优先命中 SyncEngine 已订阅缓存，缺失项再打源补齐。
+   *
+   * ⚠️ 同 `quote`：当前无调用方；且 `/market/quotes` 在补齐失败时会**静默丢弃**
+   * 缺项（`routes/market.py` 的 `except: return None`），只能靠 served/requested
+   * 差值发现 —— 启用前需让调用方显式处理缺项。
+   */
   quotes: (codes: string[], connId = "", source = "auto") =>
     http.post<QuotesResponse>("/market/quotes", { codes, conn_id: connId, source }),
 
@@ -351,7 +418,7 @@ export const marketApi = {
 
   providers: () => http.get<Record<string, unknown>>("/market/providers"),
 
-  klineSyncStatus: () => http.get<Record<string, unknown>>("/market/kline/sync-status"),
+  klineSyncStatus: () => http.get<KlineSyncStatus>("/market/kline/sync-status"),
 
-  klineCacheStats: () => http.get<Record<string, unknown>>("/market/kline/cache"),
+  klineCacheStats: () => http.get<KlineCacheStats>("/market/kline/cache"),
 };

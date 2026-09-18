@@ -69,7 +69,8 @@ def seed_order(wal, oid="1001", volume=100, ts=None):
 def test_no_pending_touches_nothing(tmp_path):
     rec, wal, events = make_reconciler(tmp_path)
     out = asyncio.run(rec.reconcile())
-    assert out == {"checked": 0, "note": "无待核销委托"}
+    # ok=True 表示「确实没有待核销」，区别于 WAL 读不出来导致的「无法对账」
+    assert out == {"checked": 0, "ok": True, "note": "无待核销委托"}
     assert events == []
 
 
@@ -150,3 +151,62 @@ def test_missing_rounds_use_wal_ts_fallback(tmp_path):
                ts=time.time() - 86400 - 60)  # 1 天前（unix 浮点）
     out = asyncio.run(rec.reconcile())
     assert out["stale"] == 1
+
+
+# ---------------- 7. WAL 读取失败 ≠ 无待核销委托 ----------------
+
+class BrokenWAL:
+    """all_records() 必定抛错的 WAL（模拟磁盘故障 / 文件损坏）。"""
+
+    def all_records(self):
+        raise OSError("wal.jsonl 无法读取（模拟磁盘故障）")
+
+    def __getattr__(self, _name):
+        # 其余方法用不到；对账在读取阶段就该失败
+        raise AssertionError("对账不应在 WAL 读取失败后继续调用其它 WAL 方法")
+
+
+def test_wal_read_failure_is_not_reported_as_nothing_pending(tmp_path):
+    """★ WAL 读不出来时，绝不能报告「无待核销委托」。
+
+    原实现 ``except: return {}`` ⇒ reconcile 返回 {checked: 0, note: 无待核销委托}，
+    与「真的没有待核销」**完全无法区分**。后果是委托可能卡在未核销状态，
+    而系统每天报告一切正常（启动日志里那句正是这个返回值）。
+    """
+    rec = OrderReconciler(FakeManager(FakeBridge(FakeGateway([], []))), wal=BrokenWAL())
+    res = asyncio.run(rec.reconcile())
+
+    assert res.get("ok") is False, f"WAL 读取失败却报告成功：{res}"
+    assert res.get("checked") == 0
+    assert "WAL" in (res.get("note") or "") + (res.get("error") or ""), res
+    # 关键：不能出现「无待核销委托」这种把故障伪装成正常的说法
+    assert "无待核销委托" not in (res.get("note") or ""), f"把 WAL 故障伪装成无事发生：{res}"
+    assert res.get("error"), "失败结果必须带 error 供调用方展示"
+
+
+def test_wal_none_is_treated_as_nothing_pending(tmp_path):
+    """反例护栏：未配置 WAL（如单测环境）属正常，不是故障。"""
+    rec = OrderReconciler(FakeManager(FakeBridge(FakeGateway([], []))), wal=None)
+    res = asyncio.run(rec.reconcile())
+    assert res.get("ok") is True, res
+    assert res.get("note") == "无待核销委托", res
+
+
+def test_reconcile_route_surfaces_wal_failure_as_503():
+    """路由层不得把「查不了」包装成 HTTP 200 + code=0。"""
+    from app.routes.reconcile import reconcile_now
+
+    class Ctx:
+        reconciler = None
+
+    async def main():
+        rec = OrderReconciler(FakeManager(FakeBridge(FakeGateway([], []))), wal=BrokenWAL())
+
+        class C:
+            reconciler = rec
+
+        out = await reconcile_now(body=None, ctx=C())  # type: ignore[arg-type]
+        assert out.get("code") == 503, f"WAL 故障却返回 code={out.get('code')}：{out}"
+        assert "WAL" in (out.get("message") or ""), out
+
+    asyncio.run(main())

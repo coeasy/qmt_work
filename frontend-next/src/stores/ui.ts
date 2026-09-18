@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import {
   CUSTOM_SKIN_ID,
+  DEFAULT_SKIN_ID,
   SKIN_TOKEN_KEYS,
   deriveSkinTokens,
   isDarkColor,
@@ -12,9 +13,10 @@ import {
  * 主题与涨跌色通过 <html> 的 data-* 属性驱动，设计令牌自动生效。
  *
  * ★ 主题三态：`auto`（跟随系统）/ `dark` / `light`。
- *   - 首次进入（无持久化记录）默认 `auto`，跟随操作系统 `prefers-color-scheme`；
- *     若系统为浅色而终端强制深色，会出现「IDE 浅色 / 终端深色」的割裂感。
- *   - 用户在状态栏或设置页显式选择后，pref 落盘，此后不再跟随系统。
+ *   - 首次进入（无持久化记录）默认 `dark` + `通达信黑` 背景（A 股终端标配），
+ *     直接进入专业终端的深色工作态，无需先手动切主题。
+ *   - 用户在状态栏或设置页显式选择后可以切到 `跟随系统` / `浅色` / 其它皮肤，
+ *     pref 落盘，此后按用户选择生效。
  *   - `auto` 模式下监听系统主题变化并实时切换（如夜间自动转深色）。
  *   - 持久化键为 `qmt.ui.v1`；老版本只存了 `theme`，load() 会迁移为显式 pref。
  *
@@ -73,20 +75,21 @@ function isTheme(t: unknown): t is Theme {
 
 function load(): Persisted {
   const fallback: Persisted = {
-    themePref: "auto",
+    themePref: "dark",
     updown: "red-up",
     dataPanelTab: "watchlist",
     dataPanelOpen: true,
-    skin: "",
-    customBg: "#101820",
+    skin: DEFAULT_SKIN_ID,
+    customBg: "#0a0a0a",
     customTokens: {},
   };
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return fallback;
     const p = JSON.parse(raw) as Partial<Persisted> & { theme?: unknown };
-    // 迁移：旧版本写的是已解析的 theme，没有 themePref
-    let themePref: ThemePref = "auto";
+    // 迁移：旧版本写的是已解析的 theme，没有 themePref；
+    // 非法 / 缺失的 theme 回退到新默认（深色 + 通达信黑），而非 auto
+    let themePref: ThemePref = "dark";
     if (p.themePref === "auto" || isTheme(p.themePref)) themePref = p.themePref;
     else if (isTheme(p.theme)) themePref = p.theme;
     return {
@@ -98,7 +101,7 @@ function load(): Persisted {
           : "watchlist",
       dataPanelOpen: p.dataPanelOpen !== false,
       skin: typeof p.skin === "string" ? p.skin : "",
-      customBg: typeof p.customBg === "string" && p.customBg ? p.customBg : "#101820",
+      customBg: typeof p.customBg === "string" && p.customBg ? p.customBg : "#0a0a0a",
       customTokens: {},
     };
   } catch {

@@ -34,6 +34,55 @@ def _norm_path(p: str) -> str:
     return os.path.normcase(os.path.normpath(str(p).strip()))
 
 
+# 剥掉后即为「客户端根」的尾部目录名（数据目录 / 二进制目录）。
+# 同一客户端常见两种写法：根（P:\stock\gd_qmt）与数据目录
+# （P:\stock\gd_qmt\userdata_mini 或 ...\userdata）。
+_DATA_DIR_TAILS = frozenset(
+    {"userdata", "userdata_mini", "bin.x64", "bin.x32", "bin_x64", "bin32", "bin", "xtquant"})
+
+
+def _client_root(p: str) -> str:
+    """把 client_path 归约到「客户端根」，用于判断两条路径是不是同一个客户端。
+
+    ★ 为什么需要它：`find_by_identity` 原来按**精确** client_path 比对，而
+    「持久化连接」与「自动探测」对同一客户端的写法常常不同 —— 用户/历史数据写
+    客户端根（`P:\\stock\\gd_qmt`），探测器给出的是数据目录
+    （`P:\\stock\\gd_qmt\\userdata_mini`）。精确比对必然判为两个客户端，于是：
+      ① 自动连接每次都新建一条（同一账号堆出多份连接）；
+      ② 更糟的是「有持久连接 ⇒ 启动自动连接被跳过」，而新建又发生在守护里，
+         表现为「客户端明明开着却连不上，且连接列表越来越长」。
+    剥掉尾部数据目录/二进制目录后比较，两种写法归一到同一个根。
+    """
+    r = _norm_path(p)
+    if not r:
+        return ""
+    while True:
+        base = os.path.basename(r).lower()
+        if base in _DATA_DIR_TAILS:
+            parent = os.path.dirname(r)
+            if not parent or parent == r:
+                break
+            r = parent
+        else:
+            break
+    return r
+
+
+def _is_root_level(p: str) -> bool:
+    """路径是否**没有**带数据目录后缀（即直接指向客户端根）。
+
+    用于区分两种「同根不同路径」：
+    - 客户端根 vs 数据目录（`gd_qmt` vs `gd_qmt\\userdata_mini`）——同一客户端的
+      两种**写法**，应视为同一条连接（自动连接复用，不重复建连）；
+    - `userdata` vs `userdata_mini` ——同一客户端的两种**模式**（完整版/极速版），
+      用户可能刻意各建一条，仍须视为不同连接。
+    """
+    r = _norm_path(p)
+    if not r:
+        return False
+    return os.path.basename(r).lower() not in _DATA_DIR_TAILS
+
+
 def _version_profile(adapter: BrokerAdapter, allow_block: bool = True) -> dict | None:
     """提取适配器的版本画像（xtp 系提供；其余适配器无则返回 None）。
 
@@ -135,6 +184,74 @@ class BrokerManager:
                 log.warning("load_persisted: 跳过损坏记录 %r: %s", r, exc)
         # 注意：这里不自动 start —— 由应用 lifespan 在事件循环上统一启动 active 连接，
         # 避免「load_persisted 一次性 loop 启动 + lifespan 再启动」造成子进程重复拉起。
+        self.dedupe_identical()
+
+    def dedupe_identical(self) -> list[dict]:
+        """合并「身份完全相同」的重复连接，返回被移除的清单（空列表=无重复）。
+
+        ★ 为什么必须在加载后立刻做：``find_by_identity`` 只能拦住**新建**重复，
+        管不了库里**已经存在**的重复行。实测（2026-09-19）客户端 ``app.db`` 里有两条
+        ``P:\\stock\\gd_qmt\\userdata_mini`` / 账号 22453951，六个身份字段逐字相同，
+        只差创建时间与 ``active`` —— 界面于是列出**两条一模一样的连接**，而同一个
+        QMT userdata 目录被两条连接抢占时**必有一条连不上**，用户看到的就是
+        「有一条永远红着」，且无从判断该删哪条。
+
+        判据**只认一级身份**（券商 + 归一化路径 + 资金账号 + 账户类型）：
+        ``userdata`` 与 ``userdata_mini`` 是同一客户端的两种**模式**，不算重复
+        （与 :meth:`find_by_identity` 的二级放宽口径保持一致）。
+
+        保留策略：优先留 ``active`` 那条（保住「启动时自动连接」意图），其次留最新
+        （DB 按 id 升序加载，后插入者更新）。被移除者的 ``active`` 意图**合并进保留者**
+        而非静默丢弃 —— 否则「删掉的那条恰好是 active」就变成「下次启动不自动连了」
+        这种更隐蔽的故障。
+        """
+        groups: dict[tuple, list[str]] = {}
+        for cid, conn in list(self._conns.items()):
+            c = conn.cfg
+            key = (c.broker_id or "", _norm_path(c.client_path),
+                   str(c.account_id or ""), c.account_type or "")
+            groups.setdefault(key, []).append(cid)
+
+        removed: list[dict] = []
+        remap: dict[str, str] = {}
+        for _key, cids in groups.items():
+            if len(cids) < 2:
+                continue
+            keep = cids[-1]
+            for cid in cids:
+                if self._conns[cid].cfg.active:
+                    keep = cid
+            keeper = self._conns[keep]
+            # 意图合并：组内任意一条 active ⇒ 保留者也 active
+            if any(self._conns[cid].cfg.active for cid in cids):
+                keeper.cfg.active = True
+            for cid in cids:
+                if cid == keep:
+                    continue
+                gone = self._conns.pop(cid, None)
+                remap[cid] = keep
+                removed.append({
+                    "conn_id": cid, "kept": keep,
+                    "client_path": gone.cfg.client_path if gone else "",
+                    "account_id": str(gone.cfg.account_id or "") if gone else "",
+                })
+                try:
+                    get_db().execute(
+                        "DELETE FROM broker_connections WHERE conn_id=?", (cid,))
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("dedupe: 删除重复连接 %s 失败：%s", cid, exc)
+            try:
+                self._persist(keeper.cfg)
+            except Exception as exc:  # noqa: BLE001
+                # 去重是启动期的整理动作：**绝不能因为它拖垮启动**。
+                log.warning("dedupe: 回写保留连接 %s 失败：%s", keep, exc)
+        if remap and self._active_id in remap:
+            self._active_id = remap[self._active_id]
+        if removed:
+            log.warning("启动去重：合并 %d 条身份重复的连接（保留 %s）",
+                        len(removed), sorted(set(remap.values())))
+        return removed
+
 
     # ---------------- 增删改连 ----------------
     def _build(self, cfg: ConnectionConfig, connect: bool) -> Connection:
@@ -419,6 +536,13 @@ class BrokerManager:
                 "client_version": conn.adapter.client_version,
                 "supported_periods": conn.adapter.supported_periods,
                 "supported_account_types": conn.adapter.supported_account_types,
+                "client_path": conn.cfg.client_path,
+                # 客户端路径是否真实存在。界面据此把「指向不存在目录」的历史/测试
+                # 残留标为**无效连接** —— 这类条目静默占满列表、永远连不上，
+                # 且会让用户误以为「配了很多连接却都不可用」。
+                # 单次 stat，轮询（15s）成本可忽略。
+                "path_exists": bool(conn.cfg.client_path)
+                and os.path.isdir(conn.cfg.client_path),
                 # 高频轮询路径：只取缓存画像，避免 ~47s 同步探测冻结事件循环
                 "version_profile": _version_profile(conn.adapter, allow_block=False),
             })
@@ -486,6 +610,23 @@ class BrokerManager:
             if (c.broker_id or "", _norm_path(c.client_path),
                     str(c.account_id or "")) == want:
                 return conn
+        # 二级匹配：同一客户端根 + 同一资金账号。
+        # 覆盖「路径写法不同」与「券商档案漂移」（用户手填 guojin、探测判 generic）
+        # —— 两者都指向同一个客户端的同一个账户，复用而不新建才是正确行为。
+        want_root = _client_root(client_path)
+        want_acc = str(account_id or "")
+        if want_root and want_acc:
+            # 只放宽「根写法 ↔ 数据目录写法」这一种同义情形；
+            # `userdata` 与 `userdata_mini` 是同一客户端的两种**模式**，仍算不同连接。
+            want_is_root = _is_root_level(client_path)
+            for conn in self._conns.values():
+                c = conn.cfg
+                if str(c.account_id or "") != want_acc:
+                    continue
+                if _client_root(c.client_path) != want_root:
+                    continue
+                if want_is_root or _is_root_level(c.client_path):
+                    return conn
         return None
 
     def activate(self, conn_id: str) -> Connection:
@@ -503,4 +644,42 @@ class BrokerManager:
         if conn.connected and self._active_id is None:
             self._active_id = conn_id
             self._persist_active(exclusive=False)
+        return conn
+
+    def repair_client_path(self, conn_id: str, client_path: str,
+                           client_mode: str = "") -> Connection | None:
+        """把既有连接的客户端路径修正为**探测到的**实际数据目录，并重建适配器。
+
+        ★ 只在「该连接当前没连上」时调用：已经连上的连接不要动（能连上就别修）。
+
+        为什么需要它：持久化连接可能因历史版本或用户手填而写成客户端根
+        （``P:\\stock\\gd_qmt``），而实际可用的数据目录是探测到的
+        ``userdata_mini`` / ``userdata``。这条连接会一直连不上，偏偏又因为它
+        「已存在且 active=1」把启动自动连接与守护都挡在外面 —— 于是客户端明明
+        开着，系统却永远停在断开状态（这就是「已开启 QMT 却不自动连接」的根因）。
+
+        适配器在 `_build` 时就绑定了 client_path，**只改 cfg 不会生效**，
+        因此必须连同 adapter / bridge 一起重建。
+        """
+        conn = self._conns.get(conn_id)
+        if conn is None:
+            return None
+        c = conn.cfg
+        if _norm_path(c.client_path) == _norm_path(client_path):
+            return conn
+        try:
+            conn.adapter.close()
+        except Exception as exc:  # noqa: BLE001 — 关闭失败不影响重建
+            log.debug("repair_client_path close %r: %s", conn_id, exc)
+        c.client_path = client_path
+        if client_mode:
+            c.client_mode = client_mode
+        conn.adapter = create_adapter(c.broker_id, c.client_path, c.account_id,
+                                      c.account_type, c.session_id, c.min_version,
+                                      c.client_mode, metrics_fn=self.metrics_fn)
+        conn.bridge = XTQuantBridge(conn.adapter)
+        conn.connected = False
+        conn.last_error = ""
+        self._persist(c)
+        log.info("已修正连接 %s 的客户端路径：%s", conn_id, client_path)
         return conn

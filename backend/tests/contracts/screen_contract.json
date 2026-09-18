@@ -36,6 +36,8 @@
   ],
   "screen_query_params": [
     "adjust",
+    "classic",
+    "classic_params",
     "conditions",
     "fields",
     "limit",

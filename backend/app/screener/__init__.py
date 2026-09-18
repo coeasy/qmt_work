@@ -9,6 +9,16 @@ from app.screener.engine import (
 )
 from app.screener.universe import UniverseSpec, resolve_universe
 from app.screener.fundamentals import fetch_fundamentals, FUNDAMENTAL_FIELDS
+from app.screener.classic import (
+    CLASSIC_STRATEGIES,
+    STRATEGY_IDS,
+    compute_rps,
+    evaluate_classic,
+    list_strategies,
+    period_return,
+    run_classic,
+    strategy_meta,
+)
 from app.screener.source_policy import (
     SourcePolicy,
     ResolvedPolicy,
@@ -24,4 +34,7 @@ __all__ = [
     "fetch_fundamentals", "FUNDAMENTAL_FIELDS",
     "SourcePolicy", "ResolvedPolicy", "parse_source_policy",
     "explicit_provider_of", "resolve_policy",
+    # 经典策略（复刻 Sequoia-X）
+    "CLASSIC_STRATEGIES", "STRATEGY_IDS", "strategy_meta", "list_strategies",
+    "evaluate_classic", "run_classic", "compute_rps", "period_return",
 ]

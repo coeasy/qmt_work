@@ -26,14 +26,31 @@ export interface Quote {
   amount?: number;
   change?: number;
   change_pct?: number;
-  bid?: number[];
-  ask?: number[];
-  bid_vol?: number[];
-  ask_vol?: number[];
+  /**
+   * 买一 / 卖一**标量**。
+   *
+   * ★ 曾是 `number[]`，但后端 `xtquant_client/xtp/quotes.py` 的 `bid` / `ask` /
+   * `bid_vol` / `ask_vol` 都是 `_lst(..., 0)` —— **标量**，五档数组在 `bids` /
+   * `asks`。按数组索引读（`r.bid?.[0]`）恒为 undefined，于是五档与买一卖一
+   * 永远显示 `--`，且不报错。
+   */
+  bid?: number;
+  ask?: number;
+  bid_vol?: number;
+  ask_vol?: number;
+  /** 五档盘口（买一~买五 / 卖一~卖五），后端已归一为定长 5 的数组。 */
+  bids?: DepthLevel[];
+  asks?: DepthLevel[];
   time?: string;
   source?: string;
   stale?: boolean;
   as_of?: string;
+}
+
+/** 盘口单档：价格 + 量（后端 bids/asks 的元素结构）。 */
+export interface DepthLevel {
+  price: number;
+  volume: number;
 }
 
 export interface Bar {
@@ -74,12 +91,22 @@ export type Period = "1m" | "5m" | "15m" | "30m" | "60m" | "1d" | "1w" | "1M";
 
 export type Side = "buy" | "sell";
 export type PriceType = "limit" | "market";
+/**
+ * 订单状态 —— **必须**与后端平台标准词表一致：
+ * `backend/xtquant_client/order_status.py`（PENDING/PARTIAL/FILLED/CANCELLED/
+ * REJECTED/UNKNOWN）。
+ *
+ * ★ 为什么改过：此前这里写 `part_filled` / `canceled` / `submitted`，而后端权威词表是
+ * `partial` / `cancelled` / `pending`。券商原始串（含 submitted/part_filled 等别名）
+ * 已由 `normalize_order_status` 在服务侧收敛成标准词，前端若按旧名匹配就**永远匹配不上**，
+ * 状态列显示原始英文串、撤单按钮不出现——属于静默错配，不报错但一直错。
+ * 任务/算法单/条件单的 `canceled` 是**另一套**（后端确实返回 canceled），不在此列。
+ */
 export type OrderStatus =
   | "pending"
-  | "submitted"
-  | "part_filled"
+  | "partial"
   | "filled"
-  | "canceled"
+  | "cancelled"
   | "rejected"
   | "unknown";
 
@@ -259,6 +286,12 @@ export interface BrokerConnection {
   active?: boolean;
   connected?: boolean;
   client_path?: string;
+  /**
+   * 后端判定：client_path 是否真实存在（manager.status_list）。
+   * false = 指向不存在目录的历史/测试残留，永远连不上，界面须显式标记并可一键清理。
+   * 未返回（旧后端）时为 undefined ⇒ 视为未知，不标记。
+   */
+  path_exists?: boolean;
   runtime_mode?: string;
 }
 

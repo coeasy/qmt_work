@@ -1,13 +1,14 @@
 import { useMemo } from "react";
-import { Badge, Button, EmptyState, Panel } from "@/design/primitives";
+import { Badge, Button, Panel } from "@/design/primitives";
 import { KLineChart } from "@/charts/KLineChart";
 import { PERIOD_LABELS } from "@/shared/periods";
 import { useQuotesStore } from "@/stores/quotes";
 import { useWatchlistStore } from "@/stores/watchlist";
 import { useQuoteSubscription } from "@/hooks/useQuoteSubscription";
-import { fmtPct, fmtPrice, fmtVolume, namePair, toneColor } from "@/shared/format";
+import { fmtPct, fmtPrice, namePair, toneColor } from "@/shared/format";
 import type { Period } from "@/shared/types";
 import type { PageProps } from "@/app/routes";
+import { OrderBookPanel } from "./panels/OrderBookPanel";
 import s from "./marketdata.module.css";
 
 /**
@@ -15,6 +16,7 @@ import s from "./marketdata.module.css";
  *
  * 图表由 klinecharts 负责（专业画线/指标/联动）；
  * 五档盘口复用行情快照的 bid/ask 数组，不额外请求。
+ * 需要「报价牌 + K 线 + 分时 + 盘口 + 成交流」一起看时用「行情工作台」页。
  */
 export function MarketData({ params }: PageProps) {
   const code = (params.code as string) || "000001.SZ";
@@ -63,56 +65,11 @@ export function MarketData({ params }: PageProps) {
         </div>
 
         <div className={s.side}>
+          {/* 盘口 + 关键数据统一由 OrderBookPanel 渲染（工作台右栏同一份实现）：
+              原先此处另写一套「卖5→买1 / 买1→买5」，缺失值处理已与 OrderBook 页
+              出现细微差异（一处 `--` 一处 `—`），合并展示要消灭的就是这种漂移。 */}
           <Panel title="五档盘口" flush>
-            {quote?.bid || quote?.ask ? (
-              <div className={s.book}>
-                {(quote?.ask ?? [])
-                  .slice(0, 5)
-                  .reverse()
-                  .map((p, i, arr) => {
-                    const lvl = arr.length - i;
-                    return (
-                      <div key={`a${lvl}`} className={s.bookRow}>
-                        <span className={s.bookLabel}>卖{lvl}</span>
-                        <span className={s.bookPrice} style={{ color: "var(--down)" }}>
-                          {fmtPrice(p)}
-                        </span>
-                        <span className={s.bookVol}>{fmtVolume(quote?.ask_vol?.[lvl - 1])}</span>
-                      </div>
-                    );
-                  })}
-                <div className={s.bookSplit} />
-                {(quote?.bid ?? []).slice(0, 5).map((p, i) => (
-                  <div key={`b${i + 1}`} className={s.bookRow}>
-                    <span className={s.bookLabel}>买{i + 1}</span>
-                    <span className={s.bookPrice} style={{ color: "var(--up)" }}>
-                      {fmtPrice(p)}
-                    </span>
-                    <span className={s.bookVol}>{fmtVolume(quote?.bid_vol?.[i])}</span>
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <EmptyState text="暂无盘口数据（需券商推送五档）" />
-            )}
-          </Panel>
-
-          <Panel title="关键数据" flush>
-            <div className={s.stats}>
-              {[
-                ["今开", fmtPrice(quote?.open)],
-                ["昨收", fmtPrice(quote?.pre_close)],
-                ["最高", fmtPrice(quote?.high)],
-                ["最低", fmtPrice(quote?.low)],
-                ["成交量", fmtVolume(quote?.volume)],
-                ["更新时间", quote?.time ?? "--"],
-              ].map(([k, v]) => (
-                <div key={k} className={s.statRow}>
-                  <span className={s.statKey}>{k}</span>
-                  <span className={s.statVal}>{v}</span>
-                </div>
-              ))}
-            </div>
+            <OrderBookPanel code={code} />
           </Panel>
         </div>
       </div>

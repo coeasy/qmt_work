@@ -88,6 +88,12 @@
 .btnBlock {
   width: 100%;
 }
+/* ConfirmButton 的待确认态：除换成 danger 色外再加一圈外环。
+   只靠颜色区分对色觉障碍用户不友好，且列表行很密时容易漏看。 */
+.armed {
+  outline: 2px solid var(--danger);
+  outline-offset: 1px;
+}
 
 /* ---------- Input / Select ---------- */
 .field {

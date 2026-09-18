@@ -11,9 +11,18 @@ router = APIRouter()
 
 @router.get("/limitup/status")
 async def limitup_status(ctx: AppContext = Depends(get_ctx)):
-    """获取limitup / status（GET /limitup/status）。"""
+    """获取limitup / status（GET /limitup/status）。
+
+    ★ 监控未初始化时**必须报错**，不能伪装成「未运行 + 空池」。
+    曾在这里兜底返回 `{"running": False, "pool": []}`，界面于是显示「监控未启动」——
+    看起来一切正常、点一下就能启动；但同模块的 pool / start / stop 全都返回 503
+    「涨停监控未初始化」，口径自相矛盾，用户点了才发现根本用不了。
+    「未启动」与「不可用」是两件事，混为一谈就是**假空态**。
+    """
     m = ctx.limitup_monitor
-    return ok(m.status() if m else {"running": False, "pool": []})
+    if m is None:
+        return err(503, "涨停监控未初始化（同模块的 pool / start / stop 均不可用）")
+    return ok(m.status())
 
 @router.post("/limitup/pool")
 async def limitup_pool_add(body: dict, ctx: AppContext = Depends(get_ctx)):

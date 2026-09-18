@@ -9,6 +9,7 @@ from app.routes._common import (MSG_NO_BROKER, _call, _need, envelope_ok, err,
 # /trade/positions 与 /account/status（仪表盘「持仓盈亏」）必须共用同一实现，
 # 否则两页会各说各话（实测：持仓页 -10.4、仪表盘 0）。
 from app.services.positions import enrich_names, enrich_positions
+from app.services.order_contract import normalize_deals, normalize_orders
 
 # --- stdlib imports injected by fix_route_imports ---
 from gateway.execution import get_execution_service
@@ -87,9 +88,20 @@ async def trade_order(body: dict, ctx: AppContext = Depends(get_ctx)):
 
 @router.post("/trade/cancel")
 async def trade_cancel(body: dict, ctx: AppContext = Depends(get_ctx)):
-    """创建/提交trade / cancel（POST /trade/cancel）。"""
-    b = _need()
+    """创建/提交trade / cancel（POST /trade/cancel）。
+
+    ★ ``conn_id`` 必须生效：此前只读 ``order_id``、恒用**当前活跃连接**，
+    前端传上来的 ``conn_id`` 被直接忽略 —— 多账户下这在两个方向上都危险：
+    委托号在别的账户里撞号时撤错单，或根本撤不到却报成功。
+
+    ★ 指定了 ``conn_id`` 却取不到该连接时**报错，绝不静默回退到 active** ——
+    静默回退正是「撤错账户」的成因。
+    """
+    conn_id = str(body.get("conn_id") or "")
+    b = _need(conn_id or None)
     if b is None:
+        if conn_id:
+            return err(404, f"指定的连接不可用或未连接：{conn_id}（已阻止回退到其他账户）")
         return no_broker()
     oid = str(body.get("order_id", ""))
     if not oid:
@@ -113,21 +125,31 @@ async def trade_positions(symbol: str = "", ctx: AppContext = Depends(get_ctx)):
 
 @router.get("/trade/orders")
 async def trade_orders(ctx: AppContext = Depends(get_ctx)):
-    """获取trade / orders（GET /trade/orders）。"""
+    """获取trade / orders（GET /trade/orders）。
+
+    ★ 字段契约归一（app.services.order_contract）：券商原生名是
+    ``direction`` / ``dealt``，界面与消费方读 ``side`` / ``filled``；两者**都给**，
+    既有调用方不受影响。``status`` 一律归一到平台标准词表
+    （partial/cancelled/...），原始值留 ``status_raw``。
+    """
     b = _need()
     if b is None:
         return no_broker()
     res = await _call(b, b.gateway.get_orders)
-    return envelope_ok(_enrich_names(res)) if isinstance(res, list) else res
+    return envelope_ok(normalize_orders(_enrich_names(res))) if isinstance(res, list) else res
 
 @router.get("/trade/deals")
 async def trade_deals(ctx: AppContext = Depends(get_ctx)):
-    """获取trade / deals（GET /trade/deals）。"""
+    """获取trade / deals（GET /trade/deals）。
+
+    ★ 归一说明见 ``/trade/orders``。成交无独立成交号，``deal_id`` 由
+    ``order_id`` + ``seq`` 兜底（界面要用它做列表 key，必须有值）。
+    """
     b = _need()
     if b is None:
         return no_broker()
     res = await _call(b, b.gateway.get_deals)
-    return envelope_ok(_enrich_names(res)) if isinstance(res, list) else res
+    return envelope_ok(normalize_deals(_enrich_names(res))) if isinstance(res, list) else res
 
 @router.post("/trade/target")
 async def trade_target(body: dict, ctx: AppContext = Depends(get_ctx)):

@@ -4,7 +4,7 @@
 - 券商档案注册表挂接 DB
 - API Key 存储绑定 DB
 - 通知中心 / 告警引擎 / 运行时配置
-- K 线本地缓存
+- K 线本地缓存（热表）+ 冷仓（热窗口之外的历史，独立 SQLite 文件）
 - WAL
 """
 from __future__ import annotations
@@ -53,12 +53,44 @@ async def setup(app: FastAPI) -> dict:
     state.runtime_config = RuntimeConfig(state.db)
     log.info("runtime config ready: %d keys", len(state.runtime_config.all()))
 
-    # K 线本地缓存
+    # K 线本地缓存（热表）+ 冷仓（热窗口之外的历史，独立文件）
+    #
+    # 冷热边界由 runtime_config 的 `market.hot_days` 控制（默认 92 天 ≈ 3 个月）。
+    # 冷仓初始化失败**不阻断启动**：`KlineCache(cold=None)` 会把归档访问回退到
+    # 主库同名表，行为与改造前一致（宁可退回旧行为，也不要因为一个可选优化
+    # 让整个客户端起不来）。
+    import asyncio
+
+    from core.config import cold_bars_path
+    from datasource.cold_store import init_cold_store
     from gateway.kline_cache import KlineCache
+    hot_days = int(state.runtime_config.get("market.hot_days")
+                   or settings.bars_hot_days)
+    cold = None
+    try:
+        cold = init_cold_store(cold_bars_path())
+        # 一次性搬移：历史版本把冷数据放在**主库**的 kline_archive 表里，
+        # 不搬过来的话 `_arch` 指向冷仓后就再也读不到它们 —— 表现为图表历史
+        # 静默变短（不报错、不提示，最难查的那种）。幂等：主库表空即空操作。
+        moved = await asyncio.to_thread(cold.migrate_from, state.db)
+        if moved.get("moved"):
+            log.info("冷仓就绪：历史归档搬移 %d 行 → %s",
+                     moved["moved"], cold.path)
+        else:
+            log.info("冷仓就绪：%s（无需搬移）", cold.path)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("冷仓初始化失败，归档回退主库表（不影响启动）：%s", exc)
+        cold = None
+
     state.kline_cache = KlineCache(
         state.db, ttl_daily=settings.kline_cache_ttl_daily,
-        ttl_intraday=settings.kline_cache_ttl_intraday)
-    log.info("kline cache ready: %s", state.kline_cache.stats().get("rows"))
+        ttl_intraday=settings.kline_cache_ttl_intraday,
+        hot_days=hot_days, cold=cold)
+    _kc_stats = state.kline_cache.stats()
+    log.info("kline cache ready: rows=%s hot=%s cold=%s (hot_days=%s, cold=%s)",
+             _kc_stats.get("rows"), _kc_stats.get("hot_rows"),
+             _kc_stats.get("archive_rows"), _kc_stats.get("hot_days"),
+             _kc_stats.get("cold_enabled"))
 
     # WAL
     from gateway.wal import WAL

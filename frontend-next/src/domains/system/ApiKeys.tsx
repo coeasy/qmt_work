@@ -2,6 +2,7 @@ import { useState } from "react";
 import {
   Badge,
   Button,
+  ConfirmButton,
   DataTable,
   EmptyState,
   FormRow,
@@ -64,7 +65,6 @@ export function ApiKeys() {
   };
 
   const rotate = async (kid: number) => {
-    if (!window.confirm(`轮换密钥 #${kid}？旧密钥将立即失效，使用旧密钥的调用方会立刻中断。`)) return;
     setBusy(true);
     setBanner(null);
     setPlaintext(null);
@@ -191,12 +191,19 @@ export function ApiKeys() {
           <Button size="sm" variant="ghost" disabled={busy} onClick={() => void toggleEnabled(r)}>
             {r.status === "active" ? "停用" : "启用"}
           </Button>
-          <Button size="sm" variant="ghost" disabled={busy} onClick={() => void rotate(r.id)}>
+          {/* 轮换会让旧密钥立即失效（在用调用方立刻中断）⇒ 两段式确认，
+              与同行的「删除」同口径，避免一处弹窗一处内联两种交互。 */}
+          <ConfirmButton
+            disabled={busy}
+            confirmText="确认轮换"
+            title={`轮换密钥 #${r.id}，旧密钥将立即失效`}
+            onConfirm={() => void rotate(r.id)}
+          >
             轮换
-          </Button>
-          <Button size="sm" variant="ghost" disabled={busy} onClick={() => void remove(r.id)}>
+          </ConfirmButton>
+          <ConfirmButton disabled={busy} onConfirm={() => void remove(r.id)}>
             删除
-          </Button>
+          </ConfirmButton>
         </div>
       ),
     },
@@ -205,9 +212,13 @@ export function ApiKeys() {
   return (
     <div className={s.page}>
       <div className={s.toolbar}>
-        <Button size="sm" variant="ghost" disabled={busy || selected.length === 0} onClick={() => void batchRemove()}>
+        <ConfirmButton
+          disabled={busy || selected.length === 0}
+          confirmText={`确认删除 ${selected.length} 条`}
+          onConfirm={() => void batchRemove()}
+        >
           批量删除（{selected.length}）
-        </Button>
+        </ConfirmButton>
         <span className={s.spacer} />
         <Input value={cleanDays} onChange={(e) => setCleanDays(e.target.value)} mono style={{ width: 60 }} />
         <Button size="sm" variant="ghost" disabled={busy} onClick={() => void cleanUnused()}>

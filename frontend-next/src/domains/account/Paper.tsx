@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import {
   Badge,
   Button,
@@ -11,7 +11,8 @@ import {
 } from "@/design/primitives";
 import { paperApi, type PaperPosition, type PaperTrade } from "@/services/api";
 import { useAsync } from "@/hooks/useAsync";
-import { fmtAmount, fmtPrice, tone, toneColor } from "@/shared/format";
+import { useLiveQuotes } from "@/hooks/useLiveQuotes";
+import { fmtMoney, fmtPct, fmtPrice, tone, toneColor } from "@/shared/format";
 import s from "../domain.module.css";
 
 type Tab = "positions" | "trades" | "metrics";
@@ -98,34 +99,79 @@ export function Paper() {
   const retPct = acc ? acc.total_return * 100 : 0;
   const frozen = acc?.marking_source === "frozen";
 
+  // ★ 模拟盘叠加实时行情：后端 marking_source=frozen 表示**没取到实时行情**，
+  //   此时 last_price 退化为成本价、浮亏恒为 0 —— 界面上会显示成「逼真的 0.00」，
+  //   用户会误以为没亏。前端能拿到行情时优先用实时价，并据此重算市值/浮亏。
+  const positionCodes = useMemo(
+    () => (positions.data ?? []).map((p) => p.code),
+    [positions.data],
+  );
+  const quotes = useLiveQuotes(positionCodes);
+  /** 实时价优先，取不到才回退后端快照（绝不用 0 冒充价格） */
+  const lastPrice = (r: PaperPosition): number | undefined => {
+    const q = quotes[r.code]?.price;
+    if (q !== undefined && q > 0) return q;
+    return r.last_price !== undefined && r.last_price > 0 ? r.last_price : undefined;
+  };
+  const lastPct = (r: PaperPosition): number | undefined => quotes[r.code]?.change_pct;
+
   const positionCols: Column<PaperPosition>[] = [
     { key: "code", header: "代码", width: 96, mono: true, render: (r) => r.code },
     { key: "name", header: "名称", width: 92, render: (r) => r.name || "--" },
     { key: "vol", header: "持仓", width: 76, align: "right", mono: true, render: (r) => String(r.volume) },
     { key: "cost", header: "成本价", width: 78, align: "right", mono: true, render: (r) => fmtPrice(r.avg_cost) },
-    { key: "last", header: "现价", width: 78, align: "right", mono: true, render: (r) => fmtPrice(r.last_price) },
-    { key: "mv", header: "市值", width: 104, align: "right", mono: true, render: (r) => fmtAmount(r.market_value) },
+    { key: "last", header: "现价", width: 78, align: "right", mono: true, render: (r) => fmtPrice(lastPrice(r)) },
+    {
+      key: "chg",
+      header: "涨跌",
+      width: 78,
+      align: "right",
+      mono: true,
+      render: (r) => <span style={{ color: toneColor(lastPct(r)) }}>{fmtPct(lastPct(r))}</span>,
+    },
+    {
+      key: "mv",
+      header: "市值",
+      width: 104,
+      align: "right",
+      mono: true,
+      render: (r) => {
+        const p = lastPrice(r);
+        const mv = p !== undefined && p > 0 ? p * r.volume : r.market_value;
+        return fmtMoney(mv);
+      },
+    },
     {
       key: "pnl",
       header: "浮动盈亏",
       width: 104,
       align: "right",
       mono: true,
-      render: (r) => (
-        <span style={{ color: toneColor(r.unrealized_pnl ?? 0) }}>
-          {fmtAmount(r.unrealized_pnl ?? 0)}
-        </span>
-      ),
+      render: (r) => {
+        const p = lastPrice(r);
+        // ★ 算不出就显示 "--"，**绝不用 0 冒充**：后端行情冻结、均价缺失时，
+        // 这里若兜底成 0，界面会显示「浮亏 0.00」——用户会以为持仓不盈不亏，
+        // 与「没数据」是完全不同的两件事。
+        const v =
+          p !== undefined && p > 0 && r.avg_cost !== undefined
+            ? (p - r.avg_cost) * r.volume
+            : r.unrealized_pnl;
+        return <span style={{ color: toneColor(v) }}>{fmtMoney(v)}</span>;
+      },
     },
     {
       key: "marking",
       header: "盯市",
-      width: 64,
-      render: (r) => (
-        <Badge tone={r.marking === "live" ? "success" : "neutral"}>
-          {r.marking === "live" ? "实时" : "成本价"}
-        </Badge>
-      ),
+      width: 76,
+      render: (r) => {
+        // 前端拿到实时价即视为「实时」—— 后端 frozen 只说明**它自己**没取到
+        const live = lastPrice(r) !== undefined && quotes[r.code] !== undefined;
+        return (
+          <Badge tone={live ? "success" : r.marking === "live" ? "success" : "neutral"}>
+            {live ? "实时" : r.marking === "live" ? "实时" : "成本价"}
+          </Badge>
+        );
+      },
     },
   ];
 
@@ -153,7 +199,7 @@ export function Paper() {
       render: (r) =>
         r.side === "sell" ? (
           <span style={{ color: toneColor(Number(r.pnl ?? 0) || 0) }}>
-            {fmtAmount(Number(r.pnl ?? 0) || 0)}
+            {fmtMoney(Number(r.pnl ?? 0) || 0)}
           </span>
         ) : (
           <span className={s.muted}>—</span>
@@ -204,16 +250,16 @@ export function Paper() {
           <div className={s.stats}>
             <div className={s.stat}>
               <span className={s.statLabel}>总资产</span>
-              <span className={s.statValue}>{fmtAmount(acc.total_assets)}</span>
-              <span className={s.statSub}>初始 {fmtAmount(acc.initial)}</span>
+              <span className={s.statValue}>{fmtMoney(acc.total_assets)}</span>
+              <span className={s.statSub}>初始 {fmtMoney(acc.initial)}</span>
             </div>
             <div className={s.stat}>
               <span className={s.statLabel}>可用资金</span>
-              <span className={s.statValue}>{fmtAmount(acc.cash)}</span>
+              <span className={s.statValue}>{fmtMoney(acc.cash)}</span>
             </div>
             <div className={s.stat}>
               <span className={s.statLabel}>持仓市值</span>
-              <span className={s.statValue}>{fmtAmount(acc.market_value)}</span>
+              <span className={s.statValue}>{fmtMoney(acc.market_value)}</span>
               <span className={s.statSub}>{acc.position_count} 只</span>
             </div>
             <div className={s.stat}>
@@ -226,21 +272,22 @@ export function Paper() {
             <div className={s.stat}>
               <span className={s.statLabel}>浮动盈亏</span>
               <span className={s.statValue} style={{ color: toneColor(acc.unrealized_pnl) }}>
-                {fmtAmount(acc.unrealized_pnl)}
+                {fmtMoney(acc.unrealized_pnl)}
               </span>
             </div>
             <div className={s.stat}>
               <span className={s.statLabel}>已实现盈亏</span>
               <span className={s.statValue} style={{ color: toneColor(acc.realized_pnl) }}>
-                {fmtAmount(acc.realized_pnl)}
+                {fmtMoney(acc.realized_pnl)}
               </span>
             </div>
           </div>
 
           {frozen && (
             <div className={`${s.note} ${s.noteWarn}`}>
-              当前<b>未取到实时行情</b>（marking_source=frozen）：持仓市值与浮动盈亏退化为
-              <b>成本价</b>估算，并非真实盯市结果。连接券商或等待行情刷新后再看。
+              后端报告<b>未取到实时行情</b>（marking_source=frozen）：其返回的市值与浮动盈亏退化为
+              <b>成本价</b>估算，并非真实盯市结果。本页已尝试叠加前端实时行情（「现价 / 涨跌」列），
+              <b>盯市</b>列显示「成本价」即表示该标的仍未取到行情。
             </div>
           )}
         </>
@@ -343,13 +390,13 @@ export function Paper() {
               <div className={s.stat}>
                 <span className={s.statLabel}>平均盈亏</span>
                 <span className={s.statValue} style={{ color: toneColor(metrics.data.avg_pnl) }}>
-                  {fmtAmount(metrics.data.avg_pnl)}
+                  {fmtMoney(metrics.data.avg_pnl)}
                 </span>
               </div>
               <div className={s.stat}>
                 <span className={s.statLabel}>最好 / 最差</span>
                 <span className={s.statValue}>
-                  {fmtAmount(metrics.data.best_pnl)} / {fmtAmount(metrics.data.worst_pnl)}
+                  {fmtMoney(metrics.data.best_pnl)} / {fmtMoney(metrics.data.worst_pnl)}
                 </span>
               </div>
             </div>

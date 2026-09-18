@@ -78,7 +78,10 @@ async def market_search(q: str, limit: int = 20, include_boards: bool = True, ct
         rows = await get_hub().search_stocks(q, limit)
     except Exception as exc:  # noqa: BLE001
         log.warning("股票搜索失败：%s", exc)
-        rows = []
+        # ★ 绝不吞成空列表：那会让「检索索引故障」与「确实没有这只票」在界面上
+        #   长得一模一样（都是空结果 + code=0），用户会以为自己把代码记错了，
+        #   反复重试而不是去查服务状态。两者必须可区分。
+        return err(503, f"检索服务不可用：{exc}")
     out = [enrich_search_row(r, q) for r in (rows or []) if r.get("code")]
     # 板块联合检索（仅当无股票结果或结果不足时补充；板块排在股票之后）
     if include_boards and len(out) < limit:
@@ -583,11 +586,27 @@ start_moneyflow_collector = kline_io.start_moneyflow_collector
 
 @router.get("/market/kline/sync-status")
 async def kline_sync_status(ctx: AppContext = Depends(get_ctx)):
-    """行情缓存定时更新状态（开关/触发时间/最近一次运行），供前端展示与配置。"""
+    """行情缓存定时更新状态（开关/触发时间/最近一次运行/冷热分层），供前端展示与配置。
+
+    「每日 16:00 自动下载 K 线」的观测面：``enabled`` + ``sync_time`` 说明会不会跑、
+    几点跑；``last_run`` 说明今天跑没跑、跑了几只；``hot`` 说明冷热怎么分的。
+    前端据此能如实告诉用户「已同步 / 待同步 / 未启用」，而不是只显示一个开关。
+    """
     ms = getattr(ctx, "market_sync", None)
     if ms is None:
         return ok({"initialized": False})
     rc = getattr(ctx, "runtime_config", None)
+    kc = getattr(ctx, "kline_cache", None)
+    hot = {}
+    if kc is not None:
+        try:
+            st = kc.stats()
+            hot = {"hot_days": st.get("hot_days"), "hot_cutoff": st.get("hot_cutoff"),
+                   "hot_rows": st.get("hot_rows"), "cold_rows": st.get("archive_rows"),
+                   "cold_enabled": st.get("cold_enabled"),
+                   "cold_path": st.get("cold_path")}
+        except Exception:  # noqa: BLE001 状态查询失败不该让整个端点 500
+            hot = {}
     info = {
         "initialized": True,
         "enabled": ms.enabled,
@@ -596,8 +615,10 @@ async def kline_sync_status(ctx: AppContext = Depends(get_ctx)):
         "keys": {
             "enabled": "market.sync.enabled",
             "sync_time": "market.sync.time",
+            "hot_days": "market.hot_days",
         },
         "last_run": getattr(ctx, "_market_sync_last", None),
+        "hot": hot,
         "config": rc.all().get("market.sync.enabled") if rc else None,
     }
     return ok(info)

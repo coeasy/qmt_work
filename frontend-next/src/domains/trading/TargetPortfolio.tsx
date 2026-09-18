@@ -1,7 +1,8 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import {
   Badge,
   Button,
+  ConfirmModal,
   DataTable,
   EmptyState,
   FormRow,
@@ -12,6 +13,8 @@ import {
 } from "@/design/primitives";
 import { portfolioApi } from "@/services/api";
 import { useAsync } from "@/hooks/useAsync";
+import { useLiveQuotes } from "@/hooks/useLiveQuotes";
+import { fmtPrice, toneColor } from "@/shared/format";
 import s from "./targetPortfolio.module.css";
 
 /**
@@ -41,14 +44,27 @@ export function TargetPortfolio() {
     [],
   );
 
+  // 跨计划收集一次全部标的，用来叠加实时行情（权重列要显示每只票的最新价）
+  const planCodes = useMemo(() => {
+    const set = new Set<string>();
+    for (const p of plans.data ?? []) {
+      if (typeof p.weights === "object" && p.weights) {
+        for (const k of Object.keys(p.weights as Record<string, unknown>)) set.add(k);
+      }
+    }
+    return [...set];
+  }, [plans.data]);
+  const quotes = useLiveQuotes(planCodes);
+
   const [selected, setSelected] = useState<number[]>([]);
   const [busy, setBusy] = useState(false);
   const [banner, setBanner] = useState<{ tone: "ok" | "error"; text: string } | null>(null);
+  /** 批量删除是破坏性动作 ⇒ 模态确认，不用 window.confirm */
+  const [confirmBatch, setConfirmBatch] = useState(false);
 
   /* ---------- 计划批量删除 ---------- */
   const batchRemove = async () => {
     if (selected.length === 0) return;
-    if (!window.confirm(`确认批量删除 ${selected.length} 条目标持仓计划？`)) return;
     setBusy(true);
     setBanner(null);
     try {
@@ -85,14 +101,35 @@ export function TargetPortfolio() {
     { key: "name", header: "名称", width: 160, render: (r) => r.name || "--" },
     {
       key: "weights",
-      header: "权重",
-      render: (r) => (
-        <span className={s.mono}>
-          {typeof r.weights === "object" && r.weights
-            ? JSON.stringify(r.weights)
-            : "--"}
-        </span>
-      ),
+      header: "权重 / 最新价",
+      render: (r) => {
+        const w =
+          typeof r.weights === "object" && r.weights
+            ? (r.weights as Record<string, unknown>)
+            : null;
+        const keys = w ? Object.keys(w) : [];
+        if (!w || keys.length === 0) return <span className={s.mono}>--</span>;
+        return (
+          <span className={s.weightList}>
+            {keys.map((code) => {
+              const q = quotes[code];
+              const raw = w[code];
+              const pct = typeof raw === "number" ? raw * 100 : undefined;
+              return (
+                <span key={code} className={s.weightChip}>
+                  <span className={s.mono}>{code}</span>
+                  <span className={s.weightPct}>
+                    {pct === undefined ? "--" : `${pct.toFixed(1)}%`}
+                  </span>
+                  <span className={s.mono} style={{ color: toneColor(q?.change_pct) }}>
+                    {fmtPrice(q?.price)}
+                  </span>
+                </span>
+              );
+            })}
+          </span>
+        );
+      },
     },
     {
       key: "status",
@@ -141,7 +178,12 @@ export function TargetPortfolio() {
       <Panel
         title={`目标持仓计划（${plans.data?.length ?? 0}）`}
         extra={
-          <Button size="sm" variant="danger" disabled={busy || selected.length === 0} onClick={() => void batchRemove()}>
+          <Button
+            size="sm"
+            variant="danger"
+            disabled={busy || selected.length === 0}
+            onClick={() => setConfirmBatch(true)}
+          >
             批量删除（{selected.length}）
           </Button>
         }
@@ -203,6 +245,24 @@ export function TargetPortfolio() {
           {banner.text}
         </div>
       )}
+
+      <ConfirmModal
+        open={confirmBatch}
+        danger
+        title="批量删除目标持仓计划"
+        confirmText={`确认删除 ${selected.length} 条`}
+        message={
+          <>
+            将删除 <b>{selected.length}</b> 条目标持仓计划，<b>不可恢复</b>。
+            已同步出去的持仓不受影响（本操作只删计划，不平仓）。
+          </>
+        }
+        onCancel={() => setConfirmBatch(false)}
+        onConfirm={() => {
+          setConfirmBatch(false);
+          void batchRemove();
+        }}
+      />
     </div>
   );
 }

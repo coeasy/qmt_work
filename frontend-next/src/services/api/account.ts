@@ -45,10 +45,23 @@ export const accountApi = {
 
   aggregate: () => http.get<AccountAggregate>("/account/aggregate"),
 
-  pnl: () =>
-    http.get<{ net_value_series: NetValuePoint[] }>("/account/pnl"),
+  /**
+   * 净值曲线。
+   *
+   * ★ 多账户必须传 `accountId`：不传时后端返回的是**所有账户混在一起的曲线**
+   * （`mixed_accounts=true`），形状完全失真。消费方拿到 `mixed_accounts` 应显式
+   * 提示用户，不要默默画出来。
+   */
+  pnl: (accountId = "") =>
+    http.get<{
+      net_value_series: NetValuePoint[];
+      account_id: string;
+      accounts: string[];
+      mixed_accounts: boolean;
+    }>("/account/pnl", { query: { account_id: accountId } }),
 
-  slippage: (code = "600519.SH", connId = "") =>
+  /** 滑点分析。★ code 必填：后端已移除写死的默认标的，不传会 400 */
+  slippage: (code: string, connId = "") =>
     http.get<SlippageReport>("/account/slippage", { query: { code, conn_id: connId } }),
 
   grid: () => http.get<AccountGrid>("/account/grid"),

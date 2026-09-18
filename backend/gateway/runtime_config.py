@@ -54,13 +54,17 @@ class RuntimeConfig:
                                  "算法单切片成交确认窗口（秒）：超时未确认按 0 成交计"),
         "algo.confirm_retries": (5, int, 1,
                                  "算法单切片成交确认重试次数"),
-        # ---- 行情缓存定时维护（今年热数据收盘后刷新 + 跨年归档）----
-        "market.sync.enabled": (False, bool, False,
-                                "是否启用行情缓存定时更新（收盘后刷新今年热数据）"),
+        # ---- 行情缓存定时维护（热窗口收盘后刷新 + 冷数据分层）----
+        "market.sync.enabled": (True, bool, False,
+                                "是否启用行情缓存每日定时更新（默认开：每日 16:00 刷新热数据，"
+                                "过点启动会自动补跑）"),
         "market.sync.time": ("16:00", str, "",
                              "每日刷新触发时间 HH:MM（收盘后，默认 16:00）"),
         "market.sync.interval": (60.0, float, 10.0,
                                  "定时更新检查循环间隔（秒），热更新生效"),
+        "market.hot_days": (92, int, 7,
+                            "K 线热窗口天数（自然日）：超过该天数的历史算冷数据，"
+                            "搬入独立冷仓文件且每日定时同步不再更新；默认 92 ≈ 3 个月"),
         "market.eod.enabled": (False, bool, False,
                                 "是否启用每日全市场 EOD 持久化同步"),
         "market.eod.time": ("18:00", str, "",

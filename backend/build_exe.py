@@ -12,6 +12,7 @@
   使 FastAPI 在打包后仍能托管前端静态资源。
 - 运行时 SQLite 数据库由 Electron 主进程通过 QMT_DB_PATH 指向 userData。
 """
+import ast
 import os
 import re
 import subprocess
@@ -129,18 +130,85 @@ runtimes_dir = ROOT / "runtimes"
 if runtimes_dir.is_dir():
     DATAS.append(f"{runtimes_dir};runtimes")
 
-# P0：xtquant_client 包以真实 .py 文件复制进 _internal/xtquant_client/
-# （PyInstaller 默认把纯 Python 模块打进 PYZ 归档，普通 embed 子进程无法从归档
-#   import；复制文件后，bridge 子进程（runtimes/cpXXX/python.exe）可正常
-#   `python -m xtquant_client.bridge_server`。主进程仍优先走 PYZ，无冲突。）
+# P0：桥接子进程需要「磁盘上的真实 .py」，不能只靠 PYZ 归档。
+#
+# 背景：桥接子进程以 `runtimes/cpXXX/python.exe -m xtquant_client.bridge_server`
+# 独立启动，走的是**普通 import**（不是 PyInstaller 冻结 loader），读不到 EXE
+# 内部的 PYZ ⇒ 它自身**及其全部首方依赖**都必须是磁盘上的真实 .py 文件。
+#
+# ★ 历史缺陷（2026-09-17 实测，打包态桥接 100% 起不来）：
+#   原实现只复制 xtquant_client/，而 xtp/quotes.py 第 5 行是
+#       from core.clock import local_now, now_iso
+#   → ModuleNotFoundError: No module named 'core'
+#   界面表现为「桥接子进程握手失败」，而报错经过**三重截断**（每行只留后 200
+#   字符、只留最后 8 行、整体再截 500 字符），真正的异常行被切掉，只能看到
+#   `from .quotes import QuotesMixin` 这一层，极难定位（详见
+#   bridge_client._stderr_tail / _stderr_buf）。
+#   注意：主进程一切正常（REST/WS/SPA 全绿）——「主进程能跑」完全不能证明
+#   「桥接能起」，两者走的是两套导入机制。
+#
+# 因此这里不再手写清单，而是「静态扫描首方导入 → 求传递闭包 → 复制」：
+# 以后 xtquant_client 新增任何首方 import 都会自动跟随，不会再出现
+# 「开发态正常、打包态静默失效」。
+#
 # 注意：datas 目标须保留相对子路径（如 adapters/__init__.py -> xtquant_client/adapters），
 # 否则子包 __init__ 会覆盖顶层同名文件。
-_xq = ROOT / "xtquant_client"
-if _xq.is_dir():
-    for _py in _xq.rglob("*.py"):
-        _rel = _py.relative_to(_xq)
-        _dest = ("xtquant_client" if _rel.parent == Path(".")
-                 else os.path.join("xtquant_client", str(_rel.parent)).replace("/", os.sep))
+BRIDGE_ENTRY_PKG = "xtquant_client"
+
+
+def _first_party_roots() -> set:
+    """backend/ 下带 __init__.py 的顶层包名（= 首方可导入根）。"""
+    return {p.name for p in ROOT.iterdir()
+            if p.is_dir() and (p / "__init__.py").is_file()}
+
+
+def _first_party_imports(py: Path, roots: set) -> set:
+    """用 ast 提取该文件 import 到的首方顶层包名（只解析、不执行代码）。"""
+    try:
+        tree = ast.parse(py.read_text(encoding="utf-8", errors="replace"))
+    except (SyntaxError, OSError):
+        return set()
+    found = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            names = [a.name for a in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            if node.level or not node.module:
+                continue  # 相对导入 → 包内，随包一起复制
+            names = [node.module]
+        else:
+            continue
+        for n in names:
+            top = n.split(".")[0]
+            if top in roots:
+                found.add(top)
+    return found
+
+
+def _bridge_source_packages(entry: str = BRIDGE_ENTRY_PKG) -> list:
+    """entry 及其首方依赖的传递闭包（含 entry 自身），按名排序。"""
+    roots = _first_party_roots()
+    seen, pending = {entry}, [entry]
+    while pending:
+        pkg = pending.pop()
+        pkg_dir = ROOT / pkg
+        if not pkg_dir.is_dir():
+            continue
+        for py in pkg_dir.rglob("*.py"):
+            for dep in _first_party_imports(py, roots):
+                if dep not in seen:
+                    seen.add(dep)
+                    pending.append(dep)
+    return sorted(seen)
+
+
+_bridge_pkgs = _bridge_source_packages()
+for _pkg in _bridge_pkgs:
+    _pkg_dir = ROOT / _pkg
+    for _py in _pkg_dir.rglob("*.py"):
+        _rel = _py.relative_to(_pkg_dir)
+        _dest = (_pkg if _rel.parent == Path(".")
+                 else os.path.join(_pkg, str(_rel.parent)).replace("/", os.sep))
         DATAS.append(f"{_py};{_dest}")
 
 
@@ -246,6 +314,46 @@ def _verify_static_output() -> None:
     print(f"  [static] 产物核对通过：{len(out_files)} / {len(src_files)} 个文件全部打包")
 
 
+def _verify_bridge_imports() -> None:
+    """构建后核对：桥接子进程能在打包产物里 import 成功。
+
+    这是「桥接坏包」的最后一道闸门。桥接子进程走的是磁盘上的真实 .py（不是
+    PYZ），所以「主进程能跑」完全不能证明「桥接能起」——2026-09-17 就出过：
+    主进程一切正常（REST/WS/SPA 全绿、界面完整渲染），而桥接子进程一启动就
+    `ModuleNotFoundError: No module named 'core'`。
+
+    这里直接用产物内的 runtimes/cpXXX/python.exe 做一次真实导入。失败即让构建
+    失败，并打印**完整** traceback（不经过 bridge_client 的三重截断）。
+    """
+    internal = DIST / "qmt_work" / "_internal"
+    runtimes = internal / "runtimes"
+    if not runtimes.is_dir():
+        print("  [bridge] 跳过：产物内无 runtimes/（无嵌入运行时，桥接不可用）")
+        return
+    pythons = sorted(runtimes.glob("cp*/python.exe"))
+    if not pythons:
+        print("  [bridge] 跳过：runtimes/ 下无 cpXXX/python.exe")
+        return
+    exe = pythons[0]
+    probe = ("import xtquant_client.base, xtquant_client.registry, "
+             "xtquant_client.xtp, xtquant_client.bridge_server; "
+             "print('bridge-import-ok')")
+    env = {k: v for k, v in os.environ.items() if not k.startswith("PYTHON")}
+    env["PYTHONPATH"] = str(internal)
+    env["PYTHONIOENCODING"] = "utf-8"
+    proc = subprocess.run([str(exe), "-c", probe], cwd=str(internal),  # noqa: S603 —— 固定探针命令，非用户输入
+                          check=False, capture_output=True, text=True,
+                          encoding="utf-8", errors="replace", env=env,
+                          creationflags=CREATE_NO_WINDOW)
+    if proc.returncode != 0 or "bridge-import-ok" not in (proc.stdout or ""):
+        raise SystemExit(
+            f"[FATAL] 桥接子进程在打包产物内 import 失败（{exe.name}，rc={proc.returncode}）。\n"
+            f"        桥接子进程走磁盘真实 .py、读不到 PYZ ⇒ 它的首方依赖闭包\n"
+            f"        （当前：{', '.join(_bridge_pkgs)}）都必须复制进 _internal。\n"
+            f"        完整 stderr：\n{proc.stderr or '(空)'}")
+    print(f"  [bridge] 导入核对通过：{', '.join(_bridge_pkgs)}（{exe.parent.name}）")
+
+
 def main():
     _verify_static_input()
     # 控制台开关（可移植）：默认 --noconsole（发布友好，无黑框窗口）；
@@ -295,6 +403,7 @@ def main():
     print(proc.stdout[-800:] if proc.stdout else "")
     _sanitize_dist_runtime()
     _verify_static_output()
+    _verify_bridge_imports()
     print(f"\n完成：{DIST / 'qmt_work' / 'qmt_work.exe'}")
 
 

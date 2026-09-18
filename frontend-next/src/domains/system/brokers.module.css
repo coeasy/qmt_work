@@ -142,3 +142,53 @@
   color: var(--text-dim);
   padding: 0 var(--sp-1);
 }
+
+/* ---- 连接诊断（/brokers/diagnostics 的渲染）---- */
+
+.diagBody {
+  padding: var(--sp-2) var(--sp-3);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: var(--font-sm);
+}
+
+.diagRow {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  color: var(--text-dim);
+}
+
+/* 路径/ABI 这类长串必须能断行，否则面板会被撑宽 */
+.mono {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+  word-break: break-all;
+  text-align: right;
+}
+
+.diagConn {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 6px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.diagConnTitle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  color: var(--text);
+}
+
+.diagConnSub {
+  color: var(--text-faint);
+  font-size: var(--font-xs);
+  word-break: break-all;
+}

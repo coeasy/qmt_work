@@ -4,13 +4,31 @@
 //   ① 它必须是**可单测**的 —— 「失败页到底有没有把中文原因和重试按钮渲染出来」
 //      不能只靠「窗口标题变了」推断。放在 main.cjs 里则必须启动整个 Electron 才能测，
 //      实际结果就是没人测（本模块出现前，失败页只在人肉截图里被看过一次）。
-//   ② 纯函数、零 Electron 依赖 —— 参数进、data URL 出，可以脱离主进程直接渲染验证。
+//   ② 纯函数、零 Electron 依赖 —— 参数进、HTML 出，可以脱离主进程直接渲染验证。
 //
-// 为什么走 data: URL 而不是本地文件：applySecurityPolicy 只对 isLocalOrigin(url)
-// 下发 CSP，data: 不匹配 ⇒ 内联 <style>/<script> 可用（应用页面仍禁止内联脚本，
-// 主题预热因此抽成同源文件 public/theme-boot.js）。
+// ★★ 关键约束：加载页**绝不能以 data: 或 file:// 的形式作为窗口的首屏导航**。
+//    实测（output/region_repro 的 REPRO_BOOT 二分；最终页统一为 http://127.0.0.1:21401/，
+//    同一页面、同一测量方法；判据 = 标题栏 WM_NCHITTEST，2=HTCAPTION 可拖 / 1=HTCLIENT 拖不动）：
+//      · 直接加载目标页          → 2（可拖）
+//      · 先 data: 再导航到目标   → 恒为 1，**永久不可恢复**
+//      · 先 file:// 再导航到目标 → 恒为 1（同样不可恢复）
+//      · 先 about:blank 再导航   → 2（可拖）
+//      导航后强制 resize / reload 均无效；注入全新 `-webkit-app-region: drag`
+//      元素同样无效 ⇒ 与页面 CSS/DOM 无关，是**窗口级**状态被写坏：
+//      Chromium 不再把 draggable region 上报给窗口过程。
+//    ⚠️ 早期只测到「file:// 首屏」在**最终页也是 file://** 时正常，据此误判过一次 ——
+//       真正的分界是「最终页为 http 的跨协议导航」，务必以最终页为 http 的矩阵为准。
+//    ⇒ 这就是「客户端窗口不能拖动」的根因（R10.1 引入 data: 加载页时踩到）。
+//      main.cjs 的 showLoading() 因此改为「先 about:blank，再把本函数产出的 HTML
+//      用 document.write 注入」；下面的 loadingPageUrl() 只剩一个用途：
+//      给 output/render_probe 这类**单次渲染**探针用（那里不存在后续 http 导航，
+//      因此不受副作用影响）。**产品代码不得使用它。**
+//
+// 为什么加载页里可以用内联 <style>/<script>：applySecurityPolicy 只对
+// isLocalOrigin(url) 下发 CSP，file:// 与 data: 都不匹配 ⇒ 内联可用
+// （应用页面仍禁止内联脚本，主题预热因此抽成同源文件 public/theme-boot.js）。
 // 页面里不使用任何内联事件属性（onclick=…），一律 addEventListener，
-// 这样将来若把 CSP 收紧到 data: 也不会连带失效。
+// 这样将来若把 CSP 收紧到加载页也不会连带失效。
 
 "use strict";
 
@@ -20,7 +38,7 @@ function escHtml(s) {
     .replace(/"/g, "&quot;");
 }
 
-function loadingPageUrl(phase, message, error) {
+function loadingPageHtml(phase, message, error) {
   const failed = phase === "failed";
   // 标题随阶段变：任务栏/托盘里也能一眼看出是「还在启动」还是「起不来」，
   // 而不是两种状态共用一个「正在启动」。
@@ -74,7 +92,19 @@ if (b) {
 }
 </script>
 </body></html>`;
-  return "data:text/html;charset=utf-8," + encodeURIComponent(html);
+  return html;
 }
 
-module.exports = { escHtml, loadingPageUrl };
+/**
+ * 加载页的 data: URL 形式 —— **仅供 output/render_probe 这类单次渲染探针使用**。
+ *
+ * 那里加载页是窗口的**唯一**页面（不存在后续 http 导航），所以不会触发下面的副作用。
+ * ⚠️ 产品代码（main.cjs）**不得使用**：窗口一旦以 data:（或 file://）作为首屏导航，
+ * draggable region 会永久失效，表现为「标题栏拖不动窗口」。正常路径是
+ * `loadingPageHtml` + 先 `about:blank` 再 `document.write` 注入。
+ */
+function loadingPageUrl(phase, message, error) {
+  return "data:text/html;charset=utf-8," + encodeURIComponent(loadingPageHtml(phase, message, error));
+}
+
+module.exports = { escHtml, loadingPageHtml, loadingPageUrl };

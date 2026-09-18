@@ -54,3 +54,27 @@
 .readoutPrice {
   font-size: var(--font-lg);
 }
+
+/* 右上角「复权方式 / 数据源 / 是否陈旧」角标。
+   为什么要显示：后端 /market/kline 会返回 stale（数据陈旧）与 source（实际数据源），
+   此前整包丢弃 —— 数据源已降级时用户毫无察觉，以为在看实时数据。 */
+.meta {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  z-index: var(--z-panel);
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  pointer-events: auto;
+  font-size: var(--font-xs);
+  color: var(--text-dim);
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 1px 6px;
+}
+
+.metaStale {
+  color: var(--warning);
+}

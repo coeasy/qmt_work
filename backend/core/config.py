@@ -159,7 +159,7 @@ def _json_config_source() -> dict[str, Any]:
         if v is None:
             continue
         out[k.replace("-", "_").lower()] = v
-    for pkey in ("db_path", "log_dir"):
+    for pkey in ("db_path", "log_dir", "bars_cold_path"):
         if pkey in out and isinstance(out[pkey], str) and not Path(out[pkey]).is_absolute():
             out[pkey] = str(exe_dir() / out[pkey])
     return out
@@ -171,6 +171,23 @@ def _default_db_path() -> Path:
 
 def _default_log_dir() -> Path:
     return exe_dir() / "logs"
+
+
+def cold_bars_path() -> Path:
+    """冷 K 线仓文件路径（单一解析入口）。
+
+    显式配置 ``bars_cold_path`` 优先（相对路径以 exe 目录为基准）；未配置则
+    **跟随主库目录** ``<db_path 的父目录>/bars_cold.db``。
+
+    刻意做成函数而不是 Field 默认值：``db_path`` 可被 JSON 配置覆盖，
+    而 Field 默认值在 ``Settings`` 构造时就固化了，改 ``db_path`` 不会带动冷仓，
+    会出现「主库搬到了 D 盘、冷仓还在 C 盘」的割裂。这里每次按当前 settings 求值。
+    """
+    raw = str(getattr(settings, "bars_cold_path", "") or "").strip()
+    if raw:
+        p = Path(raw)
+        return p if p.is_absolute() else (exe_dir() / p)
+    return settings.db_path.parent / "bars_cold.db"
 
 
 class Settings(BaseSettings):
@@ -254,6 +271,15 @@ class Settings(BaseSettings):
     # 历史 K 线本地缓存 TTL（C1）：日线 6h / 分钟线 60s
     kline_cache_ttl_daily: float = 6 * 3600.0
     kline_cache_ttl_intraday: float = 60.0
+
+    # ---- K 线冷热分层（数据同步）----
+    # 热窗口天数：**超过该天数的历史 K 线算「冷数据」**，搬进独立冷仓文件
+    # （bars_cold.db），每日定时同步只更新热窗口内的数据。
+    # 默认 92 天 ≈ 3 个月（用户口径：「超过 3 个月的数据为冷数据」）。
+    # 边界由 ``gateway.kline_cache.KlineCache.hot_cutoff`` 单点计算，本值是其唯一输入。
+    bars_hot_days: int = 92
+    # 冷仓文件路径；留空 = 主库同目录下的 bars_cold.db（跟随 db_path，便于整体搬迁/备份）
+    bars_cold_path: str = ""
 
     # 出站 webhook（B2）：并发投递与重试退避基数（秒）
     webhook_out_retry_backoff: float = 2.0

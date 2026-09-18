@@ -23,6 +23,7 @@ import json
 import os
 import sys
 import time
+import uuid
 from pathlib import Path
 
 import pytest
@@ -156,6 +157,13 @@ class FakeManager:
         return list(self._conns.values())
 
     def add_connection(self, cfg, autoconnect=True):
+        # ★ 镜像真实 BrokerManager._build：空 conn_id 就地生成 uuid
+        # （manager.py:141 `if not cfg.conn_id: cfg.conn_id = uuid.uuid4().hex[:12]`）。
+        # 替身若省掉这一步，两条连接都会落在 "" 这个键上
+        # 互相覆盖 —— 那是替身自己造出来的假象，
+        # 会让「重复提交不堆条目」这类断言变成假绿/假红。
+        if not cfg.conn_id:
+            cfg.conn_id = uuid.uuid4().hex[:12]
         c = FakeConn(cfg.conn_id or f"C{len(self._conns) + 1}")
         c.cfg = cfg          # 保留路由写入的完整 ConnectionConfig（含 account_id）
         c.connected = bool(autoconnect)
@@ -184,6 +192,37 @@ class FakeManager:
         return [{"conn_id": c.cfg.conn_id, "name": c.cfg.name,
                  "connected": c.connected, "active": True}
                 for c in self._conns.values()]
+
+    def find_by_identity(self, broker_id: str, client_path: str,
+                         account_id: str):
+        """按「券商 + 客户端路径 + 资金账号」定位已有连接（镜像真实判据）。
+
+        归一化只保留一份实现（`xtquant_client/manager.py::_norm_path`）。
+        替身若自己另写一套比较逻辑，测的就是替身而不是产品：
+        「路径写法不同仍认成同一条」这条断言会因替身写错而假失败。
+        """
+        from xtquant_client.manager import _norm_path
+        want = (broker_id or "", _norm_path(client_path),
+                str(account_id or ""))
+        for conn in self._conns.values():
+            c = conn.cfg
+            if (c.broker_id or "", _norm_path(c.client_path),
+                    str(c.account_id or "")) == want:
+                return conn
+        return None
+
+    def activate(self, conn_id: str):
+        """镜像真实 `BrokerManager.activate`：重新点亮持久意图并拉起，**不新建**。
+
+        路由的复用分支在 `autoconnect=True` 时会调它；替身缺它就是
+        AttributeError —— 那会把「产品漏洞」与「替身缺口」混为一谈。
+        """
+        c = self._conns.get(conn_id)
+        if c is None:
+            raise KeyError(f"未知连接：{conn_id}")
+        c.cfg.active = True
+        c.connected = True
+        return c
 
 
 class FakeRisk:
@@ -423,6 +462,58 @@ def test_flow1_cold_start_connect_and_quotes(h):
             assert q["served"] == 1 and q["items"][0]["last"] == 1688.0, (
                 "行情未贯通：SyncEngine 缓存 → /market/quotes 断链")
             assert h.sync_engine.latest_quotes["600519.SH"]["last"] == 1688.0
+
+    h.run(scenario())
+
+
+# ==================== 流程 1b：重复添加连接必须幂等（不得堆重复条目） ====================
+
+def test_flow1b_add_broker_is_idempotent(h):
+    """★ 连点同一个「检测到的本地客户端」不得堆出重复连接。
+
+    注：**本用例不新增契约流程**。`tests/contracts/e2e_flows.json` 按方案 §5
+    冻结为 10 条（`test_manifest_matches_real_endpoints` 把守）；本例用的
+    `POST /api/v1/brokers` 已在 flow1 的 endpoints 里，它只是对该端点**幂等性**的补强。
+    若需新增流程，应改方案 §5 并同步后端 MANIFEST / 前端 flowEntry.test.ts，
+    而不是直接往本文件里加一个函数。
+
+    实测反馈：「本地连接时点击同一个链接，会在下方出现多次相同客户端、相同交易账号
+    id 的连接；也没办法直接连接，点击连接还报错。」
+    —— 根因是 POST /brokers 每次都走 `_build()` 生成新 conn_id，从不查重。
+    两条指向同一 QMT userdata 目录的连接会互相抢占，第二条必然连不上，
+    于是「连点 → 多一条 → 点连接报错」。
+
+    修法：`add_broker` 复用 `BrokerManager.find_by_identity`（与启动自动连接
+    `phase_broker._auto_connect_active` 同一判据），命中即复用并返回 `reused=True`。
+
+    判据必须选在**能区分修好没修好**的观测面上：断言连接列表条数与 conn_id 稳定，
+    而不是「请求返回 200」—— 修复前请求同样返回 200，只是列表里多了一条。
+    """
+    async def scenario():
+        async with h.client() as c:
+            body = {"broker_id": "", "client_path": r"P:\qmt\userdata_mini",
+                    "account_id": "1234567", "autoconnect": False}
+            first = _ok(await c.post("/api/v1/brokers", json=body))
+            assert first["reused"] is False, f"首次添加不应是复用：{first}"
+
+            second = _ok(await c.post("/api/v1/brokers", json=body))
+            assert second["reused"] is True, f"重复添加必须复用而非新建：{second}"
+            assert second["conn_id"] == first["conn_id"]
+
+            # Windows 路径大小写 / 斜杠 / 尾斜杠不敏感：写法不同仍是同一个客户端
+            third = _ok(await c.post("/api/v1/brokers", json={
+                **body, "client_path": "p:/QMT/userdata_mini/"}))
+            assert third["reused"] is True, f"路径写法不同也必须认成同一条：{third}"
+            assert third["conn_id"] == first["conn_id"]
+
+            # 换了资金账号 = 另一条连接（去重不能过度，否则用户无法加第二个账号）
+            other = _ok(await c.post("/api/v1/brokers", json={
+                **body, "account_id": "7654321"}))
+            assert other["reused"] is False
+            assert other["conn_id"] != first["conn_id"]
+
+            brokers = _ok(await c.get("/api/v1/brokers"))
+            assert len(brokers) == 2, f"3 次同身份提交 + 1 次换账号 ⇒ 应恰好 2 条：{brokers}"
 
     h.run(scenario())
 

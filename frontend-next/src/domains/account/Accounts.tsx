@@ -1,4 +1,4 @@
-import { Fragment, useState } from "react";
+import { Fragment, useMemo, useState } from "react";
 import {
   Badge,
   Button,
@@ -10,7 +10,8 @@ import {
 } from "@/design/primitives";
 import { accountApi } from "@/services/api";
 import { useAsync } from "@/hooks/useAsync";
-import { fmtAmount, fmtPrice } from "@/shared/format";
+import { useLiveQuotes } from "@/hooks/useLiveQuotes";
+import { fmtMoney, fmtPct, fmtPrice, toneColor } from "@/shared/format";
 import type { AccountGrid, AccountGridPosition, AccountGridRow } from "@/shared/types";
 import s from "../domain.module.css";
 
@@ -56,9 +57,9 @@ export function Accounts() {
       render: (r) =>
         r.connected ? <Badge tone="success">已连接</Badge> : <Badge tone="danger">未连接</Badge>,
     },
-    { key: "assets", header: "总资产", width: 110, align: "right", mono: true, render: (r) => fmtAmount(r.assets) },
-    { key: "cash", header: "可用资金", width: 110, align: "right", mono: true, render: (r) => fmtAmount(r.cash) },
-    { key: "mv", header: "持仓市值", width: 110, align: "right", mono: true, render: (r) => fmtAmount(r.market_value) },
+    { key: "assets", header: "总资产", width: 110, align: "right", mono: true, render: (r) => fmtMoney(r.assets) },
+    { key: "cash", header: "可用资金", width: 110, align: "right", mono: true, render: (r) => fmtMoney(r.cash) },
+    { key: "mv", header: "持仓市值", width: 110, align: "right", mono: true, render: (r) => fmtMoney(r.market_value) },
     { key: "pos", header: "持仓数", width: 68, align: "right", mono: true, render: (r) => String(r.position_count) },
     { key: "ord", header: "委托", width: 62, align: "right", mono: true, render: (r) => String(r.order_count) },
     { key: "deal", header: "成交", width: 62, align: "right", mono: true, render: (r) => String(r.deal_count) },
@@ -69,11 +70,51 @@ export function Accounts() {
     },
   ];
 
+  // 汇总持仓同样只在**查询那一刻**有市值 ⇒ 叠加实时行情，并按最新价重算合计市值。
+  const posCodes = useMemo(() => (data?.positions ?? []).map((p) => p.code), [data?.positions]);
+  const posQuotes = useLiveQuotes(posCodes);
+  const lastPrice = (r: AccountGridPosition): number | undefined => {
+    const q = posQuotes[r.code]?.price;
+    if (q !== undefined && q > 0) return q;
+    // 后端没给现价字段，只能由市值/股数反推，且仅在数据自洽时（volume>0）才可信
+    return r.total_volume > 0 ? r.total_market_value / r.total_volume : undefined;
+  };
+
   const positionCols: Column<AccountGridPosition>[] = [
     { key: "code", header: "代码", width: 100, mono: true, render: (r) => r.code },
     { key: "name", header: "名称", width: 100, render: (r) => r.name || "--" },
+    {
+      key: "last",
+      header: "最新价",
+      width: 84,
+      align: "right",
+      mono: true,
+      render: (r) => fmtPrice(lastPrice(r)),
+    },
+    {
+      key: "chg",
+      header: "涨跌幅",
+      width: 82,
+      align: "right",
+      mono: true,
+      render: (r) => {
+        const pct = posQuotes[r.code]?.change_pct;
+        return <span style={{ color: toneColor(pct) }}>{fmtPct(pct)}</span>;
+      },
+    },
     { key: "vol", header: "合计持仓", width: 100, align: "right", mono: true, render: (r) => String(r.total_volume) },
-    { key: "mv", header: "合计市值", width: 120, align: "right", mono: true, render: (r) => fmtAmount(r.total_market_value) },
+    {
+      key: "mv",
+      header: "合计市值",
+      width: 120,
+      align: "right",
+      mono: true,
+      // 有实时价就按最新价重算（市值是价格的即时函数），否则用后端快照
+      render: (r) => {
+        const p = lastPrice(r);
+        return fmtMoney(p !== undefined && p > 0 ? p * r.total_volume : r.total_market_value);
+      },
+    },
     { key: "n", header: "分布账户", width: 90, align: "right", mono: true, render: (r) => `${r.accounts.length} 个` },
     {
       key: "act",
@@ -127,15 +168,15 @@ export function Accounts() {
             </div>
             <div className={s.stat}>
               <span className={s.statLabel}>总资产</span>
-              <span className={s.statValue}>{fmtAmount(data.total_assets)}</span>
+              <span className={s.statValue}>{fmtMoney(data.total_assets)}</span>
             </div>
             <div className={s.stat}>
               <span className={s.statLabel}>可用资金合计</span>
-              <span className={s.statValue}>{fmtAmount(data.total_cash)}</span>
+              <span className={s.statValue}>{fmtMoney(data.total_cash)}</span>
             </div>
             <div className={s.stat}>
               <span className={s.statLabel}>持仓市值合计</span>
-              <span className={s.statValue}>{fmtAmount(data.total_market_value)}</span>
+              <span className={s.statValue}>{fmtMoney(data.total_market_value)}</span>
             </div>
           </div>
 
@@ -189,7 +230,7 @@ export function Accounts() {
           </div>
           <div className={s.note} style={{ marginTop: 8 }}>
             合计持仓 <span className={s.mono}>{selected.total_volume}</span> 股，合计市值{" "}
-            <span className={s.mono}>{fmtAmount(selected.total_market_value)}</span>
+            <span className={s.mono}>{fmtMoney(selected.total_market_value)}</span>
           </div>
         </Panel>
       )}

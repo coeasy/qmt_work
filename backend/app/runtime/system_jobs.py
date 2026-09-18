@@ -1,4 +1,4 @@
-"""V9 Phase 7：system.* JobKind 注册表（8 个真实 runner 工厂）。
+"""V9 Phase 7：system.* JobKind 注册表（9 个真实 runner 工厂 + 默认调度）。
 
 调度器（ScheduleRunner）与 REST 均可按 kind 提交；全部委托既有真实服务
 （BarsSyncer / DatasetSnapshotStore / quality / screener），零 mock：
@@ -10,6 +10,10 @@
     system.rolling_repair      缺失区间滚动修复（按链补数）
     system.coverage_report     覆盖率 + 各源贡献占比报表
     system.publish_snapshot    Dataset Snapshot 发布
+    system.classic_screen      经典策略选股（app/screener/classic.py，复刻 Sequoia-X）
+
+另外 ``register_all`` 会播种两条默认调度（见 ``DEFAULT_SCHEDULES``），
+让「定时更新日线 / 定时自动选股」开箱即用——用户不必自己写 cron。
 """
 from __future__ import annotations
 
@@ -22,6 +26,7 @@ SYSTEM_JOB_KINDS: tuple[str, ...] = (
     "system.eod", "system.sync_bars", "system.sync_fundamentals",
     "system.refresh_universe", "system.reconcile_bars",
     "system.rolling_repair", "system.coverage_report", "system.publish_snapshot",
+    "system.classic_screen",
 )
 
 Runner = Callable[[dict], Any]
@@ -186,6 +191,68 @@ def _eod_runner(params: dict) -> Runner:
     return _run
 
 
+# ------------------------------------------------------ classic_screen
+def _classic_screen_runner(params: dict) -> Runner:
+    """定时经典策略选股（复刻 Sequoia-X 的「收盘后自动跑策略」）。
+
+    与手动选股共用同一条链路：解析股票池 → BarsProvider 批量取日线 →
+    ``screener.classic.run_classic`` 求值。差别只是由调度触发、结果落在作业里。
+    """
+    async def _run(job: dict) -> dict:
+        import asyncio as _asyncio
+
+        from app.data.bars_provider import BarsProvider
+        from app.screener.classic import STRATEGY_IDS, run_classic
+        from app.screener.universe import UniverseSpec, resolve_universe
+
+        strategies = params.get("strategies") or params.get("strategy") or []
+        if isinstance(strategies, str):
+            strategies = [strategies]
+        strategies = [s for s in strategies if s] or list(STRATEGY_IDS)
+        # 写错的策略名必须让作业**失败并留下原因**，而不是每天跑出「0 命中」——
+        # 后者用户会当成「行情不好」，永远发现不了配置是错的。
+        unknown = [s for s in strategies if s not in STRATEGY_IDS]
+        if unknown:
+            raise RuntimeError(
+                f"未知经典策略：{', '.join(unknown)}（可选 {', '.join(STRATEGY_IDS)}）")
+
+        limit = int(params.get("limit") or 50)
+        period = str(params.get("period") or "1d")
+        adjust = str(params.get("adjust") or "qfq")
+        policy = str(params.get("source_policy") or "auto")
+
+        uni = await resolve_universe(
+            UniverseSpec(kind=str(params.get("universe") or "all")), policy_str=policy)
+        codes = uni["codes"]
+        if not codes:
+            raise RuntimeError("股票池为空——请先运行日线同步任务或连接券商数据源")
+        max_codes = int(params.get("max_codes") or 0)
+        if max_codes and max_codes > 0:
+            codes = codes[:max_codes]
+
+        bp = BarsProvider()
+        bars_map, report = await bp.get_bars_batch(
+            codes, period=period, adjust=adjust, policy_str=policy,
+            offline=bool(params.get("offline")), lite=True)
+
+        results: dict[str, list] = {}
+        for sid in strategies:
+            # 全池逐只形态识别是纯 CPU ⇒ 必须移出事件循环
+            results[sid] = await _asyncio.to_thread(
+                run_classic, bars_map, sid, params.get("classic_params"), limit)
+
+        return {
+            "strategies": strategies,
+            "scanned": len(bars_map),
+            "total_hits": sum(len(v) for v in results.values()),
+            "results": results,
+            "provider": report.provider_used,
+            "degraded": report.degraded,
+            "degraded_reason": report.degraded_reason or "",
+        }
+    return _run
+
+
 _FACTORIES: dict[str, Callable[[dict], Runner]] = {
     "system.eod": _eod_runner,
     "system.sync_bars": _sync_bars_runner,
@@ -195,6 +262,7 @@ _FACTORIES: dict[str, Callable[[dict], Runner]] = {
     "system.rolling_repair": _rolling_repair_runner,
     "system.coverage_report": _coverage_runner,
     "system.publish_snapshot": _publish_snapshot_runner,
+    "system.classic_screen": _classic_screen_runner,
 }
 
 
@@ -204,11 +272,71 @@ def runner_for(kind: str) -> Runner | None:
     return factory
 
 
-def register_all() -> None:
-    """把 system.* 工厂注册进 JobRuntime（main 启动时调用一次）。"""
+# ------------------------------------------------------ 默认调度（易用性）
+# 为什么需要：``register_all`` 只注册 runner 工厂，**不建任何调度** ——
+# 用户想要「每天自动更新日线 / 自动选股」必须自己填 cron，门槛很高
+# （Sequoia-X 就是靠 crontab 在收盘后跑，这里把它内置成开箱即用）。
+#
+# 幂等：用**固定 schedule_id** 播种，已存在即跳过，绝不覆盖用户改过的配置。
+# 时间排布刻意构成一条链：15:30 先把当日日线落库 → 16:00 才有数据可选股 →
+# 18:30 再跑 EOD 全流程对账/快照（既有的 ensure_default_schedule）。
+# 若把选股排在日线更新之前，它会拿昨天的 K 线跑，选出的是「昨天的结果」。
+DEFAULT_SCHEDULES: tuple[dict, ...] = (
+    {
+        "id": "sch-default-sync-bars",
+        "kind": "system.sync_bars",
+        "cron": "30 15 * * 1-5",          # 每交易日 15:30（收盘 15:00 之后）
+        "name": "收盘后更新日线数据",
+        "params": {"period": "1d", "adjust": "qfq"},
+    },
+    {
+        "id": "sch-default-classic-screen",
+        "kind": "system.classic_screen",
+        "cron": "0 16 * * 1-5",           # 每交易日 16:00（日线更新之后）
+        "name": "收盘后经典策略选股",
+        "params": {"strategies": ["turtle_trade", "ma_volume"], "limit": 50},
+    },
+)
+
+
+def ensure_default_schedules(enabled: bool = True) -> list[dict]:
+    """播种默认调度（幂等）。返回本次新建的调度；失败只记日志，不影响启动。"""
+    from app.runtime.schedules import ScheduleStore
+
+    created: list[dict] = []
+    try:
+        store = ScheduleStore(_db())
+        for spec in DEFAULT_SCHEDULES:
+            try:
+                if store.get(spec["id"]):
+                    continue            # 已存在（含用户改过的）⇒ 绝不覆盖
+                created.append(store.create(
+                    spec["kind"], spec["cron"], name=spec["name"],
+                    params=spec["params"], schedule_id=spec["id"],
+                    enabled=enabled))
+                log.info("已播种默认调度：%s（%s %s）",
+                         spec["name"], spec["cron"], spec["kind"])
+            except Exception as exc:  # noqa: BLE001 — 单条失败不影响其余
+                log.warning("默认调度 %s 创建失败：%s", spec["id"], exc)
+    except Exception as exc:  # noqa: BLE001 — 调度播种失败绝不能阻断启动
+        log.warning("默认调度播种失败（已跳过，不影响启动）：%s", exc)
+    return created
+
+
+def register_all(seed_schedules: bool = True) -> None:
+    """把 system.* 工厂注册进 JobRuntime（main 启动时调用一次）。
+
+    ``seed_schedules=True`` 时顺带播种默认调度（收盘后日线更新 + 经典策略选股），
+    让「定时更新日线 / 定时自动选股」开箱即用；幂等且失败不阻断启动。
+    """
     from app.runtime.jobs import register_runner_factory
     for kind, factory in _FACTORIES.items():
         register_runner_factory(kind, factory)
+    if seed_schedules:
+        ensure_default_schedules()
 
 
-__all__ = ["SYSTEM_JOB_KINDS", "runner_for", "register_all"]
+__all__ = [
+    "SYSTEM_JOB_KINDS", "runner_for", "register_all",
+    "DEFAULT_SCHEDULES", "ensure_default_schedules",
+]

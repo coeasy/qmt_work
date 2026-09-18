@@ -140,10 +140,18 @@ async def scan_async(
     fields: Optional[List[str]] = None,
     offline: bool = False,
     progress_cb: Optional[Callable[[int, int], None]] = None,
+    classic: str = "",
+    classic_params: Optional[dict] = None,
 ) -> Dict[str, Any]:
     """多源条件选股（异步编排：解析股票池 → 取数 → 求值 → 溯源）。
 
     异常（无数据源 / 空池）交由路由层转 503；绝不返回空列表冒充「无符合标的」。
+
+    ★ ``classic``：走**经典形态策略**（app/screener/classic.py，复刻 Sequoia-X 的
+    海龟/均线放量/高窄旗形/涨停洗盘/跌停反包/RPS 突破）而不是通用条件树。
+    两者共用同一套「解析股票池 → 批量取 K 线 → 线程内求值 → 排序」编排，
+    差别只在求值这一步：条件树逐条比数值，经典策略做多日形态识别与横截面排名。
+    ``classic`` 非空时 ``conditions`` 不参与求值（仍原样回显，便于溯源）。
     """
     from app.data.bars_provider import BarsProvider
     from app.screener.fundamentals import fetch_fundamentals
@@ -185,14 +193,38 @@ async def scan_async(
     # 与 app/sync/bars.py 的 upsert_bars、app/runtime/jobs.py 的进度落库同类。
     # 注：progress_cb 因此会由**工作线程**调用（与 jobs.screen_runner 的既有做法一致）；
     # 当前唯一调用方 routes/screen.py 不传该回调。
-    results, scanned, elapsed_ms = await asyncio.to_thread(
-        evaluate_scan, codes, bars_map, conditions,
-        names=uni["names"], min_price=min_price, max_price=max_price,
-        prefilter=prefilter, progress_cb=progress_cb)
+    if classic:
+        # 经典形态策略：同一套取数编排，仅把求值换成 run_classic。
+        # 同样必须 to_thread —— 全池逐只跑形态识别是纯 CPU，留在事件循环里会
+        # 整段阻塞所有 HTTP 请求（与 evaluate_scan 同理）。
+        import time as _time
 
-    results.sort(key=lambda r: r[sort_by], reverse=bool(sort_desc))
-    if limit and limit > 0:
-        results = results[: int(limit)]
+        from app.screener.classic import STRATEGY_IDS, run_classic
+
+        # ★ 未知策略必须**报错**而不是返回空列表：run_classic 对未知 id 是宽容的
+        # （返回 []，因为全池扫描时不能让一只票的脏数据炸掉整轮），但编排层若沿用
+        # 这份宽容，用户传错策略名只会看到「零命中」，与「今天真的没票」无法区分。
+        if classic not in STRATEGY_IDS:
+            raise ValueError(
+                f"未知经典策略：{classic}（可选 {', '.join(STRATEGY_IDS)}）")
+        _t0 = _time.perf_counter()
+        results = await asyncio.to_thread(
+            run_classic, bars_map, classic, classic_params)
+        scanned = len(bars_map)
+        elapsed_ms = int((_time.perf_counter() - _t0) * 1000)
+        # 经典策略已按自身口径排序（海龟按成交额、其余按涨跌幅），
+        # 这里不再用 sort_by 重排，避免覆盖策略语义。
+        if limit and limit > 0:
+            results = results[: int(limit)]
+    else:
+        results, scanned, elapsed_ms = await asyncio.to_thread(
+            evaluate_scan, codes, bars_map, conditions,
+            names=uni["names"], min_price=min_price, max_price=max_price,
+            prefilter=prefilter, progress_cb=progress_cb)
+
+        results.sort(key=lambda r: r[sort_by], reverse=bool(sort_desc))
+        if limit and limit > 0:
+            results = results[: int(limit)]
 
     fund = None
     if fields and results:
@@ -206,6 +238,7 @@ async def scan_async(
         "universe_degraded": uni.get("degraded", False),
         "prefilter": pre_meta,
         "screening_mode": "offline" if offline else "online",
+        "classic_strategy": classic or "",
     })
     return {
         "count": len(results),
@@ -213,6 +246,7 @@ async def scan_async(
         "elapsed_ms": elapsed_ms,
         "sort_by": sort_by,
         "conditions": conditions,
+        "classic": classic or "",
         "results": results,
         "provenance": provenance,
         "degraded": report.degraded,

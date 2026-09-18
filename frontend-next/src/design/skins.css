@@ -5,67 +5,67 @@
    ★ accent / up / down / success / warning / danger **不由皮肤决定** ——
      涨跌色必须独立于皮肤，否则用户换个底色就会把「红涨绿跌」悄悄改掉。
      这些语义色统一由 [data-theme] 提供（见 tokens.css）。
-   应用方式：<html data-skin="classic">；自定义皮肤走 JS 内联变量，不在这里定义。
+   应用方式：<html data-skin="tongdaxin">；自定义皮肤走 JS 内联变量，不在这里定义。
    ========================================================================== */
 
-/* --- 午夜蓝（默认）--- 与 tokens.css 的 dark 令牌一致，显式写出便于对照与微调 */
-[data-skin="midnight"] {
-  --bg-0: #0d1117;
-  --bg-1: #131a24;
-  --bg-2: #1a2230;
-  --bg-3: #212b3b;
-  --bg-hover: #263244;
-  --bg-active: #2d3b50;
-  --border: #2a3648;
-  --border-strong: #3a4a61;
-  --text: #e6edf6;
-  --text-dim: #9aa8bd;
-  --text-faint: #6b7a91;
-  --text-inverse: #0d1117;
-  --chart-bg: #131a24;
-  --chart-grid: #212b3b;
-  --chart-axis: #6b7a91;
-  --chart-crosshair: #9aa8bd;
-}
-
-/* --- 经典黑（同花顺风格）--- 纯黑底 + 高对比，长时间盯盘最不刺眼 */
-[data-skin="classic"] {
+/* --- 通达信黑（默认）--- 纯黑底 + 极淡层级，A 股终端标配 */
+[data-skin="tongdaxin"] {
   --bg-0: #000000;
-  --bg-1: #0a0a0a;
-  --bg-2: #141414;
-  --bg-3: #1d1d1d;
-  --bg-hover: #262626;
-  --bg-active: #333333;
-  --border: #2a2a2a;
-  --border-strong: #3d3d3d;
-  --text: #e8e8e8;
-  --text-dim: #a0a0a0;
-  --text-faint: #6e6e6e;
+  --bg-1: #080808;
+  --bg-2: #101010;
+  --bg-3: #181818;
+  --bg-hover: #202020;
+  --bg-active: #2c2c2c;
+  --border: #1f1f1f;
+  --border-strong: #343434;
+  --text: #e6e6e6;
+  --text-dim: #9c9c9c;
+  --text-faint: #6b6b6b;
   --text-inverse: #000000;
   --chart-bg: #000000;
-  --chart-grid: #1a1a1a;
-  --chart-axis: #6e6e6e;
-  --chart-crosshair: #a0a0a0;
+  --chart-grid: #161616;
+  --chart-axis: #6b6b6b;
+  --chart-crosshair: #9c9c9c;
 }
 
-/* --- 深灰（大智慧风格）--- 略暖的深灰，屏幕反光环境下更舒适 */
-[data-skin="graphite"] {
-  --bg-0: #161616;
-  --bg-1: #1c1c1c;
-  --bg-2: #232323;
-  --bg-3: #2b2b2b;
-  --bg-hover: #343434;
-  --bg-active: #3f3f3f;
-  --border: #333333;
-  --border-strong: #474747;
-  --text: #dedad4;
-  --text-dim: #a39c93;
-  --text-faint: #736d65;
-  --text-inverse: #161616;
-  --chart-bg: #1c1c1c;
-  --chart-grid: #2b2b2b;
-  --chart-axis: #736d65;
-  --chart-crosshair: #a39c93;
+/* --- 大智慧黑 --- 近黑微冷灰，面板略带灰，反光屏更柔和 */
+[data-skin="dazhihui"] {
+  --bg-0: #0a0a0c;
+  --bg-1: #101013;
+  --bg-2: #18181c;
+  --bg-3: #202024;
+  --bg-hover: #28282d;
+  --bg-active: #34343a;
+  --border: #26262b;
+  --border-strong: #3c3c43;
+  --text: #e2e2e6;
+  --text-dim: #9a9aa2;
+  --text-faint: #6c6c74;
+  --text-inverse: #0a0a0c;
+  --chart-bg: #101013;
+  --chart-grid: #202024;
+  --chart-axis: #6c6c74;
+  --chart-crosshair: #9a9aa2;
+}
+
+/* --- 同花顺黑 --- 纯黑高对比，长盯盘最不刺眼 */
+[data-skin="ths"] {
+  --bg-0: #020305;
+  --bg-1: #080a0d;
+  --bg-2: #11151a;
+  --bg-3: #1a2027;
+  --bg-hover: #222a33;
+  --bg-active: #2e3947;
+  --border: #1c232c;
+  --border-strong: #2f3a47;
+  --text: #e8edf3;
+  --text-dim: #98a6b6;
+  --text-faint: #697686;
+  --text-inverse: #020305;
+  --chart-bg: #080a0d;
+  --chart-grid: #1a2027;
+  --chart-axis: #697686;
+  --chart-crosshair: #98a6b6;
 }
 
 /* --- 石板蓝 --- 低饱和蓝灰，介于午夜蓝与深灰之间 */

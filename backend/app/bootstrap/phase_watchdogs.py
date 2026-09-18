@@ -23,6 +23,80 @@ from core.state import state
 log = logging.getLogger("qmt_work.bootstrap.watchdogs")
 
 
+def _should_auto_connect(conns) -> bool:
+    """守护是否应当尝试自动接入（纯函数，便于单测锁定判据）。
+
+    判据是**「有没有真正连上的连接」**，而不是「连接列表是否为空」：
+
+    - 已有 connected          → False（无事可做）；
+    - 列表为空（全新安装）     → True；
+    - 有持久意图但没连上       → True（自愈，覆盖「先开软件后开客户端」）；
+    - 列表非空且全部 inactive  → False（用户手动断开过，尊重意图）。
+
+    ★ 用「列表为空」当判据是错的：只要存在任意一条持久连接（哪怕它坏了），
+    守护就永不介入 ⇒ 客户端明明开着却永远连不上。
+    """
+    if any(getattr(c, "connected", False) for c in conns):
+        return False
+    if conns and not any(getattr(getattr(c, "cfg", None), "active", False) for c in conns):
+        return False
+    return True
+
+
+async def _broker_auto_connect_guard() -> None:
+    """启动后自动连接守护。
+
+    解决的问题：``phase_broker.setup`` 的启动自动连接只在进程启动时探测一次。
+    若那时本机券商客户端还没启动 / 没登录，``_auto_connect_active`` 直接跳过，
+    此后**没有任何机制重试** —— 用户「先开软件、后开券商客户端」就会永远连不上。
+
+    本守护每 30s 复探一次，在**没有任何连接真正连上**时自动接入本机运行中的客户端：
+
+    - 已有连接处于 connected → 不动；
+    - 列表为空（全新安装 / 从未连过）→ 探测到运行中的客户端即接入；
+    - **有持久意图（cfg.active）但没连上 → 自愈**（复用 + 必要时修正客户端路径后接入）；
+      这是「先开软件、后开 QMT 客户端」能自动连上的关键；
+    - 列表非空且全部 inactive → 用户手动断开过，尊重其意图，不介入；
+    - ``settings.broker_auto_connect`` 为 False → 完全不介入。
+
+    复用 ``xtquant_client.autoconnect`` 的 ``detect_candidates`` / ``pick_active``，
+    与「启动自动连接」「GET /brokers/auto-detect」同源，避免界面推荐 A、后台连 B。
+    ``_auto_connect_active`` 内部按「券商+路径+账号」复用既有连接，不会重复建连。
+    """
+    from app.bootstrap.phase_broker import _auto_connect_active
+    from xtquant_client.autoconnect import detect_candidates, pick_active
+
+    while True:
+        await asyncio.sleep(30.0)
+        try:
+            if not settings.broker_auto_connect:
+                continue
+            mgr = state.broker_manager
+            if mgr is None:
+                continue
+            conns = mgr.all_connections()
+            if not _should_auto_connect(conns):
+                continue
+            try:
+                cands = await asyncio.wait_for(
+                    asyncio.to_thread(detect_candidates), timeout=60.0)
+            except Exception as exc:  # noqa: BLE001 — 探测失败静默跳过，下轮再试
+                log.debug("auto-connect guard detect failed: %s", exc)
+                continue
+            if pick_active(cands) is None:
+                continue
+            cid = await _auto_connect_active()
+            if cid:
+                # 同步进程级活跃指针，供 routes/tools/sync 取行情
+                state.bridge = mgr.active_bridge()
+                state.gateway = state.bridge.gateway if state.bridge else None
+                log.info("broker auto-connect guard connected: %s", cid)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — 单轮异常不终止守护
+            log.warning("broker auto-connect guard error: %s", exc)
+
+
 async def setup(app: FastAPI) -> dict:
     # DB 备份
     db_backup = None
@@ -94,6 +168,13 @@ async def setup(app: FastAPI) -> dict:
                         log.warning("pump guard %s: %s", conn.cfg.conn_id, exc)
     _pump_task = asyncio.create_task(_pump_guard())
     app.state._pump_task = _pump_task
+
+    # 启动自动连接守护：覆盖「启动后用户才启动券商客户端」的场景。
+    # boot 的 phase_broker 只在启动时探测一次；若当时客户端未运行，之后永不重试。
+    # 这里每 30s 复探：仅当「完全没有连接」时自动接入本机运行中的客户端，
+    # 尊重「用户手动断开」(连接列表非空但均 inactive) —— 此时不自动连，交给用户操作。
+    _acg = asyncio.create_task(_broker_auto_connect_guard())
+    app.state._broker_acg = _acg
 
     # 涨停监控 + 算法单引擎 + 条件单引擎 + 订单守护
     from engines.algo import AlgoEngine

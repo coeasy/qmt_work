@@ -64,10 +64,17 @@ class AlertEngine:
                        {"type": "alert", "data": {
                            "rule": rule.get("name"), "event": event_type}})
 
-    def evaluate_event(self, event_type: str, payload: dict | None = None) -> None:
-        """事件型规则评估（由 Notifier.on_event 回调）。"""
+    def evaluate_event(self, event_type: str, payload: dict | None = None) -> list:
+        """事件型规则评估（由 Notifier.on_event 回调）。
+
+        ★ 返回**本次实际命中的规则列表**（原先无返回值）。
+        没有返回值，``POST /alerts/test`` 就只能无条件回报「已触发」——一条规则都没
+        命中也显示成功，用户以为告警链路是通的，等真出事才发现根本没配规则。
+        返回列表后调用方可如实回报；忽略返回值的既有调用方不受影响。
+        """
+        fired: list = []
         if event_type == "alert.triggered":
-            return  # 阻断告警自触发死循环
+            return fired       # 阻断告警自触发死循环
         rules = self._db.query("SELECT * FROM alert_rules WHERE enabled=1")
         for r in rules:
             if r.get("metric"):
@@ -78,6 +85,9 @@ class AlertEngine:
             if not self._cooldown_ok(r):
                 continue
             self._fire(r, event_type, payload or {})
+            fired.append({"id": r.get("id"), "name": r.get("name"),
+                          "event": r.get("event") or "*"})
+        return fired
 
     def evaluate_metric(self, metric: str, value: float, payload: dict | None = None) -> None:
         """指标型规则评估（由行情/指标采集点调用）。"""

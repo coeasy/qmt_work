@@ -36,6 +36,44 @@ if (SAFE_MODE) {
   // （实测 exit 0x80000003）；后者会掐断软件渲染兜底，使上面的 GLES 失败无路可退。
 }
 
+// ---- GPU 崩溃自愈：无 GPU 环境下自动以安全模式重启一次 ----
+//
+// 为什么需要它：上面那批开关**只在显式指定** `--disable-gpu` / `SAFE_MODE` 时才生效。
+// 于是真实用户若遇到「GPU 进程起不来」的环境（虚拟机、RDP/远程桌面会话、显卡驱动异常、
+// 组策略禁用硬件加速 —— 交易场景里都很常见），默认启动会走到 Chromium 的
+// `FATAL: gpu_data_manager_impl_private.cc: GPU process isn't usable. Goodbye.`
+// **直接闪退，且没有任何提示**：窗口一闪即没，日志只有几行 GPU 报错，用户无从排障。
+//
+// 自愈策略：GPU 子进程在启动阶段崩溃 N 次 → 追加 `--disable-gpu` 重新拉起本进程。
+// 该参数会让上面的 `SAFE_MODE` 分支生效，因此**不会无限重启**（第二次已是安全模式）。
+const GPU_CRASH_LIMIT = 2;          // 启动阶段允许崩溃的次数
+const GPU_CRASH_WINDOW_MS = 12000;  // 「启动阶段」的时间窗（此后崩溃不再触发重启）
+let gpuCrashes = 0;
+let gpuRestarted = false;
+const bootAt = Date.now();
+
+function installGpuCrashGuard() {
+  if (SAFE_MODE) return; // 已是安全模式：没有 GPU 崩溃可自愈，也无需重启
+  app.on("child-process-gone", (_e, details) => {
+    if (details.type !== "GPU") return;
+    if (gpuRestarted) return;
+    if (Date.now() - bootAt > GPU_CRASH_WINDOW_MS) return; // 运行中偶发崩溃不重启
+    gpuCrashes += 1;
+    console.warn(`[desktop] GPU 子进程崩溃 ${gpuCrashes}/${GPU_CRASH_LIMIT}:`,
+                 details.reason || "", details.exitCode ?? "");
+    if (gpuCrashes < GPU_CRASH_LIMIT) return;
+    gpuRestarted = true;
+    console.warn("[desktop] GPU 不可用 —— 自动以软件渲染（--disable-gpu）重启客户端");
+    try {
+      // 关掉已拉起的后端，避免重启后端口被残留进程占着
+      killBackendTree();
+    } catch { /* 忽略：端口发现会自动 +1 */ }
+    app.relaunch({ args: process.argv.slice(1).concat(["--disable-gpu"]) });
+    app.exit(0);
+  });
+}
+installGpuCrashGuard();
+
 const DEFAULT_PORT = 21118; // 与 backend/run.py 的默认起始端口保持一致
 // 就绪探针优先用轻量存活端点（/api/v1/live 不做依赖检查、不生成 Swagger 页面），
 // 回退 /api/docs 兼容旧版后端；判据是「拿到任何 HTTP 响应」即视为后端已监听。
@@ -63,6 +101,10 @@ function _tail(line) {
   BACKEND_TAIL.push(line);
   if (BACKEND_TAIL.length > 40) BACKEND_TAIL.shift();
 }
+// 后端退出上报的幂等守卫与兜底：exit / close / 兜底定时器三路都可能触发，
+// 只允许上报一次；换新一代进程时由 startBackend 复位（见 reportBackendExit）。
+let exitReported = false;
+let pendingExitCode = null;
 
 // 自动更新（electron-updater）：打包后启用，开发态自动跳过
 const updater = require("./updater.cjs");
@@ -101,6 +143,7 @@ function backendEntry() {
 
 function startBackend() {
   const gen = ++backendGen;
+  exitReported = false; // 新一代进程：重新允许上报（见 reportBackendExit 的幂等守卫）
   const { cmd, args } = backendEntry();
   // 启动前清理陈旧端口文件（上次异常退出可能残留过期端口，导致健康检查等错端口）
   try { fs.unlinkSync(portFile()); } catch { /* 不存在则忽略 */ }
@@ -136,18 +179,23 @@ function startBackend() {
     backendExit = { code: null, signal: null, error: String(err) };
     _tail("[spawn-error] " + String(err));
   });
+  // ⚠️ `exit` 早于 stdio 排空：在 exit 里读 BACKEND_TAIL 会**丢掉最后几行**，而最后
+  //    几行恰恰是根因所在（实测一次启动失败只留下「监听端口」5 行，真正的
+  //    `bridge 握手失败: _ping 调用超时（30.0s）` 被吞掉，排查时误判成「后端无声退出」）。
+  //    因此这里只记录退出码并挂一个兜底定时器，真正的判定与落盘交给 `close`
+  //    —— 它在所有 stdio 流关闭后才触发，此时 BACKEND_TAIL 必然完整。
   backend.on("exit", (code) => {
     if (gen !== backendGen) return; // 上一代进程（重试重启时被 kill）的退出事件，忽略
     backendExit = { code, signal: null };
-    if (quitting) return;
-    console.error("backend exited", code);
-    if (!bootSettled) {
-      // 启动期退出：原因由 bootSequence 统一呈现在加载页上（带重试按钮），
-      // 这里只落盘诊断信息，不再叠加一个模态框。
-      writeStartupError(`后端进程异常退出（code=${code}）`);
-      return;
-    }
-    reportStartupFailure(`后端进程异常退出（code=${code}）`);
+    pendingExitCode = code;
+    // 兜底：万一 close 未触发（stdio 被孙进程持有等）仍要上报；unref 保证这个
+    // 定时器不会把 Node 事件循环多留 1.5s、拖慢正常退出。
+    const _fallback = setTimeout(() => reportBackendExit(pendingExitCode), 1500);
+    if (typeof _fallback.unref === "function") _fallback.unref();
+  });
+  backend.on("close", (code) => {
+    if (gen !== backendGen) return;
+    reportBackendExit(pendingExitCode === null ? code : pendingExitCode);
   });
 }
 
@@ -167,6 +215,33 @@ function writeStartupError(reason) {
     fs.appendFileSync(path.join(app.getPath("userData"), "startup-error.log"),
                       lines.join("\n") + "\n", "utf8");
   } catch { /* 落盘失败不阻断退出流程 */ }
+}
+
+// 「被外部强制终止」判据：退出码 1 且后端既无 Traceback 也无 ERROR 行。
+// Python 主动 sys.exit(1) 的两条路径（单实例锁被占、远程绑定 + 默认密钥）**都会先
+// log.error**，所以「零日志 + code=1」不是 Python 主动退出，而更像被强制终止 ——
+// Windows 上 TerminateProcess（taskkill /F、清理脚本、安全软件）的退出码就是 1。
+// 写明判据，避免下一次又把「被强杀」当成「后端启动失败」查半天。
+function killSuspect(code) {
+  if (code !== 1) return "";
+  if (/Traceback|ERROR/.test(BACKEND_TAIL.join("\n"))) return "";
+  return "（判据：退出码 1 且后端零 Traceback/ERROR —— Python 主动 sys.exit(1) 必先落日志，"
+    + "故更像被外部强制终止，例如另一个实例的阶段 0 清理脚本或安全软件）";
+}
+
+function reportBackendExit(code) {
+  if (exitReported) return; // exit / close / 兜底定时器三路只上报一次
+  exitReported = true;
+  if (quitting) return;
+  console.error("backend exited", code);
+  const reason = `后端进程异常退出（code=${code}）${killSuspect(code)}`;
+  if (!bootSettled) {
+    // 启动期退出：原因由 bootSequence 统一呈现在加载页上（带重试按钮），
+    // 这里只落盘诊断信息，不再叠加一个模态框。
+    writeStartupError(reason);
+    return;
+  }
+  reportStartupFailure(reason);
 }
 
 function reportStartupFailure(reason) {
@@ -393,12 +468,45 @@ function scheduleSaveWindowState() {
 //
 // 页面本体（booting / failed 两态）抽在 ./loadingPage.cjs —— 纯函数、零 Electron 依赖，
 // 因而可以脱离主进程直接渲染验证（见 frontend-next/tests/loadingPage.test.ts）。
-const { loadingPageUrl } = require("./loadingPage.cjs");
+const { loadingPageHtml } = require("./loadingPage.cjs");
+
+// ★★ 加载页的**首屏导航目标必须是 about:blank** —— 这就是「客户端窗口不能拖动」的根因。
+//
+// 实测（output/region_repro 的 REPRO_BOOT 二分；最终页统一为 http://127.0.0.1:21401/，
+// 同一页面、同一测量方法；判据 = 标题栏 WM_NCHITTEST，2=HTCAPTION 可拖 / 1=HTCLIENT 拖不动）：
+//   直接加载目标页          → 2（可拖）
+//   先 data: 再导航到目标   → 恒为 1，**永久不可恢复**
+//   先 file:// 再导航到目标 → 恒为 1（同样不可恢复）
+//   先 about:blank 再导航   → 2（可拖）
+//   导航后强制 resize / reload 均无效；注入全新 -webkit-app-region: drag 元素也无效
+//   ⇒ 与页面 CSS/DOM 无关，是**窗口级**状态被写坏：Chromium 不再把 draggable region
+//     上报给窗口过程。data: 与 file:// 都会写坏它，about:blank 不会。
+//   （注意：早期只测到「file:// 首屏」在**最终页也是 file://** 时正常，据此误判过一次 ——
+//     真正的分界是最终页为 http 的跨协议导航。）
+//
+// 所以：窗口先开 about:blank，再把加载页 HTML 用 document.write 注入进去；
+// 后端就绪后 loadURL(appUrl()) 切到应用页 —— 这条路径上拖动区始终正常。
+// 加载页里的内联 <style>/<script> 能跑：applySecurityPolicy 只对 isLocalOrigin 下发 CSP，
+// about:blank 不匹配；页面里的按钮一律 addEventListener，不依赖内联事件属性。
+let loadingGen = 0;
 
 function showLoading(phase, message, error) {
   if (!win || win.isDestroyed()) return;
-  try { win.loadURL(loadingPageUrl(phase, message, error)); }
-  catch { /* 窗口已销毁 */ }
+  const gen = ++loadingGen;
+  const html = loadingPageHtml(phase, message, error);
+  win.loadURL("about:blank")
+    .then(() => {
+      // 竞态保护：document.write 若晚于「切到应用页」到达，会把应用页面整个覆盖掉。
+      // 因此注入前必须确认①本次仍是最新一次 showLoading ②窗口还停在 about:blank。
+      if (!win || win.isDestroyed() || gen !== loadingGen) return undefined;
+      if (win.webContents.getURL() !== "about:blank") return undefined;
+      // document.open() 只替换文档、**不替换全局对象**，所以 preload 经 contextBridge
+      // 暴露的 window.electronAPI 仍然可用（失败页的「重新启动后端」按钮依赖它，
+      // 见 output/verify_loading_failed.py 的断言）。
+      return win.webContents.executeJavaScript(
+        "document.open();document.write(" + JSON.stringify(html) + ");document.close();");
+    })
+    .catch(() => { /* 窗口已销毁 / 导航被打断（切应用页时必然发生） */ });
 }
 
 function appUrl() {
@@ -422,6 +530,7 @@ async function bootSequence(respawn) {
     bootSettled = true;
     if (!win || win.isDestroyed()) return;
     console.log("[desktop] backend ready ->", appUrl());
+    loadingGen += 1; // 作废未完成的加载页注入（document.write 晚到会覆盖应用页面）
     win.loadURL(appUrl());
   } catch (e) {
     bootSettled = true;
@@ -488,7 +597,7 @@ function createWindow() {
   // 站内导航防护：只允许本机后端源；外链转交系统浏览器而非就地跳转
   win.webContents.on("will-navigate", (e, url) => {
     if (isLocalOrigin(url)) return;
-    // 加载页（data:）自身的刷新不算外链，放行，免得 Ctrl+R / location.reload 被拦
+    // 加载页（file://）自身的刷新不算外链，放行，免得 Ctrl+R / location.reload 被拦
     if (url === win.webContents.getURL()) return;
     e.preventDefault();
     openExternalSafe(url);
@@ -500,8 +609,7 @@ function createWindow() {
   });
   // 先显示加载页 —— 后端就绪由 bootSequence 负责切到真实应用 URL。
   // 这样「双击图标 → 见到窗口」是即时的，等待期有明确的中文进度反馈。
-  win.loadURL(loadingPageUrl("booting",
-    "正在启动后端服务，首次启动需加载行情与交易日历，请稍候…"));
+  showLoading("booting", "正在启动后端服务，首次启动需加载行情与交易日历，请稍候…");
   // 页面加载结果必须显式留痕：无头/自动化场景下没有控制台可看，
   // 「窗口在但白屏」曾是最难定位的故障形态。这里同时打日志 + 写就绪标记文件，
   // 失败路径写 startup-error.log，供 scripts/client_start_test.py 判定。

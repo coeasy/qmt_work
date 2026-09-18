@@ -1,7 +1,10 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { Badge, Button, DataTable, EmptyState, Input, Panel, Spinner, type Column } from "@/design/primitives";
 import { marketApi } from "@/services/api";
 import { useAsync } from "@/hooks/useAsync";
+import { useLiveQuotes } from "@/hooks/useLiveQuotes";
+import { useWatchlistStore } from "@/stores/watchlist";
+import { fmtPct, fmtPrice, toneColor } from "@/shared/format";
 import type { Instrument } from "@/shared/types";
 import s from "../domain.module.css";
 
@@ -31,19 +34,56 @@ export function Search() {
     [selected?.code],
   );
 
+  // 检索结果叠加实时行情：搜索接口只返回静态档案（代码/名称/交易所/类别），
+  // 没有价格 —— 修复前这页「看不到价」，用户还得再点进 K 线才知道是涨是跌。
+  const codes = useMemo(() => (results.data ?? []).map((r) => r.code), [results.data]);
+  const quotes = useLiveQuotes(codes);
+
+  const toggle = useWatchlistStore((st) => st.toggle);
+  const watchCodes = useWatchlistStore((st) => st.codes);
+
   const cols: Column<Instrument>[] = [
     { key: "code", header: "代码", width: 110, mono: true, render: (r) => r.code },
     { key: "name", header: "名称", render: (r) => r.name },
+    {
+      key: "last",
+      header: "最新",
+      width: 78,
+      align: "right",
+      mono: true,
+      render: (r) => fmtPrice(quotes[r.code]?.price),
+    },
+    {
+      key: "chg",
+      header: "涨跌幅",
+      width: 82,
+      align: "right",
+      mono: true,
+      render: (r) => {
+        const pct = quotes[r.code]?.change_pct;
+        return <span style={{ color: toneColor(pct) }}>{fmtPct(pct)}</span>;
+      },
+    },
     { key: "exchange", header: "交易所", width: 90, render: (r) => r.exchange ?? "--" },
-    { key: "category", header: "类别", width: 120, render: (r) => r.category ?? "--" },
+    { key: "category", header: "类别", width: 110, render: (r) => r.category ?? "--" },
     {
       key: "act",
-      header: "",
-      width: 80,
+      header: "操作",
+      width: 168,
       render: (r) => (
-        <Button size="sm" variant="ghost" onClick={() => setSelected(r)}>
-          深度画像
-        </Button>
+        <div style={{ display: "flex", gap: 4 }}>
+          <Button size="sm" variant="ghost" onClick={() => setSelected(r)}>
+            深度画像
+          </Button>
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={() => toggle(r.code)}
+            title={watchCodes.includes(r.code) ? "从自选股移除" : "加入自选股"}
+          >
+            {watchCodes.includes(r.code) ? "移出自选" : "加自选"}
+          </Button>
+        </div>
       ),
     },
   ];

@@ -72,14 +72,17 @@ async def rollback_runtime_config(body: dict, ctx: AppContext = Depends(get_ctx)
 
 @router.get("/config/risk")
 async def get_risk_config(ctx: AppContext = Depends(get_ctx)):
-    """读取风控参数（含日级限额与熔断实时状态）。"""
+    """读取风控参数（含日级限额与熔断实时状态）。
+
+    ★ 风控未初始化时**必须报错**，绝不返回硬编码的"示例参数"。
+    曾在这里兜底返回一组写死的数值，界面于是显示「风控已配置 / 单笔上限 10 万」，
+    而实际上 ``ctx.risk`` 为 None —— 下单链路根本没有任何风控参与。
+    用户以为有保护、其实是裸奔，这比「明确告知风控不可用」危险得多。
+    与 ``PUT /config/risk`` 的 503 语义保持一致。
+    """
     rm = ctx.risk
     if rm is None:
-        return ok({
-            "max_amount": 100_000.0, "min_qty": 100, "max_position_ratio": 0.3,
-            "max_single_position_ratio": 0.2, "max_orders_per_min": 30,
-            "daily_amount_limit": 0.0, "daily_loss_limit": 0.0,
-            "per_code_daily_orders": 0})
+        return err(503, "风控未初始化：当前下单链路无风控保护，请检查服务启动状态")
     data = rm.to_dict()
     data["daily"] = rm.daily_stats()
     return ok(data)

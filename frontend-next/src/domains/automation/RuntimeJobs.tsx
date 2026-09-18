@@ -2,6 +2,7 @@ import { useState } from "react";
 import {
   Badge,
   Button,
+  ConfirmButton,
   DataTable,
   EmptyState,
   FormRow,
@@ -27,9 +28,45 @@ const JOB_KINDS = [
   "system.rolling_repair",
   "system.coverage_report",
   "system.publish_snapshot",
+  "system.classic_screen",
   "sync",
   "screen",
 ] as const;
+
+/**
+ * cron 预设。
+ *
+ * ★ 为什么需要：cron 是给机器读的，让用户手填「30 15 * * 1-5」出错率极高
+ * （顺序是「分 时 日 月 周」，写反一点任务就永远不跑或跑错时间）。
+ * 这几个覆盖了「定时更新日线 / 定时选股」的真实需求，与后端播种的默认调度
+ * （system_jobs.DEFAULT_SCHEDULES）同一套口径。
+ */
+const CRON_PRESETS: Array<{ cron: string; label: string; hint: string }> = [
+  { cron: "30 15 * * 1-5", label: "每交易日 15:30", hint: "收盘后更新日线（默认调度同款）" },
+  { cron: "0 16 * * 1-5", label: "每交易日 16:00", hint: "收盘后经典策略选股（默认调度同款）" },
+  { cron: "0 9 * * 1-5", label: "每交易日 09:00", hint: "开盘前准备" },
+  { cron: "0 18 * * 5", label: "每周五 18:00", hint: "周末前的对账/报表" },
+  { cron: "0 2 * * *", label: "每天 02:00", hint: "夜间批量（避开交易时段）" },
+  { cron: "0 * * * *", label: "每小时整点", hint: "高频巡检" },
+];
+
+/** 默认调度的固定 id（backend/app/runtime/system_jobs.py:DEFAULT_SCHEDULES） */
+const DEFAULT_SCHEDULE_IDS = new Set(["sch-default-sync-bars", "sch-default-classic-screen"]);
+
+/** kind 的中文说明 —— 「system.publish_snapshot」这类名字对界面毫无解释力。 */
+const KIND_HINT: Record<string, string> = {
+  "system.eod": "收盘后全流程管线（同步→对账→快照）",
+  "system.sync_bars": "全市场日线同步",
+  "system.sync_fundamentals": "基本面因子预取（加速选股）",
+  "system.refresh_universe": "股票池刷新",
+  "system.reconcile_bars": "跨源对账",
+  "system.rolling_repair": "缺失区间滚动修复",
+  "system.coverage_report": "覆盖率与来源占比报表",
+  "system.publish_snapshot": "发布数据集快照",
+  "system.classic_screen": "经典策略选股（海龟/均线放量/RPS…）",
+  sync: "通用同步",
+  screen: "通用选股",
+};
 
 const JOB_STATUS_TONE: Record<RuntimeJob["status"], "success" | "danger" | "neutral" | "info" | "warning"> = {
   queued: "info",
@@ -69,6 +106,7 @@ export function RuntimeJobs() {
   const [sName, setSName] = useState("");
   const [sMisfire, setSMisfire] = useState("coalesce");
   const [sEnabled, setSEnabled] = useState("1");
+  const [sParams, setSParams] = useState("{}");
 
   const wrap = async (fn: () => Promise<unknown>, okText: string, reload: () => Promise<void>) => {
     setBusy(true);
@@ -100,13 +138,20 @@ export function RuntimeJobs() {
   };
 
   const createSchedule = () => {
+    let params: Record<string, unknown> = {};
+    try {
+      params = JSON.parse(sParams || "{}") as Record<string, unknown>;
+    } catch {
+      setBanner({ tone: "error", text: "调度 params 不是合法 JSON" });
+      return;
+    }
     const body: ScheduleCreate = {
       kind: sKind,
       cron: sCron,
       name: sName || sKind,
       misfire_policy: sMisfire,
       enabled: sEnabled === "1",
-      params: {},
+      params,
     };
     void wrap(() => systemApi.createSchedule(body), `调度已创建（${sCron}）`, schedules.reload);
   };
@@ -148,22 +193,42 @@ export function RuntimeJobs() {
       width: 70,
       render: (r) =>
         r.status === "queued" || r.status === "running" ? (
-          <Button
-            size="sm"
-            variant="ghost"
+          // 取消正在跑的任务不可逆（跑了一半的结果不会回滚）⇒ 两段式确认
+          <ConfirmButton
             disabled={busy}
-            onClick={() => void wrap(() => systemApi.cancelJob(r.id), `已请求取消 ${r.id}`, jobs.reload)}
+            confirmText="确认取消"
+            title={`取消任务 ${r.id}`}
+            onConfirm={() => void wrap(() => systemApi.cancelJob(r.id), `已请求取消 ${r.id}`, jobs.reload)}
           >
             取消
-          </Button>
+          </ConfirmButton>
         ) : null,
     },
   ];
 
   const schedCols: Column<ScheduleItem>[] = [
-    { key: "id", header: "ID", width: 110, mono: true, render: (r) => r.id },
+    {
+      key: "id",
+      header: "ID",
+      width: 140,
+      mono: true,
+      render: (r) => (
+        <span title={DEFAULT_SCHEDULE_IDS.has(r.id) ? "内置默认调度：可停用/改时间，删除后下次启动会重建" : r.id}>
+          {r.id}
+          {DEFAULT_SCHEDULE_IDS.has(r.id) && (
+            <Badge tone="info" title="内置默认调度">内置</Badge>
+          )}
+        </span>
+      ),
+    },
     { key: "name", header: "名称", width: 150, render: (r) => r.name || "--" },
-    { key: "kind", header: "类型", width: 180, mono: true, render: (r) => r.kind },
+    {
+      key: "kind",
+      header: "类型",
+      width: 180,
+      mono: true,
+      render: (r) => <span title={KIND_HINT[r.kind] ?? r.kind}>{r.kind}</span>,
+    },
     { key: "cron", header: "Cron", width: 130, mono: true, render: (r) => r.cron },
     { key: "misfire", header: "补跑策略", width: 90, mono: true, render: (r) => r.misfire_policy },
     {
@@ -202,14 +267,14 @@ export function RuntimeJobs() {
           >
             {r.enabled ? "停用" : "启用"}
           </Button>
-          <Button
-            size="sm"
-            variant="ghost"
+          <ConfirmButton
             disabled={busy}
-            onClick={() => void wrap(() => systemApi.deleteSchedule(r.id), `已删除 ${r.id}`, schedules.reload)}
+            onConfirm={() =>
+              void wrap(() => systemApi.deleteSchedule(r.id), `已删除 ${r.id}`, schedules.reload)
+            }
           >
             删除
-          </Button>
+          </ConfirmButton>
         </div>
       ),
     },
@@ -296,6 +361,22 @@ export function RuntimeJobs() {
               <FormRow label="Cron">
                 <Input value={sCron} onChange={(e) => setSCron(e.target.value)} mono placeholder="0 15 * * 1-5" />
               </FormRow>
+              <FormRow label="常用时间">
+                <Select
+                  value=""
+                  onChange={(e) => {
+                    const p = CRON_PRESETS.find((x) => x.cron === e.target.value);
+                    if (p) setSCron(p.cron);
+                  }}
+                  options={[
+                    { value: "", label: "选择预设时间…" },
+                    ...CRON_PRESETS.map((p) => ({ value: p.cron, label: `${p.label} — ${p.hint}` })),
+                  ]}
+                />
+              </FormRow>
+              <FormRow label="参数(JSON)">
+                <Input value={sParams} onChange={(e) => setSParams(e.target.value)} mono />
+              </FormRow>
               <FormRow label="名称">
                 <Input value={sName} onChange={(e) => setSName(e.target.value)} placeholder="可选" />
               </FormRow>
@@ -328,6 +409,17 @@ export function RuntimeJobs() {
               <Button size="sm" variant="ghost" onClick={() => void schedules.reload()}>
                 刷新
               </Button>
+            </div>
+            <div className={s.note} style={{ marginTop: 8 }}>
+              {KIND_HINT[sKind] ?? sKind} · cron 为「分 时 日 月 周」五段（如
+              <code> 30 15 * * 1-5 </code>= 每交易日 15:30）。
+              {sKind === "system.classic_screen" && (
+                <>
+                  {" "}经典策略调度可用参数示例：
+                  <code> {"{"}"strategies":["turtle_trade","ma_volume"],"limit":50{"}"} </code>
+                  —— 留空则跑全部策略。
+                </>
+              )}
             </div>
           </Panel>
 

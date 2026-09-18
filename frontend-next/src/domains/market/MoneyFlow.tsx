@@ -14,7 +14,8 @@ import { EChart } from "@/charts/EChart";
 import type { EChartsOption } from "@/charts/echartsSetup";
 import { marketApi, type BoardMoneyflowResponse } from "@/services/api";
 import { useAsync } from "@/hooks/useAsync";
-import { fmtAmount, fmtPct, normalizeCode, toneColor } from "@/shared/format";
+import { useLiveQuotes } from "@/hooks/useLiveQuotes";
+import { fmtAmount, fmtPct, fmtPrice, normalizeCode, toneColor } from "@/shared/format";
 import s from "../domain.module.css";
 
 /**
@@ -72,9 +73,36 @@ export function MoneyFlow() {
     };
   }, [strength]);
 
+  // 贡献度排名只有资金流，没有价格 ⇒ 叠加实时行情，才能一眼看出
+  // 「资金在流入的票，是不是也在涨」（流入但下跌 = 典型的主力对倒/出货信号）。
+  const contribCodes = useMemo(
+    () => (bmf.data?.contributors ?? []).map((r) => r.code),
+    [bmf.data],
+  );
+  const contribQuotes = useLiveQuotes(contribCodes);
+
   const contributorCols: Column<BoardMoneyflowResponse["contributors"][number]>[] = [
     { key: "code", header: "代码", width: 100, mono: true, render: (r) => r.code },
     { key: "name", header: "名称", width: 120, render: (r) => r.name || "--" },
+    {
+      key: "last",
+      header: "最新",
+      width: 80,
+      align: "right",
+      mono: true,
+      render: (r) => fmtPrice(contribQuotes[r.code]?.price),
+    },
+    {
+      key: "chg",
+      header: "涨跌幅",
+      width: 84,
+      align: "right",
+      mono: true,
+      render: (r) => {
+        const pct = contribQuotes[r.code]?.change_pct;
+        return <span style={{ color: toneColor(pct) }}>{fmtPct(pct)}</span>;
+      },
+    },
     {
       key: "net",
       header: "净流入(手)",

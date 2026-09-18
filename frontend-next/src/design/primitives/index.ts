@@ -1,6 +1,9 @@
 export { Button } from "./Button";
 export type { ButtonProps, ButtonVariant } from "./Button";
 
+export { ConfirmButton } from "./ConfirmButton";
+export type { ConfirmButtonProps } from "./ConfirmButton";
+
 export { Input, Select, FormRow } from "./Input";
 export type { InputProps, SelectProps, SelectOption, FormRowProps } from "./Input";
 

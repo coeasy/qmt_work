@@ -17,11 +17,21 @@ from datetime import datetime
 
 from xtquant_client.order_status import (
     FILLED,
+    PARTIAL,
     UNKNOWN,
     is_active,
     normalize_order_status,
 )
 from core.clock import now_iso, today_str
+
+
+class WalReadError(RuntimeError):
+    """WAL 读取失败。
+
+    ★ 为什么要单独定义：对账的**唯一真源**读不出来时，绝不能退化成「无待核销委托」
+    （那会让系统报告一切正常，而委托其实卡在未核销状态）。抛专用异常，
+    由 ``reconcile`` 转成显式的失败结果，让调用方能区分「没事」和「查不了」。
+    """
 
 log = logging.getLogger("qmt_work.reconcile")
 
@@ -42,14 +52,23 @@ class OrderReconciler:
 
     # ---------------- WAL 侧：待核销集合 ----------------
     def _pending_from_wal(self) -> dict[str, dict]:
-        """返回 {order_id: payload}，已核销（op=reconciled）的剔除。"""
+        """返回 {order_id: payload}，已核销（op=reconciled）的剔除。
+
+        ★ 读取失败**必须抛错**，不能返回 ``{}``：WAL 是「待核销委托」的唯一真源，
+        读不出来却返回空，会让 ``reconcile()`` 报告「无待核销委托」——
+        与「真的没有待核销」完全无法区分。结果是**委托可能卡在未核销状态，
+        而系统每天报告一切正常**（启动日志里那句 `checked: 0, note: 无待核销委托`
+        正是这个返回值，看不出是成功还是故障）。
+
+        ``self._wal is None`` 属「未配置 WAL」（如单测环境），不是故障，返回空即可。
+        """
         if self._wal is None:
             return {}
         try:
             records = self._wal.all_records()
         except Exception as exc:  # noqa: BLE001
-            log.warning("read wal failed: %s", exc)
-            return {}
+            log.error("read wal failed: %s", exc)
+            raise WalReadError(f"WAL 读取失败：{exc}") from exc
         pending: dict[str, dict] = {}
         done: set[str] = set()
         for rec in records:
@@ -100,13 +119,21 @@ class OrderReconciler:
     # ---------------- 主流程 ----------------
     async def reconcile(self, conn_id: str | None = None) -> dict:
         """执行一次对账。返回 {checked, filled, canceled, stale, mismatched, details}。"""
-        pending = self._pending_from_wal()
+        try:
+            pending = self._pending_from_wal()
+        except WalReadError as exc:
+            # ★ 明确失败，不伪装成「无待核销委托」
+            self.last_result = {
+                "checked": 0, "ok": False,
+                "note": "WAL 读取失败，本次未执行对账", "error": str(exc),
+            }
+            return self.last_result
         if not pending:
-            self.last_result = {"checked": 0, "note": "无待核销委托"}
+            self.last_result = {"checked": 0, "ok": True, "note": "无待核销委托"}
             return self.last_result
         orders, deals = await self._broker_snapshot(conn_id)
         # 状态计数键统一为规范词汇（与 xtquant_client.order_status 对齐）
-        summary = {"checked": len(pending), "filled": 0, "partial": 0,
+        summary = {"checked": len(pending), "ok": True, "filled": 0, "partial": 0,
                    "cancelled": 0, "rejected": 0, "open": 0, "stale": 0,
                    "unknown": 0, "mismatched": 0, "details": []}
         for oid, payload in pending.items():
@@ -146,7 +173,10 @@ class OrderReconciler:
                     summary["open"] += 1
                     continue
                 if status == UNKNOWN and traded > 0:
-                    status = FILLED if traded >= want > 0 else "part_filled"
+                    # ★ 必须用标准常量 PARTIAL：这里曾写成字面量 "part_filled"，
+                    # 而 summary 的计数键是 "partial"，导致部分成交被计到一个
+                    # 不存在的键上 —— 对账报表里 partial 恒为 0，缺口无人察觉。
+                    status = FILLED if traded >= want > 0 else PARTIAL
             summary[status] = summary.get(status, 0) + 1
             detail = {"order_id": oid, "code": payload.get("code", ""),
                       "side": payload.get("side", ""), "want": want,

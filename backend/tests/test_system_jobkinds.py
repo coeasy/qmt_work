@@ -1,4 +1,10 @@
-"""V9 Phase 7 DoD：8 个 system.* JobKind 注册与可提交。"""
+"""V9 Phase 7 DoD：system.* JobKind 注册与可提交。
+
+★ 计数演进：原为 8 个；接入「经典策略选股」定时调度后为 **9** 个
+（新增 ``system.classic_screen``，见 app/screener/classic.py）。
+本测试锁定的不是「永远是 9」，而是**注册表与 runner 工厂必须一一对应** ——
+新增 kind 时同步更新这里，防止出现「能提交但没有 runner」的哑任务。
+"""
 import sys
 from pathlib import Path
 
@@ -14,12 +20,14 @@ from app.runtime.system_jobs import (  # noqa: E402
 
 
 def test_eight_system_kinds_registered():
-    assert len(SYSTEM_JOB_KINDS) == 8
+    assert len(SYSTEM_JOB_KINDS) == 9
     expected = {
         "system.eod", "system.sync_bars", "system.sync_fundamentals",
         "system.refresh_universe", "system.reconcile_bars",
         "system.rolling_repair", "system.coverage_report",
         "system.publish_snapshot",
+        # 经典策略选股（复刻 Sequoia-X），含默认定时调度
+        "system.classic_screen",
     }
     assert set(SYSTEM_JOB_KINDS) == expected
     for kind in expected:
