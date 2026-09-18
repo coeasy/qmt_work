@@ -25,9 +25,13 @@ import logging
 import os
 import re
 import time
-from datetime import timedelta
+from datetime import datetime, timedelta
 
-from core.clock import local_now, to_iso
+from core.clock import bar_date, local_now, to_iso
+
+#: 缓存**内容**陈旧的判定窗口（自然日）：最后一根距今超过它，即使 TTL 未到也回源。
+#: 与 app.sync.bars 的 STALE_DAYS_DEFAULT 同口径（覆盖春节长假，周末/短假不误判）。
+CACHE_STALE_DAYS = 10
 
 log = logging.getLogger("qmt_work.kline_cache")
 
@@ -344,7 +348,33 @@ class KlineCache:
         if await self.acount(code, period, adjust) < count:
             return False
         age = time.time() - await self.alast_fetch(code, period, adjust)
-        return age <= self.ttl_for(period)
+        if age > self.ttl_for(period):
+            return False
+        # ★ TTL 之外还要看**内容**（V11 R13）：TTL 只管「多久前取的」，
+        # 管不了「当时取到的本身就是陈的」。实测（2026-09-18）券商本地历史
+        # 只到 20260825 时被写进缓存，随后 6 小时内本方法恒为 True ⇒
+        # 界面一直显示 24 天前的 K 线，而主仓其实已补下载到当天。
+        return not await self.acontent_stale(code, period, adjust)
+
+    async def acontent_stale(self, code: str, period: str,
+                             adjust: str = "") -> bool:
+        """缓存里的最后一根是否陈旧（只判日线及以上 —— 分钟线当日有效）。"""
+        if period not in ("1d", "1w", "1mon"):
+            return False
+        try:
+            rows = await self.aget(code, period, 1, adjust)
+        except Exception:  # noqa: BLE001 读不出来就当不陈旧，交给回源逻辑
+            return False
+        if not rows:
+            return False
+        last = bar_date(rows[-1].get("time"))
+        if len(last) != 8:
+            return False
+        try:
+            day = datetime.strptime(last, "%Y%m%d").date()
+        except ValueError:
+            return False
+        return (local_now().date() - day).days > CACHE_STALE_DAYS
 
     # ---------------- 组合入口 ----------------
     async def get_or_fetch(self, code: str, period: str, count: int, fetcher,

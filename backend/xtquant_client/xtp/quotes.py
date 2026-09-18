@@ -1,5 +1,7 @@
 """行情：tick / K 线 / 订阅（QuotesMixin，自原 xtp.py 逐行搬移）。"""
 
+from datetime import datetime, timedelta
+
 from ..base import BrokerNotConnectedError, BrokerSDKError
 from ._common import _dget, _normalize_kline_period, log
 from core.clock import local_now, now_iso
@@ -107,6 +109,52 @@ class QuotesMixin:
         }.get(period, count * 2)
         return max(need + 2, 1)
 
+    #: 「陈旧触发预热」的判定窗口（自然日）：最后一根距今超过它就补下载。
+    #: 与 app.sync.bars 的 STALE_DAYS_DEFAULT 同口径（覆盖春节长假）。
+    _WARM_STALE_DAYS = 10
+
+    #: code -> 上次**已尝试预热过**的最后日期。同状态只试一次，避免每只每次
+    #: 查询都去调 download_history_data（全市场同步时会放大成数千次 RPC）。
+    _WARM_MEMO: dict = {}
+
+    @staticmethod
+    def _result_last_date(data) -> str:
+        """从 get_market_data 结果里取最后一根的交易日（``YYYYMMDD``；取不到返 ``""``）。"""
+        try:
+            df0 = next(iter(data.values()))
+            cols = list(df0.columns)
+            if not cols:
+                return ""
+            return "".join(ch for ch in str(cols[-1])[:10] if ch.isdigit())
+        except Exception:  # noqa: BLE001
+            return ""
+
+    def _needs_warm(self, code: str, data, period: str) -> tuple:
+        """★ 结果**陈旧**也要预热 —— 只判「空」是漏掉大半的真凶。
+
+        实测（2026-09-19）：QMT 客户端本地历史只下载到 ``20250418``，
+        ``get_market_data`` **照样返回非空**（一年多前的 320 根），于是旧逻辑
+        「空结果才预热」永远不触发 ⇒ 全市场同步拿到 163 万根陈旧数据，
+        而在线源又被限流 ⇒ 数据一年多没更新。
+
+        返回 ``(是否需要, 最后日期)``；不需要时最后日期用于记 memo。
+        """
+        # 分钟线数据量极大且不做全市场历史同步，只补日线及以上
+        if period not in ("1d", "1w", "1mon"):
+            return False, ""
+        last = self._result_last_date(data)
+        if len(last) != 8:
+            return False, last
+        memo = type(self)._WARM_MEMO
+        if memo.get(code) == last:
+            return False, last       # 这个状态已经试过了，别反复打 RPC
+        try:
+            from datetime import timedelta
+            d = datetime.strptime(last, "%Y%m%d").date()
+        except ValueError:
+            return False, last
+        return (local_now().date() - d).days > self._WARM_STALE_DAYS, last
+
     def _warm_kline_cache(self, code: str, period: str, count: int,
                           start: str, end: str) -> bool:
         """本地缓存无数据（行情服务离线/未预热）时用 download_history_data 预热。
@@ -166,6 +214,24 @@ class QuotesMixin:
                 data = _fetch()
         if not isinstance(data, dict) or not data:
             return []
+        # ★ 结果**陈旧**同样要预热（V11 R13）：本地有数据但停在很久以前时，
+        # 上面的「空才预热」不会触发，于是券商源永远吐一年前的行情，而同步的
+        # 新鲜度门槛只能去降级到（同样被限流的）在线源。
+        # 补下载窗口必须从**最后一根**起算：默认的「回看 count 天」够不着
+        # 一年的缺口（实测本地停在 20250418，count=120 只覆盖到 2026-05）。
+        need_warm, last_dt = self._needs_warm(code, data, period)
+        if need_warm:
+            type(self)._WARM_MEMO[code] = last_dt
+            if self._warm_kline_cache(code, period, int(count), last_dt, end):
+                fresh = _fetch()
+                if isinstance(fresh, dict) and fresh:
+                    new_last = self._result_last_date(fresh)
+                    if new_last > last_dt:
+                        log.info("券商本地历史已补齐 %s：%s -> %s",
+                                 code, last_dt, new_last)
+                        data = fresh
+                    else:
+                        log.info("券商本地历史无更新 %s（仍停在 %s）", code, last_dt)
         # 迅投 get_market_data(field_list=..., stock_list=[...]) 返回
         # {字段名: DataFrame}——每个 DataFrame 的 index=股票代码、columns=日期。
         # 注意不是 {code: DataFrame}！旧实现按 data.get(code) 解析永远取不到，
