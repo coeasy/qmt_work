@@ -36,6 +36,36 @@ def _store(key: str, ttl: int, out) -> None:
         TTL.set(key, out)
 
 
+def _unavailable(label: str, source: str = "auto") -> str:
+    """构造「拿不到数据」的**准确**原因，绝不把「不支持」说成「网络坏了」。
+
+    为什么需要它：此前三处都硬编码「TDX 行情源暂不可用，请检查网络或连接券商」。
+    实测（2026-09-19）用户连着券商、显式 ``source=broker`` 查板块榜也拿到这句 ——
+    而真实原因是 ``_sup_chain("broker")`` **刻意返回空链**（券商不提供 sector 能力），
+    与 TDX、与网络毫无关系。这句会让人去查网络和券商连接，**排查方向被彻底带偏**。
+
+    两类情形必须分开说：
+    1. 源链为空 → 是「当前指定源不提供该能力」，应提示改用 ``source=auto``；
+    2. 源链非空但全失败 → 列出实际尝试过的源与各自原因。
+    """
+    hub = get_hub()
+    trace = hub.last_failure_trace() if hasattr(hub, "last_failure_trace") else {}
+    chain = trace.get("chain") or []
+    tried = trace.get("tried") or []
+    if not chain:
+        # ⚠️ 不能对 ``source=auto`` 说「请改用 source=auto」—— 用户已经在用了，
+        # 这种自相矛盾的提示比不提示更糟。两种情形必须分开讲。
+        if (source or "auto").lower() in ("auto", "", "none"):
+            return (f"{label}获取失败：当前无任何数据源声明该能力"
+                    f"（券商源无此接口，且已注册补充源未声明该能力）。"
+                    f"请检查数据源插件是否安装/启用。")
+        return (f"{label}获取失败：数据源 {source} 不提供该能力"
+                f"（券商源无此接口）。请改用 source=auto 走补充源，"
+                f"或连接/安装支持该能力的数据源。")
+    detail = "；".join(tried) if tried else "全部返回空"
+    return f"{label}获取失败：已尝试 {', '.join(chain)} 均无数据（{detail}）。"
+
+
 # ===================== 指数聚合快照 =====================
 
 async def indices_snapshot(codes: str = "", source: str = "auto", ttl: int = 3,
@@ -119,7 +149,7 @@ async def boards(kind: str = "industry", sort_by: str = "pct",
     except Exception as exc:  # noqa: BLE001
         raise ServiceError(503, f"板块榜获取失败：{exc}") from exc
     if not items:
-        raise ServiceError(503, "板块榜获取失败：TDX 行情源暂不可用，请检查网络或连接券商。")
+        raise ServiceError(503, _unavailable("板块榜", source))
     out = {"items": items, "kind": kind, "count": len(items), "source": src_name, "ts": _now()}
     _store(ck, ttl, out)
     return out
@@ -219,7 +249,7 @@ async def etfs(limit: int = 0, with_quote: bool = False,
     except Exception as exc:  # noqa: BLE001
         raise ServiceError(503, f"ETF 清单获取失败：{exc}") from exc
     if not items:
-        raise ServiceError(503, "ETF 清单获取失败：TDX 行情源暂不可用。")
+        raise ServiceError(503, _unavailable("ETF 清单", source))
     groups = {}
     for it in items:
         g = str(it.get("code", ""))[:2]
@@ -394,7 +424,7 @@ async def rotation(days: int = 5, kind: str = "industry",
     except Exception as exc:  # noqa: BLE001
         raise ServiceError(503, f"板块榜获取失败：{exc}") from exc
     if not boards_rows:
-        raise ServiceError(503, "板块榜获取失败：TDX 行情源暂不可用。")
+        raise ServiceError(503, _unavailable("板块榜", source))
     boards_rows.sort(key=lambda b: abs(b.get("change_pct") or 0), reverse=True)
     pick = boards_rows[:top_n]
 

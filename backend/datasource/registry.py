@@ -174,6 +174,9 @@ class DataSourceManager:
         self._breakers: dict[str, dict] = {}
         # 详情富化结果缓存：code -> (写入时间, det)；见 _enrich_detail
         self._detail_cache: dict[str, tuple[float, dict]] = {}
+        # 最近一次 _first_supported 的失败溯源（见 last_failure_trace）
+        self._last_chain: list[str] = []
+        self._last_trace: list[str] = []
 
     # ---------- 注册 ----------
     def register(self, source: DataSource) -> "DataSourceManager":
@@ -668,15 +671,44 @@ class DataSourceManager:
 
     async def _first_supported(self, method: str, *args, source: str = "auto",
                                capability: str = "kline", **kwargs):
-        """按 source + capability 解析的链，找到第一个实现该方法的补充源并返回 (结果, 源名)。"""
-        for name in self._sup_chain(source, capability):
+        """按 source + capability 解析的链，找到第一个实现该方法的补充源并返回 (结果, 源名)。
+
+        失败原因记录在 :attr:`_last_chain` / :attr:`_last_trace`，供
+        :meth:`last_failure_trace` 读取 —— 返回值本身只有 ``(None, None)``，
+        信息量不足以让用户判断该怎么办。
+        """
+        chain = self._sup_chain(source, capability)
+        self._last_chain = list(chain)
+        self._last_trace = []
+        for name in chain:
             src = self._plugins.get(name)
-            if src is None or not hasattr(src, method):
+            if src is None:
+                self._last_trace.append(f"{name}: 未注册")
+                continue
+            if not hasattr(src, method):
+                self._last_trace.append(f"{name}: 不支持 {method}")
+                continue
+            if not self._source_allowed(name):
+                self._last_trace.append(f"{name}: 熔断冷却中")
                 continue
             res = await self._call_source(name, getattr(src, method)(*args, **kwargs))
             if res:
                 return res, name
+            self._last_trace.append(f"{name}: 调用失败或返回空")
         return None, None
+
+    def last_failure_trace(self) -> dict:
+        """最近一次 :meth:`_first_supported` 的失败溯源。
+
+        为什么需要它：``_first_supported`` 失败时只返回 ``(None, None)``，
+        **丢弃了全部失败原因**，上层于是只能给一句泛化兜底文案。
+
+        实测（2026-09-19）：用户 ``source=broker`` 查板块榜得到
+        「TDX 行情源暂不可用，请检查网络或连接券商」—— 而他**明明连着券商**。
+        真实原因是 ``_sup_chain("broker")`` **刻意返回空链**（券商不提供 sector
+        能力），与 TDX、与网络都无关。把「不支持」说成「网络坏了」会直接带偏排查方向。
+        """
+        return {"chain": list(self._last_chain), "tried": list(self._last_trace)}
 
     async def get_boards(self, kind: str = "industry", sort_by: str = "pct",
                          limit: int = 50, source: str = "auto") -> tuple[Optional[list], Optional[str]]:
