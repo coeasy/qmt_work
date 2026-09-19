@@ -157,9 +157,24 @@ export function OfflineData() {
   };
 
   // ---- 上次运行（落库） ----
-  const rec: SyncRunRecord | null = sync?.last_run_persisted ?? null;
-  const run = rec?.detail ?? {};
-  const runTone: BadgeTone =
+  /**
+   * ⚠️ **两条流不能混**：
+   * - `last_run_persisted` = 热窗口刷新（`market.sync`）：只把最近若干天的热数据
+   *   回源一遍，detail 里只有 `codes/ok/fail/hot_days`；
+   * - `last_bars_run` = 全市场日线同步（`sync.bars`）：detail 里才有
+   *   `sync_mode/paged/as_of_min/skipped_complete/stale/as_of_max`。
+   *
+   * 「同步总览」这块讲的是**热刷新调度器**（`sync.sync_time`/`enabled`/`hot_days`），
+   * 所以它的「上次运行」用前者；而「数据够不够新」「全量回补到底成没成」是后者
+   * 的事实 —— 从前者读会**永远读到 undefined**（表现为「点了按钮没反应」）。
+   */
+  const hotRec: SyncRunRecord | null = sync?.last_run_persisted ?? null;
+  const barsRec: SyncRunRecord | null =
+    sync?.last_bars_run ?? cov?.sync ?? null;
+  const run = hotRec?.detail ?? {};
+  const bars = barsRec?.detail ?? {};
+
+  const toneOf = (rec: SyncRunRecord | null): BadgeTone =>
     rec === null
       ? "neutral"
       : rec.status === "ok"
@@ -175,23 +190,36 @@ export function OfflineData() {
     error: "失败",
     skipped: "已跳过",
   };
-  const runText =
+  const labelOf = (rec: SyncRunRecord | null) =>
     rec === null
       ? "从未跑过"
       : (runLabel[rec.status ?? ""] ?? rec.status ?? "未知");
 
-  // 详情优先用 sync_bars 的口径（total/ok/failed/stale），没有就用热刷新的口径（codes/ok/fail）
-  const runDetailText = rec
+  const runTone = toneOf(hotRec);
+  const runText = labelOf(hotRec);
+  const barsTone = toneOf(barsRec);
+  const barsText = labelOf(barsRec);
+
+  /** 热刷新流的详情（只有 codes/ok/fail/hot_days 口径）。 */
+  const runDetailText = hotRec
     ? run.summary
       ? String(run.summary)
       : run.reason
         ? String(run.reason)
         : run.error
           ? String(run.error)
-          : `扫描 ${run.total ?? run.codes ?? "—"} · 成功 ${run.ok ?? "—"}` +
-            (run.failed ? ` · 失败 ${run.failed}` : "") +
-            (run.fail ? ` · 失败 ${run.fail}` : "") +
-            (run.stale ? ` · 陈旧 ${run.stale}` : "")
+          : `刷新 ${run.codes ?? "—"} 只 · 成功 ${run.ok ?? "—"}` +
+            (run.fail ? ` · 失败 ${run.fail}` : "")
+    : "";
+
+  /** 日线同步流的详情（total/ok/failed/stale 口径）。 */
+  const barsDetailText = barsRec
+    ? bars.error
+      ? String(bars.error)
+      : `扫描 ${bars.total ?? "—"} · 成功 ${bars.ok ?? "—"}` +
+        (bars.failed ? ` · 失败 ${bars.failed}` : "") +
+        (bars.stale ? ` · 陈旧 ${bars.stale}` : "") +
+        (bars.bars_written ? ` · 写入 ${bars.bars_written} 根` : "")
     : "";
 
   // ---- 覆盖度 ----
@@ -280,7 +308,19 @@ export function OfflineData() {
         >
           <div className={s.body}>
             {!sync || sync.initialized === false ? (
-              <EmptyState text="同步器未初始化（后端未装配 market_sync，或接口不可达）" />
+              <>
+                <EmptyState text="同步器未初始化（后端未装配 market_sync，或接口不可达）" />
+                {/* ★ 「调度器没启动」≠「从来没有同步过」：落库历史与调度器无关，
+                    在出故障的这一刻丢掉它，用户恰好失去唯一线索。 */}
+                {barsRec || hotRec ? (
+                  <div className={s.note}>
+                    但仍有历史记录：热刷新
+                    {hotRec ? `${labelOf(hotRec)}（${hotRec.last_ts ?? "时间未知"}）` : "从未跑过"}；
+                    日线同步
+                    {barsRec ? `${labelOf(barsRec)}（${barsRec.last_ts ?? "时间未知"}）` : "从未跑过"}。
+                  </div>
+                ) : null}
+              </>
             ) : (
               <>
                 <div className={s.kv}>
@@ -294,35 +334,49 @@ export function OfflineData() {
                   <span className={s.mono}>{sync.sync_time || "—"}</span>
                 </div>
                 <div className={s.kv}>
-                  <span>上次运行（落库）</span>
+                  <span>上次热刷新（落库）</span>
                   <span className={s.row}>
                     <Badge tone={runTone}>{runText}</Badge>
-                    {rec?.last_ts ? (
-                      <span className={s.mono}>{fmtDateTime(toTimestamp(rec.last_ts))}</span>
+                    {hotRec?.last_ts ? (
+                      <span className={s.mono}>{fmtDateTime(toTimestamp(hotRec.last_ts))}</span>
                     ) : null}
                   </span>
                 </div>
-                {rec ? <div className={s.note}>{runDetailText}</div> : null}
+                {hotRec ? <div className={s.note}>{runDetailText}</div> : null}
+                {/* ★★ 「上次日线同步」用的是**另一条流**（sync.bars）。全市场日线
+                    落库是用户真正关心的那条；它与热刷新是两件事，必须分开显示，
+                    否则用户会以为「热刷新成功 = 日线已更新」。 */}
+                <div className={s.kv}>
+                  <span>上次日线同步（落库）</span>
+                  <span className={s.row}>
+                    <Badge tone={barsTone}>{barsText}</Badge>
+                    {barsRec?.last_ts ? (
+                      <span className={s.mono}>{fmtDateTime(toTimestamp(barsRec.last_ts))}</span>
+                    ) : null}
+                  </span>
+                </div>
+                {barsRec ? <div className={s.note}>{barsDetailText}</div> : null}
                 {/* ★ 从未跑过不是「异常」，但也不是「一切正常」——它意味着
                     这个功能一次都没成功过，用户需要知道该去点一次。 */}
-                {rec === null && sync.initialized ? (
+                {hotRec === null && barsRec === null && sync.initialized ? (
                   <div className={s.noteWarn}>
                     尚未记录到任何一次同步运行。若刚安装或从未同步过，可点下方
                     「立即同步日线」手动跑一次。
                   </div>
                 ) : null}
-                {/* ★ ok 很高但陈旧很多 —— 这是「假成功」，必须顶到台面上 */}
-                {run.stale ? (
+                {/* ★ ok 很高但陈旧很多 —— 这是「假成功」，必须顶到台面上。
+                    ⚠️ 取自 sync.bars 流：热刷新的 detail 里没有 stale。 */}
+                {bars.stale ? (
                   <div className={s.noteError}>
-                    上次同步有 {run.stale} 只标的的数据**陈旧**（最新截至
-                    {run.as_of_max ? ` ${fmtBarDate(String(run.as_of_max))}` : "未知"}）。
+                    上次日线同步有 {bars.stale} 只标的的数据**陈旧**（最新截至
+                    {bars.as_of_max ? ` ${fmtBarDate(String(bars.as_of_max))}` : "未知"}）。
                     这通常意味着券商客户端本地历史未下载到近期，或在线数据源不可用。
                   </div>
                 ) : null}
-                {/* ★★ 「名义全量、实际没翻页」是最危险的一种假成功：mode 写着
+                {/* ★★ 「名义全量、实际没翻页」是最危险的一种假成功：sync_mode 写着
                     full、ok 是满的，用户会以为历史已补齐，其实只是把最近 N 根
                     又写了一遍。这里必须明确否定它。 */}
-                {run.sync_mode === "full" && run.paged === false ? (
+                {bars.sync_mode === "full" && bars.paged === false ? (
                   <div className={s.noteError}>
                     上次**全量回补未生效**：当前数据源链上没有任何源支持按日期区间
                     取数（免费在线源只接受「最近 N 根」），实际退化为单次大窗口，
@@ -330,17 +384,17 @@ export function OfflineData() {
                     券商渠道是唯一支持按年翻页取历史的数据源。
                   </div>
                 ) : null}
-                {run.degraded_reason ? (
-                  <div className={s.noteWarn}>{String(run.degraded_reason)}</div>
+                {bars.degraded_reason ? (
+                  <div className={s.noteWarn}>{String(bars.degraded_reason)}</div>
                 ) : null}
                 {/* 全量回补的结果：历史推到了哪一年 + 跳过了多少（断点续传的证据） */}
-                {run.sync_mode === "full" && run.paged ? (
+                {bars.sync_mode === "full" && bars.paged ? (
                   <div className={s.note}>
                     上次全量回补：历史最早到
-                    {run.as_of_min ? ` ${fmtBarDate(String(run.as_of_min))}` : "未知"}，
-                    写入 {run.bars_written ?? "—"} 根
-                    {run.skipped_complete
-                      ? `；因本地已补齐而跳过 ${run.skipped_complete} 只（断点续传）`
+                    {bars.as_of_min ? ` ${fmtBarDate(String(bars.as_of_min))}` : "未知"}，
+                    写入 {bars.bars_written ?? "—"} 根
+                    {bars.skipped_complete
+                      ? `；因本地已补齐而跳过 ${bars.skipped_complete} 只（断点续传）`
                       : ""}
                     。
                   </div>

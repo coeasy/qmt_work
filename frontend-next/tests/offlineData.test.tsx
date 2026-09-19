@@ -69,7 +69,10 @@ const COVERAGE: MarketCoverage = {
 };
 
 function statusOf(over: Partial<KlineSyncStatus> = {}): KlineSyncStatus {
-  return { initialized: true, enabled: true, sync_time: "16:00", hot: {}, ...over };
+  return {
+    initialized: true, enabled: true, sync_time: "16:00", hot: {},
+    last_run_persisted: null, last_bars_run: null, ...over,
+  };
 }
 
 function recordOf(over: Partial<SyncRunRecord> = {}): SyncRunRecord {
@@ -88,15 +91,16 @@ afterEach(cleanup);
 
 describe("离线数据页 · 诚实性", () => {
   it("从未跑过同步显示「从未跑过」而不是空白或 0", async () => {
-    mockMarket.klineSyncStatus.mockResolvedValue(statusOf({ last_run_persisted: null }));
+    mockMarket.klineSyncStatus.mockResolvedValue(statusOf({ last_run_persisted: null, last_bars_run: null }));
     render(<OfflineData />);
-    expect(await screen.findByText("从未跑过")).toBeTruthy();
+    // 两条流（热刷新 / 日线同步）各一条，都必须如实说「从未跑过」
+    expect(await screen.findAllByText("从未跑过")).toHaveLength(2);
     expect(await screen.findByText(/尚未记录到任何一次同步运行/)).toBeTruthy();
   });
 
   it("跑了但失败要显示失败原因（与「从未跑过」可区分）", async () => {
     mockMarket.klineSyncStatus.mockResolvedValue(statusOf({
-      last_run_persisted: recordOf({
+      last_bars_run: recordOf({
         status: "error", detail: { error: "股票池为空（数据源不可用且本地无股票列表）" },
       }),
     }));
@@ -107,13 +111,36 @@ describe("离线数据页 · 诚实性", () => {
 
   it("ok 很高但数据陈旧时把 stale 顶到台面上", async () => {
     mockMarket.klineSyncStatus.mockResolvedValue(statusOf({
-      last_run_persisted: recordOf({
+      last_bars_run: recordOf({
         detail: { ok: 5153, stale: 5093, as_of_max: "20250418" },
       }),
     }));
     render(<OfflineData />);
     expect(await screen.findByText(/5093 只标的的数据/)).toBeTruthy();
     expect(await screen.findByText(/2025-04-18/)).toBeTruthy();
+  });
+
+  it("热刷新与日线同步是两条流，必须分开显示（不得互相冒充）", async () => {
+    mockMarket.klineSyncStatus.mockResolvedValue(statusOf({
+      // 热刷新成功 ≠ 日线已更新：前者只是把最近若干天热数据回源一遍
+      last_run_persisted: recordOf({ stream: "market.sync", detail: { codes: 5200, ok: 5200 } }),
+      last_bars_run: null,
+    }));
+    render(<OfflineData />);
+    expect(await screen.findByText("上次热刷新（落库）")).toBeTruthy();
+    expect(await screen.findByText("上次日线同步（落库）")).toBeTruthy();
+    // 日线那条从未跑过 ⇒ 必须如实说「从未跑过」，不能借用热刷新的「成功」
+    expect(await screen.findByText("从未跑过")).toBeTruthy();
+  });
+
+  it("stale / sync_mode 只认日线同步流：热刷新 detail 里没有这些键", async () => {
+    mockMarket.klineSyncStatus.mockResolvedValue(statusOf({
+      // 热刷新 detail 里塞了 stale 也不该被采信 —— 它根本不产这个字段
+      last_run_persisted: recordOf({ stream: "market.sync", detail: { codes: 10, stale: 9 } }),
+      last_bars_run: null,
+    }));
+    render(<OfflineData />);
+    expect(screen.queryByText(/只标的的数据/)).toBeNull();
   });
 
   it("库中没有任何日线数据时给出可操作指引，而不是空表格", async () => {
@@ -193,7 +220,7 @@ describe("离线数据页 · 全量回补", () => {
 
   it("mode=full 但 paged=false 时必须明确否定「已补齐」", async () => {
     mockMarket.klineSyncStatus.mockResolvedValue(statusOf({
-      last_run_persisted: recordOf({
+      last_bars_run: recordOf({
         detail: { sync_mode: "full", paged: false, ok: 5200, total: 5200 },
       }),
     }));
@@ -206,7 +233,7 @@ describe("离线数据页 · 全量回补", () => {
 
   it("mode=full 且 paged=true 时给出「历史推到哪一年」与跳过数", async () => {
     mockMarket.klineSyncStatus.mockResolvedValue(statusOf({
-      last_run_persisted: recordOf({
+      last_bars_run: recordOf({
         detail: {
           sync_mode: "full", paged: true, as_of_min: "20140102",
           bars_written: 1200000, skipped_complete: 4100,
@@ -221,7 +248,7 @@ describe("离线数据页 · 全量回补", () => {
 
   it("增量同步的记录不得被误判成全量", async () => {
     mockMarket.klineSyncStatus.mockResolvedValue(statusOf({
-      last_run_persisted: recordOf({
+      last_bars_run: recordOf({
         // ⚠️ mode 是流的判别标签，不是同步模式 —— 界面只能看 sync_mode
         detail: { mode: "sync_bars", sync_mode: "incremental", paged: false, ok: 10 },
       }),

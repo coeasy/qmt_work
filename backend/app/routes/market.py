@@ -626,7 +626,12 @@ async def kline_sync_status(ctx: AppContext = Depends(get_ctx)):
     """
     ms = getattr(ctx, "market_sync", None)
     if ms is None:
-        return ok({"initialized": False})
+        # ★ 同步器没装配，**不等于**「从来没有同步过」。两条流的落库记录是 DB 数据，
+        #   与调度器是否启动无关；在此丢掉它们，恰好会让用户在「出故障」时失去
+        #   唯一的线索（上次跑到哪、成没成）。
+        return ok({"initialized": False,
+                   "last_run_persisted": last_run(STREAM_MARKET_SYNC),
+                   "last_bars_run": last_run(STREAM_SYNC_BARS)})
     rc = getattr(ctx, "runtime_config", None)
     kc = getattr(ctx, "kline_cache", None)
     hot = {}
@@ -654,6 +659,15 @@ async def kline_sync_status(ctx: AppContext = Depends(get_ctx)):
         #   而用户判断「今天的数据到底同步了没有」正是在重启之后。
         #   两者并存：内存版更实时（刚跑完立刻可见），落库版跨重启可查。
         "last_run_persisted": last_run(STREAM_MARKET_SYNC),
+        # ★★ 这是**另一条流**：``market.sync`` 是热窗口刷新（只把最近若干天的
+        #   热数据回源一遍），而 ``sync.bars`` 才是「全市场日线落库」那条路。
+        #   两者的 detail 结构完全不同：只有 sync.bars 才有
+        #   ``sync_mode`` / ``paged`` / ``as_of_min`` / ``skipped_complete`` /
+        #   ``stale`` / ``as_of_max``。
+        #   ⚠️ 界面若把全量回补的字段从 ``last_run_persisted`` 读，会**永远读不到**
+        #   （热刷新的 detail 里根本没有这些键），表现为「全量回补按钮点了没反应」。
+        #   所以这里必须把两条流都如实给出，由界面各自取用。
+        "last_bars_run": last_run(STREAM_SYNC_BARS),
         "hot": hot,
         "config": rc.all().get("market.sync.enabled") if rc else None,
     }

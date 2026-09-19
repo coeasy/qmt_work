@@ -198,3 +198,80 @@ def test_sync_bars_errors_truncated(db, monkeypatch):
     rec = st_mod.last_run(st_mod.STREAM_SYNC_BARS)
     assert len(rec["detail"]["errors"]) == 20
     assert rec["detail"]["errors_truncated"] == 30
+
+
+# ---------------------------------------------------------------------------
+# ⑥ 两条流不得互相冒充（V11 §5.3 P0-3 III）
+# ---------------------------------------------------------------------------
+def test_sync_bars_detail_exposes_full_backfill_fields(db, monkeypatch):
+    """``sync.bars`` 的 detail 必须带 ``sync_mode`` / ``paged`` / ``as_of_min`` /
+    ``skipped_complete`` —— 界面靠它们区分「全量真补齐」与「名义全量」。
+
+    ⚠️ 同步模式落库键是 **``sync_mode``**，不是 ``mode``：``mode`` 早已是**流的
+    判别标签**（``"sync_bars"`` / ``"market.sync"``）。两者混用会让界面把全量回补
+    误判成普通增量同步。
+    """
+    _run_bars({}, {"total": 10, "ok": 10, "failed": 0, "stale": 0, "bars_written": 99,
+                   "mode": "full", "paged": True, "as_of_min": "20140102",
+                   "skipped_complete": 4100}, monkeypatch)
+    d = st_mod.last_run(st_mod.STREAM_SYNC_BARS)["detail"]
+    assert d["mode"] == "sync_bars"        # 流标签，保持不变
+    assert d["sync_mode"] == "full"        # 同步模式
+    assert d["paged"] is True
+    assert d["as_of_min"] == "20140102"
+    assert d["skipped_complete"] == 4100
+
+
+def test_sync_status_exposes_both_streams(db, monkeypatch):
+    """``GET /market/kline/sync-status`` 必须**同时**给出两条流的落库记录。
+
+    ★ 为什么不能只给一条：``last_run_persisted`` 是**热窗口刷新**（``market.sync``），
+    它的 detail 里**根本没有** ``stale`` / ``sync_mode`` / ``paged`` 这些键。
+    界面若把「全量回补到底成没成」「数据够不够新」从它读，会**永远读到 undefined**，
+    表现为「按钮点了没反应」—— 而单看端点返回 200 是发现不了的。
+    """
+    from app.routes.market import kline_sync_status
+
+    st_mod.record_run(st_mod.STREAM_MARKET_SYNC, status="ok",
+                      detail={"mode": "market.sync", "codes": 5200})
+    st_mod.record_run(st_mod.STREAM_SYNC_BARS, status="ok",
+                      detail={"mode": "sync_bars", "sync_mode": "full", "paged": False})
+
+    class _Ms:
+        enabled = True
+        sync_time = "16:00"
+
+    class _Ctx:
+        market_sync = _Ms()
+        runtime_config = None
+        kline_cache = None
+
+    body = asyncio.run(kline_sync_status(ctx=_Ctx()))
+    payload = body.get("data", body)
+    assert payload["last_run_persisted"]["detail"]["mode"] == "market.sync"
+    assert payload["last_bars_run"]["detail"]["mode"] == "sync_bars"
+    assert payload["last_bars_run"]["detail"]["paged"] is False
+
+
+def test_sync_status_keeps_history_when_synchronizer_absent(db, monkeypatch):
+    """同步器没装配时，落库历史**不能跟着一起消失**。
+
+    ★ 「调度器没启动」与「从来没有同步过」是两件事。若在 not-initialized 分支里
+    丢掉两条流的记录，用户在**出故障的那一刻**恰好失去唯一线索
+    （上次跑到哪、成没成），而这正是他最需要它的时候。
+    """
+    from app.routes.market import kline_sync_status
+
+    st_mod.record_run(st_mod.STREAM_SYNC_BARS, status="error",
+                      detail={"mode": "sync_bars", "error": "股票池为空"})
+
+    class _Ctx:
+        market_sync = None
+        runtime_config = None
+        kline_cache = None
+
+    payload = asyncio.run(kline_sync_status(ctx=_Ctx()))
+    payload = payload.get("data", payload)
+    assert payload["initialized"] is False
+    assert payload["last_bars_run"]["status"] == "error"
+    assert "股票池为空" in payload["last_bars_run"]["detail"]["error"]

@@ -345,10 +345,19 @@ export interface KlineSyncStatus {
     count_per_code?: number;
   } | null;
   /**
-   * 落库版的上次运行（跨重启可查）。
+   * 落库版的上次运行（跨重启可查）—— **热窗口刷新流**（`market.sync`）。
    * `null` 表示**从未跑过** —— 与「跑过但失败」（`status: "error"`）是两件事。
    */
   last_run_persisted?: SyncRunRecord | null;
+  /**
+   * 落库版的**全市场日线同步**流（`sync.bars`）上次运行。
+   *
+   * ⚠️ 与 `last_run_persisted` 是**两条不同的流**，detail 结构也不同：
+   * 只有这条才有 `sync_mode` / `paged` / `as_of_min` / `skipped_complete` /
+   * `stale` / `as_of_max`。把全量回补的字段从 `last_run_persisted` 读会**永远
+   * 读不到**（热刷新 detail 里根本没这些键），表现为「按钮点了没反应」。
+   */
+  last_bars_run?: SyncRunRecord | null;
   hot?: {
     /** 热窗口天数（自然日，默认 92 ≈ 3 个月） */
     hot_days?: number;
