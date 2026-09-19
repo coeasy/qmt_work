@@ -1,5 +1,5 @@
 import { useCallback, useMemo, useState } from "react";
-import { Badge, Button, Input, Panel, Tabs } from "@/design/primitives";
+import { Badge, Button, Input, Panel, Tabs, TradingDateBadge } from "@/design/primitives";
 import { KLineChart } from "@/charts/KLineChart";
 import { PERIODS, PERIOD_LABELS } from "@/shared/periods";
 import { useQuotesStore } from "@/stores/quotes";
@@ -101,6 +101,9 @@ export function MarketWorkbench({ params }: PageProps) {
           )}
           {quote?.stale && <Badge tone="warning">数据可能滞后</Badge>}
           {!quote && <Badge tone="warning">未订阅到行情</Badge>}
+          {/* 非交易日必须显式说明「下面是最近交易日的数据」，否则周六看到的
+              数字会被当成今日行情（后端返回上一交易日数据本身是正确的）。 */}
+          <TradingDateBadge />
 
           <span className={d.spacer} />
 

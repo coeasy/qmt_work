@@ -32,8 +32,8 @@ async def fetch_kline_cached(code: str, period: str = "1d", count: int = 250,
 
     返回 {"bars": [...], "source": "cache"|"broker"|"eltdx"|"cache_stale", "cached_at": ts}。
     缓存未初始化时直接回源。source=auto 时券商优先，无连接/异常回退 eltdx(TDX 公共行情)。
-    adjust: qfq/hfq/''。券商 get_kline 不支持复权，显式复权时优先走 eltdx 才能真正返回
-    复权价（券商原始 K 线静默返回复权价会误导用户）；券商侧仅保持缓存里既有复权标记。
+    adjust: qfq/hfq/''。**显式复权优先走 eltdx**（少一次券商 RPC，且 eltdx 原生支持复权）；
+    但券商路径同样会透传 adjust（V11 R14 修复前漏传，导致降级时口径静默变成不复权）。
 
     ⚠️ 两条关键不变量（曾经因此出现「图表空白但无任何报错」）：
     1. 代码规范化：券商（xtquant）**只认 `600519.SH` 形态**。传裸代码 `600519`
@@ -52,8 +52,22 @@ async def fetch_kline_cached(code: str, period: str = "1d", count: int = 250,
     source = get_hub().validate_source(source)
 
     async def _fetch_broker(c: str, p: str, n: int):
+        """回源券商取 K 线。
+
+        ★ 必须把 ``adjust`` 传下去（V11 R14 修复）。此前这里只传 3 个位置参数，
+        而适配器的 ``get_kline(code, period, count, start, end, adjust)`` 第 6 个
+        参数才是复权口径 —— 不传即恒为 ``None`` ⇒ ``dividend_type="none"``
+        ⇒ **拿到未复权价**。后果（实测确认）：
+
+        1. 上层 ``kline_cache.get_or_fetch`` 仍按**请求口径**落库（``aput(..., adjust="qfq")``），
+           响应 ``market.py`` 也回 ``"adjust":"qfq"``，前端角标显示「前复权」；
+        2. 于是用户看到的是**标着前复权的不复权价**，除权日出现巨大跳空，
+           形态识别与指标全部失真；
+        3. 只有在线源（eltdx/腾讯）恰好返回 qfq 时才「看起来正常」，
+           一旦在线源失败降级到券商，口径就悄悄变了。
+        """
         b = get_bridge(broker_id or None)
-        return await b.call(b.gateway.get_kline, c, p, n)
+        return await b.call(b.gateway.get_kline, c, p, n, "", "", adjust or "")
 
     async def _fetch_eltdx(c: str, p: str, n: int):
         bars, src = await get_hub().get_kline(
@@ -64,12 +78,24 @@ async def fetch_kline_cached(code: str, period: str = "1d", count: int = 250,
     if source in ("auto", "eltdx") and adjust in ("qfq", "hfq") and period.lower() in ("1d", "day", "1w", "week", "1mon", "mon", "month"):
         try:
             bars, src = await _fetch_eltdx(code, period, count)
-            await _persist(code, period, bars, adjust)
-            return {"bars": bars, "source": src, "cached_at": None}
         except Exception as exc:  # noqa: BLE001
             if source == "eltdx":
                 raise
             log.warning("eltdx 复权K线失败，auto 链继续尝试券商: %s", exc)
+        else:
+            # ★ 空结果 = 失败（与本文件 docstring 的不变量一致，V11 R14）：
+            # 此前 eltdx 返回空（**不抛异常**）时会在这里直接 return，
+            # 于是 auto 链**从不回退券商** —— 实测表现为请求 `adj=qfq` 时
+            # 返回 source=None 且 0 根，路由随即降级到 local:sqlite，
+            # 用户拿到的既不是券商 qfq 也不是在线源，而是本地可能很旧的数据。
+            # 现在空结果与异常同路：继续往券商走（券商已支持 dividend_type）。
+            if bars:
+                await _persist(code, period, bars, adjust)
+                return {"bars": bars, "source": src, "cached_at": None}
+            if source == "eltdx":
+                # 显式指定 eltdx 时不得改源：如实返回空，由路由决定兜底。
+                return {"bars": [], "source": src, "cached_at": None}
+            log.warning("eltdx 复权K线返回空（未报错），auto 链继续尝试券商：%s", code)
 
     cache = getattr(state, "kline_cache", None)
 

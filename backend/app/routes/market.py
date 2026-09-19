@@ -53,6 +53,34 @@ async def market_providers(ctx: AppContext = Depends(get_ctx)):
     """Provider 能力目录：只把真实注册的实现标记为 active。"""
     return ok(provider_catalog.describe())
 
+
+@router.get("/market/session")
+async def market_session(ctx: AppContext = Depends(get_ctx)):
+    """当前交易会话快照（交易日 / 盘中阶段 / 数据参照日）。
+
+    为什么单开一个端点而不是复用 ``/health.trading_session``：后者只有
+    ``{mode, active, trading_day}`` 三个字段，**说不出「该看哪一天的数据」**。
+    非交易日打开行情页时后端照常返回上一交易日的数据（这是对的），但界面
+    没有任何地方标注这一点，用户会把周六看到的数字当成「今天的行情」。
+
+    返回：
+    ``{today, trading_day, active, phase, last_trading_day, as_of,
+       next_trading_day, calendar:{mode,exact}, now}``
+
+    - ``phase``：holiday / pre_open / open / lunch_break / closed，
+      比 ``active`` 的布尔值多一层区分（``active=False`` 同时覆盖
+      「休市/盘前/午休/已收盘」四种完全不同的用户预期）。
+    - ``as_of``：数据参照日，非交易日 = 上一交易日。
+    - ``calendar.mode``：exchange（券商真实日历，最准）/ builtin（内置节假日表）。
+    """
+    from app.sync.calendar import session_snapshot
+
+    try:
+        return ok(session_snapshot())
+    except Exception as exc:  # noqa: BLE001
+        log.warning("session_snapshot 失败：%s", exc)
+        return err(500, f"交易会话查询失败：{exc}")
+
 # 兼容别名：既有单测/调用方仍以 routes.market 引用（重构 P1-1 保持行为与符号兼容）
 _normalize_code = normalize_code
 _enrich_search_row = enrich_search_row
@@ -318,8 +346,10 @@ async def market_kline(code: str, period: str = "1d", count: int = 250,
                        conn_id: str = "", force: bool = False, source: str = "auto",
                        adj: str = "", ctx: AppContext = Depends(get_ctx)):
     """历史 K 线（C1 本地缓存优先；source: auto=券商优先回退eltdx / broker / eltdx）。
-    adj: ''=不复权 / qfq=前复权 / hfq=后复权。券商 get_kline 不支持复权，显式复权时
-    走 TDX 复权源，避免静默返回原始价误导用户。
+    adj: ''=不复权 / qfq=前复权 / hfq=后复权。显式复权时**优先**走 eltdx（原生支持复权、
+    少一次券商 RPC）；eltdx 不可用或返回空则继续走券商 —— 券商侧经 `dividend_type`
+    参数化同样支持复权（V11 R14 起 adjust 已真正透传，此前漏传导致降级时口径静默
+    变成不复权却仍标「前复权」）。本响应的 `adjust` 是**实际取数口径**，前端角标应以它为准。
 
     周期在入口即校验：未知周期返回明确错误，不支持的周期（如季线）返回原因。
     ⚠️ 绝不能静默降级为日线 —— 那会让用户看到错误周期的数据却不自知（P0-1）。

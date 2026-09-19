@@ -40,6 +40,9 @@ output/
 # frontend-next（新一代前端工程）
 # ★ frontend-next/build/ 含 icon.ico / icon.png 打包图标，属源资源，故意不忽略
 frontend-next/node_modules/
+# vite 构建缓存会落在**仓库根**的 node_modules/.vite（不是 frontend-next/ 下），
+# 每次 `npm run build` 都会重新生成 ⇒ 不忽略就会常驻 git status 噪声。
+node_modules/
 frontend-next/dist/
 frontend-next/dist-electron/
 frontend-next/.vite/

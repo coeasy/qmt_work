@@ -10,6 +10,9 @@ export type { InputProps, SelectProps, SelectOption, FormRowProps } from "./Inpu
 export { Badge, StatusBadge } from "./Badge";
 export type { BadgeProps, BadgeTone } from "./Badge";
 
+export { TradingDateBadge } from "./TradingDateBadge";
+export type { TradingDateBadgeProps } from "./TradingDateBadge";
+
 export { Panel, EmptyState, Spinner } from "./Panel";
 export type { PanelProps } from "./Panel";
 

@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { Button, Input } from "@/design/primitives";
+import { Button, Input, TradingDateBadge } from "@/design/primitives";
 import { useQuotesStore } from "@/stores/quotes";
 import { useQuoteSubscription } from "@/hooks/useQuoteSubscription";
 import { fmtPct, fmtPrice, namePair, normalizeCode, toneColor } from "@/shared/format";
@@ -61,6 +61,9 @@ export function Minutes({ params }: PageProps) {
             {fmtPrice(quote.price)} {fmtPct(quote.change_pct)}
           </span>
         )}
+        {/* 分时图最容易误读：非交易日显示的是最近交易日全天分时，
+            不说清楚会被当成「今天的分时怎么不动」 */}
+        <TradingDateBadge />
       </div>
 
       {/* .chart 只给高度，面板内部靠 flex 填充 ⇒ 容器也要是 flex column（bodyCol） */}

@@ -30,6 +30,48 @@ export interface QuotesResponse {
   requested: number;
 }
 
+/**
+ * 交易会话快照（`GET /market/session`，来源 `app/sync/calendar.py::session_snapshot`）。
+ *
+ * 存在的意义：非交易日后端照常返回**上一交易日**的数据（正确），但界面此前
+ * 没有任何地方标注「这是哪天的行情」，用户会把周六看到的数字当成今日行情。
+ */
+export interface SessionSnapshot {
+  /** 今天 YYYYMMDD */
+  today: string;
+  /** 今天是否交易日 */
+  trading_day: boolean;
+  /** 是否盘中活跃 */
+  active: boolean;
+  /** holiday / pre_open / open / lunch_break / closed */
+  phase: string;
+  /** 数据参照日（= 该看哪一天的行情），非交易日回退上一交易日 */
+  last_trading_day: string;
+  /** 同 last_trading_day，语义化别名 */
+  as_of: string;
+  /** 下一个交易日 */
+  next_trading_day: string;
+  /** 日历来源：exchange（券商真实日历，最准）/ builtin（内置节假日表） */
+  calendar: { mode: string; exact: boolean };
+  /** 服务端当前时刻 YYYY-MM-DD HH:MM:SS */
+  now: string;
+}
+
+/** 会话阶段 → 中文标签（唯一入口，界面不得各自硬编码） */
+export const SESSION_PHASE_LABEL: Record<string, string> = {
+  holiday: "休市",
+  pre_open: "盘前",
+  open: "交易中",
+  lunch_break: "午间休市",
+  closed: "已收盘",
+};
+
+/** YYYYMMDD → YYYY-MM-DD（非 8 位数字原样返回） */
+export function fmtBarDate(v: string | null | undefined): string {
+  if (!v) return "";
+  return /^\d{8}$/.test(v) ? `${v.slice(0, 4)}-${v.slice(4, 6)}-${v.slice(6, 8)}` : v;
+}
+
 export interface MinutePoint {
   t: string;
   price: number;
@@ -285,6 +327,16 @@ export interface KlineCacheStats {
  *   - kline 的参数名是 adj（不是 adjust）
  */
 export const marketApi = {
+  /**
+   * 交易会话快照：交易日 / 盘中阶段 / **数据参照日**（非交易日回退上一交易日）。
+   *
+   * 与 `/health.trading_session` 的分工：health 那份只有 mode/active/trading_day，
+   * 用于状态栏角标（每 30s 轮询、字段极简）；本接口多给
+   * `last_trading_day` / `as_of` / `phase` / `next_trading_day`，用于行情页头部
+   * 「当前展示的是哪一天的数据」这类需要精确日期的展示，按需调用即可。
+   */
+  session: () => http.get<SessionSnapshot>("/market/session"),
+
   /**
    * 单标的快照。
    *

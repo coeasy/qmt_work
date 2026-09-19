@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
+from core.quote_fields import pick_order_ref_price
+
 
 class ExecutionService:
     """单券商连接上的统一下单/撤单服务。"""
@@ -35,8 +37,11 @@ class ExecutionService:
         except Exception as exc:  # noqa: BLE001
             return None, f"无法取得真实最新价，拒绝市价单风控：{exc}"
         if isinstance(quote, dict):
-            latest = quote.get("last") or quote.get("ask") or quote.get("bid")
-            if latest is not None and float(latest) > 0:
+            # 下单参考价唯一入口（V11 R14）：最新价优先，退到盘口可成交价。
+            # 此前这里是 `last or ask or bid`，与 signal_router 里的复制体
+            # 各自维护，且与行情/风控链路的键序不同。
+            latest = pick_order_ref_price(quote)
+            if latest is not None:
                 return float(latest), ""
         return None, "无法取得真实最新价，拒绝市价单风控"
 

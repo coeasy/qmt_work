@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import { ConfirmButton, DataTable, Panel, type Column } from "@/design/primitives";
+import { ConfirmButton, DataTable, Panel, TradingDateBadge, type Column } from "@/design/primitives";
 import { useWatchlistStore } from "@/stores/watchlist";
 import { useWorkspaceStore } from "@/stores/workspace";
 import { useLiveQuotes } from "@/hooks/useLiveQuotes";
@@ -178,7 +178,17 @@ export function QuoteBoard({
       flush
       title={`报价牌 · ${codes.length} 只`}
       extra={
-        <span style={{ fontSize: "var(--font-xs)", color: "var(--text-faint)" }}>
+        <span
+          style={{
+            fontSize: "var(--font-xs)",
+            color: "var(--text-faint)",
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 6,
+          }}
+        >
+          {/* 报价牌同样要标注数据日期：非交易日这里显示的是上一交易日收盘价 */}
+          <TradingDateBadge />
           {onPick ? "单击切换标的" : "单击打开 K 线"}
         </span>
       }

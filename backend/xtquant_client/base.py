@@ -172,8 +172,13 @@ class BrokerAdapter(ABC):
 
     @abstractmethod
     def get_kline(self, code: str, period: str, count: int,
-                  start: str = "", end: str = "") -> list[dict]:
-        """历史 K 线。返回 [{time,open,high,low,close,volume}, ...]。"""
+                  start: str = "", end: str = "", adjust: str | None = None) -> list[dict]:
+        """历史 K 线。返回 [{time,open,high,low,close,volume}, ...]。
+
+        ``adjust``：``"qfq"`` 前复权 / ``"hfq"`` 后复权 / ``""`` 或 ``None`` 不复权。
+        实现方须真正按该口径取数（QMT 经 ``dividend_type`` 参数化）；**不得忽略**
+        ——忽略会让调用方拿到未复权价却按请求口径落库与展示。
+        """
 
     @abstractmethod
     def get_tick(self, code: str) -> dict:

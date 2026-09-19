@@ -40,7 +40,8 @@ class XTQuantGateway(ABC):
     def get_quote(self, code: str) -> dict: ...
 
     @abstractmethod
-    def get_kline(self, code: str, period: str, count: int) -> list[dict]: ...
+    def get_kline(self, code: str, period: str, count: int,
+                  start: str = "", end: str = "", adjust: str | None = None) -> list[dict]: ...
 
     def get_instrument_detail(self, code: str) -> dict:
         """合约详情（名称 / 涨停价 / 跌停价 / 昨收）。真实网关需覆盖；默认抛错。"""

@@ -19,6 +19,7 @@ from app.middleware.request_id import request_id_middleware
 from app.routes import router
 from app.version import __version__
 from core.config import BASE_DIR, settings
+from core.quote_fields import pick_last_price
 from core.state import state
 from gateway.auth import make_auth_middleware
 from gateway.rate_limit import RateLimiter, make_rate_limit_middleware
@@ -51,15 +52,10 @@ def _latest_price(code: str):
     se = state.sync_engine
     if se is None:
         return None
-    d = se.latest_quotes.get(code) or {}
-    for k in ("price", "last", "lastPrice", "close"):
-        v = d.get(k)
-        if v:
-            try:
-                return float(v)
-            except (TypeError, ValueError):
-                pass
-    return None
+    # 键序唯一入口 core.quote_fields（V11 R14）：此前这里自成一派
+    # （price→last→lastPrice→close），与 strategy_runtime 的
+    # lastPrice→last→price 不一致 ⇒ 同一行情可能被两套口径审视。
+    return pick_last_price(se.latest_quotes.get(code) or {})
 
 risk.set_price_provider(_latest_price)
 mcp = build_mcp(risk)

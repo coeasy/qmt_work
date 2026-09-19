@@ -14,6 +14,7 @@ import logging
 
 from fastapi import FastAPI
 
+from core.quote_fields import pick_prev_close
 from core.state import state
 from sync import SyncEngine, WSManager
 
@@ -92,17 +93,10 @@ async def setup(app: FastAPI) -> dict:
         se = state.sync_engine
         if se is None:
             return None
+        # 昨收键序唯一入口 core.quote_fields（V11 R14）：此前这里自成一派，
+        # 与 strategy_runtime 的 `lastClose or preClose` 优先级不一致。
         q = (getattr(se, "latest_quotes", None) or {}).get(code.upper())
-        if not isinstance(q, dict):
-            return None
-        for k in ("preClose", "lastClose", "prevClose"):
-            v = q.get(k)
-            if v:
-                try:
-                    return float(v)
-                except (TypeError, ValueError):
-                    pass
-        return None
+        return pick_prev_close(q)
     state.paper_engine.set_ref_close_provider(_paper_ref_close)
     log.info("paper trading engine ready")
 

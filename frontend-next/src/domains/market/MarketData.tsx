@@ -1,6 +1,6 @@
 import { useMemo } from "react";
-import { Badge, Button, Panel } from "@/design/primitives";
-import { KLineChart } from "@/charts/KLineChart";
+import { Badge, Button, Panel, TradingDateBadge } from "@/design/primitives";
+import { KLineChart, DEFAULT_INDICATORS } from "@/charts/KLineChart";
 import { PERIOD_LABELS } from "@/shared/periods";
 import { useQuotesStore } from "@/stores/quotes";
 import { useWatchlistStore } from "@/stores/watchlist";
@@ -21,7 +21,12 @@ import s from "./marketdata.module.css";
 export function MarketData({ params }: PageProps) {
   const code = (params.code as string) || "000001.SZ";
   const period = (params.period as Period) || "1d";
-  const indicators = (params.indicators as string[]) ?? ["MA"];
+  // ★ 必须 memo：`?? ["MA"]` 每次 render 都是新数组，而 KLineChart 的 effect
+  // 依赖里含指标（V11 R14 已改为序列化 key，但这里仍不该每次新建引用）。
+  const indicators = useMemo<readonly string[]>(
+    () => (params.indicators as string[] | undefined) ?? DEFAULT_INDICATORS,
+    [params.indicators],
+  );
   const linked = params.linked !== false;
 
   const codes = useMemo(() => [code], [code]);
@@ -47,6 +52,8 @@ export function MarketData({ params }: PageProps) {
         <Badge tone="info">{PERIOD_LABELS[period]}</Badge>
         {quote?.source && <Badge tone={quote.stale ? "warning" : "neutral"}>{quote.source}</Badge>}
         {quote?.stale && <Badge tone="warning">数据可能滞后</Badge>}
+        {/* 「今日/最近交易日」——非交易日看行情时唯一能说明数据属于哪天的信息 */}
+        <TradingDateBadge />
 
         <span className={s.spacer} />
         <Button size="sm" variant={inWatch ? "default" : "primary"} onClick={() => toggle(code)}>

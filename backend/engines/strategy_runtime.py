@@ -19,6 +19,7 @@ from typing import Dict, List, Optional
 
 import numpy as np
 from core.clock import now_iso
+from core.quote_fields import pick_last_price, pick_prev_close
 
 log = logging.getLogger("qmt_work.strategy_runtime")
 
@@ -379,9 +380,12 @@ class StrategyRuntime:
             t = ticks.get(code)
             if not isinstance(t, dict):
                 continue
-            last = t.get("lastPrice") or t.get("last") or t.get("price")
-            lc = t.get("lastClose") or t.get("preClose")
-            if not last or not lc:
+            # 最新价/昨收键序唯一入口（V11 R14）：此前这里是
+            # `lastPrice or last or price` / `lastClose or preClose`，
+            # 与 main.py、phase_engines.py 的优先级都不一致。
+            last = pick_last_price(t)
+            lc = pick_prev_close(t)
+            if last is None or lc is None:
                 continue
             try:
                 last = float(last); lc = float(lc)
@@ -505,16 +509,15 @@ class StrategyRuntime:
             return float(fallback) if fallback else 0.0
         try:
             q = await bridge.call(bridge.gateway.get_quote, code)
-            if isinstance(q, dict):
-                for k in ("lastPrice", "last", "price", "close"):
-                    v = q.get(k)
-                    if v:
-                        try:
-                            return float(v)
-                        except (TypeError, ValueError):
-                            pass
+            # 唯一入口（V11 R14）：这是第 6 处内联实现，键序 lastPrice 优先，
+            # 与 main.py 的 price 优先不一致 —— 已由源码扫描护栏抓出并收敛。
+            price = pick_last_price(q)
+            if price is not None:
+                return price
         except Exception:  # noqa: BLE001
             pass
+        # 保留调用方显式给定的 fallback 语义（策略侧允许回退，与展示侧的
+        # 「无行情绝不回填 0」不同 —— 展示侧不得走到这里）。
         return float(fallback) if fallback else 0.0
 
     async def _held_volume(self, run, code, bridge) -> float:

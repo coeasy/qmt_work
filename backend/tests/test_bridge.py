@@ -36,6 +36,12 @@ def test_bridge_handshake_and_queries():
         assert q["last"] == 10.0, q
         k = a.get_kline("600519.SH", "1d", 10)
         assert isinstance(k, list) and k, k
+        # ★ 复权口径必须真的穿过 RPC 到达子进程（V11 R14）：
+        # 此前 BridgeAdapter 只传 5 个参数，adjust 在代理层就被丢了，
+        # 子进程恒按 dividend_type="none" 返回未复权价。
+        assert k[0].get("adjust") == "", "未指定口径应落成 ''（不复权）"
+        kq = a.get_kline("600519.SH", "1d", 10, "", "", "qfq")
+        assert kq[0].get("adjust") == "qfq", "请求 qfq 必须原样到达子进程适配器"
         acc = a.get_account()
         assert acc["assets"] == 100.0, acc
         pos = a.get_positions()

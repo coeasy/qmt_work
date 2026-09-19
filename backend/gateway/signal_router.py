@@ -26,6 +26,7 @@ from gateway.idempotency import single_flight
 # P0-1：WAL 写前日志的操作语义常量（单一真源定义在 gateway.wal，此处复用）
 from gateway.wal import WAL_OP_INTENT, WAL_OP_INTENT_FAILED, WAL_OP_RESULT  # noqa: E402
 from core.clock import now_iso
+from core.quote_fields import pick_order_ref_price
 
 log = logging.getLogger("qmt_work.signal")
 
@@ -265,8 +266,10 @@ class SignalRouter:
             try:
                 q = await b.call(b.gateway.get_quote, sig.code)
                 if isinstance(q, dict):
-                    p = q.get("last") or q.get("ask") or q.get("bid")
-                    if p:
+                    # 与 execution.py 共用唯一入口（V11 R14）：这两处此前是
+                    # 复制粘贴的同一段 `last or ask or bid`。
+                    p = pick_order_ref_price(q)
+                    if p is not None:
                         return float(p)
             except Exception:  # noqa: BLE001
                 pass

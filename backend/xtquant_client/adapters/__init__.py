@@ -44,7 +44,8 @@ class ExternalBrokerAdapter(BrokerAdapter):
 
     def get_quote(self, code: str) -> dict: return self._not_impl(code)
     def get_full_tick(self, codes: list[str]) -> dict: return self._not_impl(codes)
-    def get_kline(self, code: str, period: str, count: int, start: str = "", end: str = "") -> list[dict]:
+    def get_kline(self, code: str, period: str, count: int, start: str = "", end: str = "",
+                  adjust: str | None = None) -> list[dict]:
         return self._not_impl(code, period, count)
     def get_tick(self, code: str) -> dict: return self._not_impl(code)
     def get_stock_list(self, sector: str = "沪深A股") -> list[dict]: return self._not_impl(sector)

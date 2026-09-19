@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <!--
+    应用图标（同时用作浏览器标签页 favicon）。
+    之前完全没有 favicon：浏览器默认请求 /favicon.ico → 404，控制台里常驻一条
+    无关键字（只说 "Failed to load resource: 404"）的错误，排查真问题时容易被它干扰。
+    用 SVG 内联绘制，不引入二进制资源。
+  -->
+  <rect width="32" height="32" rx="6" fill="#0f172a"/>
+  <path d="M5 22 L11 15 L15 19 L21 9 L27 14" fill="none" stroke="#22c55e"
+        stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="27" cy="14" r="2.6" fill="#22c55e"/>
+</svg>

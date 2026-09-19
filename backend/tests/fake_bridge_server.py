@@ -38,9 +38,13 @@ class MockAdapter:
     def get_full_tick(self, codes):
         return {c: {"code": c, "last": 10.0} for c in codes}
 
-    def get_kline(self, code, period, count, start="", end=""):
+    def get_kline(self, code, period, count, start="", end="", adjust=None):
+        # 签名必须与真实适配器一致（含 adjust）：RPC 按**位置**传 6 个参数，
+        # 少一个参数会直接 TypeError（V11 R14 协议变更）。
+        # 同时把收到的口径回显在返回里，便于断言「请求口径真的传到了子进程」。
         return [{"time": "2026-01-01", "open": 10, "high": 11,
-                 "low": 9, "close": 10.5, "volume": 1000}]
+                 "low": 9, "close": 10.5, "volume": 1000,
+                 "adjust": adjust or ""}]
 
     def get_tick(self, code):
         return self.get_quote(code)

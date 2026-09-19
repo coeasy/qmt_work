@@ -46,7 +46,7 @@ def test_qmt_connector_satisfies_ports():
         def get_quote(self, code):
             return {}
 
-        def get_kline(self, code, period, count, start="", end=""):
+        def get_kline(self, code, period, count, start="", end="", adjust=None):
             return []
 
         def get_full_tick(self, codes):

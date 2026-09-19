@@ -498,9 +498,13 @@ class BridgeAdapter(BrokerAdapter):
         return self._rpc("get_full_tick", [list(codes)])
 
     def get_kline(self, code: str, period: str, count: int,
-                  start: str = "", end: str = "") -> list[dict]:
-        return self._rpc("get_kline", [code, period, count, start, end])
-
+                  start: str = "", end: str = "", adjust: str | None = None) -> list[dict]:
+        # ★ adjust 必须随 RPC 下发（V11 R14）：子进程侧适配器（xtp）的 get_kline
+        # 支持 dividend_type 参数化，但此前本代理只传 5 个参数 ⇒ 子进程恒按
+        # 默认 None → dividend_type="none"（未复权）返回。而 registry 层
+        # （datasource/registry.py:155）是用 `adjust=adjust` **关键字**调用的，
+        # 签名不收 adjust 时直接 TypeError，整条券商 K 线链路报错。
+        return self._rpc("get_kline", [code, period, count, start, end, adjust or ""])
     def get_instrument_detail(self, code: str) -> dict:
         """合约详情（名称 / 涨停价 / 跌停价 / 昨收）。
 
