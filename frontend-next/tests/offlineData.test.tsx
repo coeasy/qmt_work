@@ -168,3 +168,65 @@ describe("离线数据页 · 诚实性", () => {
       expect.objectContaining({ kind: "system.sync_bars" }));
   });
 });
+
+/**
+ * 全量回补（V11 §5.3 P0-3 III）。
+ *
+ * 这一组的核心是**不许把「名义全量」说成「历史已补齐」**：
+ * `sync_mode === "full"` 只表示「用户要的是全量」，能不能真做到要看 `paged`。
+ * 数据源不支持按区间取数时会退化为单次大窗口 —— 此时 ok 是满的、状态是「成功」，
+ * 但历史一根没多。界面必须明确否定它，否则用户会带着「已补齐」的错觉去做回测。
+ */
+describe("离线数据页 · 全量回补", () => {
+  it("点击「全量回补历史」提交 mode=full 的任务（并带上年数）", async () => {
+    mockSystem.submitJob.mockResolvedValue({ id: "job-f1", status: "queued" });
+    render(<OfflineData />);
+    const btn = await screen.findByRole("button", { name: "全量回补历史" });
+    btn.click();
+    await screen.findByText(/已提交全量回补任务（job-f1/);
+    expect(mockSystem.submitJob).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: "system.sync_bars",
+        params: expect.objectContaining({ mode: "full", full_years: 12 }),
+      }));
+  });
+
+  it("mode=full 但 paged=false 时必须明确否定「已补齐」", async () => {
+    mockMarket.klineSyncStatus.mockResolvedValue(statusOf({
+      last_run_persisted: recordOf({
+        detail: { sync_mode: "full", paged: false, ok: 5200, total: 5200 },
+      }),
+    }));
+    render(<OfflineData />);
+    expect(await screen.findByText(/全量回补未生效/)).toBeTruthy();
+    expect(await screen.findByText(/退化为单次大窗口/)).toBeTruthy();
+    // 不能出现「历史最早到」这种只有真补齐了才成立的表述
+    expect(screen.queryByText(/上次全量回补：历史最早到/)).toBeNull();
+  });
+
+  it("mode=full 且 paged=true 时给出「历史推到哪一年」与跳过数", async () => {
+    mockMarket.klineSyncStatus.mockResolvedValue(statusOf({
+      last_run_persisted: recordOf({
+        detail: {
+          sync_mode: "full", paged: true, as_of_min: "20140102",
+          bars_written: 1200000, skipped_complete: 4100,
+        },
+      }),
+    }));
+    render(<OfflineData />);
+    expect(await screen.findByText(/上次全量回补：历史最早到/)).toBeTruthy();
+    expect(await screen.findByText(/2014-01-02/)).toBeTruthy();
+    expect(await screen.findByText(/跳过 4100 只/)).toBeTruthy();
+  });
+
+  it("增量同步的记录不得被误判成全量", async () => {
+    mockMarket.klineSyncStatus.mockResolvedValue(statusOf({
+      last_run_persisted: recordOf({
+        // ⚠️ mode 是流的判别标签，不是同步模式 —— 界面只能看 sync_mode
+        detail: { mode: "sync_bars", sync_mode: "incremental", paged: false, ok: 10 },
+      }),
+    }));
+    render(<OfflineData />);
+    expect(screen.queryByText(/全量回补未生效/)).toBeNull();
+  });
+});

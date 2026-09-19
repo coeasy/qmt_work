@@ -55,6 +55,8 @@ export function OfflineData() {
   const [cov, setCov] = useState<MarketCoverage | null>(null);
   const [session, setSession] = useState<SessionSnapshot | null>(null);
   const [lookback, setLookback] = useState(30);
+  /** 全量回补的目标年数（越久越慢，默认 12 年已覆盖内置策略与绝大多数回测） */
+  const [fullYears, setFullYears] = useState(12);
   /** 同步状态接口的失败原因（不可静默 —— 静默会显示成「未启用」） */
   const [err, setErr] = useState("");
   /** 覆盖度接口的失败原因（与 err 分开：一个挂了不代表另一个也挂了） */
@@ -106,6 +108,46 @@ export function OfflineData() {
       })
       .then((r) => {
         setMsg(`已提交同步任务（${r.id}，状态 ${r.status}）。完成后点「刷新」查看结果。`);
+        setBusy(false);
+      })
+      .catch((e: unknown) => {
+        setMsg(`提交失败：${e instanceof Error ? e.message : String(e)}`);
+        setBusy(false);
+      });
+  };
+
+  /**
+   * 全量回补历史（V11 §5.3 P0-3 III）。
+   *
+   * 与「立即同步日线」的区别：后者只把**最近** `lookback` 根合并进库（日常维护，
+   * 要的是「够新」）；本动作按自然年**向前逐页**取，把历史一次性补齐。
+   *
+   * ★ 并发必须压低（4→2）：全量是「每只标的翻十几次区间请求」，在券商渠道上
+   * 单只耗时是增量的十几倍，并发高只会把回源压垮、把失败率推上去。
+   * ★ 结果里必须能看出**有没有真的翻页**：没有支持区间的源时会退化为单次大
+   * window，此时「全量」名不副实 —— 由 `paged` 字段暴露（见下方提示块）。
+   */
+  const triggerFullBackfill = () => {
+    setBusy(true);
+    setMsg("");
+    void systemApi
+      .submitJob({
+        kind: "system.sync_bars",
+        name: `全量回补日线（近 ${fullYears} 年）`,
+        params: {
+          period: "1d",
+          adjust: "qfq",
+          mode: "full",
+          full_years: fullYears,
+          concurrency: 2,
+        },
+      })
+      .then((r) => {
+        setMsg(
+          `已提交全量回补任务（${r.id}，状态 ${r.status}）。` +
+            `该任务按自然年逐年向前取数，耗时较长；` +
+            `重复执行会自动跳过已补齐的标的（断点续传），可放心重跑。`,
+        );
         setBusy(false);
       })
       .catch((e: unknown) => {
@@ -277,6 +319,32 @@ export function OfflineData() {
                     这通常意味着券商客户端本地历史未下载到近期，或在线数据源不可用。
                   </div>
                 ) : null}
+                {/* ★★ 「名义全量、实际没翻页」是最危险的一种假成功：mode 写着
+                    full、ok 是满的，用户会以为历史已补齐，其实只是把最近 N 根
+                    又写了一遍。这里必须明确否定它。 */}
+                {run.sync_mode === "full" && run.paged === false ? (
+                  <div className={s.noteError}>
+                    上次**全量回补未生效**：当前数据源链上没有任何源支持按日期区间
+                    取数（免费在线源只接受「最近 N 根」），实际退化为单次大窗口，
+                    历史**没有**真正补齐。请到「连接管理」连接券商后重跑 ——
+                    券商渠道是唯一支持按年翻页取历史的数据源。
+                  </div>
+                ) : null}
+                {run.degraded_reason ? (
+                  <div className={s.noteWarn}>{String(run.degraded_reason)}</div>
+                ) : null}
+                {/* 全量回补的结果：历史推到了哪一年 + 跳过了多少（断点续传的证据） */}
+                {run.sync_mode === "full" && run.paged ? (
+                  <div className={s.note}>
+                    上次全量回补：历史最早到
+                    {run.as_of_min ? ` ${fmtBarDate(String(run.as_of_min))}` : "未知"}，
+                    写入 {run.bars_written ?? "—"} 根
+                    {run.skipped_complete
+                      ? `；因本地已补齐而跳过 ${run.skipped_complete} 只（断点续传）`
+                      : ""}
+                    。
+                  </div>
+                ) : null}
                 <div className={s.actions}>
                   <Button size="sm" onClick={load}>
                     刷新
@@ -284,6 +352,27 @@ export function OfflineData() {
                   <Button size="sm" variant="primary" disabled={busy} onClick={triggerSync}>
                     {busy ? "提交中…" : "立即同步日线"}
                   </Button>
+                </div>
+                {/* ---- 全量回补（V11 §5.3 P0-3 III） ---- */}
+                <div className={s.actions}>
+                  <span className={s.hint}>补齐历史</span>
+                  <Select
+                    value={String(fullYears)}
+                    onChange={(e) => setFullYears(Number(e.target.value))}
+                    options={[
+                      { value: "5", label: "近 5 年" },
+                      { value: "8", label: "近 8 年" },
+                      { value: "12", label: "近 12 年" },
+                      { value: "20", label: "近 20 年" },
+                    ]}
+                  />
+                  <Button size="sm" disabled={busy} onClick={triggerFullBackfill}>
+                    {busy ? "提交中…" : "全量回补历史"}
+                  </Button>
+                </div>
+                <div className={s.hint}>
+                  全量回补按自然年向前逐页取数，耗时远高于增量同步；重复执行会跳过
+                  已补齐的标的，可放心重跑。仅券商数据源支持按日期区间取历史。
                 </div>
                 {msg ? <div className={s.note}>{msg}</div> : null}
               </>

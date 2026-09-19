@@ -69,8 +69,9 @@ def test_empty_list_falls_back_to_broker_sector():
     syncer = BarsSyncer(store=store)
     seen: dict = {}
 
-    async def _fake_sync_many(codes, progress_cb=None):
+    async def _fake_sync_many(codes, progress_cb=None, skipped_complete=0):
         seen["codes"] = list(codes)
+        seen["skipped_complete"] = skipped_complete
         from app.sync.bars import SyncSummary
         return SyncSummary(started="", finished="", total=len(codes),
                            failed=0, ok=len(codes), errors=[], elapsed_ms=1)
@@ -100,7 +101,7 @@ def test_no_codes_at_all_returns_empty_summary():
     syncer = BarsSyncer(store=_StubStore())
     called = {"v": False}
 
-    async def _fake_sync_many(codes, progress_cb=None):
+    async def _fake_sync_many(codes, progress_cb=None, skipped_complete=0):
         called["v"] = True
         raise AssertionError("没有代码就不该进同步流程")
 
@@ -143,5 +144,107 @@ def test_sync_runner_raises_on_empty_instead_of_fake_success():
         job: dict = {"report": lambda p, m: None}
         with pytest.raises(RuntimeError, match="股票池为空"):
             asyncio.run(runner(job))
+    finally:
+        bars_mod.BarsSyncer = orig
+
+
+def test_sync_runner_accepts_all_skipped_as_legitimate():
+    """★ 全量回补的断点续传会让 total=0 成为**合法**结果。
+
+    第二次跑全量时，所有标的的本地历史都已覆盖目标起点、全部被跳过 ——
+    若沿用「total=0 即失败」的判据，重跑全量必报「股票池为空」的假失败。
+    ``skipped_complete`` 就是「这不是空转」的证据。
+    """
+    from app.runtime.jobs import sync_runner
+
+    class _SkippedSummary:
+        failed = 0
+        bars_written = 0
+        finished = "x"
+
+        def to_dict(self):
+            return {"total": 0, "ok": 0, "failed": 0, "bars_written": 0,
+                    "skipped_complete": 4123, "mode": "full", "paged": True}
+
+    class _Syncer:
+        @staticmethod
+        async def sync_stock_list(limit=None, progress_cb=None):
+            return _SkippedSummary()
+
+    import app.sync.bars as bars_mod
+    orig = bars_mod.BarsSyncer
+    bars_mod.BarsSyncer = lambda *a, **k: _Syncer()
+    try:
+        runner = sync_runner({})
+        job: dict = {"report": lambda p, m: None}
+        result = asyncio.run(runner(job))
+        assert result["skipped_complete"] == 4123
+    finally:
+        bars_mod.BarsSyncer = orig
+
+
+def test_sync_runner_flags_degraded_full():
+    """全量模式却没翻成页 ⇒ 结果里必须带上可操作的原因，不能只报「成功」。"""
+    from app.runtime.jobs import sync_runner
+
+    class _DegradedSummary:
+        failed = 0
+        bars_written = 5
+        finished = "x"
+
+        def to_dict(self):
+            return {"total": 3, "ok": 3, "failed": 0, "bars_written": 5,
+                    "mode": "full", "paged": False}
+
+    class _Syncer:
+        @staticmethod
+        async def sync_stock_list(limit=None, progress_cb=None):
+            return _DegradedSummary()
+
+    import app.sync.bars as bars_mod
+    orig = bars_mod.BarsSyncer
+    bars_mod.BarsSyncer = lambda *a, **k: _Syncer()
+    try:
+        runner = sync_runner({})
+        msgs: list = []
+        job: dict = {"report": lambda p, m: msgs.append(m)}
+        result = asyncio.run(runner(job))
+        assert "degraded_reason" in result
+        assert "未真正补齐" in result["degraded_reason"]
+        assert any("全量回补未生效" in m for m in msgs)
+    finally:
+        bars_mod.BarsSyncer = orig
+
+
+def test_sync_runner_passes_mode_to_syncer():
+    """``params.mode`` 必须真的传到同步器 —— 否则界面的「全量回补」是个假按钮。"""
+    from app.runtime.jobs import sync_runner
+
+    seen: dict = {}
+
+    class _Summary:
+        failed = 0
+        bars_written = 1
+        finished = "x"
+
+        def to_dict(self):
+            return {"total": 1, "ok": 1, "failed": 0, "bars_written": 1}
+
+    class _Syncer:
+        def __init__(self, **kw):
+            seen.update(kw)
+
+        async def sync_stock_list(self, limit=None, progress_cb=None):
+            return _Summary()
+
+    import app.sync.bars as bars_mod
+    orig = bars_mod.BarsSyncer
+    bars_mod.BarsSyncer = lambda **k: _Syncer(**k)
+    try:
+        runner = sync_runner({"mode": "full", "full_years": 8})
+        job: dict = {"report": lambda p, m: None}
+        asyncio.run(runner(job))
+        assert seen["mode"] == "full"
+        assert seen["full_years"] == 8
     finally:
         bars_mod.BarsSyncer = orig

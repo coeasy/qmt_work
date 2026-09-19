@@ -49,12 +49,16 @@ def _sync_bars_runner(params: dict) -> Runner:
     """
     from app.runtime.jobs import sync_runner
     inner = sync_runner(params)
-    _keys = ("period", "adjust", "lookback", "concurrency", "limit")
+    _keys = ("period", "adjust", "lookback", "concurrency", "limit",
+             "mode", "full_years")
 
     def _detail(job: dict, summary: dict) -> dict:
         """只留可展示的摘要 —— ``errors`` 在全市场量级可能上千条，不该整条塞进库里。"""
         errs = list(summary.get("errors") or [])
         return {
+            # ⚠️ ``mode`` 在这里是**流的判别标签**（与 ``market_sync`` 写的
+            #    "market.sync" 同构），不是同步模式 —— 同步模式另见 ``sync_mode``。
+            #    两者混用会让界面把「全量回补」误判成普通同步。
             "mode": "sync_bars",
             "job_id": str(job.get("id") or ""),
             "params": {k: params.get(k) for k in _keys},
@@ -65,6 +69,16 @@ def _sync_bars_runner(params: dict) -> Runner:
             "bars_written": int(summary.get("bars_written") or 0),
             "as_of_max": summary.get("as_of_max") or "",
             "elapsed_ms": int(summary.get("elapsed_ms") or 0),
+            # ---- 全量回补（V11 §5.3 P0-3 III）：这三项缺一不可 ----
+            # ``sync_mode``：incremental / full
+            "sync_mode": summary.get("mode") or "incremental",
+            # ``paged``：是否**真的**按日期区间向前翻页。full 而 paged=False
+            # ⇒ 历史并未补齐，界面必须能看见（否则「全量完成」是句谎话）。
+            "paged": bool(summary.get("paged")),
+            # 写入的最早一根 = 历史推到了哪一年
+            "as_of_min": summary.get("as_of_min") or "",
+            # 断点续传跳过数：中断后重跑这个数会明显变大
+            "skipped_complete": int(summary.get("skipped_complete") or 0),
             "errors": errs[:20],
             "errors_truncated": max(0, len(errs) - 20),
         }
@@ -358,14 +372,19 @@ def runner_for(kind: str) -> Runner | None:
 # （Sequoia-X 就是靠 crontab 在收盘后跑，这里把它内置成开箱即用）。
 #
 # 幂等：用**固定 schedule_id** 播种，已存在即跳过，绝不覆盖用户改过的配置。
-# 时间排布刻意构成一条链：15:30 先把当日日线落库 → 16:00 才有数据可选股 →
+# 时间排布刻意构成一条链：16:00 先把当日日线落库 → 16:15 才有数据可选股 →
 # 18:30 再跑 EOD 全流程对账/快照（既有的 ensure_default_schedule）。
 # 若把选股排在日线更新之前，它会拿昨天的 K 线跑，选出的是「昨天的结果」。
+#
+# ⚠️ 两者**必须错开**：``RESOURCE_GROUP``（app/runtime/jobs.py）把 sync_bars 归入
+#    ``local_bars`` 互斥组，但**不含 ``classic_screen``** ⇒ 同一时刻会**并发**，
+#    选股将读到半更新的日线。改同步时间时务必同步顺延选股。
+#    存量部署的旧值由迁移 v27 对齐（且只在用户没改过时生效）。
 DEFAULT_SCHEDULES: tuple[dict, ...] = (
     {
         "id": "sch-default-sync-bars",
         "kind": "system.sync_bars",
-        "cron": "30 15 * * 1-5",          # 每交易日 15:30（收盘 15:00 之后）
+        "cron": "0 16 * * 1-5",           # 每交易日 16:00（收盘 15:00 后数据已稳定）
         "name": "收盘后更新日线数据",
         # concurrency / lookback 用**实测验证过**的值（2026-09-19 全市场 5224 只）：
         # - concurrency=4：券商补下载走的是本地 RPC，4 并发下全市场 7 分钟跑完
@@ -374,13 +393,15 @@ DEFAULT_SCHEDULES: tuple[dict, ...] = (
         # - lookback=120：足够覆盖全部内置策略（最长 high_tight_flag 的 60 日
         #   回看 + MA20 + RPS 20 日），而默认 320 会把耗时翻近一倍。
         #   窗口增量是幂等合并，缩短回看**不会**丢历史（旧数据不删除）。
-        "params": {"period": "1d", "adjust": "qfq",
+        # - mode=incremental：日常维护只要「够新」；需要把历史一次性补齐时，
+        #   到「离线数据」页点「全量回补」（mode=full），不要塞进每日调度。
+        "params": {"period": "1d", "adjust": "qfq", "mode": "incremental",
                    "concurrency": 4, "lookback": 120},
     },
     {
         "id": "sch-default-classic-screen",
         "kind": "system.classic_screen",
-        "cron": "0 16 * * 1-5",           # 每交易日 16:00（日线更新之后）
+        "cron": "15 16 * * 1-5",          # 每交易日 16:15（日线更新之后，留出 15 分钟）
         "name": "收盘后经典策略选股",
         "params": {"strategies": ["turtle_trade", "ma_volume"], "limit": 50},
     },

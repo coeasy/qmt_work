@@ -699,6 +699,24 @@ CREATE TABLE IF NOT EXISTS screen_picks (
 CREATE INDEX IF NOT EXISTS idx_screen_picks_run ON screen_picks(run_id, strategy);
 CREATE INDEX IF NOT EXISTS idx_screen_picks_code ON screen_picks(code, created_at DESC);
 """),
+    # ------------------------------------------------------------------
+    # v27：默认调度时间对齐「离线同步 16:00」并给选股留出时间（V11 §5.3 P0-3 I）
+    # ------------------------------------------------------------------
+    # ★ 为什么要改时间：原排布是 15:30 同步日线 → 16:00 选股。用户要求离线定时
+    #   同步默认 16:00（收盘数据已稳定），于是同步顺延到 16:00，选股必须再顺延
+    #   到 16:15 —— ``RESOURCE_GROUP``（app/runtime/jobs.py）把 sync_bars 归入
+    #   ``local_bars`` 互斥组，但**不含 classic_screen**，两者同时刻会**并发**，
+    #   选股会读到半更新的日线（选出「昨天的结果」）。
+    #
+    # ★ 幂等与「绝不覆盖用户配置」：只在 ``cron`` **仍等于旧种子值**时才更新 ——
+    #   用户手动改过的时间（cron 不再是旧值）原样保留。这正是
+    #   ``ensure_default_schedules`` 的「已存在即跳过」在迁移侧的等价语义。
+    (27, """
+UPDATE schedules SET cron = '0 16 * * 1-5', updated_at = datetime('now','localtime')
+ WHERE id = 'sch-default-sync-bars' AND cron = '30 15 * * 1-5';
+UPDATE schedules SET cron = '15 16 * * 1-5', updated_at = datetime('now','localtime')
+ WHERE id = 'sch-default-classic-screen' AND cron = '0 16 * * 1-5';
+"""),
 ]
 
 

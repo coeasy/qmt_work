@@ -441,6 +441,11 @@ def sync_runner(params: dict) -> Runner:
             # 新鲜度门槛：最后一根距今超过 N 个自然日即判陈旧并继续降级换源。
             # 传 0/负 = 关闭（恢复「非空即算数」的旧行为）。
             stale_days=int(params.get("stale_days") or STALE_DAYS_DEFAULT),
+            # 全量回补（V11 §5.3 P0-3 III）：``mode=full`` 按自然年向前逐页补齐历史，
+            # 并基于「本地最早一根」做断点续传。非法值由 BarsSyncer 内部按
+            # incremental 处理 —— **绝不静默变全量**（那是几小时的作业）。
+            mode=str(params.get("mode") or "incremental"),
+            full_years=int(params.get("full_years") or 0) or 12,
         )
         attempts = max(1, int(params.get("max_attempts") or 1))
         summary = None
@@ -457,10 +462,24 @@ def sync_runner(params: dict) -> Runner:
         # 实测（2026-09-19）：定时任务 status=done / progress=100%，而
         # total=0、bars_written=0、elapsed_ms=0 —— 每天跑、数据一天没更新，
         # 界面还显示「已完成」。静默空转比直接失败危险得多：用户不会去看日志。
-        if not result.get("total"):
+        #
+        # ⚠️ 例外：全量回补的**断点续传**会让 total=0 成为**合法**结果 ——
+        # 第二次跑全量时所有标的的本地历史都已覆盖目标起点，全被跳过。
+        # 这不是空转，`skipped_complete` 就是证据。若不排除，重跑全量必报
+        # 「股票池为空」的假失败。
+        if not result.get("total") and not result.get("skipped_complete"):
             raise RuntimeError(
                 "日线同步未获取到任何股票（股票池为空）——"
                 "请检查数据源是否可用，或连接券商后重试")
+        # ★ 全量模式下「没翻成页」必须让用户看得见（V11 §5.3 P0-3 III）：
+        # 此时 ok 是满的、mode 写着 full，但历史**并未**补齐。
+        if (str(result.get("mode")) == "full" and result.get("total")
+                and not result.get("paged")):
+            result["degraded_reason"] = (
+                "当前数据源链上没有任何源支持按日期区间取数（免费在线源只接受"
+                "最近 N 根），全量回补已退化为单次大窗口 —— 历史未真正补齐，"
+                "请连接券商数据源后重跑")
+            job["report"](100, "全量回补未生效：当前数据源不支持区间取数")
         # EOD/全市场同步只有在本地批次实际写入后才发布 snapshot；部分失败明确
         # 标成 partial，研究/回测不能把它当成完整数据集使用。
         try:

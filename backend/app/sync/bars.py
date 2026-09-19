@@ -56,6 +56,39 @@ def _split_fetch_result(raw) -> tuple[Optional[list], str]:
     return raw, ""
 
 
+def _bar_time(b) -> object:
+    """从 dict / 模型对象里取 K 线时间字段（两种形态都支持）。"""
+    if isinstance(b, dict):
+        return b.get("time")
+    return getattr(b, "time", None)
+
+
+def _bars_first_date(bars: Sequence) -> str:
+    """这一批 K 线里**最早**的一根交易日（``""`` = 未知）。
+
+    与 ``datasource.registry.bars_last_date`` 对称：全量回补只报「写入了 N 根」
+    说明不了「历史推到了哪一年」，必须同时给出最早一根。
+    取 **min** 而不是 ``bars[0]`` —— 不假设源的返回顺序。
+    """
+    ds = [d for d in (bar_date(_bar_time(b)) for b in bars or []) if d]
+    return min(ds) if ds else ""
+
+
+def _dedupe_bars(bars: Sequence) -> list:
+    """按交易日去重并升序排列（逐年翻页的相邻年份不会重叠，但接口可能回边界日）。
+
+    只做**内存内**去重：真正的幂等由 ``local_bars`` 主键
+    (code, period, adjust, dt, provider_id) 保证（重复日期覆盖、旧数据不删）。
+    这里去重的意义是少写一遍库，不是正确性来源。
+    """
+    seen: dict = {}
+    for b in bars or []:
+        key = bar_date(_bar_time(b)) or str(_bar_time(b) or "")
+        if key:
+            seen[key] = b
+    return [seen[k] for k in sorted(seen)]
+
+
 def _is_stale(as_of: str, stale_days: int = STALE_DAYS_DEFAULT) -> bool:
     """最后一根交易日是否陈旧（距今超过 ``stale_days`` 个自然日）。
 
@@ -115,6 +148,12 @@ class SyncOutcome:
     as_of: str = ""
     #: 数据是否陈旧（最后一根距今超过 ``stale_days`` 个自然日）。
     stale: bool = False
+    #: 本次是否**真的按日期区间向前翻页**（V11 §5.3 P0-3 III）。
+    #: ``False`` 且 ``mode=full`` 表示没有支持区间的源、已退化为「单次大 count」——
+    #: 必须在报告里说出来，否则用户会以为历史已经全部补齐。
+    paged: bool = False
+    #: 本次写入的 K 线里最早的一根（``""`` = 未知），用于判断回补到了哪一年。
+    as_of_min: str = ""
 
     def to_dict(self) -> dict:
         return {"code": self.code, "ok": self.ok,
@@ -140,6 +179,17 @@ class SyncSummary:
     stale: int = 0
     #: 全批中最新的最后一根交易日（``""`` = 全部未知）。
     as_of_max: str = ""
+    #: 全批中最**早**的一根交易日（``""`` = 全部未知）。全量回补用它回答
+    #: 「这次到底把历史推到了哪一年」——只报写入根数说明不了这件事。
+    as_of_min: str = ""
+    #: ``incremental`` / ``full``（V11 §5.3 P0-3 III）。
+    mode: str = "incremental"
+    #: 本次是否**真的按日期区间向前翻页**取数（见 :attr:`SyncOutcome.paged`）。
+    #: ``mode=full`` 而这里为 ``False`` ⇒ 已退化为单次大 count，**历史未真正补齐**。
+    paged: bool = False
+    #: 全量模式下因「本地历史已覆盖到目标起点」而**跳过**的标的数。
+    #: 这就是断点续传的可见证据：中断后重跑，这个数会明显变大。
+    skipped_complete: int = 0
 
     def to_dict(self) -> dict:
         return {
@@ -147,12 +197,33 @@ class SyncSummary:
             "total": self.total, "ok": self.ok, "failed": self.failed,
             "bars_written": self.bars_written, "elapsed_ms": self.elapsed_ms,
             "errors": self.errors, "stale": self.stale,
-            "as_of_max": self.as_of_max,
+            "as_of_max": self.as_of_max, "as_of_min": self.as_of_min,
+            "mode": self.mode, "paged": self.paged,
+            "skipped_complete": self.skipped_complete,
         }
 
 
 class BarsSyncer:
-    """日线窗口同步器（并发闸门 + 幂等合并 + 结果汇总）。"""
+    """日线窗口同步器（并发闸门 + 幂等合并 + 结果汇总）。
+
+    两种模式（V11 §5.3 P0-3 III）：
+
+    - ``incremental``（默认）：只把**最近** ``lookback`` 根合并进库 —— 日常维护，
+      要的是「够新」；
+    - ``full``：把**历史一次性补齐** —— 按自然年从今年往前逐页取，直到某一年
+      没有数据（早于上市日）。走的是券商渠道的日期区间能力
+      （``DataSourceManager.get_kline_range``，唯一声明 ``supports_kline_range``
+      的源），因此**不会**出现「假装翻页、其实一直拿最近 N 根」。
+
+    ⚠️ 免费在线源只接受 ``count``（最近 N 根），**无法**指定日期区间；纯在线源
+    环境下 ``full`` 会退化为单次大 ``count``，并把 ``paged=False`` 如实报出来。
+    """
+
+    #: 全量回补默认往前翻多少年（1990 年开市至今约 36 年；12 年已覆盖内置策略
+    #: 与绝大多数回测需求，且不至于让单只耗时失控）。
+    FULL_YEARS_DEFAULT = 12
+    #: 退化为单次大 count 时取的根数（12 年 ≈ 2900 个交易日，留足余量）。
+    FULL_COUNT_DEFAULT = 3600
 
     def __init__(
         self,
@@ -165,11 +236,18 @@ class BarsSyncer:
         provider_id: str = "auto",
         batch_id: Optional[str] = None,
         stale_days: int = STALE_DAYS_DEFAULT,
+        mode: str = "incremental",
+        full_years: int = FULL_YEARS_DEFAULT,
+        full_count: int = FULL_COUNT_DEFAULT,
     ):
         self._store = store or get_store()
         self._fetch = fetch_bars or self._default_fetch
         self._concurrency = max(1, int(concurrency))
         self._lookback = int(lookback)
+        #: ``incremental`` / ``full``（非法值按 incremental 处理，绝不静默变全量）
+        self._mode = "full" if str(mode).strip().lower() == "full" else "incremental"
+        self._full_years = max(1, int(full_years or self.FULL_YEARS_DEFAULT))
+        self._full_count = max(1, int(full_count or self.FULL_COUNT_DEFAULT))
         self._period = period
         self._adjust = adjust
         #: 新鲜度门槛：最后一根距今超过该自然日数即判「陈旧」。
@@ -213,17 +291,100 @@ class BarsSyncer:
         return (local_now().date() - timedelta(days=self._stale_days)).strftime("%Y%m%d")
 
     # ------------------------------------------------------------------
+    # 全量回补（V11 §5.3 P0-3 III）
+    # ------------------------------------------------------------------
+    async def _fetch_full(self, code: str) -> tuple[Optional[list], str, bool]:
+        """按自然年**从今年往前逐页**取，直到某一年没有数据。
+
+        返回 ``(bars, source, paged)``：
+
+        - ``paged=True``：确实走了区间翻页，``bars`` 是多年合并去重后的全量；
+        - ``paged=False``：**没有任何源支持日期区间**（纯在线源环境）⇒ 返回
+          ``(None, "", False)``，由 :meth:`sync_one` 退化为单次大 count。
+          ★ 绝不在这里假装成功：退化的结果必须在报告里看得见。
+
+        为什么从**今年往前**翻而不是从最早往今年翻：新股上市日未知，往前翻可以
+        「遇到空页就停」，页数最少；从最早翻则必然多翻十几年空页。
+        """
+        from core.clock import local_now
+        today = local_now().date()
+        merged: list = []
+        src_name = ""
+        paged = False
+        year = today.year
+        for _ in range(self._full_years):
+            start = f"{year}0101"
+            end = today.strftime("%Y%m%d") if year == today.year else f"{year}1231"
+            try:
+                bars, src = await get_hub().get_kline_range(
+                    code, self._period, adjust=self._adjust,
+                    start=start, end=end, source=self._source)
+            except Exception as exc:  # noqa: BLE001 单页失败不击穿整只
+                log.debug("全量回补 %s %s 区间取数失败：%s", code, year, exc)
+                bars, src = None, None
+            if bars is None and not paged:
+                # 第一页就说明「没有源支持区间」⇒ 退化，交由调用方走大 count
+                return None, "", False
+            paged = True
+            if not bars:
+                # 该年无数据 = 早于上市日（或已到更早的边界）⇒ 停止向前翻页
+                break
+            merged.extend(bars)
+            src_name = src or src_name
+            year -= 1
+        if not paged:
+            return None, "", False
+        return _dedupe_bars(merged), src_name, True
+
+    def _target_start(self) -> str:
+        """全量回补的目标起点（``YYYYMMDD``）：``full_years`` 年前的 1 月 1 日。"""
+        from core.clock import local_now
+        return f"{local_now().year - self._full_years + 1}0101"
+
+    def _filter_backfilled(self, codes: Sequence[str]) -> tuple[list, int]:
+        """筛掉「本地历史已覆盖到目标起点」的标的；返回 ``(待回补, 已跳过数)``。
+
+        ★ 为什么用**数据**当游标，而不是「上次跑到第几个 code」的游标表：
+        游标表只在**正常退出**时才被写对 —— 崩一次就白跑（下次从 0 重来）；
+        而「库里最早一根是哪天」本身就是事实，**不需要额外状态，也不会与真实
+        进度不一致**。中断后重跑，已补齐的自动跳过，这就是断点续传。
+
+        判据是 ``earliest > target``（严格早于目标起点才算补齐）：库里最早一根
+        正好等于 target 时也已达标，不必重跑。
+
+        读本地最早日期失败（表不存在 / 库锁）时**全量重跑**并如实返回 ``0`` ——
+        宁可多做功，不可漏补。跳过数少报比多报安全。
+        """
+        target = self._target_start()
+        try:
+            have = self._store.earliest_dt_map(list(codes), self._period, self._adjust)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("全量回补读取本地最早日期失败（将全量重跑）：%s", exc)
+            return list(codes), 0
+        need = [c for c in codes
+                if not have.get(c) or str(have[c]) > target]
+        return need, len(codes) - len(need)
+
+    # ------------------------------------------------------------------
     # 核心
     # ------------------------------------------------------------------
     async def sync_one(self, code: str) -> SyncOutcome:
         async with self._sem:
+            paged = False
             try:
-                raw = await self._fetch(code, self._period, self._adjust, self._lookback)
+                if self._mode == "full":
+                    bars0, src0, paged = await self._fetch_full(code)
+                    raw = ((bars0, src0) if paged
+                           else await self._fetch(code, self._period, self._adjust,
+                                                  self._full_count))
+                else:
+                    raw = await self._fetch(code, self._period, self._adjust, self._lookback)
             except Exception as exc:  # noqa: BLE001
                 return SyncOutcome(code=code, error=f"抓取异常：{exc}")
             bars, real_src = _split_fetch_result(raw)
             if not bars:
-                return SyncOutcome(code=code, error="源无数据（非交易时段或代码不受支持）")
+                return SyncOutcome(code=code, error="源无数据（非交易时段或代码不受支持）",
+                                   paged=paged)
             # 溯源为真：写真实命中来源名，绝不用 "auto" 冒充（P3-4）
             provider_id = _resolve_provider_id(real_src, self._provider_id)
             # 新鲜度判定（V11 R13）：拿到数据 ≠ 数据够新。券商本地历史可能只到
@@ -245,14 +406,21 @@ class BarsSyncer:
                     provider_id=provider_id, batch_id=self._batch_id,
                     schema_version="bars.v2", quality_state="raw")
             except Exception as exc:  # noqa: BLE001
-                return SyncOutcome(code=code, error=f"落库失败：{exc}")
+                return SyncOutcome(code=code, error=f"落库失败：{exc}", paged=paged)
             return SyncOutcome(code=code, ok=True, bars_written=n,
-                               as_of=as_of, stale=stale)
+                               as_of=as_of, stale=stale, paged=paged,
+                               as_of_min=_bars_first_date(bars))
 
     async def sync_many(self, codes: Sequence[str],
-                        progress_cb: Optional[Callable[[int, int, str], None]] = None
-                        ) -> SyncSummary:
-        """批量同步（G6 进度钩子：progress_cb(done, total, code) 每完成一只回调）。"""
+                        progress_cb: Optional[Callable[[int, int, str], None]] = None,
+                        skipped_complete: int = 0) -> SyncSummary:
+        """批量同步（G6 进度钩子：progress_cb(done, total, code) 每完成一只回调）。
+
+        ``skipped_complete``（V11 §5.3 P0-3 III）：全量回补时**因本地历史已覆盖到
+        目标起点而跳过**的标的数。它必须以参数传入并原样写进汇总 —— 否则
+        「跳过了 4000 只、只跑了 300 只」在结果里完全看不见，用户会以为同步
+        坏了（或以为全市场只有 300 只）。
+        """
         started = now_iso()
         t0 = time.perf_counter()
         done = 0
@@ -280,6 +448,15 @@ class BarsSyncer:
             errors=[o.to_dict() for o in failed],
             stale=sum(1 for o in ok if o.stale),
             as_of_max=max((o.as_of for o in ok if o.as_of), default=""),
+            # 全批中**最早**的一根：只报「写入了 N 根」回答不了
+            # 「这次到底把历史推到了哪一年」。
+            as_of_min=min((o.as_of_min for o in ok if o.as_of_min), default=""),
+            mode=self._mode,
+            # ★ 只有**真的按区间翻了页**才算 full 生效。``paged=False`` 而
+            #   ``mode=full`` ⇒ 当前环境没有支持区间的源，已退化为单次大 count，
+            #   历史**并未**补齐 —— 界面与报告必须如实说出来。
+            paged=(self._mode == "full" and any(o.paged for o in ok)),
+            skipped_complete=int(skipped_complete or 0),
         )
         self._store.set_meta("last_sync_at", summary.finished)
         if summary.failed:
@@ -295,6 +472,18 @@ class BarsSyncer:
                 "同步数据陈旧：%d/%d 只标的最后一根早于 %s 天前（最新 as_of=%s）——"
                 "数据源可能未更新或无近期历史，请检查数据源与券商本地数据下载范围",
                 summary.stale, summary.ok, self._stale_days, summary.as_of_max or "未知")
+        # ★ 全量模式却没翻成页：这是**最危险的一种「看起来成功了」** ——
+        #   mode 写着 full、ok 是满的，用户会以为历史已经补齐，实际上只是把
+        #   最近 N 根又写了一遍。必须在日志里说清「历史其实没补齐」。
+        if self._mode == "full" and not summary.paged and summary.ok:
+            log.warning(
+                "全量回补未按日期区间翻页：当前数据源链上没有任何源声明 "
+                "supports_kline_range（免费在线源只接受 count=最近 N 根），"
+                "已退化为单次 %d 根 —— 历史**未**真正补齐，"
+                "如需完整历史请连接券商数据源后重跑", self._full_count)
+        if summary.skipped_complete:
+            log.info("全量回补断点续传：本地历史已覆盖目标起点的 %d 只被跳过",
+                     summary.skipped_complete)
         return summary
 
     async def sync_stock_list(self, limit: Optional[int] = None,
@@ -319,14 +508,24 @@ class BarsSyncer:
         if not items:
             return SyncSummary(started=now_iso(), finished=now_iso(),
                                total=0, failed=0, ok=0, errors=[],
-                               elapsed_ms=0)
+                               elapsed_ms=0, mode=self._mode)
         if not fallback:
             # 兜底路径只有代码没有名称，写进股票列表会把名称覆盖成空 —— 不写。
             self._store.upsert_stock_list(items)
         codes = [str(i.get("code")) for i in items if i.get("code")]
         if limit:
             codes = codes[: int(limit)]
-        return await self.sync_many(codes, progress_cb=progress_cb)
+        # ★ 全量模式的**断点续传**：先按「本地最早一根是哪天」筛掉已补齐的标的。
+        #   放在 ``limit`` 之后 —— limit 是用户显式的「只跑前 N 只」，
+        #   不该被跳过数稀释成「前 N 只里再挑几只」。
+        #   中断后重跑，已补齐的自动跳过 ⇒ 不需要额外的游标表，也不会与真实进度不一致。
+        skipped = 0
+        if self._mode == "full":
+            codes, skipped = self._filter_backfilled(codes)
+            if not codes and skipped:
+                log.info("全量回补：%d 只标的本地历史均已覆盖目标起点，无需回补", skipped)
+        return await self.sync_many(codes, progress_cb=progress_cb,
+                                    skipped_complete=skipped)
 
 
 async def _main(limit: int, concurrency: int, lookback: int) -> int:

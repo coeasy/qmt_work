@@ -277,7 +277,14 @@ export interface SyncRunRecord {
   last_ts?: string;
   status?: string;
   detail?: {
+    /**
+     * ⚠️ 这是**流的判别标签**（`"sync_bars"` / `"market.sync"`），
+     * **不是**同步模式 —— 同步模式见 `sync_mode`。两者混用会把「全量回补」
+     * 误判成普通增量同步。
+     */
     mode?: string;
+    /** 同步模式：`incremental`（默认，只补最近 N 根）/ `full`（向前翻页补齐历史） */
+    sync_mode?: string;
     reason?: string;
     error?: string;
     summary?: string;
@@ -294,6 +301,19 @@ export interface SyncRunRecord {
     elapsed_ms?: number;
     hot_days?: number;
     count_per_code?: number;
+    /**
+     * 全量回补：本次**是否真的按日期区间向前翻页**。
+     * `mode === "full" && paged === false` ⇒ 当前数据源链没有支持区间取数的源
+     * （免费在线源只接受 count），历史**并未**补齐 —— 界面必须如实说出来，
+     * 否则「全量完成」是一句谎话。
+     */
+    paged?: boolean;
+    /** 全量回补写入的最早一根 K 线日期（`YYYYMMDD`），判断历史推到了哪一年 */
+    as_of_min?: string;
+    /** 全量回补因「本地历史已覆盖目标起点」而跳过的标的数（断点续传的证据） */
+    skipped_complete?: number;
+    /** 降级原因（如「全量回补未生效」），有值即表示结果与名义模式不符 */
+    degraded_reason?: string;
     errors?: Array<{ code?: string; error?: string }>;
     errors_truncated?: number;
     params?: Record<string, unknown>;

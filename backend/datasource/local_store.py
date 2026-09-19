@@ -18,7 +18,7 @@ import hashlib
 import json
 import logging
 import threading
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Sequence, Union
 
 from core.clock import bar_date as _bar_date  # K 线交易日格式唯一入口（V11 R13）
 from core.clock import now_iso as _now  # 唯一实现在 core.clock（V11 R8 收敛）
@@ -323,6 +323,35 @@ class LocalStore:
             "SELECT MAX(dt) AS m FROM local_bars "
             "WHERE code=? AND period=? AND adjust=?", (code, period, adjust))
         return rows[0]["m"] if rows and rows[0]["m"] else None
+
+    def earliest_dt_map(self, codes: Sequence[str], period: str = "1d",
+                        adjust: str = "") -> Dict[str, str]:
+        """每只标的的**最早一根** K 线日期（``{code: dt}``；无数据的 code 不出现）。
+
+        ★ 这是「全量回补」的**天然断点游标**（V11 §5.3 P0-3 III）。
+
+        为什么不用「上次跑到第几个 code」这种游标表：那个游标只在**正常退出**时
+        才被写对，崩一次就白跑；而「库里最早一根是哪天」本身就是事实 ——
+        中断后重跑时，已补齐的标的自然被跳过，未补齐的自动继续。
+        **数据即游标**，不需要额外状态，也不会与真实进度不一致。
+        """
+        if not codes:
+            return {}
+        out: Dict[str, str] = {}
+        # 分批 IN 查询：SQLite 变量上限默认 999，按 500 一批保守切分。
+        uniq = [str(c) for c in dict.fromkeys(codes) if c]
+        for i in range(0, len(uniq), 500):
+            part = uniq[i:i + 500]
+            ph = ",".join("?" for _ in part)
+            rows = self._db.query(
+                f"SELECT code, MIN(dt) AS m FROM local_bars "
+                f"WHERE period=? AND adjust=? AND code IN ({ph}) "
+                f"GROUP BY code",
+                (period, adjust, *part))
+            for r in rows:
+                if r.get("m"):
+                    out[str(r["code"])] = str(r["m"])
+        return out
 
     def latest_bar_dt(self) -> Optional[str]:
         """全市场 K 线最近一根日期（选股溯源 as_of 之用）。表不存在返回 None。"""
