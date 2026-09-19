@@ -13,6 +13,7 @@ export type {
   KlineSyncStatus,
   LimitUpRow,
   LimitUpScanResponse,
+  MarketCoverage,
   MarketSourcesResponse,
   MinutePoint,
   MinutesResponse,
@@ -24,6 +25,7 @@ export type {
   RotationResponse,
   SessionSnapshot,
   StockInfo,
+  SyncRunRecord,
 } from "./market";
 
 export { tradeApi, signalApi } from "./trade";
@@ -65,6 +67,7 @@ export type {
   CapabilitiesResponse,
   CapabilitiesSummary,
   CapabilityItem,
+  ClassicPicksResponse,
   ClassicStrategy,
   HealthCheck,
   HealthResponse,
@@ -74,8 +77,10 @@ export type {
   ReadyResponse,
   RuntimeJobSubmit,
   ScheduleCreate,
+  ScreenPick,
   ScreenResponse,
   ScreenRow,
+  ScreenRunMeta,
   ScreenRunQuery,
 } from "./system";
 

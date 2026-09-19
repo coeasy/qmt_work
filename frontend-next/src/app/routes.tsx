@@ -26,6 +26,25 @@ export interface PageDef {
   fullBleed?: boolean;
   /** 该页面已实现 / 仍为占位（占位页会显式展示其后端契约） */
   status?: "done" | "partial" | "planned";
+  /**
+   * 是否出现在顶部主菜单（默认 `true`）。
+   *
+   * 置 `false` 表示「**已被合并进更上层的页面**，不再作为菜单入口」，但仍注册在
+   * `PAGES` 里 —— 也就是说它必须另有入口（例如行情工作台头部的「独立打开」按钮组），
+   * 否则就退化成旧前端那种「页面不可达却无人发现」的问题。
+   *
+   * `MENU` 数组仍然完整列出它们（命令面板分组、快捷键序号都依赖它），
+   * 只是 `MenuBar` 渲染时跳过 —— 这样「隐藏」不会打乱任何基于 MENU 的索引。
+   */
+  menu?: boolean;
+  /**
+   * `menu: false` 时**必须**声明它现在从哪个页面进入（该页面的 key）。
+   *
+   * 这是把「页面去哪了」变成**可断言的事实**：旧前端就栽在「页面注册了但没人能到达」
+   * 上（12 个页面不可达却无人发现）。有了这个字段，门禁就能在 CI 里检查
+   * 「每个隐藏页面都另有入口」，而不是靠人记得去读代码。
+   */
+  entryFrom?: string;
 }
 
 const P = (loader: () => Promise<{ default: ComponentType<PageProps> }>): PageComponent =>
@@ -47,6 +66,9 @@ export const PAGES: Record<string, PageDef> = {
     comp: P(() => import("@/domains/market/QuoteBoard")),
     fullBleed: true,
     status: "done",
+    // 已合并进「行情工作台」；入口在工作台头部「独立打开」按钮组
+    menu: false,
+    entryFrom: "workbench",
   },
   quote: {
     key: "quote",
@@ -54,6 +76,9 @@ export const PAGES: Record<string, PageDef> = {
     comp: P(() => import("@/domains/market/MarketData")),
     fullBleed: true,
     status: "done",
+    menu: false,
+    // 入口：行情工作台头部的「独立打开」按钮组
+    entryFrom: "workbench",
   },
   minutes: {
     key: "minutes",
@@ -61,6 +86,9 @@ export const PAGES: Record<string, PageDef> = {
     comp: P(() => import("@/domains/market/Minutes")),
     fullBleed: true,
     status: "done",
+    menu: false,
+    // 入口：行情工作台头部的「独立打开」按钮组
+    entryFrom: "workbench",
   },
   orderbook: {
     key: "orderbook",
@@ -68,6 +96,9 @@ export const PAGES: Record<string, PageDef> = {
     comp: P(() => import("@/domains/market/OrderBook")),
     fullBleed: true,
     status: "done",
+    menu: false,
+    // 入口：行情工作台头部的「独立打开」按钮组
+    entryFrom: "workbench",
   },
   deal_feed: {
     key: "deal_feed",
@@ -75,6 +106,9 @@ export const PAGES: Record<string, PageDef> = {
     comp: P(() => import("@/domains/market/DealFeed")),
     fullBleed: true,
     status: "done",
+    menu: false,
+    // 入口：行情工作台头部的「独立打开」按钮组
+    entryFrom: "workbench",
   },
   sector_radar: {
     key: "sector_radar",
@@ -117,6 +151,13 @@ export const PAGES: Record<string, PageDef> = {
     key: "screen_workbench",
     label: "选股工作台",
     comp: P(() => import("@/domains/research/ScreenWorkbench")),
+    status: "done",
+  },
+  auto_picks: {
+    key: "auto_picks",
+    label: "自动选股",
+    comp: P(() => import("@/domains/research/screen/AutoPicks")),
+    fullBleed: true,
     status: "done",
   },
   screen: {
@@ -240,6 +281,12 @@ export const PAGES: Record<string, PageDef> = {
     comp: P(() => import("@/domains/system/SystemStatus")),
     status: "done",
   },
+  offline: {
+    key: "offline",
+    label: "离线数据",
+    comp: P(() => import("@/domains/system/OfflineData")),
+    status: "done",
+  },
   audit: {
     key: "audit",
     label: "审计日志",
@@ -285,8 +332,10 @@ export const MENU: MenuGroup[] = [
     key: "market",
     label: "行情",
     items: [
-      // 工作台 = 报价牌 + K 线 + 分时 + 盘口 + 成交流合并展示；后面 5 项保留为独立页
-      // （多显示器 / 分栏对照时仍需要），工作台头部有「独立打开」直达按钮。
+      // 工作台 = 报价牌 + K 线 + 分时 + 盘口 + 成交流 + 基本信息 + 基本面 + 交易
+      // 合并展示。后面 5 项（quoteboard/quote/minutes/orderbook/deal_feed）标了
+      // menu:false ⇒ 不再出现在下拉里（去掉重复入口），但页面仍注册、仍可用，
+      // 入口在工作台头部的「独立打开」按钮组（多显示器 / 分栏对照时仍需要）。
       "workbench",
       "quoteboard",
       "quote",
@@ -303,7 +352,7 @@ export const MENU: MenuGroup[] = [
   {
     key: "research",
     label: "研究",
-    items: ["screen_workbench", "screen", "formula", "factor_hub", "search"],
+    items: ["screen_workbench", "auto_picks", "screen", "formula", "factor_hub", "search"],
   },
   {
     key: "trading",
@@ -319,6 +368,7 @@ export const MENU: MenuGroup[] = [
       "dashboard",
       "brokers",
       "sysstatus",
+      "offline",
       "audit",
       "apikeys",
       "mcp",
@@ -332,6 +382,27 @@ export const DEFAULT_PAGE = "dashboard";
 
 export function pageLabel(key: string): string {
   return PAGES[key]?.label ?? key;
+}
+
+/**
+ * 某个菜单分组里**应当显示**的条目。
+ *
+ * `menu: false` 的页面已被合并进更上层的页面（如行情工作台），不再重复列出。
+ * 注意只过滤**显示**，不过滤 `MENU` 本身 —— 命令面板分组与快捷键序号都基于
+ * `MENU` 的全量列表，改动那份列表会连带打乱索引。
+ */
+export function visibleMenuItems(group: MenuGroup): string[] {
+  return group.items.filter((k) => {
+    const def = PAGES[k];
+    return def !== undefined && def.menu !== false;
+  });
+}
+
+/** 已合并进上层页面、不在主菜单显示的页面（供门禁断言「它们仍另有入口」） */
+export function hiddenMenuPages(): string[] {
+  return Object.values(PAGES)
+    .filter((d) => d.menu === false)
+    .map((d) => d.key);
 }
 
 /** 命令面板用：全部页面的扁平列表 */

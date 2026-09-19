@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { MENU, PAGES, allPages, pageLabel } from "@/app/routes";
+import { MENU, PAGES, allPages, hiddenMenuPages, pageLabel, visibleMenuItems } from "@/app/routes";
 
 /**
  * 页面注册表一致性测试。
@@ -158,5 +158,67 @@ describe("页面注册表", () => {
     // 移植后的因子研究页必须是真实实现，而非占位
     expect(PAGES.factor_hub).toBeDefined();
     expect(PAGES.factor_hub?.status).toBe("done");
+  });
+});
+
+/**
+ * `menu: false`（页面已合并进上层页面、不再占主菜单）的一致性。
+ *
+ * 存在意义：合并页面最危险的失败模式不是「菜单少了一项」，而是
+ * **页面被从菜单摘掉之后谁也到不了** —— 旧前端就栽在这上面（12 个页面注册了
+ * 却不可达，且无人发现）。所以隐藏必须带两个可断言的条件：
+ *   ① 仍然注册在 `PAGES` 且仍属于某个 `MENU` 分组（命令面板 / 快捷键仍能找到）；
+ *   ② 必须声明 `entryFrom` 指向一个真实存在的页面。
+ */
+describe("菜单隐藏项（menu: false）", () => {
+  it("visibleMenuItems 会过滤掉 menu:false 的条目，但不改动 MENU 本身", () => {
+    const market = MENU.find((g) => g.key === "market");
+    expect(market).toBeDefined();
+    const visible = visibleMenuItems(market!);
+    expect(visible).not.toContain("quoteboard");
+    expect(visible).not.toContain("quote");
+    expect(visible).toContain("workbench");
+    // MENU 必须保持完整（命令面板分组 / 快捷键序号依赖它）
+    expect(market!.items).toContain("quoteboard");
+    expect(visible.length).toBe(market!.items.length - hiddenMenuPages().filter((k) => market!.items.includes(k)).length);
+  });
+
+  it("每个隐藏页面仍注册在 PAGES 且仍属于某个菜单分组（不会变成不可达）", () => {
+    const inMenu = new Set(MENU.flatMap((g) => g.items));
+    const problems: string[] = [];
+    for (const key of hiddenMenuPages()) {
+      if (!PAGES[key]) problems.push(`${key} 未注册`);
+      if (!inMenu.has(key)) problems.push(`${key} 不在任何菜单分组（命令面板将归入「其他」）`);
+    }
+    expect(problems).toEqual([]);
+  });
+
+  it("每个隐藏页面都必须声明 entryFrom，且指向真实存在的页面", () => {
+    const problems: string[] = [];
+    for (const key of hiddenMenuPages()) {
+      const from = PAGES[key]?.entryFrom;
+      if (!from) {
+        problems.push(`${key} 未声明 entryFrom —— 「页面去哪了」无法追溯`);
+        continue;
+      }
+      if (!PAGES[from]) problems.push(`${key} 的 entryFrom="${from}" 不是已注册页面`);
+      if (from === key) problems.push(`${key} 的 entryFrom 指向自己`);
+    }
+    expect(problems).toEqual([]);
+  });
+
+  it("隐藏项本身必须是 done（合并展示不等于留一个半成品入口）", () => {
+    for (const key of hiddenMenuPages()) {
+      expect(PAGES[key]?.status).toBe("done");
+    }
+  });
+
+  it("当前隐藏项恰好是已合并进行情工作台的 5 个行情子页", () => {
+    expect(hiddenMenuPages().sort()).toEqual(
+      ["deal_feed", "minutes", "orderbook", "quote", "quoteboard"].sort(),
+    );
+    for (const key of hiddenMenuPages()) {
+      expect(PAGES[key]?.entryFrom).toBe("workbench");
+    }
   });
 });

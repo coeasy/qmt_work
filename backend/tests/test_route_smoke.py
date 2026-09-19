@@ -125,3 +125,39 @@ def test_portfolio_aggregate_empty():
     # 空持仓 → 400（设计：空列表无意义，调用方应先校验）
     res = asyncio.run(_an.portfolio_aggregate({"positions": []}))
     assert res["code"] == 400
+
+
+def test_market_coverage_reports_only_days_with_data(tmp_path):
+    """★ 覆盖度报表必须**如实**：没有数据的日子不出现（绝不补 0 冒充「那天有 0 只」）。
+
+    「上次同步 ok=5221」只说明**调用**成功，不说明数据**新到哪天** —— 源链
+    「第一个非空即返回」时券商本地历史停在一年前也照样 ok。用户唯一能自查的
+    办法就是看「最近 N 个交易日，每天在库多少只」，所以这里绝不能美化。
+    """
+    from types import SimpleNamespace
+
+    from app.routes import market as _mk
+    from core import db as db_mod
+
+    prev = db_mod._db
+    db_mod.init_db(tmp_path / "cov.db")
+    try:
+        db = db_mod.get_db()
+        for dt, code in (("20260917", "600519.SH"),
+                         ("20260918", "600519.SH"), ("20260918", "000001.SZ")):
+            db.execute(
+                "INSERT INTO local_bars (code,period,adjust,dt,open,high,low,close,"
+                "volume,amount,provider_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (code, "1d", "qfq", dt, 1, 1, 1, 1, 1, 1, "eltdx"))
+        res = asyncio.run(_mk.market_coverage(lookback_days=30,
+                                             ctx=SimpleNamespace(db=db)))
+        assert res["code"] == 0
+        d = res["data"]
+        assert [r["dt"] for r in d["per_day"]] == ["20260918", "20260917"]
+        assert d["latest_day"] == "20260918" and d["latest_codes"] == 2
+        assert d["days_with_data"] == 2
+        assert d["provider_share"][0]["provider_id"] == "eltdx"
+        # 从没跑过同步 ⇒ None（而不是伪造一条「已同步」记录）
+        assert d["sync"] is None
+    finally:
+        db_mod._db = prev

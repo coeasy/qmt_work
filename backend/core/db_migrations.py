@@ -651,6 +651,54 @@ UPDATE OR IGNORE local_bars
    SET dt = substr(dt, 1, 4) || substr(dt, 6, 2) || substr(dt, 9, 2)
  WHERE length(dt) = 10 AND substr(dt, 5, 1) = '-' AND substr(dt, 8, 1) = '-';
 """),
+    # ------------------------------------------------------------------
+    # v26：screen_runs + screen_picks —— 选股结果落库（V11 R14 §5.3 E）
+    # ------------------------------------------------------------------
+    # 问题：选股结果此前**只存在于作业返回的 JSON 里**。手动选股关掉页面就没了；
+    # 定时选股（system.classic_screen）跑完之后用户只能去「任务运行时」翻一个
+    # 巨大的 JSON 结果字段，翻不到就等于没有。于是「每天收盘后自动选股」这条
+    # 链路事实上是**跑给日志看的**：没有任何界面能稳定看到昨天的选股结果。
+    #
+    # ★ 为什么必须是**两张表**：命中行与运行元数据是两件事。
+    #   若只建 screen_picks，则「命中 0 只」的运行**一行都不会写** ——
+    #   「今天跑过但没选出票」与「从来没跑过」在界面上完全一样（本项目「假成功」
+    #   家族的反面：失败/空结果必须同样可见）。screen_runs 每次运行必写一行。
+    #
+    #   - source：manual / schedule —— 用户必须能分辨「我手动跑的」与「定时跑的」；
+    #   - scanned / bar_date / degraded_*：**结果的可信度元数据**。
+    #     「命中 0 只」与「根本没扫到数据」是两件事：前者可能是行情不好，
+    #     后者说明同步没跑成功 —— 不落 scanned 就永远分不清。
+    (26, """
+CREATE TABLE IF NOT EXISTS screen_runs (
+    run_id TEXT PRIMARY KEY,
+    source TEXT NOT NULL DEFAULT 'manual',     -- manual（界面手动跑）/ schedule（定时任务）
+    job_id TEXT NOT NULL DEFAULT '',           -- 定时跑时的作业 id
+    strategies TEXT NOT NULL DEFAULT '',       -- 逗号分隔的策略 id
+    hits INTEGER NOT NULL DEFAULT 0,           -- 命中总数（0 也如实记录）
+    scanned INTEGER NOT NULL DEFAULT 0,        -- 本次扫描了多少只（0 = 根本没数据）
+    bar_date TEXT NOT NULL DEFAULT '',         -- 数据截至日 YYYYMMDD（★ 非空 ≠ 够新）
+    degraded INTEGER NOT NULL DEFAULT 0,
+    degraded_reason TEXT NOT NULL DEFAULT '',
+    truncated INTEGER NOT NULL DEFAULT 0,      -- 命中过多被截断
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_screen_runs_time ON screen_runs(created_at DESC);
+CREATE TABLE IF NOT EXISTS screen_picks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT NOT NULL,                      -- 关联 screen_runs.run_id
+    strategy TEXT NOT NULL,                    -- 经典策略 id
+    code TEXT NOT NULL,
+    name TEXT NOT NULL DEFAULT '',
+    close REAL,
+    change_pct REAL,
+    score REAL,
+    reason TEXT NOT NULL DEFAULT '',           -- 命中理由（原先被前端 detailText 跳过）
+    detail_json TEXT NOT NULL DEFAULT '{}',    -- 其余策略明细（ma20 / vol_ratio …）
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_screen_picks_run ON screen_picks(run_id, strategy);
+CREATE INDEX IF NOT EXISTS idx_screen_picks_code ON screen_picks(code, created_at DESC);
+"""),
 ]
 
 
@@ -670,4 +718,9 @@ EXTRA_COLUMNS: dict[str, tuple[str, ...]] = {
     "kline_cache": ("adjust",),
     # backtests：V9 §10.4 回测结果挂 Dataset Snapshot（可复现研究溯源）
     "backtests": ("dataset_snapshot_id",),
+    # sync_state：同步运行的**完整结果**（V11 §5.3 F）。
+    # ★ 该表原本只有 (stream, last_seq, last_ts, status) —— 能说「上次同步是什么时候、
+    #   什么状态」，却**说不出跑了几只、成功几只、数据截至哪天**。而用户判断
+    #   「今天的数据到底同步了没有」靠的正是后者。详情统一塞进 detail_json。
+    "sync_state": ("detail_json",),
 }

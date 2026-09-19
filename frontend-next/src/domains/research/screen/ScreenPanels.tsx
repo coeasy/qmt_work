@@ -149,16 +149,22 @@ const CLASSIC_DETAIL_SKIP = new Set([
 ]);
 
 /** 把策略明细 {ma20: 10.2, vol_ratio: 1.9} 渲染成「ma20 10.20 · 量比 1.9」。 */
-function detailText(r: ScreenRow): string {
+export function detailText(r: ScreenRow): string {
   const parts: string[] = [];
+  // ★ 命中理由必须**排在最前面**：它是「为什么选中它」的唯一解释。
+  //   此前这里显式跳过了 reason（`k !== "reason"`），于是「命中理由」这一列
+  //   只在展示一堆数值明细 —— 用户看到 ma20 1450.50 · vol_ratio 1.90 却不知道
+  //   这只票凭什么入选（是创新高？还是均线多头？）。
+  const reason = r.reason;
+  if (typeof reason === "string" && reason) parts.push(reason);
   for (const [k, v] of Object.entries(r)) {
-    if (CLASSIC_DETAIL_SKIP.has(k) || v === null || v === undefined) continue;
+    if (CLASSIC_DETAIL_SKIP.has(k) || k === "reason" || v === null || v === undefined) continue;
     if (typeof v === "number") {
       if (!Number.isFinite(v)) continue;
       parts.push(`${k} ${Math.abs(v) >= 1000 ? v.toFixed(0) : v.toFixed(2)}`);
     } else if (typeof v === "boolean") {
       if (v) parts.push(k);
-    } else if (typeof v === "string" && v && k !== "reason") {
+    } else if (typeof v === "string" && v) {
       parts.push(`${k} ${v}`);
     }
   }

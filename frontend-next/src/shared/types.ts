@@ -177,6 +177,8 @@ export interface AccountGridRow {
   assets: number;
   cash: number;
   market_value: number;
+  /** 该账户持仓浮动盈亏合计；**null 表示无数据**（不是 0，前端须显示「—」） */
+  profit: number | null;
   position_count: number;
   order_count: number;
   deal_count: number;
@@ -190,7 +192,22 @@ export interface AccountGridPosition {
   name: string;
   total_volume: number;
   total_market_value: number;
-  accounts: Array<{ conn_id: string; name: string; volume: number; market_value: number }>;
+  /** 合计成本（成本×股数）；无成本数据为 null */
+  total_cost: number | null;
+  /** 最新价（同一标的跨账户同价，取任一非空值） */
+  price: number | null;
+  /** 合计浮动盈亏；null 表示无数据 */
+  profit: number | null;
+  /** 盈亏比（%） */
+  profit_pct: number | null;
+  accounts: Array<{
+    conn_id: string;
+    name: string;
+    volume: number;
+    market_value: number;
+    price: number | null;
+    profit: number | null;
+  }>;
 }
 
 export interface AccountGrid {
@@ -199,6 +216,8 @@ export interface AccountGrid {
   total_assets: number;
   total_cash: number;
   total_market_value: number;
+  /** 全部账户浮动盈亏合计；null 表示无数据 */
+  total_profit: number | null;
   accounts: AccountGridRow[];
   positions: AccountGridPosition[];
   generated_at: string;

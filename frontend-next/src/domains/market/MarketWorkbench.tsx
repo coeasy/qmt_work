@@ -9,36 +9,47 @@ import { useQuoteSubscription } from "@/hooks/useQuoteSubscription";
 import { fmtPct, fmtPrice, namePair, normalizeCode, toneColor } from "@/shared/format";
 import type { Period } from "@/shared/types";
 import type { PageProps } from "@/app/routes";
+import { OrderForm } from "@/domains/trading/OrderForm";
 import { QuoteBoard } from "./QuoteBoard";
 import { MinutesChart } from "./panels/MinutesChart";
 import { OrderBookPanel } from "./panels/OrderBookPanel";
 import { L2Panel } from "./panels/L2Panel";
 import { DealFeedPanel } from "./panels/DealFeedPanel";
+import { StockInfoPanel } from "./panels/StockInfoPanel";
+import { FundamentalsPanel } from "./panels/FundamentalsPanel";
 import s from "./panels/panels.module.css";
 import d from "../domain.module.css";
 
 /**
- * 行情工作台 —— 把「报价牌 / K 线分析 / 分时图 / 盘口逐笔 / 成交明细」合并到一个界面。
+ * 行情工作台 —— 把「报价牌 / K 线分析 / 分时图 / 盘口逐笔 / 成交明细 / 股票基本信息 /
+ * 基本面信息 / 手动下单」合并到一个界面（对标同花顺 / 通达信的「看盘 + 交易」同屏）。
  *
- * 为什么合并：这 5 项本来就是看一只票的同一件事，拆成 5 个独立 Tab 的代价是
- * ① 每次换标的要在 5 个 Tab 里各改一次代码（改漏一个就看到两只票的数据混在一起）；
- * ② 报价牌与盘口/成交流互相看不见，看盘时要在 Tab 之间来回切。
- * 工作台把「标的」提升为**页面级状态**：左栏点一下，中栏图表与右栏盘口/成交流
- * 同时切换，不可能再出现三处标的不一致。
+ * 为什么合并：这些本来就是看一只票的同一件事，拆成多个独立 Tab 的代价是
+ * ① 每次换标的要在每个 Tab 里各改一次代码（改漏一个就看到两只票的数据混在一起）；
+ * ② 报价牌与盘口/成交流互相看不见，看盘时要在 Tab 之间来回切；
+ * ③ 看到机会要下单还得跳页重填代码。
+ * 工作台把「标的」提升为**页面级状态**：左栏点一下，中栏图表、右栏盘口/成交流、
+ * 底部资料与下单面板**同时切换**，不可能再出现多处标的不一致。
  *
- * 布局（三列，窄屏收起左栏 —— 见 panels.module.css 的 1180px 断点）：
+ * 布局（三列 + 中列底部坞，窄屏收起左栏 —— 见 panels.module.css 的 1180px 断点）：
  *   左：报价牌（自选股，点行切换标的，当前标的高亮）
- *   中：K 线 / 分时（Tab 切换，K 线带周期切换条）
+ *   中：上 = K 线 / 分时（Tab 切换，K 线带周期切换条）
+ *       下 = 底部坞：基本信息 / 基本面 / 交易（可折叠，默认展开）
  *   右：五档盘口 + 逐笔 / 成交流（Tab 切换）
  *
- * 保留独立入口：头部「独立打开」按钮组把当前标的带到对应独立页 ——
- * 合并展示不等于取消独立页（多显示器 / 分栏对照时独立页仍然有用）。
+ * ★ 底部坞为什么不放在右列：右列只有 260–320px，塞不下第 5 个页签；中列宽度充裕，
+ *   而且「图表在上、下单在下」正是交易时的视线动线。
+ *
+ * ★ 独立页保留：头部「独立打开」按钮组把当前标的带到对应独立页 —— 合并展示不等于
+ *   取消独立页（多显示器 / 分栏对照时独立页仍然有用）。这些独立页已从主菜单移除
+ *   （`routes.tsx` 的 `menu: false`），只能从这里进，避免菜单里出现重复入口。
  *
  * 零 mock：所有数字都来自 WS 快照或后端接口；无数据时各面板显式说明原因。
  */
 
 type View = "kline" | "minutes";
 type Flow = "l2" | "deals";
+type Dock = "info" | "fundamentals" | "trade";
 
 export function MarketWorkbench({ params }: PageProps) {
   const initialCode = useMemo(() => {
@@ -53,6 +64,8 @@ export function MarketWorkbench({ params }: PageProps) {
   const [period, setPeriod] = useState<Period>((params.period as Period) || "1d");
   const [view, setView] = useState<View>((params.view as View) || "kline");
   const [flow, setFlow] = useState<Flow>("deals");
+  /** 底部坞当前页签；null = 已折叠（把高度还给图表） */
+  const [dock, setDock] = useState<Dock | null>("info");
 
   const open = useWorkspaceStore((st) => st.open);
   const quote = useQuotesStore((st) => st.quotes[code]);
@@ -78,6 +91,7 @@ export function MarketWorkbench({ params }: PageProps) {
     if (/^\d{6}(\.[A-Za-z]{2})?$/.test(raw)) pick(raw);
   }, [draft, pick]);
 
+  const dockTitle = dock === "info" ? "基本信息" : dock === "fundamentals" ? "基本面" : "交易";
   return (
     <div className={s.work}>
       {/* ---------- 左：报价牌 ---------- */}
@@ -85,7 +99,7 @@ export function MarketWorkbench({ params }: PageProps) {
         <QuoteBoard compact active={code} onPick={pick} />
       </div>
 
-      {/* ---------- 中：K 线 / 分时 ---------- */}
+      {/* ---------- 中：K 线 / 分时 + 底部坞 ---------- */}
       <div className={s.workMain}>
         <div className={s.workHeader}>
           <span className={s.symbolName}>{title}</span>
@@ -121,6 +135,7 @@ export function MarketWorkbench({ params }: PageProps) {
             {inWatch ? "移出自选" : "加自选"}
           </Button>
           <span className={s.linkBar}>
+            {/* 这些独立页已从主菜单移除（routes.tsx: menu:false），入口只在这里 */}
             <Button
               size="sm"
               variant="ghost"
@@ -198,6 +213,41 @@ export function MarketWorkbench({ params }: PageProps) {
           ) : (
             <MinutesChart code={code} />
           )}
+        </Panel>
+
+        {/* ---------- 中列底部坞：基本信息 / 基本面 / 交易 ---------- */}
+        <Panel
+          flush
+          className={[s.dock, dock === null ? s.dockCollapsed : ""].filter(Boolean).join(" ")}
+          bodyClassName={s.dockBody}
+          title={dock === null ? "资料与交易（已折叠）" : dockTitle}
+          extra={
+            <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+              {dock !== null && (
+                <Tabs
+                  items={[
+                    { key: "info", label: "基本信息" },
+                    { key: "fundamentals", label: "基本面" },
+                    { key: "trade", label: "交易" },
+                  ]}
+                  value={dock}
+                  onChange={(k) => setDock(k as Dock)}
+                />
+              )}
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => setDock(dock === null ? "info" : null)}
+                title={dock === null ? "展开资料与交易" : "折叠（把高度还给图表）"}
+              >
+                {dock === null ? "展开" : "折叠"}
+              </Button>
+            </div>
+          }
+        >
+          {dock === "info" && <StockInfoPanel code={code} />}
+          {dock === "fundamentals" && <FundamentalsPanel code={code} />}
+          {dock === "trade" && <OrderForm code={code} compact onCodeChange={pick} />}
         </Panel>
       </div>
 

@@ -72,3 +72,17 @@
   gap: var(--sp-2);
   padding: var(--sp-3);
 }
+
+/* 持仓情况面板：表格自身滚动，不把整页撑长 */
+.positions {
+  min-height: 180px;
+}
+
+.tableArea {
+  max-height: 320px;
+  overflow: auto;
+}
+
+.tableArea > * {
+  min-width: 0;
+}

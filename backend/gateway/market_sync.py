@@ -67,17 +67,23 @@ def hot_fetch_count(hot_days: int) -> int:
 
 class MarketSync:
     def __init__(self, state, runtime_config, interval: float = 60.0,
-                 job_runtime=None, sync_job_factory=None):
+                 job_runtime=None, sync_job_factory=None, state_recorder=None):
         """V10 A3：删除 gateway→app 的反向 import。
 
         ``job_runtime``（JobRuntime store）与 ``sync_job_factory(params)``（返回 JobSpec
         的工厂）由 app 层装配时注入；未注入则 EOD 自动触发降级为 no-op（非致命）。
+
+        ``state_recorder``（V11 §5.3 F）：形如 ``recorder(*, status, detail)`` 的回调，
+        由 app 层绑定到 ``app.sync.state.record_run``。**同样用注入而非直接 import** ——
+        ``gateway`` 是顶层包，直接 import app 会重新引入刚被消除的反向依赖。
+        未注入则静默降级（状态落库是观测增强项，不该把同步本身带崩）。
         """
         self.state = state
         self.cfg = runtime_config
         self.interval = interval
         self._job_runtime = job_runtime
         self._sync_job_factory = sync_job_factory
+        self._state_recorder = state_recorder
         self._task: asyncio.Task | None = None
         self._last_run_date: str | None = None
         self._eod_last_run_date: str | None = getattr(state, "_eod_last_run_date", None)
@@ -105,6 +111,20 @@ class MarketSync:
     @property
     def eod_time(self) -> str:
         return str(self.cfg.get("market.eod.time") or "18:00")
+
+    def _record(self, status: str, detail: dict) -> None:
+        """把本次热窗口刷新的结果落库（回调由 app 层注入，见 ``__init__``）。
+
+        ★ **失败/跳过也必须记**：只记成功的运行，等于把「今天没跑」与
+        「跑了但失败」在界面上混成一件事 —— 而这正是用户要区分的那件事。
+        """
+        fn = self._state_recorder
+        if fn is None:
+            return
+        try:
+            fn(status=status, detail=detail)
+        except Exception as exc:  # noqa: BLE001 — 记录失败绝不影响同步
+            log.debug("market sync state record failed: %s", exc)
 
     async def start(self):
         # 启动即做一次热窗口滚动维护（幂等；首次调用必定执行，因为
@@ -252,15 +272,25 @@ class MarketSync:
         """
         kc = getattr(self.state, "kline_cache", None)
         if kc is None:
+            self._record("skipped", {"mode": "market.sync", "reason": "K 线缓存未初始化"})
             return
         try:
             series = await asyncio.to_thread(kc.hot_series)
         except Exception as exc:  # noqa: BLE001
             log.warning("market sync list series failed: %s", exc)
+            self._record("error", {"mode": "market.sync",
+                                   "reason": f"读取热表序列失败：{exc}"})
             return
         codes = sorted({s["code"] for s in series if s.get("period") in ("1d", "1w", "1mo")})
         if not codes:
             log.info("market sync: no cached hot series to refresh")
+            # ★ 这不是「行情不好」，是**热表里根本没有日线序列**（从没同步过，
+            #   或全部已被滚动进冷仓）。必须让它在界面上显示为「无可刷新标的」，
+            #   而不是一片沉默。
+            self._record("skipped", {
+                "mode": "market.sync",
+                "reason": "热表内无日线序列（从未同步过，或序列已全部滚动进冷仓）",
+                "codes": 0})
             return
         from tools import fetch_kline_cached
 
@@ -288,3 +318,23 @@ class MarketSync:
         log.info("market sync refresh: codes=%s ok=%s fail=%s (hot_days=%s count=%s)",
                  len(codes), results["ok"], results["fail"],
                  getattr(kc, "hot_days", None), count)
+
+        # ★ 落库（重启后仍可见）。状态三分：全成 / 部分失败 / 全失败。
+        # ⚠️ ``ok`` 只表示「回源调用没抛异常」，**不等于数据已更新到最新交易日** ——
+        # 源链「第一个非空即返回」的老毛病仍在（详见 docs 硬约束清单「非空≠够新」）。
+        # 所以这里不把 ok 说成「数据已更新」，只如实报调用成败，界面另外展示
+        # 覆盖度报表（GET /market/coverage）让用户自己看数据到底到哪天。
+        if results["fail"] == 0:
+            status = "ok"
+        elif results["ok"] == 0:
+            status = "error"
+        else:
+            status = "partial"
+        self._record(status, {
+            "mode": "market.sync",
+            "date": to_iso(_sh_now()),
+            "codes": len(codes), "ok": results["ok"], "fail": results["fail"],
+            "hot_days": getattr(kc, "hot_days", None), "count_per_code": count,
+            "summary": (f"热窗口刷新 {len(codes)} 只：成功 {results['ok']}、"
+                        f"失败 {results['fail']}"),
+        })

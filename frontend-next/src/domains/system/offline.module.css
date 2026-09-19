@@ -1,0 +1,124 @@
+.wrap {
+  height: 100%;
+  min-height: 0;
+  overflow: auto;
+  padding: var(--sp-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+
+.top {
+  display: grid;
+  grid-template-columns: minmax(340px, 1.4fr) minmax(260px, 1fr);
+  gap: var(--sp-3);
+}
+
+.body {
+  padding: var(--sp-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.kv {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  width: 100%;
+  font-size: var(--font-sm);
+  color: var(--text-dim);
+}
+
+.row {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.mono {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+
+.dim {
+  color: var(--text-faint);
+}
+
+.hint {
+  font-size: var(--font-xs);
+  color: var(--text-faint);
+}
+
+/* 说明性文字：既不是错误也不是警告，只是把数字讲清楚 */
+.note {
+  font-size: var(--font-xs);
+  line-height: 1.6;
+  color: var(--text-dim);
+  background: var(--bg-soft, rgba(127, 127, 127, 0.08));
+  border-radius: var(--radius-sm, 4px);
+  padding: var(--sp-2);
+}
+
+/* ★ 「数据落后于交易日」是**要用户立刻处理**的事，所以给告警色而不是灰字 */
+.noteWarn {
+  font-size: var(--font-xs);
+  line-height: 1.6;
+  color: var(--warning-text, #b26a00);
+  background: var(--warning-bg, rgba(255, 176, 32, 0.12));
+  border-left: 2px solid var(--warning, #ffb020);
+  border-radius: var(--radius-sm, 4px);
+  padding: var(--sp-2);
+}
+
+/* ★ 「同步成功但数据全是陈的」是最容易被忽略的一种失败 */
+.noteError {
+  font-size: var(--font-xs);
+  line-height: 1.6;
+  color: var(--danger-text, #c62828);
+  background: var(--danger-bg, rgba(220, 60, 60, 0.12));
+  border-left: 2px solid var(--danger, #dc3c3c);
+  border-radius: var(--radius-sm, 4px);
+  padding: var(--sp-2);
+}
+
+.code {
+  font-family: var(--font-mono);
+  padding: 0 4px;
+}
+
+.actions {
+  display: flex;
+  gap: var(--sp-2);
+  align-items: center;
+  margin-top: var(--sp-1);
+}
+
+.tables {
+  display: grid;
+  grid-template-columns: minmax(280px, 1fr) minmax(280px, 1fr);
+  gap: var(--sp-3);
+  margin-top: var(--sp-2);
+}
+
+.tableBox {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 4px);
+  overflow: hidden;
+}
+
+.tableTitle {
+  padding: var(--sp-2);
+  font-size: var(--font-xs);
+  color: var(--text-dim);
+  border-bottom: 1px solid var(--border);
+}
+
+.tableBox > :last-child {
+  height: 260px;
+}

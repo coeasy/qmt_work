@@ -162,17 +162,26 @@ async def account_slippage(code: str = "", conn_id: str = "", ctx: AppContext = 
 
 # ---------------- 多账户网格视图（P0：统一看板） ----------------
 
-def _account_row(conn) -> dict:
-    """构造单个连接的账户看板行（失败则带 error）。"""
+async def _account_row(conn, ctx: AppContext) -> tuple[dict, list[dict]]:
+    """构造单个连接的账户看板行（失败则带 error）+ 富化后的持仓行。
+
+    ★ 与 ``/account/status`` 同口径的两条修正（原先两页会各说各话）：
+    1. 持仓行必须过 ``enrich_positions`` —— 券商 ``get_positions`` 只回
+       ``code/name/volume/avail/cost/market_value``，**不含现价与浮动盈亏**；
+       不富化则看板上的「持仓盈亏」永远是 0，而持仓页却有值。
+    2. ``assets`` 为 0/空时退化为 ``cash + 持仓市值``。实测某账户
+       ``get_account().assets`` 恒为 0，但持仓市值 179.9 —— 若不退化，
+       看板会显示「总资产 0.00 元」而旁边又列着一只持仓。
+    """
     base = {"conn_id": conn.cfg.conn_id, "name": conn.cfg.name,
             "broker": conn.adapter.broker_name, "broker_id": conn.cfg.broker_id,
             "account_id": conn.cfg.account_id, "account_type": conn.cfg.account_type,
             "connected": bool(conn.connected),
-            "assets": 0.0, "cash": 0.0, "market_value": 0.0,
+            "assets": 0.0, "cash": 0.0, "market_value": 0.0, "profit": None,
             "position_count": 0, "order_count": 0, "deal_count": 0, "error": ""}
     if not conn.connected:
         base["error"] = conn.last_error or "未连接"
-        return base
+        return base, []
     try:
         acc = conn.adapter.get_account()
         pos = conn.adapter.get_positions()
@@ -180,14 +189,44 @@ def _account_row(conn) -> dict:
         d = conn.adapter.get_deals()
     except BrokerError as exc:
         base["error"] = str(exc)
-        return base
-    base["assets"] = float(acc.get("assets") or 0)
-    base["cash"] = float(acc.get("cash") or 0)
-    base["market_value"] = float(acc.get("market_value") or 0)
-    base["position_count"] = len(pos or [])
+        return base, []
+    # 现价/盈亏/中文名富化：唯一实现在 app/services/positions.py，与
+    # /account/status、/trade/positions 共用（该模块 docstring 已声明此约束）。
+    pos = await enrich_positions(pos, ctx, getattr(conn, "bridge", None))
+    pos = list(pos or [])
+    pos_value = sum(float(p.get("market_value") or 0) for p in pos)
+    cash = float(acc.get("cash") or 0)
+    assets = float(acc.get("assets") or 0)
+    if assets <= 0:
+        assets = cash + pos_value
+    base["assets"] = round(assets, 2)
+    base["cash"] = cash
+    base["market_value"] = round(pos_value, 2)
+    base["profit"] = _sum_opt([p.get("profit") for p in pos])
+    base["position_count"] = len(pos)
     base["order_count"] = len(o or [])
     base["deal_count"] = len(d or [])
-    return base
+    return base, pos
+
+
+def _sum_opt(vals) -> float | None:
+    """求和，但「一个数都没有」时返回 None 而不是 0。
+
+    ★ 0 与「不知道」必须可区分：持仓盈亏恒无数据时前端要显示「—」，
+    显示 0.00 会让用户以为真的不赚不亏（本项目的「假成功」家族问题）。
+
+    不可解析的值（券商偶尔回 ``""`` / ``"--"``）按「没有值」处理而不是抛错 ——
+    这是展示层聚合，一个畸形字段不该把整个看板打成 500。
+    """
+    nums: list[float] = []
+    for v in vals:
+        if v is None:
+            continue
+        try:
+            nums.append(float(v))
+        except (TypeError, ValueError):
+            continue
+    return round(sum(nums), 2) if nums else None
 
 
 @router.get("/account/grid")
@@ -195,36 +234,56 @@ async def account_grid(ctx: AppContext = Depends(get_ctx)):
     """多券商 / 多账户统一看板：逐账户指标行 + 按标的汇总的持仓矩阵 + 总资产合计。
 
     未连接的账户亦列出（error 字段说明原因），便于统一运维视图。
+
+    ★ 每个账户的持仓**只取一次**（原先 ``_account_row`` 与汇总循环各取一次，
+    同一份数据打了两遍券商 IPC），取回后统一富化再分别喂给「逐账户行」与
+    「跨标的矩阵」。
     """
     conns = ctx.broker_manager.all_connections()
     if not conns:
         return err(503, "尚未添加任何券商连接：请到「券商连接」页添加券商。")
-    rows = [_account_row(c) for c in conns]
+    rows: list[dict] = []
+    pos_by_conn: list[tuple[object, list[dict]]] = []
+    for c in conns:
+        row, pos = await _account_row(c, ctx)
+        rows.append(row)
+        if pos:
+            pos_by_conn.append((c, pos))
     total_assets = sum(r["assets"] for r in rows)
     total_cash = sum(r["cash"] for r in rows)
     total_mv = sum(r["market_value"] for r in rows)
     # 按标的汇总持仓（跨账户）
     by_code: dict[str, dict] = {}
-    for c in conns:
-        if not c.connected:
-            continue
-        try:
-            pos = c.adapter.get_positions()
-        except BrokerError:
-            continue
-        for p in (pos or []):
+    for c, pos in pos_by_conn:
+        for p in pos:
             code = p.get("code", "")
             if not code:
                 continue
             cell = by_code.setdefault(code, {
                 "code": code, "name": p.get("name", code),
-                "total_volume": 0, "total_market_value": 0.0, "accounts": []})
+                "total_volume": 0, "total_market_value": 0.0, "total_cost": 0.0,
+                "price": None, "profit": None, "profit_pct": None, "accounts": []})
             vol = int(p.get("volume", 0) or 0)
             mv = float(p.get("market_value", 0) or 0)
             cell["total_volume"] += vol
             cell["total_market_value"] += mv
+            # 现价/盈亏比：同一标的跨账户必然同价，任取一个非空值即可（不求和）
+            if cell["price"] is None:
+                cell["price"] = p.get("price")
+            if cell["profit_pct"] is None:
+                cell["profit_pct"] = p.get("profit_pct")
+            cost = p.get("cost")
+            if cost is not None and vol:
+                cell["total_cost"] += float(cost) * vol
             cell["accounts"].append({"conn_id": c.cfg.conn_id, "name": c.cfg.name,
-                                     "volume": vol, "market_value": mv})
+                                     "volume": vol, "market_value": mv,
+                                     "price": p.get("price"), "profit": p.get("profit")})
+    for cell in by_code.values():
+        cell["profit"] = _sum_opt(a["profit"] for a in cell["accounts"])
+        if not cell["total_cost"]:
+            cell["total_cost"] = None
+        else:
+            cell["total_cost"] = round(cell["total_cost"], 2)
     positions = sorted(by_code.values(), key=lambda x: x["total_market_value"], reverse=True)
     return ok({
         "account_count": len(rows),
@@ -232,6 +291,7 @@ async def account_grid(ctx: AppContext = Depends(get_ctx)):
         "total_assets": round(total_assets, 2),
         "total_cash": round(total_cash, 2),
         "total_market_value": round(total_mv, 2),
+        "total_profit": _sum_opt(r["profit"] for r in rows),
         "accounts": rows,
         "positions": positions,
         "generated_at": now_iso(),

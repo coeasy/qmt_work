@@ -39,8 +39,57 @@ def _db():
 
 # ---------------------------------------------------------------- sync_bars
 def _sync_bars_runner(params: dict) -> Runner:
+    """全市场日线同步 + **结果落库**（``sync_state``，V11 §5.3 F）。
+
+    ★ 为什么要包一层：``sync_runner`` 的结果原本只落在 ``runtime_jobs.result_json``，
+    而作业表会被裁剪 —— 「上一次同步跑成什么样」跨重启就查不到了，可用户判断
+    「今天的数据到底同步了没有」靠的正是它。
+    ★ **失败也写**：只记成功的运行，等于把「今天没跑」与「跑了但失败」在界面上
+    混成一件事 —— 而这正是用户要区分的那件事。
+    """
     from app.runtime.jobs import sync_runner
-    return sync_runner(params)
+    inner = sync_runner(params)
+    _keys = ("period", "adjust", "lookback", "concurrency", "limit")
+
+    def _detail(job: dict, summary: dict) -> dict:
+        """只留可展示的摘要 —— ``errors`` 在全市场量级可能上千条，不该整条塞进库里。"""
+        errs = list(summary.get("errors") or [])
+        return {
+            "mode": "sync_bars",
+            "job_id": str(job.get("id") or ""),
+            "params": {k: params.get(k) for k in _keys},
+            "total": int(summary.get("total") or 0),
+            "ok": int(summary.get("ok") or 0),
+            "failed": int(summary.get("failed") or 0),
+            "stale": int(summary.get("stale") or 0),
+            "bars_written": int(summary.get("bars_written") or 0),
+            "as_of_max": summary.get("as_of_max") or "",
+            "elapsed_ms": int(summary.get("elapsed_ms") or 0),
+            "errors": errs[:20],
+            "errors_truncated": max(0, len(errs) - 20),
+        }
+
+    async def _run(job: dict) -> dict:
+        from app.sync.state import STREAM_SYNC_BARS, record_run
+        try:
+            result = await inner(job)
+        except Exception as exc:
+            record_run(STREAM_SYNC_BARS, status="error",
+                       detail={"mode": "sync_bars",
+                               "job_id": str(job.get("id") or ""),
+                               "params": {k: params.get(k) for k in _keys},
+                               "error": str(exc)})
+            raise
+        summary = result if isinstance(result, dict) else {}
+        ok = int(summary.get("ok") or 0)
+        failed = int(summary.get("failed") or 0)
+        stale = int(summary.get("stale") or 0)
+        # 部分成功（有失败或有陈旧）也是**要看得见**的状态，不能压成 ok。
+        status = "ok" if not (failed or stale) else ("error" if not ok else "partial")
+        record_run(STREAM_SYNC_BARS, status=status, detail=_detail(job, summary))
+        return result
+
+    return _run
 
 
 # ---------------------------------------------------------- fundamentals
@@ -235,16 +284,47 @@ def _classic_screen_runner(params: dict) -> Runner:
             codes, period=period, adjust=adjust, policy_str=policy,
             offline=bool(params.get("offline")), lite=True)
 
+        # ★ 护栏：「扫了 0 只」不是「今天没选出票」，是**根本没拿到数据**。
+        #   此前这里会一路跑到 run_classic，返回 total_hits=0 并报成功 ——
+        #   用户看到的是「今天行情不好」，而真相是日线同步没跑成（本项目
+        #   「假成功」家族：流程跑完了，数据没动）。必须让它**失败并留下原因**。
+        if not bars_map:
+            raise RuntimeError(
+                f"选股未取得任何 K 线（股票池 {len(codes)} 只，数据源 {report.provider_used or '无'}）："
+                "请先运行「定时更新日线」任务或连接券商数据源后再试"
+                + (f"；降级原因：{report.degraded_reason}" if report.degraded_reason else ""))
+
         results: dict[str, list] = {}
         for sid in strategies:
             # 全池逐只形态识别是纯 CPU ⇒ 必须移出事件循环
             results[sid] = await _asyncio.to_thread(
                 run_classic, bars_map, sid, params.get("classic_params"), limit)
 
+        total_hits = sum(len(v) for v in results.values())
+        # ★ 落库：定时选股的结果必须**有稳定的界面**。此前只存在于本作业的返回值里，
+        #   用户只能去「任务运行时」翻一个巨大的 JSON 字段，翻不到就等于没有 ——
+        #   「每天收盘后自动选股」这条链路事实上是跑给日志看的。
+        from app.screener.picks import bars_last_date, save_run
+
+        saved = save_run(
+            results=results, scanned=len(bars_map), source="schedule",
+            job_id=str(job.get("id") or job.get("job_id") or ""),
+            bar_date=bars_last_date(bars_map),
+            degraded=bool(report.degraded),
+            degraded_reason=report.degraded_reason or "",
+        )
+
         return {
             "strategies": strategies,
             "scanned": len(bars_map),
-            "total_hits": sum(len(v) for v in results.values()),
+            "total_hits": total_hits,
+            # ★ 「命中 0 只」必须与「扫了 0 只」区分开：这里显式给出结论，
+            #   让结果展开时一眼看出是「行情不好」还是「数据没到位」。
+            "conclusion": ("无命中（行情形态不满足）" if total_hits == 0
+                           else f"命中 {total_hits} 只"),
+            "run_id": saved.get("run_id", ""),
+            "saved": saved.get("saved", 0),
+            "bar_date": bars_last_date(bars_map),
             "results": results,
             "provider": report.provider_used,
             "degraded": report.degraded,

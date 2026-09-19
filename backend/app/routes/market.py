@@ -20,6 +20,8 @@ from app.services.market import (
     quote_error,
 )
 from app.services.market import aggregates as msvc
+# V11 §5.3 F：同步状态落库（「上次同步跑成什么样」跨重启可见）
+from app.sync.state import STREAM_MARKET_SYNC, STREAM_SYNC_BARS, last_run
 
 # 这两个常量定义在 common.py；此前经 aggregates 隐式 re-export 使用，
 # 2026-09-08 改为从源头直接导入，消除「删掉 aggregates 的未使用导入就断」的脆弱耦合。
@@ -648,10 +650,46 @@ async def kline_sync_status(ctx: AppContext = Depends(get_ctx)):
             "hot_days": "market.hot_days",
         },
         "last_run": getattr(ctx, "_market_sync_last", None),
+        # ★ 落库版的上次运行（V11 §5.3 F）。内存里的 last_run **重启即丢**，
+        #   而用户判断「今天的数据到底同步了没有」正是在重启之后。
+        #   两者并存：内存版更实时（刚跑完立刻可见），落库版跨重启可查。
+        "last_run_persisted": last_run(STREAM_MARKET_SYNC),
         "hot": hot,
         "config": rc.all().get("market.sync.enabled") if rc else None,
     }
     return ok(info)
+
+
+@router.get("/market/coverage")
+async def market_coverage(period: str = "1d", adjust: str = "qfq",
+                          lookback_days: int = 30, ctx: AppContext = Depends(get_ctx)):
+    """本地日线的**覆盖度报表**：每个交易日在库多少只 + 各数据源占比。
+
+    ★ 为什么要有这个端点：「上次同步 ok=5221」只说明**调用**成功了，不说明
+    数据**新到哪天** —— 源链「第一个非空即返回」时，券商本地历史停在一年前
+    也照样 ok（详见 docs 硬约束清单「非空≠够新」）。用户唯一能自查的办法就是
+    看「最近 N 个交易日，每天在库多少只」。因此这里如实返回 ``per_day``，
+    **不做任何填充**：某天缺失就是缺失，不能补成 0 也不能省略。
+    """
+    from datasource.quality import coverage_report
+    try:
+        rep = await asyncio.to_thread(
+            coverage_report, ctx.db, period=period, adjust=adjust,
+            lookback_days=max(1, min(int(lookback_days or 30), 250)))
+    except Exception as exc:  # noqa: BLE001 — 报表查询失败要说清原因，不返空表冒充「无数据」
+        return err(500, f"覆盖率报表查询失败：{exc}")
+    per_day = list(rep.get("per_day") or [])
+    # 回显查询口径：用户看到的「30 天 / qfq」必须是**实际用的**那一组，
+    # 而不是他自己以为的那一组（参数被兜底过就说明不了问题）。
+    rep["period"] = period
+    rep["adjust"] = adjust
+    rep["latest_day"] = per_day[0]["dt"] if per_day else ""
+    rep["latest_codes"] = per_day[0]["codes"] if per_day else 0
+    rep["days_with_data"] = len(per_day)
+    # 同步状态（落库）一并返回：覆盖度与「上次同步跑成什么样」必须放在一起看 ——
+    # 只给覆盖度，用户不知道是「没跑」还是「跑了但源没数据」。
+    rep["sync"] = last_run(STREAM_SYNC_BARS)
+    return ok(rep)
 
 
 @router.get("/market/datasets/snapshots")

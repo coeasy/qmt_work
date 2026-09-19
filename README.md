@@ -66,7 +66,7 @@
 
 ## 界面导航（6 分组 / 37 页）
 
-页面注册表 `frontend-next/src/app/routes.tsx` 的 `PAGES`（含 `status: "done" | "planned"`）是顶部菜单、命令面板的**单一真相来源**。6 大业务域、37 个页面入口（36 已实现，1 占位：分仓再平衡）。占位页会显式展示其后端契约，避免「看起来能用其实是空壳」。
+页面注册表 `frontend-next/src/app/routes.tsx` 的 `PAGES`（含 `status: "done" | "planned"`）是顶部菜单、命令面板的**单一真相来源**。6 大业务域、40 个页面（40 已实现，0 占位）。`menu: false` 的页面（报价牌 / K 线分析 / 分时图 / 盘口逐笔 / 成交明细）已合并进「行情工作台」，不再占主菜单入口，但页面仍注册、仍可用（入口在工作台头部的「独立打开」按钮组），并由 `tests/routes.test.ts` 强制要求每个隐藏页声明 `entryFrom`。占位页会显式展示其后端契约，避免「看起来能用其实是空壳」。
 
 | 分组 | 页面 |
 |------|------|
@@ -399,7 +399,7 @@ print(httpx.get(f"{BASE}/paper/positions", headers=HEAD).json())
 
 | 层级 | 命令 | 覆盖范围 |
 |------|------|----------|
-| 后端单测 | `cd backend && for f in tests/test_*.py; do python -m pytest "$f" -q -p no:cacheprovider; done` | 88 个 `test_*.py`，815 个用例 |
+| 后端单测 | `cd backend && for f in tests/test_*.py; do python -m pytest "$f" -q -p no:cacheprovider; done` | 131 个 `test_*.py`，1298 个用例 |
 | 后端冒烟 | `python backend/tests/smoke2.py` | REST 主要端点 + 错误语义（**需先起后端**；默认连 `data/app.db`，检测到真实券商连接时自动跳过 3 条「未连接券商 → 503」断言并提示改用下方客户端测试做权威验证） |
 | 前端类型检查 | `cd frontend-next && npm run typecheck` | TypeScript strict 零错误 |
 | 前端单测 | `cd frontend-next && npm test` | vitest |
@@ -467,7 +467,7 @@ qmt_work/
 │  ├─ connectors/ plugins/ sync/   # 外部连接器 / 插件内核 / WebSocket 同步引擎
 │  ├─ tools/ runtimes/  # 因子策略工具 / 捆绑 Python 运行时（cp311）
 │  ├─ data/ static/ dist/   # SQLite / 前端构建产物 / PyInstaller 产物
-│  ├─ tests/            # 88 个 test_*.py（815 用例）+ 冒烟测试 smoke2.py
+│  ├─ tests/            # 131 个 test_*.py（1298 用例）+ 冒烟测试 smoke2.py
 │  ├─ scripts/          # 门禁脚本（许可 / 能力漂移 / 契约生成 / 架构校验）
 │  └─ build_exe.py      # EXE 打包脚本（含 static 闸门）
 ├─ frontend-next/         # 主前端：React 18 + Vite 5 + TS 5 strict（已退役旧 frontend/）

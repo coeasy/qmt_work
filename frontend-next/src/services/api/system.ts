@@ -393,6 +393,50 @@ export interface NlScreenResult {
 }
 
 /**
+ * 一次选股运行的可信度元数据（`screen_runs` 表，GET /market/screen/classic/picks）。
+ *
+ * ★ 这几个字段不是装饰：`hits === 0` 时它们是**唯一**能区分
+ * 「行情不好所以没选中」与「根本没扫到数据（同步没跑成）」的依据。
+ */
+export interface ScreenRunMeta {
+  run_id: string;
+  /** manual（界面手动跑）/ schedule（定时任务） */
+  source: string;
+  job_id: string;
+  strategies: string[];
+  hits: number;
+  /** 本次扫描了多少只；**0 表示根本没拿到数据**，不是「没选中」 */
+  scanned: number;
+  /** 命中所依据的日线截至日 YYYYMMDD（★ 非空 ≠ 够新）；解析不了为空串 */
+  bar_date: string;
+  degraded: boolean;
+  degraded_reason: string;
+  /** 命中过多被截断（只落了前 N 条） */
+  truncated: boolean;
+  created_at: string;
+}
+
+/** 一条命中（含「为什么选中它」的 reason 与其余策略明细）。 */
+export interface ScreenPick {
+  strategy: string;
+  code: string;
+  name: string;
+  close: number | null;
+  change_pct: number | null;
+  score: number | null;
+  reason: string;
+  detail: Record<string, unknown>;
+}
+
+/** GET /market/screen/classic/picks 的返回体。 */
+export interface ClassicPicksResponse {
+  /** null = 库里还没有任何选股记录（界面须显示「尚未跑过」，不是空表格） */
+  run: ScreenRunMeta | null;
+  picks: ScreenPick[];
+  available_runs: ScreenRunMeta[];
+}
+
+/**
  * 选股 API。路径与 backend/app/routes/screen.py 对应。
  *
  * ★ 契约修正（相对初版）：
@@ -412,6 +456,24 @@ export const screenApi = {
   /** 经典策略清单（用于下拉与参数表单） */
   strategies: () =>
     http.get<{ items: ClassicStrategy[]; count: number }>("/market/screen/strategies"),
+
+  /**
+   * 最近一次（或指定 `run_id`）的选股结果 —— 「自动选股」页签的数据源。
+   *
+   * ★ 为什么需要它：定时选股跑完之后，用户此前只能去「任务运行时」翻一个巨大的
+   *   JSON 结果字段，翻不到就等于没有。本接口让结果**有稳定的界面**。
+   *   `run` 为 null 表示**从未跑过**（显示「尚未跑过选股」，不是空表格 ——
+   *   空表格会被读成「今天没选出票」）。
+   */
+  classicPicks: (opts: { runId?: string; strategy?: string; source?: string; limit?: number } = {}) =>
+    http.get<ClassicPicksResponse>("/market/screen/classic/picks", {
+      query: {
+        run_id: opts.runId ?? "",
+        strategy: opts.strategy ?? "",
+        source: opts.source ?? "",
+        limit: opts.limit ?? 500,
+      },
+    }),
 
   /** 经典策略选股（多策略批量，与定时任务 system.classic_screen 同一内核） */
   classic: (body: {
@@ -433,6 +495,8 @@ export const screenApi = {
       degraded: boolean;
       degraded_reason?: string;
       provenance: Record<string, unknown>;
+      /** 本次落库的运行摘要（run_id 可用于「自动选股」页签定位） */
+      run?: { run_id: string; saved: number; total_hits: number; error?: string };
     }>("/market/screen/classic", body),
 
   /** 公式 DSL 选股（如 "C > MA(20) AND RSI(14) < 30"） */

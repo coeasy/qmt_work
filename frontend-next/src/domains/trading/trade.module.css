@@ -27,6 +27,33 @@
   gap: var(--sp-2);
 }
 
+/*
+ * 紧凑模式：行情工作台底部坞里用。
+ * 工作台是**横向**布局（宽而矮），竖排表单会被拉成「一行一个控件」的细长条；
+ * 改成自适应多列网格，一行能并排放 2–3 个字段，高度减半。
+ * 提示条 / 行情行 / 预估 / 按钮区必须跨满整行，否则会被塞进某一列里挤成一团。
+ */
+.formCompact {
+  padding: var(--sp-2);
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: var(--sp-1) var(--sp-2);
+  align-items: center;
+}
+
+.formCompact .quoteLine,
+.formCompact .warnBar,
+.formCompact .est,
+.formCompact .banner,
+.formCompact .actions {
+  grid-column: 1 / -1;
+}
+
+.formCompact .actions {
+  flex-direction: row;
+  padding-top: 0;
+}
+
 .sideGroup {
   display: flex;
   gap: var(--sp-2);

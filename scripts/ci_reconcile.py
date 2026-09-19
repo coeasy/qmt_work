@@ -31,11 +31,12 @@ BACKEND = os.path.join(ROOT, "backend")
 FRONTEND = os.path.join(ROOT, "frontend-next")
 SRC = os.path.join(FRONTEND, "src")
 PAGES_REGISTRY = os.path.join(SRC, "app", "routes.tsx")
+README = os.path.join(ROOT, "README.md")
 
 # ── 计数契约（与 README「核心能力」「项目结构」章节同步）─────────────────────
-EXPECTED_TESTS = 1237          # 后端用例收集数
-EXPECTED_COMPONENTS = 61     # 前端 .tsx 组件数（components + shell + charts + domains）
-EXPECTED_PAGES = 38          # 注册页数量（routes.tsx PAGES 键；含占位）
+EXPECTED_TESTS = 1298          # 后端用例收集数
+EXPECTED_COMPONENTS = 67     # 前端 .tsx 组件数（components + shell + charts + domains）
+EXPECTED_PAGES = 40          # 注册页数量（routes.tsx PAGES 键；含占位）
 
 # ── 收集失败时允许跳过的辅助模块（非测试）────────────────────────────────────
 _SKIP_FILES = {"smoke2.py", "fake_bridge_server.py", "_phase4_support.py",
@@ -140,6 +141,36 @@ def count_pages() -> int:
     return len(re.findall(r"(?m)^\s{2,6}([a-z][a-z0-9_]*)\s*:\s*\{", body))
 
 
+def check_readme_numbers(tests: int, pages: int) -> list[str]:
+    """README 里的**计数声明**必须与实测一致 —— README 漂移门禁。
+
+    ★ 为什么必须自动核：README 曾长期声称「37 个页面入口（36 已实现，1 占位：分仓再平衡）」，
+    而实际早已是 38 个且全部 ``status: "done"``；测试文件数与用例数同样停在很早以前。
+    根因是门禁只核 ``EXPECTED_*`` 常量，**没人核 README 本身** —— 于是文档可以无限期地
+    说错话。文档说谎比没有文档更糟：读者会照着它做判断。
+
+    只在 README 里**确实写了**该数字时才比对（缺了不算错，避免门禁变成格式检查）。
+    """
+    if not os.path.isfile(README):
+        return [f"缺少 README：{README}"]
+    text = open(README, encoding="utf-8").read()
+    problems: list[str] = []
+
+    m = re.search(r"(\d+)\s*个页面", text)
+    if m and int(m.group(1)) != pages:
+        problems.append(f"README 称「{m.group(1)} 个页面」，实测 {pages} 个")
+
+    m = re.search(r"(\d+)\s*个\s*`test_\*\.py`\s*[，,]\s*(\d+)\s*个用例", text)
+    if m:
+        n_files = len(glob.glob(os.path.join(BACKEND, "tests", "test_*.py")))
+        if int(m.group(1)) != n_files:
+            problems.append(f"README 称「{m.group(1)} 个 test_*.py」，实测 {n_files} 个")
+        # pytest 不可用时 tests 为 0，跳过（否则会误报）
+        if tests and int(m.group(2)) != tests:
+            problems.append(f"README 称「{m.group(2)} 个用例」，实测收集 {tests} 个")
+    return problems
+
+
 def _self_update(tests: int, components: int, pages: int) -> None:
     """把实测值回写本文件的期望常量。"""
     path = os.path.abspath(__file__)
@@ -188,6 +219,16 @@ def main() -> int:
         if actual != expected:
             ok = False
             print(f"     → {hint}；执行 `python scripts/ci_reconcile.py --update` 可回写期望值")
+
+    # README 里写死的计数同样要核（否则文档可以无限期地说错话）
+    readme_problems = check_readme_numbers(tests, pages)
+    if readme_problems:
+        ok = False
+        for p in readme_problems:
+            print(f"[✗] README: {p}")
+        print("     → 请更新 README 对应数字（或删掉该处数字声明）")
+    else:
+        print("[✓] README 计数声明与实测一致")
 
     if not ok:
         print("RECONCILE FAILED")

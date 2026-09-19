@@ -53,10 +53,10 @@ class _KC:
         return self._series
 
 
-def _mk(series=None, **cfg):
+def _mk(series=None, recorder=None, **cfg):
     st = SimpleNamespace(kline_cache=_KC(series), _market_sync_last=None)
     rc = _Cfg(**cfg)
-    ms = MarketSync(st, rc, interval=10)
+    ms = MarketSync(st, rc, interval=10, state_recorder=recorder)
     return ms, st, rc
 
 
@@ -233,3 +233,120 @@ def test_refresh_hot_filters_periods(monkeypatch):
                         lambda *a, **k: None)
     _run(ms._refresh_hot())
     assert st._market_sync_last["codes"] == 2        # 仅 1d/1w 进入刷新集
+
+
+# ------------------------------------------------ 同步状态落库（V11 §5.3 F）
+# 动机：结果原先只写在内存 ``_market_sync_last`` 里，**重启即丢** —— 而用户判断
+# 「今天的数据到底同步了没有」恰恰是在重启之后。且只有成功的运行留痕，
+# 「今天没跑」与「跑了但失败」在界面上长得一模一样。
+
+class _Rec:
+    """state_recorder 桩：记录每次回调的 (status, detail)。"""
+
+    def __init__(self, raise_exc=None):
+        self.calls = []
+        self._raise = raise_exc
+
+    def __call__(self, *, status, detail):
+        self.calls.append((status, detail))
+        if self._raise is not None:
+            raise self._raise
+
+    @property
+    def last(self):
+        return self.calls[-1] if self.calls else (None, None)
+
+
+def _fetch_stub(monkeypatch, fail_codes=()):
+    async def _fake(code, period, count, force=False):
+        if code in fail_codes:
+            raise RuntimeError("boom")
+    monkeypatch.setattr("tools.fetch_kline_cached", _fake)
+
+
+def test_refresh_hot_records_ok(monkeypatch):
+    series = [{"code": f"600{100+i:03d}.SH", "period": "1d"} for i in range(3)]
+    rec = _Rec()
+    ms, st, _ = _mk(series=series, recorder=rec, market={"sync": {"enabled": True}})
+    _fetch_stub(monkeypatch)
+    _run(ms._refresh_hot())
+    status, detail = rec.last
+    assert status == "ok"
+    assert (detail["codes"], detail["ok"], detail["fail"]) == (3, 3, 0)
+    assert detail["mode"] == "market.sync" and detail["summary"]
+
+
+def test_refresh_hot_records_partial(monkeypatch):
+    """部分失败不能压成 ok —— 那会让「几只没刷上」永远看不见。"""
+    series = [{"code": f"600{100+i:03d}.SH", "period": "1d"} for i in range(4)]
+    rec = _Rec()
+    ms, st, _ = _mk(series=series, recorder=rec, market={"sync": {"enabled": True}})
+    _fetch_stub(monkeypatch, fail_codes={"600100.SH"})
+    _run(ms._refresh_hot())
+    status, detail = rec.last
+    assert status == "partial"
+    assert (detail["ok"], detail["fail"]) == (3, 1)
+
+
+def test_refresh_hot_records_error_when_all_fail(monkeypatch):
+    series = [{"code": "600100.SH", "period": "1d"}]
+    rec = _Rec()
+    ms, st, _ = _mk(series=series, recorder=rec, market={"sync": {"enabled": True}})
+    _fetch_stub(monkeypatch, fail_codes={"600100.SH"})
+    _run(ms._refresh_hot())
+    assert rec.last[0] == "error"
+
+
+def test_refresh_hot_records_skipped_when_no_series(monkeypatch):
+    """★ 「热表里没有可刷新的序列」必须可见。
+
+    这不是「行情不好」，而是从没同步过 / 序列已全部滚进冷仓 —— 沉默地 return
+    会让用户面对一个永远静止的界面而无从判断。
+    """
+    rec = _Rec()
+    ms, st, _ = _mk(series=[], recorder=rec, market={"sync": {"enabled": True}})
+    _run(ms._refresh_hot())
+    status, detail = rec.last
+    assert status == "skipped"
+    assert detail["codes"] == 0 and "热表" in detail["reason"]
+
+
+def test_refresh_hot_records_skipped_when_no_cache():
+    rec = _Rec()
+    ms = MarketSync(SimpleNamespace(kline_cache=None), _Cfg(), interval=10,
+                    state_recorder=rec)
+    _run(ms._refresh_hot())
+    assert rec.last[0] == "skipped"
+
+
+def test_refresh_hot_records_error_when_hot_series_raises(monkeypatch):
+    rec = _Rec()
+    ms, st, _ = _mk(recorder=rec, market={"sync": {"enabled": True}})
+
+    def _boom():
+        raise RuntimeError("db locked")
+
+    monkeypatch.setattr(st.kline_cache, "hot_series", _boom)
+    _run(ms._refresh_hot())
+    status, detail = rec.last
+    assert status == "error" and "db locked" in detail["reason"]
+
+
+def test_recorder_exception_never_breaks_refresh(monkeypatch):
+    """★ 记录失败绝不能把同步带崩：状态落库是观测增强项，不是同步的前置条件。"""
+    series = [{"code": "600100.SH", "period": "1d"}]
+    rec = _Rec(raise_exc=RuntimeError("sync_state 表不存在"))
+    ms, st, _ = _mk(series=series, recorder=rec, market={"sync": {"enabled": True}})
+    _fetch_stub(monkeypatch)
+    _run(ms._refresh_hot())
+    assert st._market_sync_last["ok"] == 1          # 内存态照旧写入
+    assert rec.calls, "回调确实被调用过（只是它自己炸了）"
+
+
+def test_no_recorder_is_a_valid_degraded_mode(monkeypatch):
+    """未注入回调（装配失败）时静默降级，不影响刷新。"""
+    series = [{"code": "600100.SH", "period": "1d"}]
+    ms, st, _ = _mk(series=series, market={"sync": {"enabled": True}})
+    _fetch_stub(monkeypatch)
+    _run(ms._refresh_hot())
+    assert st._market_sync_last["ok"] == 1

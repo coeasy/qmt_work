@@ -264,11 +264,50 @@ export interface L2Transaction {
 }
 
 /**
+ * 一条**落库的**同步运行记录（`sync_state` 表）。
+ *
+ * ★ 与内存里的 `last_run` 的区别：内存版重启即丢，而用户判断「今天的数据到底
+ * 同步了没有」恰恰是在重启之后。落库版还带 `detail`，能说清跑了几只、成功几只、
+ * 数据截至哪天。`status` 四态：`ok` / `partial` / `error` / `skipped` ——
+ * **skipped 不是失败**（如「热表内无日线序列」），但同样必须看得见。
+ */
+export interface SyncRunRecord {
+  stream: string;
+  /** 该流最近一次运行的时间戳（ISO） */
+  last_ts?: string;
+  status?: string;
+  detail?: {
+    mode?: string;
+    reason?: string;
+    error?: string;
+    summary?: string;
+    date?: string;
+    job_id?: string;
+    codes?: number;
+    ok?: number;
+    fail?: number;
+    total?: number;
+    failed?: number;
+    stale?: number;
+    bars_written?: number;
+    as_of_max?: string;
+    elapsed_ms?: number;
+    hot_days?: number;
+    count_per_code?: number;
+    errors?: Array<{ code?: string; error?: string }>;
+    errors_truncated?: number;
+    params?: Record<string, unknown>;
+    [k: string]: unknown;
+  };
+}
+
+/**
  * `/market/kline/sync-status` 返回体 —— 「每日定时下载 K 线 + 冷热分层」的观测面。
  *
  * 前端据此能如实告诉用户「今日已同步 / 待同步 / 未启用」以及冷热怎么分的，
  * 而不是只给一个开关（开关开着不代表今天跑过）。
- * `last_run` 只在**本进程**跑过之后才有值（重启后为空，属正常）。
+ * `last_run` 只在**本进程**跑过之后才有值（重启后为空，属正常）；
+ * 重启后要看历史请用 `last_run_persisted`。
  */
 export interface KlineSyncStatus {
   initialized: boolean;
@@ -285,6 +324,11 @@ export interface KlineSyncStatus {
     hot_days?: number;
     count_per_code?: number;
   } | null;
+  /**
+   * 落库版的上次运行（跨重启可查）。
+   * `null` 表示**从未跑过** —— 与「跑过但失败」（`status: "error"`）是两件事。
+   */
+  last_run_persisted?: SyncRunRecord | null;
   hot?: {
     /** 热窗口天数（自然日，默认 92 ≈ 3 个月） */
     hot_days?: number;
@@ -295,6 +339,29 @@ export interface KlineSyncStatus {
     cold_enabled?: boolean;
     cold_path?: string;
   };
+}
+
+/**
+ * `/market/coverage` 返回体 —— 本地日线的**覆盖度报表**。
+ *
+ * ★ 这是「非空≠够新」这条硬约束唯一能让用户自查的出口：`last_run.ok=5221`
+ * 只说明**调用**成功，不说明数据**新到哪天**。所以 `per_day` 如实返回
+ * 「最近 N 个交易日每天在库多少只」，缺的日子**不出现**（不补 0 冒充）。
+ */
+export interface MarketCoverage {
+  period: string;
+  adjust: string;
+  lookback_days: number;
+  /** 每个交易日在库的 code 数，按 dt 降序；缺失的日子不在列表里 */
+  per_day: Array<{ dt: string; codes: number }>;
+  provider_share: Array<{ provider_id: string; bars: number; share: number }>;
+  universe_size: number | null;
+  /** 有数据的最新交易日（`""` = 一个都没有） */
+  latest_day: string;
+  latest_codes: number;
+  days_with_data: number;
+  /** `system.sync_bars` 的落库运行记录（`null` = 从未跑过） */
+  sync: SyncRunRecord | null;
 }
 
 /** `/market/kline/cache` 返回体（KlineCache.stats 的口径） */
@@ -473,4 +540,14 @@ export const marketApi = {
   klineSyncStatus: () => http.get<KlineSyncStatus>("/market/kline/sync-status"),
 
   klineCacheStats: () => http.get<KlineCacheStats>("/market/kline/cache"),
+
+  /** 本地日线覆盖度报表（「数据到底新到哪天」的唯一自查出口） */
+  coverage: (opts: { period?: string; adjust?: string; lookbackDays?: number } = {}) =>
+    http.get<MarketCoverage>("/market/coverage", {
+      query: {
+        period: opts.period ?? "1d",
+        adjust: opts.adjust ?? "qfq",
+        lookback_days: opts.lookbackDays ?? 30,
+      },
+    }),
 };

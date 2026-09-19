@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { MENU, PAGES, pageLabel } from "@/app/routes";
+import { MENU, PAGES, pageLabel, visibleMenuItems } from "@/app/routes";
 import { useWorkspaceStore } from "@/stores/workspace";
 import { marketApi } from "@/services/api";
 import { normalizeCode } from "@/shared/format";
@@ -51,7 +51,8 @@ export function MenuBar() {
           </button>
           {openKey === g.key && (
             <div className={s.menuDrop} role="menu">
-              {g.items.map((k) => {
+              {/* ★ 走 visibleMenuItems：menu:false 的页面（已合并进上层页面）不重复列出 */}
+              {visibleMenuItems(g).map((k) => {
                 const def = PAGES[k];
                 if (!def) return null;
                 return (

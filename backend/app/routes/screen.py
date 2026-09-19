@@ -22,6 +22,7 @@ from fastapi import APIRouter
 from app.routes._common import audit_log, err, ok
 from app.screener.classic import STRATEGY_IDS, list_strategies, run_classic
 from app.screener.engine import list_saved_boards, save_as_board, scan_async
+from app.screener.picks import bars_last_date, save_run
 
 router = APIRouter()
 
@@ -213,6 +214,14 @@ async def market_screen_classic(body: Dict[str, Any]):
                 run_classic, bars_map, sid, one or None, limit)
     except (ValueError, RuntimeError) as exc:
         return err(400 if isinstance(exc, ValueError) else 503, str(exc))
+    # ★ 落库：手动选股的结果也必须留下（关掉页面就没了 ⇒ 第二天想看「昨天选出来什么」
+    #   只能重跑，而重跑用的是**今天**的行情，结果自然不同）。
+    saved = save_run(
+        results=results, scanned=len(bars_map), source="manual",
+        bar_date=bars_last_date(bars_map),
+        degraded=bool(report.degraded),
+        degraded_reason=report.degraded_reason or "",
+    )
     return ok({
         "strategies": strategies,
         "scanned": len(bars_map),
@@ -221,7 +230,31 @@ async def market_screen_classic(body: Dict[str, Any]):
         "degraded": report.degraded,
         "degraded_reason": report.degraded_reason or "",
         "provenance": report.to_provenance(),
+        "run": saved,
     })
+
+
+@router.get("/market/screen/classic/picks")
+async def market_screen_classic_picks(run_id: str = "", strategy: str = "",
+                                      source: str = "", limit: int = 500):
+    """最近一次（或指定 ``run_id``）的选股结果 —— 「自动选股」页签的数据源。
+
+    ★ 为什么需要它：定时选股 ``system.classic_screen`` 跑完之后，用户此前只能去
+    「任务运行时」翻一个巨大的 JSON 结果字段，翻不到就等于没有。本端点让结果
+    **有稳定的界面**：按运行批次查看命中、命中理由、以及**可信度元数据**
+    （``scanned`` / ``bar_date`` / ``degraded_*``）。
+
+    ``run_id`` 为空 → 取最近一次运行；库里没有任何记录 → ``run: null``
+    （前端显示「尚未跑过选股」，**不是**空表格 —— 空表格会被读成「今天没选出票」）。
+    """
+    from app.screener.picks import picks_of_run
+
+    try:
+        out = picks_of_run(run_id, strategy=strategy,
+                           limit=int(limit or 500), source=source)
+    except Exception as exc:  # noqa: BLE001
+        return err(500, f"读取选股结果失败：{exc}")
+    return ok(out)
 
 
 @router.post("/market/screen/expr")

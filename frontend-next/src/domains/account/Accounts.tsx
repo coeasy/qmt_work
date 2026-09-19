@@ -1,28 +1,28 @@
-import { Fragment, useMemo, useState } from "react";
-import {
-  Badge,
-  Button,
-  DataTable,
-  EmptyState,
-  Panel,
-  Spinner,
-  type Column,
-} from "@/design/primitives";
+import { useState } from "react";
+import { Button, EmptyState, Panel, Spinner, type Column, DataTable, Badge } from "@/design/primitives";
 import { accountApi } from "@/services/api";
 import { useAsync } from "@/hooks/useAsync";
-import { useLiveQuotes } from "@/hooks/useLiveQuotes";
-import { fmtMoney, fmtPct, fmtPrice, toneColor } from "@/shared/format";
+import { fmtMoney } from "@/shared/format";
 import type { AccountGrid, AccountGridPosition, AccountGridRow } from "@/shared/types";
+import {
+  AssetSummaryCards,
+  ConnBadge,
+  CrossAccountPositions,
+  PositionDistribution,
+} from "./AssetSummary";
 import s from "../domain.module.css";
 
 /**
  * 多账户网格（统一看板）。
  *
  * ★ 契约要点（account.py:account_grid）：
- *   - 返回 {account_count, connected_count, total_*, accounts:[...], positions:[...], generated_at}
+ *   - 返回 {account_count, connected_count, total_*, total_profit, accounts, positions, generated_at}
  *   - **未连接的账户也会列出**，其 error 字段说明原因（这是运维视图，不是只列健康的）
  *   - 跨账户持仓按标的汇总，accounts 子数组给出每个账户的分量
  *   - 完全无连接时后端返回 503（err(503, "尚未添加任何券商连接…")）
+ *
+ * ★ 汇总卡与跨账户持仓表已抽到 `./AssetSummary`，与仪表盘共用同一份实现 ——
+ *   两页各自 `reduce` 求和曾导致「同一时刻两个总资产」。
  */
 export function Accounts() {
   const grid = useAsync<AccountGrid>(() => accountApi.grid(), []);
@@ -54,12 +54,19 @@ export function Accounts() {
       key: "st",
       header: "状态",
       width: 72,
-      render: (r) =>
-        r.connected ? <Badge tone="success">已连接</Badge> : <Badge tone="danger">未连接</Badge>,
+      render: (r) => <ConnBadge connected={r.connected} />,
     },
     { key: "assets", header: "总资产", width: 110, align: "right", mono: true, render: (r) => fmtMoney(r.assets) },
     { key: "cash", header: "可用资金", width: 110, align: "right", mono: true, render: (r) => fmtMoney(r.cash) },
     { key: "mv", header: "持仓市值", width: 110, align: "right", mono: true, render: (r) => fmtMoney(r.market_value) },
+    {
+      key: "pnl",
+      header: "浮动盈亏",
+      width: 110,
+      align: "right",
+      mono: true,
+      render: (r) => (r.profit === null || r.profit === undefined ? <span className={s.muted}>—</span> : fmtMoney(r.profit)),
+    },
     { key: "pos", header: "持仓数", width: 68, align: "right", mono: true, render: (r) => String(r.position_count) },
     { key: "ord", header: "委托", width: 62, align: "right", mono: true, render: (r) => String(r.order_count) },
     { key: "deal", header: "成交", width: 62, align: "right", mono: true, render: (r) => String(r.deal_count) },
@@ -67,64 +74,6 @@ export function Accounts() {
       key: "err",
       header: "错误",
       render: (r) => (r.error ? <span style={{ color: "var(--danger)" }}>{r.error}</span> : <span className={s.muted}>—</span>),
-    },
-  ];
-
-  // 汇总持仓同样只在**查询那一刻**有市值 ⇒ 叠加实时行情，并按最新价重算合计市值。
-  const posCodes = useMemo(() => (data?.positions ?? []).map((p) => p.code), [data?.positions]);
-  const posQuotes = useLiveQuotes(posCodes);
-  const lastPrice = (r: AccountGridPosition): number | undefined => {
-    const q = posQuotes[r.code]?.price;
-    if (q !== undefined && q > 0) return q;
-    // 后端没给现价字段，只能由市值/股数反推，且仅在数据自洽时（volume>0）才可信
-    return r.total_volume > 0 ? r.total_market_value / r.total_volume : undefined;
-  };
-
-  const positionCols: Column<AccountGridPosition>[] = [
-    { key: "code", header: "代码", width: 100, mono: true, render: (r) => r.code },
-    { key: "name", header: "名称", width: 100, render: (r) => r.name || "--" },
-    {
-      key: "last",
-      header: "最新价",
-      width: 84,
-      align: "right",
-      mono: true,
-      render: (r) => fmtPrice(lastPrice(r)),
-    },
-    {
-      key: "chg",
-      header: "涨跌幅",
-      width: 82,
-      align: "right",
-      mono: true,
-      render: (r) => {
-        const pct = posQuotes[r.code]?.change_pct;
-        return <span style={{ color: toneColor(pct) }}>{fmtPct(pct)}</span>;
-      },
-    },
-    { key: "vol", header: "合计持仓", width: 100, align: "right", mono: true, render: (r) => String(r.total_volume) },
-    {
-      key: "mv",
-      header: "合计市值",
-      width: 120,
-      align: "right",
-      mono: true,
-      // 有实时价就按最新价重算（市值是价格的即时函数），否则用后端快照
-      render: (r) => {
-        const p = lastPrice(r);
-        return fmtMoney(p !== undefined && p > 0 ? p * r.total_volume : r.total_market_value);
-      },
-    },
-    { key: "n", header: "分布账户", width: 90, align: "right", mono: true, render: (r) => `${r.accounts.length} 个` },
-    {
-      key: "act",
-      header: "操作",
-      width: 80,
-      render: (r) => (
-        <Button size="sm" variant="ghost" onClick={() => setSelected(r)}>
-          查看分布
-        </Button>
-      ),
     },
   ];
 
@@ -160,25 +109,7 @@ export function Accounts() {
         <Spinner label="加载账户网格…" />
       ) : data ? (
         <>
-          <div className={s.stats}>
-            <div className={s.stat}>
-              <span className={s.statLabel}>账户总数</span>
-              <span className={s.statValue}>{data.account_count}</span>
-              <span className={s.statSub}>已连接 {data.connected_count}</span>
-            </div>
-            <div className={s.stat}>
-              <span className={s.statLabel}>总资产</span>
-              <span className={s.statValue}>{fmtMoney(data.total_assets)}</span>
-            </div>
-            <div className={s.stat}>
-              <span className={s.statLabel}>可用资金合计</span>
-              <span className={s.statValue}>{fmtMoney(data.total_cash)}</span>
-            </div>
-            <div className={s.stat}>
-              <span className={s.statLabel}>持仓市值合计</span>
-              <span className={s.statValue}>{fmtMoney(data.total_market_value)}</span>
-            </div>
-          </div>
+          <AssetSummaryCards grid={data} loading={grid.loading} />
 
           <Panel flush title="逐账户指标" className={s.grow}>
             <div className={s.tableArea}>
@@ -198,40 +129,29 @@ export function Accounts() {
             </div>
           </Panel>
 
-          <Panel flush title={`跨账户持仓汇总（${data.positions.length}）`} className={s.grow}>
+          <Panel
+            flush
+            title={`跨账户持仓汇总（${data.positions.length}）`}
+            className={s.grow}
+            extra={<Badge tone="neutral">按标的合并</Badge>}
+          >
             <div className={s.tableArea}>
-              {data.positions.length === 0 ? (
-                <EmptyState text="无跨账户持仓" />
-              ) : (
-                <DataTable
-                  columns={positionCols}
-                  rows={data.positions}
-                  rowKey={(r) => r.code}
-                  rowHeight={24}
-                />
-              )}
+              <CrossAccountPositions positions={data.positions} onInspect={setSelected} />
             </div>
           </Panel>
         </>
       ) : null}
 
       {selected && (
-        <Panel title={`持仓分布 · ${selected.code} ${selected.name}`} extra={<Button size="sm" variant="ghost" onClick={() => setSelected(null)}>关闭</Button>}>
-          <div className={s.kv}>
-            {selected.accounts.map((a) => (
-              <Fragment key={a.conn_id}>
-                <span className={s.kvKey}>{a.name || a.conn_id}</span>
-                <span className={s.kvVal}>
-                  <span className={s.mono}>{a.volume}</span> 股 · 市值{" "}
-                  <span className={s.mono}>{fmtPrice(a.market_value)}</span>
-                </span>
-              </Fragment>
-            ))}
-          </div>
-          <div className={s.note} style={{ marginTop: 8 }}>
-            合计持仓 <span className={s.mono}>{selected.total_volume}</span> 股，合计市值{" "}
-            <span className={s.mono}>{fmtMoney(selected.total_market_value)}</span>
-          </div>
+        <Panel
+          title={`持仓分布 · ${selected.code} ${selected.name}`}
+          extra={
+            <Button size="sm" variant="ghost" onClick={() => setSelected(null)}>
+              关闭
+            </Button>
+          }
+        >
+          <PositionDistribution position={selected} />
         </Panel>
       )}
     </div>

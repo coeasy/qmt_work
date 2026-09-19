@@ -61,9 +61,19 @@ async def setup(app: FastAPI) -> dict:
             runner=sync_runner(params), priority=2, params=params)
     except Exception as exc:  # noqa: BLE001
         log.warning("EOD job_runtime 注入失败（将降级为 no-op）：%s", exc)
+    # ★ 同步状态落库回调（V11 §5.3 F）。`gateway` 是顶层包，不能直接 import app
+    #   （会重新引入 V10 A3 刚消除的反向依赖）⇒ 在此绑定后注入。
+    #   注入失败只影响「重启后还能看到上次同步结果」，不影响同步本身。
+    state_recorder = None
+    try:
+        from app.sync.state import STREAM_MARKET_SYNC, record_run
+        state_recorder = lambda **kw: record_run(STREAM_MARKET_SYNC, **kw)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("同步状态落库回调注入失败（已降级，同步不受影响）：%s", exc)
     state.market_sync = MarketSync(
         state, state.runtime_config,
-        job_runtime=job_runtime, sync_job_factory=sync_job_factory)
+        job_runtime=job_runtime, sync_job_factory=sync_job_factory,
+        state_recorder=state_recorder)
     await state.market_sync.start()
     log.info("market sync ready: enabled=%s sync_time=%s",
              state.market_sync.enabled, state.market_sync.sync_time)

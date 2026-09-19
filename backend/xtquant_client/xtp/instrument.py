@@ -155,13 +155,31 @@ class InstrumentMixin:
         if frame is None:
             return {"code": code, "detail": "无财务数据（数据权限或代码无效）"}
 
-        # 两种返回形态兼容：
-        # - pandas.DataFrame（新 SDK get_stock_financial）：取最后一行
-        # - 纯 dict（旧 SDK get_financial_data，形如 {报告期: {指标: 值}}）：取最后一个键
+        # 三种返回形态兼容（**朝向必须先判**，见下）：
+        # - pandas.DataFrame（新 SDK get_stock_financial）
+        # - 纯 dict（旧 SDK get_financial_data，形如 {报告期: {指标: 值}}）
+        #
+        # ★ 实测缺陷（2026-09-19，本机 xtquant）：`get_stock_financial` 返回的
+        # DataFrame **行是指标、列是报告期**（与「行=报告期」的直觉相反）。
+        # 原实现一律取 ``frame.iloc[-1]`` 当「最新一期」，于是把**最后一个指标名**
+        # 当成报告期 —— 实测 ``600519.SH`` 的 ``report_time`` 返回 ``"PARENT_NET"``
+        # （``PARENT_NETPROFIT`` 被 ``[:10]`` 截断），且 ``EPS/BPS/ROE`` 全为 ``None``
+        # ⇒ 估值维度（PE/PB）永远 ``unavailable``，界面上「基本面」永久空白。
+        #
+        # 判据不能靠「有没有 iloc」（两种朝向都有），只能看**索引里是不是指标名**。
         if hasattr(frame, "iloc"):
             if len(frame) == 0:
                 return {"code": code, "detail": "无财务数据（数据权限或代码无效）"}
-            row, report_time = frame.iloc[-1], str(frame.index[-1])[:10]
+            idx = [str(x) for x in list(frame.index)]
+            if set(idx) & set(fields):
+                # 转置朝向：行=指标，列=报告期 ⇒ 取最后一个报告期这一列
+                col = list(frame.columns)[-1] if len(frame.columns) else None
+                if col is None:
+                    return {"code": code, "detail": "无财务数据（数据权限或代码无效）"}
+                row, report_time = frame[col], str(col)[:10]
+            else:
+                # 常规朝向：行=报告期，列=指标
+                row, report_time = frame.iloc[-1], str(frame.index[-1])[:10]
         elif isinstance(frame, dict):
             items = list(frame.items())
             if not items:

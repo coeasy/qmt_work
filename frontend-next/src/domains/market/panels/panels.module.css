@@ -283,3 +283,120 @@
   color: var(--text);
   font-weight: 600;
 }
+
+/* ---- 工作台底部坞（基本信息 / 基本面 / 交易） ----
+ *
+ * 为什么是「底部坞」而不是再往右加一列：右侧栏只有 260–320px，塞不下第 5 个页签；
+ * 而中列（minmax(0,1fr)）宽度充裕，且「看盘 + 下单」本就该同屏 —— 图表在上、
+ * 下单/资料在下，视线不用横向跳。
+ */
+.dock {
+  flex: 0 0 auto;
+  max-height: 42%;
+  min-height: 150px;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.dockBody {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: var(--sp-2);
+}
+
+.dockCollapsed {
+  max-height: none;
+  min-height: 0;
+}
+
+/* ---- 面板内的说明条（降级原因 / 数据截至日） ---- */
+
+.panelNote {
+  padding: 2px var(--sp-2) var(--sp-1);
+  font-size: var(--font-xs);
+  color: var(--text-dim);
+  line-height: 1.5;
+}
+
+/* ---- 概念标签行 ---- */
+
+.chipRow {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.mono {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---- 基本面分区 ----
+ *
+ * 6 维各自成区并带 availability 角标：某一维「无数据」是**正常降级**（各维独立
+ * 超时容错），必须让用户看出是哪一维、以及为什么，而不是以为整个页面坏了。
+ */
+.sectionGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: var(--sp-2);
+}
+
+.section {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-2);
+  padding: var(--sp-2);
+  min-width: 0;
+}
+
+.sectionHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  font-size: var(--font-xs);
+  color: var(--text-dim);
+  margin-bottom: var(--sp-1);
+}
+
+.sectionEmpty {
+  font-size: var(--font-xs);
+  color: var(--text-faint);
+  line-height: 1.5;
+}
+
+.cellGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 2px 10px;
+}
+
+.cell {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 6px;
+  font-size: var(--font-xs);
+  min-width: 0;
+}
+
+.cellLabel {
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+
+.cellValue,
+.cellValueMono {
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cellValueMono {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
