@@ -287,7 +287,15 @@ DEFAULT_SCHEDULES: tuple[dict, ...] = (
         "kind": "system.sync_bars",
         "cron": "30 15 * * 1-5",          # 每交易日 15:30（收盘 15:00 之后）
         "name": "收盘后更新日线数据",
-        "params": {"period": "1d", "adjust": "qfq"},
+        # concurrency / lookback 用**实测验证过**的值（2026-09-19 全市场 5224 只）：
+        # - concurrency=4：券商补下载走的是本地 RPC，4 并发下全市场 7 分钟跑完
+        #   （ok=5221 / stale=4）。默认 8 在全市场量级未经实测，且在线源在
+        #   并发 32 时曾集体超时触发熔断 —— 批量同步宁慢勿炸。
+        # - lookback=120：足够覆盖全部内置策略（最长 high_tight_flag 的 60 日
+        #   回看 + MA20 + RPS 20 日），而默认 320 会把耗时翻近一倍。
+        #   窗口增量是幂等合并，缩短回看**不会**丢历史（旧数据不删除）。
+        "params": {"period": "1d", "adjust": "qfq",
+                   "concurrency": 4, "lookback": 120},
     },
     {
         "id": "sch-default-classic-screen",

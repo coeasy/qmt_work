@@ -59,6 +59,37 @@ def _val(bar: Any, name: str) -> Optional[float]:
         return None
 
 
+def _limit_pct(code: str, default: float) -> float:
+    """按**板块**返回涨跌停阈值（正数，单位 %）—— 20cm 板块的关键。
+
+    ★ 为什么不能写死 9.8（V11 R13）：A 股涨跌停幅度**按板块不同** ——
+    主板 ±10%、创业板(300/301)/科创板(688)/北交所 ±20%、ST ±5%。
+    项目里 :func:`datasource.board.limit_ratio` 已经算得很好，但选股引擎
+    **完全没用它**，而是把阈值写死成 9.8% —— 于是对 20cm 板块：
+
+    - ``limit_up_shakeout``（要求涨 >= 9.8%）会把 20cm 股票的**普通上涨**
+      误判成涨停（阈值太低）；
+    - ``uptrend_limit_down``（要求跌 <= -9.8%）在 20cm 板块**永远不成立**
+      —— 它们跌停是 -20%，跌 -9.8% 根本不是跌停，该策略对创业板/科创板
+      恒 0 命中。
+
+    实测（2026-09-19，1500 只样本）：6 个策略里 ``uptrend_limit_down``
+    是唯一 0 命中的，其余 5 个共命中 11 次。
+
+    返回 ``default`` 的情形：板块无涨跌幅限制（可转债）或识别失败 ——
+    此时保守沿用调用方给的默认幅度，不擅自放宽。
+    """
+    try:
+        from datasource.board import limit_ratio
+        r = limit_ratio(code)
+    except Exception:  # noqa: BLE001 — 板块识别失败不得中断全市场扫描
+        r = None
+    if not r:          # None（无限制）/ 0（异常）
+        return float(default)
+    # 0.98 容差：除权、四舍五入导致实际涨跌幅略低于理论板幅（如 9.97%）
+    return float(r) * 100.0 * 0.98
+
+
 def _series(bars: Sequence[Any], name: str) -> List[Optional[float]]:
     return [_val(b, name) for b in bars]
 
@@ -140,7 +171,7 @@ def compute_rps(returns_by_code: Dict[str, float]) -> Dict[str, float]:
 # 约定：返回 (是否命中, 明细 dict)。明细里的键同时用于界面解释命中原因。
 
 
-def _st_turtle_trade(bars, p) -> Tuple[bool, Dict[str, Any]]:
+def _st_turtle_trade(bars, p, code: str = "") -> Tuple[bool, Dict[str, Any]]:
     """海龟突破：创 N 日新高 + 成交额过阈值 + 阳线（防诱多）。"""
     n = int(p.get("breakout_days", 20))
     min_amount = float(p.get("min_amount", 1e8))
@@ -165,7 +196,7 @@ def _st_turtle_trade(bars, p) -> Tuple[bool, Dict[str, Any]]:
     }
 
 
-def _st_ma_volume(bars, p) -> Tuple[bool, Dict[str, Any]]:
+def _st_ma_volume(bars, p, code: str = "") -> Tuple[bool, Dict[str, Any]]:
     """均线 + 放量突破：收盘站上 MA(ma_n)，短期均线上穿长期均线，成交量放大。"""
     ma_n = int(p.get("ma_n", 20))
     fast = int(p.get("fast_n", 5))
@@ -198,7 +229,7 @@ def _st_ma_volume(bars, p) -> Tuple[bool, Dict[str, Any]]:
     }
 
 
-def _st_high_tight_flag(bars, p) -> Tuple[bool, Dict[str, Any]]:
+def _st_high_tight_flag(bars, p, code: str = "") -> Tuple[bool, Dict[str, Any]]:
     """高而窄的旗形整理突破：前期大幅上涨 → 窄幅横盘整理 → 放量向上突破。"""
     lookback = int(p.get("lookback", 60))
     flag_days = int(p.get("flag_days", 10))
@@ -229,10 +260,12 @@ def _st_high_tight_flag(bars, p) -> Tuple[bool, Dict[str, Any]]:
     }
 
 
-def _st_limit_up_shakeout(bars, p) -> Tuple[bool, Dict[str, Any]]:
+def _st_limit_up_shakeout(bars, p, code: str = "") -> Tuple[bool, Dict[str, Any]]:
     """涨停洗盘回踩确认：近期出现过涨停 → 之后回踩但不破涨停日最低价 → 再度转强。"""
     window = int(p.get("window", 10))
-    lu_pct = float(p.get("limit_up_pct", 9.8))
+    # 阈值默认按**板块**自动取（20cm 板块是 19.6 而非 9.8）；用户显式传则尊重。
+    _lu = p.get("limit_up_pct")
+    lu_pct = float(_lu) if _lu is not None else _limit_pct(code, 9.8)
     if len(bars) < window + 2:
         return False, {"reason": "样本不足"}
     # 1) 找窗口内最近的涨停日
@@ -264,11 +297,14 @@ def _st_limit_up_shakeout(bars, p) -> Tuple[bool, Dict[str, Any]]:
     }
 
 
-def _st_uptrend_limit_down(bars, p) -> Tuple[bool, Dict[str, Any]]:
+def _st_uptrend_limit_down(bars, p, code: str = "") -> Tuple[bool, Dict[str, Any]]:
     """上升趋势中的跌停反包：MA20 之上且均线向上 → 昨日跌停 → 今日收盘吞没昨日最高价。"""
     ma_n = int(p.get("ma_n", 20))
     slope_n = int(p.get("slope_n", 5))
-    ld_pct = float(p.get("limit_down_pct", -9.8))
+    # 同上：跌停阈值按板块自动取。★ 写死 -9.8 会让该策略对创业板/科创板
+    # **恒不成立**（它们跌停是 -20%），实测 1500 只样本下 0 命中即由此而来。
+    _ld = p.get("limit_down_pct")
+    ld_pct = float(_ld) if _ld is not None else -_limit_pct(code, 9.8)
     if len(bars) < ma_n + slope_n + 2:
         return False, {"reason": "样本不足"}
     closes = _series(bars, "close")
@@ -294,7 +330,7 @@ def _st_uptrend_limit_down(bars, p) -> Tuple[bool, Dict[str, Any]]:
     }
 
 
-def _st_rps_breakout(bars, p, rps: Optional[float]) -> Tuple[bool, Dict[str, Any]]:
+def _st_rps_breakout(bars, p, rps: Optional[float], code: str = "") -> Tuple[bool, Dict[str, Any]]:
     """欧奈尔 RPS 突破：横截面 RPS 达阈值 + 创阶段新高（或站上均线）。"""
     min_rps = float(p.get("min_rps", 87.0))
     n = int(p.get("breakout_days", 20))
@@ -342,13 +378,13 @@ CLASSIC_STRATEGIES: Dict[str, Dict[str, Any]] = {
     "limit_up_shakeout": {
         "label": "涨停洗盘回踩",
         "desc": "近期涨停后回踩不破涨停日最低价，随后再度转强确认",
-        "params": {"window": 10, "limit_up_pct": 9.8, "break_buffer": 0.0},
+        "params": {"window": 10, "limit_up_pct": None, "break_buffer": 0.0},
         "fn": _st_limit_up_shakeout,
     },
     "uptrend_limit_down": {
         "label": "上升趋势跌停反包",
         "desc": "均线之上且均线向上，昨日跌停后今日收盘吞没昨日最高价",
-        "params": {"ma_n": 20, "slope_n": 5, "limit_down_pct": -9.8},
+        "params": {"ma_n": 20, "slope_n": 5, "limit_down_pct": None},
         "fn": _st_uptrend_limit_down,
     },
     "rps_breakout": {
@@ -380,8 +416,12 @@ def list_strategies() -> List[Dict[str, Any]]:
 
 def evaluate_classic(bars: Sequence[Any], strategy_id: str,
                      params: Optional[Dict[str, Any]] = None,
-                     rps: Optional[float] = None) -> Tuple[bool, Dict[str, Any]]:
+                     rps: Optional[float] = None,
+                     code: str = "") -> Tuple[bool, Dict[str, Any]]:
     """对单只股票的 K 线执行一个经典策略。
+
+    ``code``：标的代码，供**按板块**判定涨跌停幅度（20cm 板块是 ±20% 不是 ±10%）。
+    缺省为空 ⇒ 策略退回保守的主板幅度，不会因缺代码而崩。
 
     返回 ``(是否命中, 明细)``。未知策略 / 数据不足都返回 ``(False, {...})``，
     **不抛异常** —— 全市场扫描时不能让一只股票的脏数据中断整轮。
@@ -396,8 +436,8 @@ def evaluate_classic(bars: Sequence[Any], strategy_id: str,
     try:
         fn = spec["fn"]
         if strategy_id == "rps_breakout":
-            return fn(bars, p, rps)
-        return fn(bars, p)
+            return fn(bars, p, rps, code=code)
+        return fn(bars, p, code=code)
     except Exception as exc:  # noqa: BLE001 — 单只失败不影响整轮扫描
         return False, {"reason": "计算异常：%s" % exc}
 
@@ -423,7 +463,8 @@ def run_classic(bars_by_code: Dict[str, Sequence[Any]], strategy_id: str,
 
     out: List[Dict[str, Any]] = []
     for code, bars in bars_by_code.items():
-        ok, detail = evaluate_classic(bars, strategy_id, p, rps_map.get(code))
+        ok, detail = evaluate_classic(bars, strategy_id, p, rps_map.get(code),
+                                      code=code)
         if not ok:
             continue
         row = {"code": code, "strategy": strategy_id}
