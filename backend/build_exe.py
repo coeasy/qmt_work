@@ -123,6 +123,26 @@ static_dir = ROOT / "static"
 if static_dir.exists():
     DATAS.append(f"{static_dir};static")
 
+# ★ 版本号单一真源 `VERSION` 必须随包（2026-09-22 修的真缺陷）。
+#
+#   `app/version.py` 按 `parents[2]`（仓库根）/ `parents[1]`（backend）两条候选路径
+#   找 `VERSION`，**找不到就静默回退**内置 `_FALLBACK = "0.1.0"`。
+#   而此前构建脚本**完全没管**这个文件 ⇒ 打包产物里没有 `VERSION`
+#   ⇒ 版本恒为 `0.1.0`。
+#
+#   实测后果（0.2.0 的安装包）：界面「系统健康」显示 `v0.1.0`，
+#   `/health`、`/ready`、FastAPI OpenAPI、release-manifest 全部是 `0.1.0`
+#   —— 用户无法从界面确认自己装的是哪一版，自动更新的版本比对也失去依据。
+#
+#   `--add-data=<src>;.` 落在 `_internal/`，正好命中 `parents[1]` 那条候选路径
+#   （打包态 `__file__` = `_internal/app/version.py` ⇒ `parents[1]` = `_internal`）。
+_version_file = ROOT.parent / "VERSION"
+if _version_file.is_file():
+    DATAS.append(f"{_version_file};.")
+else:
+    print(f"  [warn] 未找到版本号真源 {_version_file}，打包产物将回退内置版本号")
+
+
 # P0：随包附带的嵌入式 Python 运行时（backend/runtimes/cp38 ~ cp312），
 # 供 ABI 不匹配时桥接子进程使用。该目录由 tools/fetch_runtimes.py 准备；
 # 不存在则跳过（不影响进程内直连可用的券商）。
@@ -404,6 +424,32 @@ def main():
     _sanitize_dist_runtime()
     _verify_static_output()
     _verify_bridge_imports()
+
+    # ★ 版本号随包校验（2026-09-22 修的真缺陷）：打包态 `app/version.py` 读不到
+    #   `VERSION` 就**静默**回退内置 0.1.0 —— 必须在构建期 fail fast，
+    #   否则只能等用户在界面「系统健康」里发现版本号不对。
+    if _version_file.is_file():
+        want = _version_file.read_text(encoding="utf-8").strip()
+        # PyInstaller 6.x 把 data 放 `_internal/`；5.x 直接放 dist 根 —— 两处都认。
+        cands = [DIST / "qmt_work" / "_internal" / "VERSION",
+                 DIST / "qmt_work" / "VERSION"]
+        hit = next((c for c in cands if c.is_file()), None)
+        if hit is None:
+            raise SystemExit(
+                "[FATAL] 版本号真源没进包（找过 "
+                + " / ".join(str(c) for c in cands)
+                + "）。\n"
+                "        打包态会静默回退内置值 0.1.0 ⇒ 界面「系统健康」、/health、"
+                "/ready、OpenAPI 全部显示错误版本。\n"
+                "        修法：确认 DATAS 里含 `--add-data=<repo>/VERSION;.`。")
+        got = hit.read_text(encoding="utf-8").strip()
+        if got != want:
+            raise SystemExit(
+                f"[FATAL] 包内 VERSION（{got!r}）与源文件（{want!r}）不一致：{hit}")
+        print(f"  [version] 版本号随包核对通过：{got}  ({hit.relative_to(DIST)})")
+    else:
+        print(f"  [warn] 源目录无 VERSION（{_version_file}），跳过版本号随包校验")
+
     print(f"\n完成：{DIST / 'qmt_work' / 'qmt_work.exe'}")
 
 

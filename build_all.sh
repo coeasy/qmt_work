@@ -7,7 +7,7 @@
 #   bash build_all.sh                 全流程（zip 便携版）+ 构建后自检
 #   bash build_all.sh --nsis          同时产出 NSIS 安装包（需 NSIS，否则退回 zip）
 #   bash build_all.sh --portable      等价于默认：仅 zip 便携版
-#   bash build_all.sh --backend-only  仅后端 EXE
+#   bash build_all.sh --backend-only  仅后端 EXE（Step 1 前端 + Step 2 PyInstaller，跳过 Electron）
 #   bash build_all.sh --desktop-only  仅 Electron（需 backend/dist 已存在）
 #   bash build_all.sh --skip-frontend 跳过前端构建（需 backend/static 已存在）
 #   bash build_all.sh --no-verify     跳过构建后自检（client_start_test.py）
@@ -278,23 +278,31 @@ if [[ "$DESKTOP_ONLY" == false ]]; then
 fi
 
 # ---- Step 2: 后端 EXE ----
+#
+# ★ 2026-09-22 修的真缺陷：这里原先包了一层 `if [[ "$BACKEND_ONLY" == false ]]`，
+#   于是 `--backend-only` 变成「跑完 Step 1 前端就直接 exit 0」，**PyInstaller 一次都没跑**。
+#   而脚本头部文档写的是「--backend-only  仅后端 EXE」—— 契约与实现相反。
+#   危害在于它**不报错**：日志照样打印「[build] 仅构建后端 EXE 完成」，
+#   产物却仍是上一轮的（`backend/dist/qmt_work/qmt_work.exe` 时间戳不变），
+#   极易把「复用了旧 EXE」误判成「构建成功」。
+#   判据（本轮实测）：`--backend-only` 的日志里**没有** "Step 2/3" 与 build_exe.py 的输出。
+#   正确语义：只要不是 --desktop-only，Step 2 就必须执行；--backend-only 只是
+#   「执行完 Step 2 后停下，不进 Step 3（Electron）」。
 if [[ "$DESKTOP_ONLY" == false ]]; then
-    if [[ "$BACKEND_ONLY" == false ]]; then
-        log "Step 2/3: 后端 EXE 打包（PyInstaller）"
-        clean_dist
-        cd "$BACKEND"
-        [[ -f build_exe.py ]] || fail "backend/build_exe.py 不存在"
-        [[ -f static/index.html ]] || warn "backend/static 为空，打包出的 EXE 无法托管前端"
-        "$PY" build_exe.py || { cd "$ROOT"; fail "后端 EXE 打包失败"; }
-        cd "$ROOT"
-        [[ -f "$BACKEND/dist/qmt_work/qmt_work.exe" ]] \
-            || fail "打包脚本退出 0 但产物缺失: $BACKEND/dist/qmt_work/qmt_work.exe"
-        log "后端 EXE 完成 → $BACKEND/dist/qmt_work/qmt_work.exe"
-    fi
+    log "Step 2/3: 后端 EXE 打包（PyInstaller）"
+    clean_dist
+    cd "$BACKEND"
+    [[ -f build_exe.py ]] || fail "backend/build_exe.py 不存在"
+    [[ -f static/index.html ]] || warn "backend/static 为空，打包出的 EXE 无法托管前端"
+    "$PY" build_exe.py || { cd "$ROOT"; fail "后端 EXE 打包失败"; }
+    cd "$ROOT"
+    [[ -f "$BACKEND/dist/qmt_work/qmt_work.exe" ]] \
+        || fail "打包脚本退出 0 但产物缺失: $BACKEND/dist/qmt_work/qmt_work.exe"
+    log "后端 EXE 完成 → $BACKEND/dist/qmt_work/qmt_work.exe"
 
     if [[ "$BACKEND_ONLY" == true ]]; then
         echo ""
-        log "仅构建后端 EXE 完成"
+        log "仅构建后端 EXE 完成（Step 1 + Step 2，已跳过 Electron）"
         exit 0
     fi
 fi
