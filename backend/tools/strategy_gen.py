@@ -240,14 +240,34 @@ def save_qmt_strategy(filename: str, content: str, client_path: str = "") -> dic
 
 
 def register_strategy_tools(mcp):
-    @mcp.tool()
-    async def generate_strategy(strategy_type: str, code: str = "600519.SH",
-                                client_path: str = "", account_id: str = "",
-                                params: dict | None = None) -> dict:
+    # ★★ 嵌套工具函数**必须改名**（2026-09-22 修的真缺陷）。
+    #
+    # 原因：`@mcp.tool()` 会把被装饰的名字重绑为 `FunctionTool` 对象。此前嵌套函数与
+    # 它要调用的**模块级**函数同名，于是函数体里的 `name(...)` 解析到的是
+    # **本函数的闭包变量**（装饰后的 FunctionTool 自己）⇒ 运行期
+    # `TypeError: 'FunctionTool' object is not callable`。
+    #
+    # 实测证据（MCP tools/call，修复前）：
+    #   Error calling tool 'save_qmt_strategy': 'FunctionTool' object is not callable
+    #   Error calling tool 'generate_strategy'  : 同因（同一文件两处）
+    # 静态判定可复现：`scripts/scan_tool_shadowing.py`。
+    #
+    # 修法：嵌套函数改用 `_*_tool` 命名（彻底消除遮蔽），
+    # 并用 `@mcp.tool(name=...)` 把**对外工具名**保持为原值 —— 对 MCP 客户端零影响。
+    #
+    # ⚠️ 反面教训：不要用「先 `_impl = generate_strategy` 再定义同名函数」的写法 ——
+    #   Python 里函数内任何位置被赋值的名字**整体是局部变量**，那句赋值会读到
+    #   「尚未绑定的局部」⇒ `UnboundLocalError`（已实测踩到）。
+
+    @mcp.tool(name="generate_strategy")
+    async def _generate_strategy_tool(strategy_type: str, code: str = "600519.SH",
+                                      client_path: str = "", account_id: str = "",
+                                      params: dict | None = None) -> dict:
         """生成 QMT 策略代码（ma_cross/macd/rsi/limitup 四类模板），返回代码内容。"""
         return generate_strategy(strategy_type, code, client_path, account_id, params)
 
-    @mcp.tool()
-    async def save_qmt_strategy(filename: str, content: str, client_path: str = "") -> dict:
+    @mcp.tool(name="save_qmt_strategy")
+    async def _save_qmt_strategy_tool(filename: str, content: str,
+                                      client_path: str = "") -> dict:
         """把策略代码保存到 QMT 客户端 mpython 目录（QMT 内可导入运行）。"""
         return save_qmt_strategy(filename, content, client_path)

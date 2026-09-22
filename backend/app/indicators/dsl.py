@@ -12,10 +12,22 @@
     symbol   := C | O | H | L | V（=close/open/high/low/volume）
     op       := > | >= | < | <= | == | !=
 
-示例：
+示例（**下面每一条都必须能解析**，由 `tests/test_dsl_examples.py` 守）：
     "C > MA(20) AND RSI(14) < 30"
-    "C > MA(20) AND (VOLUME > MA(VOLUME,20)*1.5 OR KDJ.K(9) > 80)"
+    "C > MA(20) AND (VOL_RATIO(5) > 1.5 OR KDJ.K(9) > 80)"
     "MACD.DIF(12,26,9) > 0 AND NOT WR(14) < -80"
+
+⚠️ 已知边界（v1 **不支持**，别照直觉写）：
+  1. **没有算术运算**：`MA(20)*1.5`、`(C-O)/O` 都解析不了。要表达「量 > 均量 × 1.5」
+     这类**倍数**，请用比值指标 —— `VOL_RATIO(n) > 1.5`（当日量 ÷ 前 n 日均量）。
+  2. **指标参数只能是数字**：`MA(VOLUME,20)`（对成交量求均线）**不行**，
+     `_num_arg` 只接受数字。指标吃什么序列由注册表的 `inputs` 决定
+     （`volume_ma` / `vol_ratio` 的 `inputs=["volume"]`）。
+  3. **没有截面算子**：`RANK(x)` / `TOP(x,n)` 尚未接入（见 `routes/screen.py` 的说明）。
+
+  ★ 第 1、2 条此前**没有写明**，而示例里恰好用了 `MA(VOLUME,20)*1.5` ——
+    照抄示例**必然**报「无法解析」。示例与实现不符比没有示例更糟：
+    读者会以为是自己写错了。现已改为可解析的等价写法，并补上边界说明。
 
 输出：与 G7 screener 兼容的 conditions JSON（{and:[..]}/{or:[..]}，叶子
 {indicator:...}/{field:...}），窗口一律最新（-1）。多输出指标经 `NAME.OUTPUT`

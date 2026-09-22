@@ -223,6 +223,12 @@ def _st_ma_volume(bars, p, code: str = "") -> Tuple[bool, Dict[str, Any]]:
     return ok, {
         "close": close, "ma%d" % ma_n: round(ma, 4), "ma%d" % fast: round(ma_fast, 4),
         "volume": vol[0], "vol_ma%d" % vol_n: round(vol_ma, 2),
+        # ⚠️ 这里的 `vol_ratio` 是**含当日**口径：分母 `vol_ma = _ma(vols, vol_n)` 取
+        #    末 n 根（**含今日**）。它与指标注册表里的 `indicators.vol_ratio`
+        #    （**不含当日**，即通达信/同花顺的标准「量比」）**不是同一个东西**。
+        #    这是**有意保留**的差异：本策略的 `vol_ok = vol >= vol_ma * vol_mult`
+        #    与这个展示值必须同源（含当日），改成不含当日会**改变选股结果**。
+        #    ⇒ 不要为了「看起来一致」去对齐其中一边；要改先想清楚口径。
         "vol_ratio": round(vol[0] / vol_ma, 3),
         "above_ma": above_ma, "golden_cross": golden, "volume_surge": vol_ok,
         "reason": "站上均线+多头+放量" if ok else "未同时满足（站上均线/多头/放量）",

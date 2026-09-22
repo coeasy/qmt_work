@@ -189,6 +189,15 @@ register(IndicatorSpec(
     formula="VOL-MA = MA(V, p)",
 ))
 register(IndicatorSpec(
+    name="vol_ratio", label="量比（当日量 / 前 N 日均量）", category="volume",
+    description=("当日成交量 ÷ 前 period 日均量（**不含当日**）。>1 放量、<1 缩量；"
+                 "前 period 根无基准时为 null。用于表达「量 > 均量 × k」这类条件 —— "
+                 "条件树的 value 只能是字面量，写不出「均量 × k」。"),
+    params=[IndicatorParam("period", PARAM_INT, 5, 1, "基准窗口（不含当日）")],
+    outputs=["vol_ratio"], fn=builtin.vol_ratio, inputs=["volume"],
+    formula="量比 = V / MA(V, p)[-1]",
+))
+register(IndicatorSpec(
     name="returns", label="简单收益率", category="other",
     description="R[i] = C[i]/C[i-1] - 1，首根 null。",
     params=[], outputs=["returns"], fn=builtin.returns,

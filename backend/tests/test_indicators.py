@@ -249,12 +249,12 @@ def test_custom_params_match_reference(prices):
 
 
 # ============================ 注册表与调度 ==================================
-def test_registry_has_sixteen_indicators():
+def test_registry_has_seventeen_indicators():
     inds = list_indicators()
-    assert len(inds) == 16
+    assert len(inds) == 17
     assert {i["name"] for i in inds} == {
         "ma", "ema", "macd", "kdj", "rsi", "boll", "wr",
-        "atr", "adx", "cci", "obv", "volume_ma",
+        "atr", "adx", "cci", "obv", "volume_ma", "vol_ratio",
         "returns", "log_returns", "zscore", "roc",
     }
     for i in inds:

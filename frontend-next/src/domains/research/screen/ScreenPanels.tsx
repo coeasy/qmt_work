@@ -429,7 +429,15 @@ export function ScreenResult({
 /* 条件选股                                                            */
 /* ------------------------------------------------------------------ */
 
-const PRESET_EXAMPLES: Array<{ label: string; conditions: string }> = [
+/**
+ * 条件选股的预设示例。
+ *
+ * ⚠️ 导出是为了让 `tests/screenPresets.test.ts` 能**断言这些条件不是空条件** ——
+ * 2026-09-22 实测过一个真缺陷：预设「放量…」曾被写成
+ * `volume_ma(5) > 0 AND close > 0`（两者恒为正）⇒ 命中全部标的，
+ * 标签在说谎而用户无从察觉（「全中」看起来像今天普涨，不像 bug）。
+ */
+export const PRESET_EXAMPLES: Array<{ label: string; conditions: string }> = [
   {
     label: "收盘价站上 20 日均线",
     conditions: JSON.stringify(
@@ -462,12 +470,35 @@ const PRESET_EXAMPLES: Array<{ label: string; conditions: string }> = [
     ),
   },
   {
-    label: "放量（量 > 5 日均量 1.5 倍）且收阳",
+    // ★ 2026-09-22 修的真缺陷：此前条件是
+    //     `volume_ma(5) > 0` AND `close > 0`
+    //   —— 成交量均线与收盘价**恒为正** ⇒ 条件对任何标的都成立。
+    //   实测（24 只真实标的）命中 **24/24**，而对照组「收盘价 > MA20」只命中 4/24：
+    //   这个预设**看起来在筛「放量」，实际什么都没筛**，标签在说谎。
+    //   根因：条件树的 value 只能是字面量，写不出「5 日均量 × 1.5」。
+    //   修法：用新增的**量比**指标 `vol_ratio`（当日量 ÷ 前 N 日均量）表达倍数，
+    //   用 `compare(close > open)` 表达「收阳」（compare 叶子本就支持两个字段相比）。
+    label: "放量（当日量 > 前 5 日均量 1.5 倍）且收阳",
     conditions: JSON.stringify(
       {
         and: [
-          { indicator: { name: "volume_ma", params: { win: 5 }, window: -1, op: "gt", value: 0 } },
-          { field: { name: "close", window: -1, op: "gt", value: 0 } },
+          {
+            indicator: {
+              name: "vol_ratio",
+              params: { win: 5 },
+              output: "vol_ratio",
+              window: -1,
+              op: "gt",
+              value: 1.5,
+            },
+          },
+          {
+            compare: {
+              op: "gt",
+              left: { kind: "field", name: "close", window: -1 },
+              right: { kind: "field", name: "open", window: -1 },
+            },
+          },
         ],
       },
       null,

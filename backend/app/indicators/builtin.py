@@ -257,6 +257,33 @@ def volume_ma(volume, period: int = 20) -> np.ndarray:
     return ma(volume, period)
 
 
+def vol_ratio(volume, period: int = 5) -> np.ndarray:
+    """量比：当日成交量 ÷ **前 period 日**（不含当日）成交量均线。
+
+    ★ 为什么必须有它（2026-09-22 修的真缺陷）：
+    前端预设「放量（量 > 5 日均量 1.5 倍）且收阳」此前被写成
+    ``volume_ma(5) > 0`` —— 成交量均线**恒为正**，于是该条件对任何标的都成立。
+    实测（24 只真实标的）：该预设命中 **24/24**，而对照组「收盘价 > MA20」只命中 4/24。
+    也就是说这个预设**看起来在筛「放量」，实际什么都没筛**。
+
+    根因是注册表只提供**绝对量**的 ``volume_ma``，而「量 > 均量 × 1.5」需要一个**比值**；
+    条件树里的 ``value`` 只能是字面量，写不出「均量 × 1.5」。所以补这个指标。
+
+    口径：基准取**前 period 根**（``shift(1)`` 后再取 MA），与通达信 / 同花顺的
+    「量比」一致 —— 用含当日的均线做分母会把放量本身算进基准，把信号抹平。
+    前 period 根无基准 ⇒ 返回 null（不猜）。
+    """
+    v = _as_float(volume)
+    n = v.shape[0]
+    out = np.full(n, np.nan)
+    if n > period:
+        base = ma(v, period)
+        base = np.concatenate(([np.nan], base[:-1]))     # shift(1)：基准不含当日
+        with np.errstate(divide="ignore", invalid="ignore"):
+            out = np.where(base > 0, v / base, np.nan)
+    return out
+
+
 def returns(close) -> np.ndarray:
     """简单收益率：R[i] = C[i]/C[i-1] - 1，首根 NaN。"""
     c = _as_float(close)

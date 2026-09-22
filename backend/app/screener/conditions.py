@@ -88,6 +88,26 @@ def _eval_indicator(cond: dict, bars: list, cache: dict) -> Optional[float]:
     return _windowed(arr, int(ind.get("window", -1)))
 
 
+def _field_series(bars: list, name: str) -> list:
+    """取某字段的整列（**Bar 对象与 dict 两态兼容**）。
+
+    ★ 为什么必须两态（2026-09-22 修）：这里此前只写 ``getattr(b, name, None)``，
+    传 dict 时**静默**得到 ``None`` ⇒ 字段条件恒为 ``False``（不报错、不命中）。
+    而指标侧 ``indicators.registry._col`` 一直是两态兼容的 ⇒ 同一份数据会出现
+    「指标算得出、字段条件永远不命中」这种极难定位的分裂。
+
+    判据与 ``_col`` 保持一致：按**首元素**是否真有该属性决定取值方式。
+    """
+    if not bars:
+        return []
+    first = bars[0]
+    if hasattr(first, name):
+        getter = lambda b: getattr(b, name, None)          # noqa: E731
+    else:
+        getter = lambda b: b.get(name) if isinstance(b, dict) else None  # noqa: E731
+    return [float(v) if v is not None else None for v in (getter(b) for b in bars)]
+
+
 def _operand_value(operand: dict, bars: list, cache: dict) -> Optional[float]:
     """取操作数在 window 处的值（compare 叶子用）。kind ∈ field/indicator。"""
     kind = operand.get("kind")
@@ -95,9 +115,7 @@ def _operand_value(operand: dict, bars: list, cache: dict) -> Optional[float]:
         name = operand.get("name")
         if name not in _FIELD_NAMES:
             raise ValueError(f"未知字段条件：{name}（可选 {sorted(_FIELD_NAMES)}）")
-        arr = [float(getattr(b, name)) if getattr(b, name, None) is not None else None
-               for b in bars]
-        return _windowed(arr, int(operand.get("window", -1)))
+        return _windowed(_field_series(bars, name), int(operand.get("window", -1)))
     if kind == "indicator":
         spec = get_indicator(operand["name"])
         params = _resolve_ind_params(spec, operand.get("params") or {})
@@ -133,9 +151,7 @@ def _eval_leaf(cond: dict, bars: list, cache: dict) -> bool:
         name = f.get("name")
         if name not in _FIELD_NAMES:
             raise ValueError(f"未知字段条件：{name}（可选 {sorted(_FIELD_NAMES)}）")
-        arr = [float(getattr(b, name)) if getattr(b, name, None) is not None else None
-               for b in bars]
-        val = _windowed(arr, int(f.get("window", -1)))
+        val = _windowed(_field_series(bars, name), int(f.get("window", -1)))
         leaf = f
     else:
         raise ValueError("条件叶子须为 {indicator:...} / {field:...} / {compare:...}")
