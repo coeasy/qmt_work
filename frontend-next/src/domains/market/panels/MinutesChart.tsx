@@ -155,7 +155,9 @@ export function MinutesChart({
         {res.loading && points.length === 0 ? (
           <Spinner label="加载分时…" />
         ) : points.length === 0 ? (
-          <EmptyState text="暂无分时数据" />
+          // 沿用错误分支里那句已核实的口径说明：分时依赖 TDX 公共行情源，
+          // 非交易时段或网络不可用时为空（零 mock，不补假值）。
+          <EmptyState text="暂无分时数据 —— 分时依赖 TDX 公共行情源，非交易时段或网络不可用时为空（零 mock，不补假值）" />
         ) : (
           <EChart option={option} />
         )}

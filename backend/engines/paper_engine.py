@@ -22,6 +22,13 @@ log = logging.getLogger("qmt_work.paper")
 DEFAULT_INITIAL = 1_000_000.0
 MIN_LOT = 100  # A 股 1 手 = 100 股
 
+#: 模拟盘委托号前缀（**单一真相来源**）。
+#: 为什么要有常量：撤单路由要靠它区分「模拟盘委托号」与「券商委托号」——
+#: 实测把 ``PAPER-1`` 递给券商适配器会走 ``int(order_id)`` ⇒ ValueError ⇒ 500
+#: 「服务器内部错误」（真相是「这笔委托不在券商那儿」）。两处各写一次字面量
+#: 早晚漂移，所以收敛到这里。
+PAPER_ORDER_PREFIX = "PAPER-"
+
 
 def _today_date() -> str:
     return today_str()
@@ -286,7 +293,7 @@ class PaperEngine:
                 tid = self._seq
             log.info("模拟盘成交 %s %s %g@%.4f 现金 %.2f", side, code, vol_int,
                      price, self.cash)
-            return {"order_id": f"PAPER-{tid}", "trade_id": tid, "code": code,
+            return {"order_id": f"{PAPER_ORDER_PREFIX}{tid}", "trade_id": tid, "code": code,
                     "side": side, "price": round(price, 4), "volume": vol_int,
                     "price_type": price_type or "limit", "remark": remark or "",
                     "commission": commission, "pnl": round(pnl, 4),

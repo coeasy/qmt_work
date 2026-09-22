@@ -8,7 +8,7 @@ import time
 
 import httpx
 
-from datasource.base import DataSource
+from datasource.base import DataSource, EXT_DETAIL_KEYS
 
 log = __import__("logging").getLogger("qmt_work.datasource.public_sources")
 
@@ -19,6 +19,103 @@ def _vendor_code(code: str) -> str:
     if not prefix:
         raise ValueError(f"股票代码必须带交易所后缀: {code}")
     return prefix + bare
+
+
+# --------------------------------------------------------------------------
+# 腾讯快照字段下标
+#
+# 快照形如 ``v_sh600519="1~贵州茅台~600519~1257.12~1266.98~..."``，按 ``~`` 切分后
+# **0-based** 取用。
+#
+# ⚠️⚠️ 这些下标是**实测**出来的（2026-09-21 拉 sh600519 / sh000001 / sz300750 三个
+# 样本逐位核对：涨停价 1393.68 = 昨收 1266.98 × 1.1、跌停 1140.28 = × 0.9、
+# 创业板 300750 涨停 365.16 = 304.30 × 1.2 —— 都自洽），**不是照抄文档猜的**。
+# 猜错的后果不是报错，而是界面显示一个**看起来很合理的错数字**，比 `--` 危险得多。
+#
+# 只挑「快照里本来就有、且个股基本面面板用得上」的字段。腾讯这一条请求能带 ~50 个
+# 字段，以前只解析了 7 个，市值 / PE / PB / 换手 / 振幅这些**已经在响应里躺着**，
+# 却还要别处再取或干脆不显示 —— 现在顺手解析出来，**零额外请求**。
+# --------------------------------------------------------------------------
+_TX_IDX = {
+    "name": 1,
+    "last": 3,          # 最新价
+    "pre_close": 4,     # 昨收
+    "open": 5,          # 今开
+    "volume": 6,        # 成交量（手）→ 转股
+    "high": 33,         # 最高
+    "low": 34,          # 最低
+    "amount": 37,       # 成交额（万元）→ 转元
+    "turnover_rate": 38,  # 换手率 %
+    "pe_ttm": 39,       # 市盈率（TTM，亏损股为负）
+    "amplitude": 43,    # 振幅 %
+    "circ_mv": 44,      # 流通市值（亿元）→ 转元
+    "total_mv": 45,     # 总市值（亿元）→ 转元
+    "pb": 46,           # 市净率
+    "high_limit": 47,   # 涨停价（-1 = 无，见下）
+    "low_limit": 48,    # 跌停价（-1 = 无）
+    "volume_ratio": 49,  # 量比
+    "avg_price": 51,    # 均价
+}
+
+_TX_MIN_FIELDS = 7  # 少于这个长度视为「没返回」（与历史行为一致）
+
+
+def _tx_num(fields: list, key: str) -> float | None:
+    """按 `_TX_IDX` 取一个数；缺位 / 空串 / 非数字一律 None（不猜、不填 0）。"""
+    idx = _TX_IDX[key]
+    if idx >= len(fields):
+        return None
+    try:
+        return float(fields[idx])
+    except (TypeError, ValueError):
+        return None
+
+
+def _tx_snapshot(code: str, fields: list) -> dict:
+    """把腾讯快照的 `~` 字段数组解析成行情字典 —— **单只与批量共用一份解析**。
+
+    ★ 必须共用：此前 `get_quote` 与 `get_quotes` 各写一遍，字段要加就得改两处，
+      漏改的那条路径会静默少字段（历史上批量就被漏过一次）。
+
+    ⚠️ 两个必须特殊处理的值（实测，不是理论）：
+      - **涨跌停价**：指数 / 无涨跌幅品种返回 **`-1`**（不是 0，也不是空）。
+        直接透传会让「上证指数涨停价 -1.00」这种荒谬值出现在界面上 ⇒ 只认 `> 0`。
+      - **市净率**：指数返回 `0.00`。显示 `0.00` 会被读成「净资产为零」 ⇒ 只认 `> 0`。
+      其余字段**保留原值**（`pe_ttm` 亏损股本就是负数，`amplitude` 一字板本就是 0），
+      一律不做「<=0 就当没有」的粗暴过滤 —— 那会把真实数据抹掉。
+    """
+    def _pos(key: str) -> float | None:
+        v = _tx_num(fields, key)
+        return v if (v is not None and v > 0) else None
+
+    volume = _tx_num(fields, "volume")
+    amount = _pos("amount")
+    circ = _pos("circ_mv")
+    total = _pos("total_mv")
+    name = fields[_TX_IDX["name"]] if len(fields) > _TX_IDX["name"] else ""
+    return {
+        "code": code,
+        "name": name,
+        "last": _tx_num(fields, "last"),
+        "pre_close": _tx_num(fields, "pre_close"),
+        "open": _tx_num(fields, "open"),
+        "high": _tx_num(fields, "high"),
+        "low": _tx_num(fields, "low"),
+        # 手 → 股；万元 → 元；亿元 → 元（与 broker / eltdx 口径一致，前端 fmtAmount 直出「亿」）
+        "volume": (volume * 100) if volume is not None else None,
+        "amount": (amount * 1e4) if amount is not None else None,
+        "turnover_rate": _tx_num(fields, "turnover_rate"),
+        "pe_ttm": _tx_num(fields, "pe_ttm"),
+        "amplitude": _tx_num(fields, "amplitude"),
+        "circ_mv": (circ * 1e8) if circ is not None else None,
+        "total_mv": (total * 1e8) if total is not None else None,
+        "pb": _pos("pb"),
+        "high_limit": _pos("high_limit"),
+        "low_limit": _pos("low_limit"),
+        "volume_ratio": _tx_num(fields, "volume_ratio"),
+        "avg_price": _tx_num(fields, "avg_price"),
+        "source": "tencent",
+    }
 
 
 class _PublicSource(DataSource):
@@ -51,6 +148,9 @@ class _PublicSource(DataSource):
 
     async def _get(self, url: str) -> str:
         await self._throttle()
+        # DEBUG 级留痕：诊断「批量到底生效了没」时，数这个日志里 URL 的出现次数
+        # 是最直接的证据（1 次 = 批量生效；N 次 = 退化成逐只）。
+        log.debug("公开源 HTTP: %s", url)
         async with httpx.AsyncClient(timeout=8.0, headers={"User-Agent": "qmt_work/1.0"}) as client:
             response = await client.get(url)
             response.raise_for_status()
@@ -58,7 +158,45 @@ class _PublicSource(DataSource):
 
     async def get_instrument_detail(self, code: str) -> dict:
         quote = await self.get_quote(code)
-        return {key: quote.get(key) for key in ("name", "pre_close", "last", "open", "high", "low")}
+        return {key: quote.get(key) for key in self._DETAIL_KEYS}
+
+    #: 画像可从盘口快照派生的字段（与 ``get_instrument_detail`` 的返回键一致）
+    #:
+    #: ★ 与快照解析共用同一套键：快照里解析出来的市值 / PE / PB / 换手 / 涨跌停，
+    #:   画像层**原样透出**，「基本信息」面板因此不用再发第二次请求。
+    _DETAIL_KEYS = ("name", "pre_close", "last") + EXT_DETAIL_KEYS
+
+    def derive_detail(self, raw: dict) -> dict:
+        """从已取到的行情快照派生画像 —— **零额外 HTTP**。
+
+        ★ 为什么需要：``get_instrument_detail`` 本身就是 ``get_quote`` 的字段子集
+        （见上）。批量场景若再走一次 ``get_quotes`` 去「批量取画像」，
+        N 只标的会退化成 **2 次** HTTP（1 次行情 + 1 次画像），且都要排队过
+        0.3s 全局节流锁 —— 批量的收益被砍掉一半。有了派生钩子，
+        manager 侧拿到行情后直接本地派生，画像不再产生任何请求。
+
+        ⚠️ 只在**批量路径**启用（``DataSourceManager.get_quotes``）。单只路径
+        （``get_quote``）仍走 ``get_instrument_detail``：将来若某个源把详情接口
+        升级成能返回涨跌停 / 行业 / 概念，单只路径会自动拿到，而本派生只承诺
+        「快照里有的字段」，不会悄悄丢掉那些升级。
+        """
+        if not raw:
+            return {}
+        return {k: raw.get(k) for k in self._DETAIL_KEYS}
+
+    async def get_details(self, codes):
+        """批量画像 —— 只用于**手上没有行情快照**时的兜底路径。
+
+        正常批量链路走 ``derive_detail``（零请求）；这里保留是为了让
+        ``get_details`` 作为独立接口仍然可用且语义正确。
+        """
+        if not codes:
+            return {}
+        quotes = await self.get_quotes(codes)
+        if not isinstance(quotes, dict):
+            return {c: None for c in codes}
+        return {c: (self.derive_detail(q) if q else None)
+                for c, q in quotes.items()}
 
     async def get_stock_list(self) -> list:
         # 公共源不提供全市场列表 —— 这里 raise 是**有意的显式拒绝**，不是待实现桩。
@@ -115,11 +253,39 @@ class TencentSource(_PublicSource):
         raw = await self._get(f"https://qt.gtimg.cn/q={vendor}")
         match = re.search(r'="([^"]*)"', raw)
         fields = match.group(1).split("~") if match else []
-        if len(fields) < 7:
+        if len(fields) < _TX_MIN_FIELDS:
             raise RuntimeError(f"腾讯未返回行情: {code}")
-        return {"code": code, "name": fields[1], "last": float(fields[3] or 0),
-                "pre_close": float(fields[4] or 0), "open": float(fields[5] or 0),
-                "volume": float(fields[6] or 0) * 100, "source": self.name}
+        return _tx_snapshot(code, fields)
+
+    async def get_quotes(self, codes):
+        """批量行情 —— 1 次 HTTP 拉多只（绕过 N 只串行节流的瓶颈）。
+
+        腾讯接口原生支持批量（``qt.gtimg.cn/q=sh000001,sz000002,...``），返回形如
+        ``v_sh000001="...~...";v_sz000002="...~...";``。每只解析同单只。
+        """
+        if not codes:
+            return {}
+        vendors = [_vendor_code(c) for c in codes]
+        url = "https://qt.gtimg.cn/q=" + ",".join(vendors)
+        raw = await self._get(url)
+        out: dict = {}
+        # ★ 不依赖换行 —— 腾讯批量返回可能换行分隔、也可能单行用 ``;`` 分隔，
+        #   用正则一次性抓出所有 ``v_<vendor>="<fields>"``，避免漏第二只。
+        pattern = re.compile(r'v_([a-z]+\d+)="([^"]*)"')
+        for vendor, fields_str in pattern.findall(raw):
+            fields = fields_str.split("~")
+            if len(fields) < _TX_MIN_FIELDS:
+                continue
+            # 重建 code（带后缀）
+            prefix = vendor[:2].upper()
+            bare = vendor[2:]
+            code = f"{bare}.{prefix}"
+            # ★ 与单只共用同一份解析（否则两条路径会少字段/多字段不一致）
+            out[code] = _tx_snapshot(code, fields)
+        # 没拉到的 code 标 None（让上游走兜底，不要静默丢）
+        for c in codes:
+            out.setdefault(c, None)
+        return out
 
     async def get_kline(self, code: str, period: str = "1d", count: int = 250,
                         adjust: str | None = None) -> list:

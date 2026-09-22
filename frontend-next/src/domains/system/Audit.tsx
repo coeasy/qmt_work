@@ -123,16 +123,16 @@ export function Audit() {
       )}
 
       {verify && verify.ok && (
-        <div className={s.stats}>
-          <div className={s.stat}>
-            <span className={s.statLabel}>校验结果</span>
-            <span className={s.statValue} style={{ color: "var(--success)" }}>
+        <div className={s.statRow}>
+          <div className={s.statRowItem}>
+            <span className={s.statRowLabel}>校验结果</span>
+            <span className={s.statRowValue} style={{ color: "var(--success)" }}>
               完整
             </span>
           </div>
-          <div className={s.stat}>
-            <span className={s.statLabel}>断链数</span>
-            <span className={s.statValue}>{verify.broken_count}</span>
+          <div className={s.statRowItem}>
+            <span className={s.statRowLabel}>断链数</span>
+            <span className={s.statRowValue}>{verify.broken_count}</span>
           </div>
         </div>
       )}
@@ -146,7 +146,9 @@ export function Audit() {
               {rows.error}
             </div>
           ) : (rows.data?.length ?? 0) === 0 ? (
-            <EmptyState text="无审计记录" />
+            // 空是**正常首态**（还没有任何写操作），不是故障；但审计只记写操作，
+            // 不说明的话用户会以为「我明明点了那么多东西，怎么一条都没有」。
+            <EmptyState text="暂无审计记录 —— 下单、提交任务、修改调度、保存选股板等写操作会自动记到这里，只读查询不记录" />
           ) : (
             <DataTable columns={cols} rows={rows.data ?? []} rowKey={(r) => String(r.id)} rowHeight={24} />
           )}

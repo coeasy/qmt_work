@@ -58,6 +58,28 @@ def _new_run_id() -> str:
     return f"{now_iso().replace(':', '').replace('-', '')[:15]}-{uuid.uuid4().hex[:8]}"
 
 
+def bar_time(bar) -> str:
+    """从 ``Bar`` / ``BarLite`` / ``dict`` 里取交易日字段（原始字符串，未规范化）。
+
+    ★ 为什么需要它：批量路径（``BarsProvider.get_bars_batch(lite=True)``）返回的是
+    ``BarLite`` —— 一个 ``__slots__`` 轻量对象，**只有属性、没有 ``.get``**。
+    此前这里写的是 ``last.get("time") if hasattr(last, "get") else None``：
+    ``BarLite`` 没有 ``.get`` ⇒ 直接传 ``None`` 给 ``bar_date()`` ⇒ 恒返回 ``""``。
+
+    实测后果（2026-09-20 真实库）：定时经典选股**任务成功、命中 100 只、结果落库**，
+    但 ``bar_date=""`` —— 界面上这次选股「基于哪一天的日线」永远是空的；
+    更严重的是「日线落后于最近交易日就先自动补数」的前置体检写的是
+    ``(last_date and last_date < expect_date)``，``last_date == ""`` 时整条判据为假
+    ⇒ **数据陈旧永远触发不了自动补数**，正是这段代码当初要防的
+    「用上上周的日线选出今天的票」。
+    """
+    if bar is None:
+        return ""
+    if hasattr(bar, "get"):                      # dict 形态
+        return str(bar.get("time") or "")
+    return str(getattr(bar, "time", "") or "")    # Bar / BarLite 形态
+
+
 def bars_last_date(bars_map: dict) -> str:
     """这一批 K 线的**数据截至日**（``YYYYMMDD``）。
 
@@ -74,8 +96,7 @@ def bars_last_date(bars_map: dict) -> str:
     for bars in (bars_map or {}).values():
         if not bars:
             continue
-        last = bars[-1]
-        d = bar_date(last.get("time") if hasattr(last, "get") else None)
+        d = bar_date(bar_time(bars[-1]))
         if d and d > latest:
             latest = d
     return latest

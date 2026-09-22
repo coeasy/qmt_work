@@ -5,6 +5,7 @@ from datetime import datetime
 
 from datasource.instrument import classify_instrument, with_exchange_suffix
 from core.clock import local_now, now_iso
+from app.services.market.common import VALUATION_METRIC_MAP, VALUATION_METRIC_KEYS, metric_sources
 
 log = logging.getLogger("qmt_work.market")
 
@@ -118,6 +119,28 @@ async def build_analysis(m, code: str, conn_id: str = "", source: str = "auto",
             return None
         return await b.call(b.gateway.get_financial, code)
 
+    async def _valuation_metrics():
+        """行情快照派生的估值指标（PE / PB）—— 券商财务缺位时的**第二路**。
+
+        见 `valuation` 组合处的长注释：本维度此前的「无数据」是**假空缺**。
+        逐源尝试「声明了行情派生字段」的源（`common.metric_sources()`，不写死
+        腾讯，换源自动跟随）；任何异常都吞掉 —— 兜底是尽力而为，绝不让整个
+        接口失败（失败时保持 unavailable，如实说没有）。
+        """
+        for name in metric_sources():
+            try:
+                q = await m.get_quote(code, source=name, conn_id=conn_id or None)
+            except Exception as exc:  # noqa: BLE001
+                log.debug("analysis 估值行情兜底源 %s 失败 %s：%s", name, code, exc)
+                continue
+            if not isinstance(q, dict):
+                continue
+            got = {k: q.get(k) for k in VALUATION_METRIC_KEYS if q.get(k) is not None}
+            if got:
+                got["_source"] = name
+                return got
+        return None
+
     snap, prof, cap, perf, mf, fin = await asyncio.gather(
         _guard(_snapshot()), _guard(_profile()), _guard(_capital()),
         _guard(_performance()), _guard(_moneyflow()), _guard(_valuation()),
@@ -135,16 +158,47 @@ async def build_analysis(m, code: str, conn_id: str = "", source: str = "auto",
     if perf and perf.get("stale"):
         availability["performance"] = "stale"
 
+    # ---- 估值：券商财务优先，缺口用**行情派生指标**补齐 ----
+    #
+    # ★★ 为什么必须有「行情兜底」这一路（2026-09-21 实测，用户报「基本面 6 维
+    #   数据不少维度无数据」）：
+    #   本维度此前**只认券商财务接口**（`gateway.get_financial`）。实测同时成立：
+    #     ① 本机 QMT 只有旧接口 `get_financial_data`，且返回 **10 张 0×0 空表**
+    #        （终端未下载财务数据 / 无财务数据权限）；
+    #     ② 与此同时 `/market/stock-info` 能拿到 **腾讯** 的
+    #        `pe_ttm=19.23` / `pb=6.23` / `total_mv=1.57e12`。
+    #   ⇒ 同一份估值数据，一个端点有、另一个端点说「无数据」——
+    #     用户在「基本面」里看到的「估值 无数据」是**假空缺**：界面在撒谎，
+    #     而真实原因（终端没财务数据）与展示口径（其实有 PE/PB）都不对。
+    #
+    #   现在补第二路：券商给不了就问声明了这些字段的行情源要，并如实标注
+    #   `metrics_source`，让「这个 PE 是哪来的」可追溯（券商现算 / 行情源直供）。
     valuation = None
-    if fin:
-        eps, bps = fin.get("EPS"), fin.get("BPS")
+    fin_eps = (fin or {}).get("EPS")
+    fin_bps = (fin or {}).get("BPS")
+    if fin and (fin_eps is not None or fin_bps is not None):
         valuation = {
-            "report_time": fin.get("report_time"), "eps": eps, "bps": bps,
+            "report_time": fin.get("report_time") or None, "eps": fin_eps, "bps": fin_bps,
             "roe": fin.get("ROE"), "detail": fin.get("detail", ""),
-            "pe": round(last / eps, 2) if (last and eps and eps > 0) else None,
-            "pb": round(last / bps, 2) if (last and bps and bps > 0) else None,
+            "pe": round(last / fin_eps, 2) if (last and fin_eps and fin_eps > 0) else None,
+            "pb": round(last / fin_bps, 2) if (last and fin_bps and fin_bps > 0) else None,
+            "metrics_source": "broker",
         }
-        availability["valuation"] = "ok" if (valuation["pe"] or valuation["pb"]) \
+    if valuation is None or not (valuation.get("pe") or valuation.get("pb")):
+        metrics = await _guard(_valuation_metrics(), timeout=8.0)
+        if metrics:
+            src_name = metrics.pop("_source", None)
+            if valuation is None:
+                valuation = {"report_time": None, "eps": None, "bps": None, "roe": None,
+                             "detail": (fin or {}).get("detail", ""), "pe": None, "pb": None}
+            # ★ 按 **显式映射**填，不能按同名填：行情源给的是 `pe_ttm`，载荷用 `pe`
+            #   （实测按同名填会漏掉 PE —— pb 同名碰巧对上了，pe 一直空着）。
+            for src_key, dst_key in VALUATION_METRIC_MAP.items():
+                if valuation.get(dst_key) is None and metrics.get(src_key) is not None:
+                    valuation[dst_key] = metrics[src_key]
+            valuation["metrics_source"] = src_name
+    if valuation:
+        availability["valuation"] = "ok" if (valuation.get("pe") or valuation.get("pb")) \
             else "unavailable"
 
     if cap:

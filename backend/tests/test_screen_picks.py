@@ -183,3 +183,28 @@ def test_bars_last_date_empty_or_broken_returns_blank():
     assert picks_mod.bars_last_date({"600519.SH": [{"time": ""}]}) == ""
     assert picks_mod.bars_last_date({"600519.SH": [{}]}) == ""
     assert picks_mod.bars_last_date({"600519.SH": [None]}) == ""
+
+
+def test_bars_last_date_works_with_barlite_objects():
+    """★ 批量路径给的是 ``BarLite`` 对象（只有属性、**没有 ``.get``**），也必须能解析。
+
+    实测（2026-09-20 真实库）：``BarsProvider.get_bars_batch(lite=True)`` 返回
+    ``BarLite``，而这里此前写的是 ``last.get("time") if hasattr(last, "get") else None``
+    ⇒ 属性访问不到就传 ``None`` 给 ``bar_date()`` ⇒ **恒返回 ``""``**。
+    后果：定时选股任务成功、命中 100 只、结果落库，但 ``bar_date=""`` ——
+    界面上「这次选股基于哪一天的日线」永远是空的；更严重的是
+    「日线落后于最近交易日就先自动补数」的前置体检
+    （``last_date and last_date < expect_date``）在 ``last_date == ""`` 时整条为假
+    ⇒ **数据陈旧永远触发不了自动补数**，正是这段代码当初要防的事。
+    """
+    from datasource.models import BarLite
+
+    bars = {
+        "600519.SH": [BarLite("20260917", 1.0, 2.0, 0.5, 1.5),
+                      BarLite("20260918", 1.0, 2.0, 0.5, 1.8)],
+        "000001.SZ": [BarLite("2026-09-16", 1.0, 2.0, 0.5, 1.9)],   # 带横线形状
+    }
+    assert picks_mod.bars_last_date(bars) == "20260918"
+    assert picks_mod.bar_time(BarLite("20260918", 1.0, 2.0, 0.5, 1.8)) == "20260918"
+    assert picks_mod.bar_time({"time": "20260918"}) == "20260918"
+    assert picks_mod.bar_time(None) == ""

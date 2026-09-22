@@ -34,9 +34,9 @@ PAGES_REGISTRY = os.path.join(SRC, "app", "routes.tsx")
 README = os.path.join(ROOT, "README.md")
 
 # ── 计数契约（与 README「核心能力」「项目结构」章节同步）─────────────────────
-EXPECTED_TESTS = 1329          # 后端用例收集数
-EXPECTED_COMPONENTS = 67     # 前端 .tsx 组件数（components + shell + charts + domains）
-EXPECTED_PAGES = 40          # 注册页数量（routes.tsx PAGES 键；含占位）
+EXPECTED_TESTS = 1589          # 后端用例收集数
+EXPECTED_COMPONENTS = 72     # 前端 .tsx 组件数（components + shell + charts + domains）
+EXPECTED_PAGES = 43          # 注册页数量（routes.tsx PAGES 键；含占位）
 
 # ── 收集失败时允许跳过的辅助模块（非测试）────────────────────────────────────
 _SKIP_FILES = {"smoke2.py", "fake_bridge_server.py", "_phase4_support.py",
@@ -168,6 +168,17 @@ def check_readme_numbers(tests: int, pages: int) -> list[str]:
         # pytest 不可用时 tests 为 0，跳过（否则会误报）
         if tests and int(m.group(2)) != tests:
             problems.append(f"README 称「{m.group(2)} 个用例」，实测收集 {tests} 个")
+
+    # 路由模块数：README 长期写「36 个路由模块」而实测 34 —— 与页面数同源的漂移。
+    # 判据用「文件里真有 @router. 装饰器」，_common.py 之类辅助模块不该被算进去。
+    m = re.search(r"(\d+)\s*个\s*(?:REST\s*)?路由模块", text)
+    if m:
+        route_dir = os.path.join(BACKEND, "app", "routes")
+        n_mod = len([f for f in glob.glob(os.path.join(route_dir, "*.py"))
+                     if not f.endswith("__init__.py")
+                     and "@router." in open(f, encoding="utf-8", errors="ignore").read()])
+        if int(m.group(1)) != n_mod:
+            problems.append(f"README 称「{m.group(1)} 个路由模块」，实测 {n_mod} 个")
     return problems
 
 

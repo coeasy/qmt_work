@@ -62,7 +62,25 @@ class LimitUpMonitor:
         code = (code or "").strip().upper()
         if not code:
             raise ValueError("代码不能为空")
-        self._pool[code] = name or code
+        # ★★ 名称必须真的去查（2026-09-20 实测修复）。此前是 `name or code` ——
+        #   未传 name 时把**代码当名称**存进池子，静默造成两个后果：
+        #
+        #   1. **功能**：`_limit_factor(code, name)` 靠「名称含 ST」判 5% 涨停幅度。
+        #      名称恒等于代码 ⇒ ST 分支永不命中 ⇒ **ST 股被按 10% 判涨停，
+        #      而它 5% 就封板了 ⇒ 永远等不到触发**（用户以为「没涨停」，其实监控失效）。
+        #   2. **展示**：`/limitup/status` 返回 `{"code":"600000.SH","name":"600000.SH"}`，
+        #      界面「名称」列把代码当名称 —— 拿占位值冒充真实数据。
+        #
+        #   名称表就在运行时数据目录的 `stock_names.json`（由 eltdx 源维护、与之共用）。
+        #   查不到就**留空**，由前端渲染占位符；**绝不再拿代码顶上**。
+        if not name:
+            try:
+                from datasource.eltdx_utils import lookup_name
+                name = lookup_name(code)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("涨停池名称查询失败（名称将留空）：%s", exc)
+                name = ""
+        self._pool[code] = name or ""
         self._ticks.setdefault(code, deque(maxlen=25))
         return {"code": code, "name": self._pool[code]}
 

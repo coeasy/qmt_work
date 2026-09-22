@@ -254,7 +254,7 @@ export function Rebalance() {
       <Panel flush className={s.grow} title={`调仓计划（${orders?.length ?? 0}）`}>
         <div className={s.tableArea}>
           {!orders ? (
-            <EmptyState text="尚未生成调仓计划" />
+            <EmptyState text="尚未生成调仓计划 —— 在上方确认目标组合与参数后点「生成调仓计划」" />
           ) : orders.length === 0 ? (
             <EmptyState text="无需调仓（所有标的差额均低于阈值）" />
           ) : (

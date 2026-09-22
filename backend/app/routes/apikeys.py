@@ -120,10 +120,18 @@ async def clean_unused_api_keys(body: dict, ctx: AppContext = Depends(get_ctx)):
     # 注意：last_used_at 为空视为"从未使用"，也满足"从未使用>days天"条件
     # 保留 active 且：(last_used_at 为空且 created_at < cutoff) OR last_used_at < cutoff
     deleted = 0
+    # ★ 「从未使用」这一支**必须同时满足 created_at < cutoff**。
+    #   旧写法 `(last_used_at < ? OR last_used_at = '' OR last_used_at IS NULL)` 少了
+    #   创建时间条件 ⇒ 一个刚创建、还没被用过的密钥会在**第一次清理时就被删掉**，
+    #   与本函数 docstring 声明的保留条件（「从未使用且 created_at < cutoff」）相反。
+    #   典型后果：新建密钥 → 忘了配到客户端 → 跑一次清理 → 密钥消失且无痕迹可查。
     rows = ctx.db.query(
         "SELECT id, last_used_at, created_at FROM api_keys "
-        "WHERE status='active' AND (last_used_at < ? OR last_used_at = '' OR last_used_at IS NULL)",
-        (cutoff,))
+        "WHERE status='active' AND ("
+        "  (last_used_at IS NOT NULL AND last_used_at <> '' AND last_used_at < ?)"
+        "  OR ((last_used_at IS NULL OR last_used_at = '') AND created_at < ?)"
+        ")",
+        (cutoff, cutoff))
     ids_to_del = [r["id"] for r in rows]
     if ids_to_del:
         place = ",".join("?" * len(ids_to_del))

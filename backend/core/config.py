@@ -68,9 +68,13 @@ def _default_config_payload() -> dict[str, Any]:
         "log_alert_webhook": "",
         "log_alert_level": "ERROR",
         # ---- 数据库自动备份（防单点损坏）----
+        # ⚠️ keep 是**份数**上限，对 1GB+ 的主库毫无意义（10 份 = 11GB）；
+        #    max_total_mb 才是真正的磁盘闸门，必须一起配。
         "db_backup_enabled": True,
         "db_backup_interval": 3600.0,
         "db_backup_keep": 10,
+        "db_backup_max_total_mb": 4096.0,
+        "db_backup_min_keep": 2,
         # ---- 网关鉴权（生产环境务必修改）----
         "api_key": "qmt-dev-key",
         # ---- 可选引导连接（不填则需在「券商连接」页添加）----
@@ -173,21 +177,72 @@ def _default_log_dir() -> Path:
     return exe_dir() / "logs"
 
 
-def cold_bars_path() -> Path:
+def cold_bars_path(override: str = "") -> Path:
     """冷 K 线仓文件路径（单一解析入口）。
 
-    显式配置 ``bars_cold_path`` 优先（相对路径以 exe 目录为基准）；未配置则
-    **跟随主库目录** ``<db_path 的父目录>/bars_cold.db``。
+    优先级：``override``（运行期配置 ``offline.cold_dir``，**按目录**解释）
+    > 显式配置 ``bars_cold_path``（**按文件路径**解释，向后兼容）
+    > **跟随主库目录** ``<db_path 的父目录>/bars_cold.db``。
+
+    ⚠️ ``override`` 与 ``bars_cold_path`` 的语义**故意不同**：
+    前者是「冷库目录」（界面里让用户选的是文件夹），后者是历史遗留的「冷库文件」。
+    把 ``override`` 也按文件解释的话，用户选了一个文件夹就会得到一个名叫
+    「我的数据」的**文件**（不带 .db 后缀），排查起来极其费解。
 
     刻意做成函数而不是 Field 默认值：``db_path`` 可被 JSON 配置覆盖，
     而 Field 默认值在 ``Settings`` 构造时就固化了，改 ``db_path`` 不会带动冷仓，
     会出现「主库搬到了 D 盘、冷仓还在 C 盘」的割裂。这里每次按当前 settings 求值。
     """
+    ov = str(override or "").strip()
+    if ov:
+        p = Path(ov)
+        if not p.is_absolute():
+            p = exe_dir() / p
+        return p / "bars_cold.db"
     raw = str(getattr(settings, "bars_cold_path", "") or "").strip()
     if raw:
         p = Path(raw)
         return p if p.is_absolute() else (exe_dir() / p)
     return settings.db_path.parent / "bars_cold.db"
+
+
+def export_dir(raw: str = "") -> Path:
+    """离线数据导出目录（单一解析入口）。
+
+    优先级：显式值 ``raw``（运行期配置 ``offline.export_dir``）
+    > ``<运行目录>/export``。相对路径以运行目录（exe 同目录 / backend 根）为基准。
+    """
+    v = str(raw or "").strip()
+    p = Path(v) if v else (exe_dir() / "export")
+    return p if p.is_absolute() else (exe_dir() / p)
+
+
+def update_config_file(updates: dict[str, Any]) -> Path:
+    """把若干键**合并**写入 ``<exe 同目录>/qmt_work_config.json``；返回文件路径。
+
+    ⚠️ 必须合并而不是重写：这个文件里同时有用户手改过的 ``api_key`` / ``host`` /
+    风控阈值，整体覆盖等于把用户的配置删掉。已有的 ``_`` 开头注释键也原样保留。
+    文件不存在（开发模式不自动生成）时，从 ``_default_config_payload()`` 起步。
+    """
+    f = config_file()
+    data: dict[str, Any] = {}
+    if f.exists():
+        try:
+            loaded = json.loads(f.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                data = loaded
+        except (OSError, json.JSONDecodeError):
+            # 坏文件不静默丢弃：改名留档后重建，用户还能找回原内容
+            try:
+                f.replace(f.with_suffix(".json.bak"))
+            except OSError:
+                pass
+    if not data:
+        data = _default_config_payload()
+    data.update(updates)
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    return f
 
 
 class Settings(BaseSettings):
@@ -252,10 +307,14 @@ class Settings(BaseSettings):
     log_alert_webhook: str = ""            # ERROR+ 日志推送 webhook（{url}|{secret} 或纯 url）
     log_alert_level: str = "ERROR"         # 日志告警最低级别
 
-    # 数据库自动备份：启动时 + 周期性（秒）+ 关闭前各一次，保留最近 keep 份
+    # 数据库自动备份：启动时 + 周期性（秒）+ 关闭前各一次
+    # 保留策略 = min(份数上限 keep, 总体积上限 max_total_mb)，但至少留 min_keep 份。
+    # ⚠️ 只有份数上限时，1GB+ 主库会产生 10GB+ 备份（实测用户目录 11GB）⇒ 必须配体积。
     db_backup_enabled: bool = True
     db_backup_interval: float = 3600.0
     db_backup_keep: int = 10
+    db_backup_max_total_mb: float = 4096.0   # 备份目录总体积上限（MB）；<=0 = 不限
+    db_backup_min_keep: int = 2              # 体积上限再严也至少保留的份数
 
     # 限流：窗口秒数 / 窗口内最大请求数（按 token/ip）
     rate_limit_window: int = 60

@@ -4,7 +4,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from _phase7_support import eod_db, tmp_db  # noqa: F401,E402
+from _phase7_support import BAR_DT, eod_db, tmp_db  # noqa: F401,E402
 from datasource.quality import PROVIDER_QUALITY_RANK, reconcile_bars  # noqa: E402
 
 
@@ -14,7 +14,7 @@ def test_consistent_sources_canonical_final(eod_db):
     # 一致组：最优源（broker 排最前）标 final
     rows = eod_db.query(
         "SELECT provider_id, quality_state FROM local_bars "
-        "WHERE code='600000.SH' AND dt='20260910'")
+        f"WHERE code='600000.SH' AND dt='{BAR_DT}'")
     by_prov = {r["provider_id"]: r["quality_state"] for r in rows}
     assert by_prov["broker"] == "final"
     assert by_prov["eltdx"] in ("raw", "reconciled", "final")   # raw 保留
@@ -26,7 +26,7 @@ def test_conflict_keeps_all_raw_marked(eod_db):
     assert stats["conflicts"] == 1
     rows = eod_db.query(
         "SELECT provider_id, quality_state FROM local_bars "
-        "WHERE code='600001.SZ' AND dt='20260910'")
+        f"WHERE code='600001.SZ' AND dt='{BAR_DT}'")
     assert len(rows) == 2                          # 全部 raw 保留，不删行
     assert all(r["quality_state"] == "conflict" for r in rows)
 

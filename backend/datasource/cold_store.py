@@ -194,6 +194,66 @@ class ColdStore:
             if len(rows) < int(batch):
                 return {"moved": moved, "batches": batches, "done": True}
 
+    def copy_from_file(self, src: Path | str, batch: int = 5000) -> dict:
+        """把**另一个冷仓文件**里的行复制进来（**不删源**）。
+
+        场景（P0-3 II）：用户在设置里改了冷库目录 ⇒ 新冷库是空的 ⇒ 图表历史
+        **静默变短**（不报错、不提示，最难查的那类问题）。这个函数就是那个
+        「把旧库搬过来」的动作。
+
+        ★ 刻意**不删源文件**：目录是用户自己选的，删错一个文件比多占一份磁盘
+        严重得多；复制完成后由用户确认无误再自行清理，界面会明示源路径与保留事实。
+
+        返回 ``{"moved": n, "batches": k, "src": str, "dst": str}``；
+        源文件不存在 / 打不开 ⇒ 返回 ``moved=0`` 并带 ``error``（不抛异常，
+        调用方要能把失败如实告知用户，而不是把异常翻译成 500）。
+        """
+        src_p = Path(src)
+        out = {"moved": 0, "batches": 0, "src": str(src_p), "dst": str(self.path),
+               "error": ""}
+        if not src_p.exists() or not src_p.is_file():
+            out["error"] = f"源文件不存在：{src_p}"
+            return out
+        if src_p.resolve() == Path(self.path).resolve():
+            out["error"] = "源与目标相同，无需迁移"
+            return out
+        cols = ",".join(_ARCHIVE_COLS)
+        placeholders = ",".join("?" * len(_ARCHIVE_COLS))
+        try:
+            sconn = sqlite3.connect(f"file:{src_p}?mode=ro", uri=True, timeout=10.0)
+            sconn.row_factory = sqlite3.Row
+        except sqlite3.Error as exc:
+            out["error"] = f"源冷仓不可读：{exc}"
+            return out
+        try:
+            offset = 0
+            while True:
+                try:
+                    rows = sconn.execute(
+                        f"SELECT {cols} FROM kline_archive ORDER BY id LIMIT ? OFFSET ?",
+                        (int(batch), offset)).fetchall()
+                except sqlite3.Error as exc:
+                    # 源里根本没有这张表（比如用户指错了目录）⇒ 视为 0 行，不是错误
+                    out["error"] = f"源冷仓无 kline_archive 表（{exc}）"
+                    break
+                if not rows:
+                    break
+                seq = [tuple(r[c] for c in _ARCHIVE_COLS) for r in rows]
+                self.executemany_in_txn(
+                    f"INSERT OR REPLACE INTO kline_archive ({cols}) VALUES ({placeholders})",
+                    seq)
+                out["moved"] += len(rows)
+                out["batches"] += 1
+                if len(rows) < int(batch):
+                    break
+                offset += len(rows)
+        finally:
+            try:
+                sconn.close()
+            except sqlite3.Error:
+                pass
+        return out
+
     def close(self) -> bool:
         with self._lock:
             if self._closed:

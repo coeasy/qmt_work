@@ -14,12 +14,21 @@ async def rebalance(body: dict, ctx: AppContext = Depends(get_ctx)):
     """等权篮子再平衡：targets=[{code,target_ratio}] -> 调仓单（阈值过滤+拆单+涨跌停处理）。
 
     do_trade=True 时经券商真实下单；否则仅生成计划。
+
+    ★ 券商门按**执行模式**分流（2026-09-20 实测修复）：本端点按**券商账户**的总资产
+    与持仓计算差额，模拟盘账户（PaperEngine）不参与 —— 因此无券商时不能一律说
+    「请去连接券商」，要讲清「当前模式不支持」并给出替代路径，否则是错误归因。
     """
     targets = body.get("targets", [])
     if not targets:
         return err(400, "targets 不能为空")
     b = _need(body.get("conn_id") or None)
     if b is None:
+        _mode = str(getattr(ctx.signal_router, "mode", "") or "")
+        if _mode and _mode != "live":
+            return err(503, "再平衡按券商账户的总资产与持仓计算差额，"
+                            "模拟盘 / 预演账户暂不支持。"
+                            "如需在模拟盘调仓，请到「交易」页按标的逐个下单。")
         return no_broker()
     cash = await _call(b, b.gateway.get_cash)
     if isinstance(cash, dict) and cash.get("code"):

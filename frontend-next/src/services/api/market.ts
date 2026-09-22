@@ -99,6 +99,42 @@ export interface StockInfo {
   concepts?: string[];
   source?: string;
   note?: string;
+  /**
+   * 行情派生字段（2026-09-21 扩展）。
+   *
+   * ⚠️ 后端给不出时是 **`null`**（不是 0）：这些是「源里没有」，不是「值为零」。
+   * 前端一律渲染 `--`，**绝不能把 null 当 0 显示** —— 市值 0 元 / 市盈率 0
+   * 会被读成真实数据（假数据比没数据更危险）。
+   */
+  open?: number | null;
+  high?: number | null;
+  low?: number | null;
+  /** 均价（成交额 / 成交量） */
+  avg_price?: number | null;
+  /** 振幅 % */
+  amplitude?: number | null;
+  /** 换手率 % */
+  turnover_rate?: number | null;
+  /** 量比 */
+  volume_ratio?: number | null;
+  /** 市盈率 TTM（亏损股为负） */
+  pe_ttm?: number | null;
+  /** 市净率 */
+  pb?: number | null;
+  /** 流通市值（元） */
+  circ_mv?: number | null;
+  /** 总市值（元） */
+  total_mv?: number | null;
+  /** 成交额（元） */
+  amount?: number | null;
+  /**
+   * 上面这些行情派生字段**实际来自哪个源**。
+   *
+   * 为什么需要：详情源（本地 TDX / 券商）不提供这些字段，后端会再从公开行情源补一次。
+   * 此时 `source` 仍是详情源，不说明白就是「数据源写着 eltdx、市值却是别处来的」。
+   * 与 `source` 相同、或没有补过时不出现。
+   */
+  metrics_source?: string | null;
 }
 
 export interface IndicesResponse {
@@ -219,6 +255,13 @@ export interface OverviewResponse {
   /** 上证 + 深证成交额求和；任一缺失则为 null（UI 显示「—」） */
   two_city_turnover: number | null;
   two_city_note: string;
+  /**
+   * 三块数据（统计板块 / 指数 / 宽度趋势）**全空**时后端给出的成因。
+   *
+   * 后端只在「确实拿不到」时才带上它；界面必须原样转述，不要自己编原因 ——
+   * 「未连接券商」和「数据源不提供该能力」是两件事，猜错会把排查方向带偏。
+   */
+  unavailable?: string;
   source: string;
   ts: string;
 }

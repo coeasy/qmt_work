@@ -3,6 +3,7 @@ import {
   Badge,
   Button,
   ConfirmButton,
+  ConfirmModal,
   DataTable,
   EmptyState,
   FormRow,
@@ -38,6 +39,27 @@ export function Webhooks() {
   const [busy, setBusy] = useState(false);
   const [banner, setBanner] = useState<{ tone: "ok" | "error"; text: string } | null>(null);
   const [selected, setSelected] = useState<number[]>([]);
+  /** 批量删除的模态确认（批量 ⇒ ConfirmModal，见按钮处注释） */
+  const [confirmBatch, setConfirmBatch] = useState(false);
+  /** 非空 = 正在编辑该订阅（★ 新建与编辑共用 POST，靠这个 id 区分） */
+  const [editingId, setEditingId] = useState<number | null>(null);
+
+  const resetForm = () => {
+    setEditingId(null);
+    setName("");
+    setUrl("");
+    setEvents("*");
+    setEnabled("1");
+  };
+
+  const startEdit = (r: WebhookSub) => {
+    setEditingId(r.id);
+    setName(r.name ?? "");
+    setUrl(r.url ?? "");
+    setEvents(r.events ?? "*");
+    setEnabled(r.enabled === 0 ? "0" : "1");
+    setBanner(null);
+  };
 
   const create = async () => {
     if (!url.trim()) {
@@ -48,14 +70,18 @@ export function Webhooks() {
     setBanner(null);
     try {
       const res = await webhookApi.create({
+        // ★ 带 id 即更新 —— 后端 save_sub 按 id 走 UPDATE，不要去找 PUT
+        ...(editingId ? { id: editingId } : {}),
         name,
         url,
         events,
         enabled: enabled === "1",
       });
-      setBanner({ tone: "ok", text: `已创建订阅 #${res.id}` });
-      setName("");
-      setUrl("");
+      setBanner({
+        tone: "ok",
+        text: editingId ? `已保存订阅 #${res.id}` : `已创建订阅 #${res.id}`,
+      });
+      resetForm();
       await subs.reload();
     } catch (e) {
       setBanner({ tone: "error", text: e instanceof Error ? e.message : String(e) });
@@ -136,6 +162,9 @@ export function Webhooks() {
             }
             aria-label={`选择订阅 ${r.id}`}
           />
+          <Button size="sm" variant="ghost" disabled={busy} onClick={() => startEdit(r)}>
+            编辑
+          </Button>
           <Button size="sm" variant="ghost" disabled={busy} onClick={() => void test(r.id)}>
             测试
           </Button>
@@ -179,13 +208,16 @@ export function Webhooks() {
   return (
     <div className={s.page}>
       <div className={s.toolbar}>
-        <ConfirmButton
+        {/* ★ 批量删除走 ConfirmModal（判据同 Alerts.tsx）：高风险、低频，
+            要让人读一遍「将删除 N 条」再确认，而不是靠第二次点击形成肌肉记忆。 */}
+        <Button
+          size="sm"
+          variant="danger"
           disabled={busy || selected.length === 0}
-          confirmText={`确认删除 ${selected.length} 条`}
-          onConfirm={() => void batchRemove()}
+          onClick={() => setConfirmBatch(true)}
         >
           批量删除（{selected.length}）
-        </ConfirmButton>
+        </Button>
         <span className={s.spacer} />
         <Button
           size="sm"
@@ -203,7 +235,16 @@ export function Webhooks() {
         <div className={`${s.note} ${banner.tone === "ok" ? s.noteOk : s.noteError}`}>{banner.text}</div>
       )}
 
-      <Panel title="新建订阅">
+      <Panel
+        title={editingId ? `编辑订阅 #${editingId}` : "新建订阅"}
+        extra={
+          editingId ? (
+            <Button size="sm" variant="ghost" onClick={resetForm}>
+              取消编辑
+            </Button>
+          ) : null
+        }
+      >
         <div className={s.cols4}>
           <FormRow label="名称">
             <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="可选" />
@@ -226,8 +267,8 @@ export function Webhooks() {
           </FormRow>
         </div>
         <div style={{ marginTop: 8 }}>
-          <Button size="sm" disabled={busy} onClick={() => void create()}>
-            创建
+          <Button size="sm" variant="primary" disabled={busy} onClick={() => void create()}>
+            {editingId ? "保存修改" : "创建"}
           </Button>
         </div>
       </Panel>
@@ -241,7 +282,7 @@ export function Webhooks() {
               {subs.error}
             </div>
           ) : (subs.data?.length ?? 0) === 0 ? (
-            <EmptyState text="暂无 Webhook 订阅" />
+            <EmptyState text="暂无 Webhook 订阅 —— 在上方填写回调 URL 与订阅事件后点「创建」" />
           ) : (
             <DataTable columns={subCols} rows={subs.data ?? []} rowKey={(r) => String(r.id)} rowHeight={24} />
           )}
@@ -255,7 +296,7 @@ export function Webhooks() {
               {deliveries.error}
             </div>
           ) : (deliveries.data?.length ?? 0) === 0 ? (
-            <EmptyState text="暂无投递记录" />
+            <EmptyState text="暂无投递记录 —— 订阅被触发后，每次投递的结果与失败原因会记在这里" />
           ) : (
             <DataTable
               columns={deliveryCols}
@@ -266,6 +307,26 @@ export function Webhooks() {
           )}
         </div>
       </Panel>
+
+      <ConfirmModal
+        open={confirmBatch}
+        title="批量删除 Webhook 订阅"
+        danger
+        confirmText={`确认删除 ${selected.length} 条`}
+        message={
+          <>
+            将删除选中的 <b>{selected.length}</b> 条订阅，删除后不再向这些地址推送事件。
+            <br />
+            若只是想暂停推送，把订阅改成「停用」更安全。
+          </>
+        }
+        warn="删除后不可恢复"
+        onConfirm={() => {
+          setConfirmBatch(false);
+          void batchRemove();
+        }}
+        onCancel={() => setConfirmBatch(false)}
+      />
     </div>
   );
 }

@@ -82,7 +82,7 @@ const JOB_STATUS_TONE: Record<RuntimeJob["status"], "success" | "danger" | "neut
  * ★ 契约要点（runtime.py）：
  *   - GET /runtime/jobs 与 /runtime/schedules 都返回 {items, count}，**不是**裸数组
  *   - 调度的创建字段是 kind（不是 job_kind）；cron 由后端 CronExpr.parse 校验，非法即 400
- *   - misfire_policy 取值 coalesce / skip / catchup
+ *   - misfire_policy 取值 coalesce / skip / catch_up（**下划线**，不是 catchup）
  *   - /runtime/schedules/{id}/trigger 立即触发一次，返回 {schedule_id, job_id}
  *   - kind 必须能取到 runner，否则 400「kind 无对应 runner」——本页只列已注册 kind
  */
@@ -107,6 +107,17 @@ export function RuntimeJobs() {
   const [sMisfire, setSMisfire] = useState("coalesce");
   const [sEnabled, setSEnabled] = useState("1");
   const [sParams, setSParams] = useState("{}");
+  /** 正在编辑的调度 id；null = 当前在「新建」模式。 */
+  const [editingId, setEditingId] = useState<string | null>(null);
+  // ★ 新建调度的默认值（取消编辑时还原；显式保存一份，避免后面再加新字段时漏改）。
+  const SCHEDULE_DEFAULTS = {
+    kind: "system.eod",
+    cron: "0 15 * * 1-5",
+    name: "",
+    misfire: "coalesce",
+    enabled: "1",
+    params: "{}",
+  };
 
   const wrap = async (fn: () => Promise<unknown>, okText: string, reload: () => Promise<void>) => {
     setBusy(true);
@@ -137,7 +148,27 @@ export function RuntimeJobs() {
     );
   };
 
-  const createSchedule = () => {
+  const enterEdit = (r: ScheduleItem) => {
+    setSKind(r.kind);
+    setSCron(r.cron);
+    setSName(r.name || "");
+    setSMisfire(r.misfire_policy || "coalesce");
+    setSEnabled(r.enabled ? "1" : "0");
+    setSParams(JSON.stringify(r.params ?? {}));
+    setEditingId(r.id);
+  };
+
+  const cancelEdit = () => {
+    setSKind(SCHEDULE_DEFAULTS.kind);
+    setSCron(SCHEDULE_DEFAULTS.cron);
+    setSName(SCHEDULE_DEFAULTS.name);
+    setSMisfire(SCHEDULE_DEFAULTS.misfire);
+    setSEnabled(SCHEDULE_DEFAULTS.enabled);
+    setSParams(SCHEDULE_DEFAULTS.params);
+    setEditingId(null);
+  };
+
+  const submitSchedule = () => {
     let params: Record<string, unknown> = {};
     try {
       params = JSON.parse(sParams || "{}") as Record<string, unknown>;
@@ -145,7 +176,7 @@ export function RuntimeJobs() {
       setBanner({ tone: "error", text: "调度 params 不是合法 JSON" });
       return;
     }
-    const body: ScheduleCreate = {
+    const base: ScheduleCreate = {
       kind: sKind,
       cron: sCron,
       name: sName || sKind,
@@ -153,13 +184,25 @@ export function RuntimeJobs() {
       enabled: sEnabled === "1",
       params,
     };
-    void wrap(() => systemApi.createSchedule(body), `调度已创建（${sCron}）`, schedules.reload);
+    if (editingId) {
+      void wrap(
+        () => systemApi.updateSchedule(editingId, base),
+        `调度已保存（${editingId}）`,
+        async () => { await schedules.reload(); cancelEdit(); },
+      );
+    } else {
+      void wrap(
+        () => systemApi.createSchedule(base),
+        `调度已创建（${sCron}）`,
+        async () => { await schedules.reload(); cancelEdit(); },
+      );
+    }
   };
 
   const jobCols: Column<RuntimeJob>[] = [
     { key: "id", header: "任务号", width: 120, mono: true, render: (r) => r.id },
     { key: "kind", header: "类型", width: 180, mono: true, render: (r) => r.kind },
-    { key: "name", header: "名称", width: 160, render: (r) => r.name ?? "--" },
+    { key: "name", header: "名称", width: 160, render: (r) => r.name || "--" },
     {
       key: "status",
       header: "状态",
@@ -237,14 +280,25 @@ export function RuntimeJobs() {
       width: 76,
       render: (r) => <Badge tone={r.enabled ? "success" : "neutral"}>{r.enabled ? "启用" : "停用"}</Badge>,
     },
-    { key: "next", header: "下次运行", width: 150, mono: true, render: (r) => r.next_run ?? "--" },
-    { key: "last", header: "上次运行", width: 150, mono: true, render: (r) => r.last_run ?? "--" },
+    // ⚠️ 字段名是 next_run_at / last_run_at（后端连列名一起返回）。
+    // 写成 next_run/last_run 会永远读到 undefined ⇒ 两列恒 `--`，且不报错。
+    { key: "next", header: "下次运行", width: 150, mono: true, render: (r) => r.next_run_at ?? "--" },
+    { key: "last", header: "上次运行", width: 150, mono: true, render: (r) => r.last_run_at ?? "--" },
     {
       key: "act",
       header: "操作",
       width: 190,
       render: (r) => (
         <div style={{ display: "flex", gap: 4 }}>
+          <Button
+            size="sm"
+            variant="ghost"
+            disabled={busy}
+            onClick={() => enterEdit(r)}
+            title="编辑此调度（cron / 补跑策略 / 启用 等）"
+          >
+            编辑
+          </Button>
           <Button
             size="sm"
             variant="ghost"
@@ -335,7 +389,7 @@ export function RuntimeJobs() {
                   {jobs.error}
                 </div>
               ) : (jobs.data?.items.length ?? 0) === 0 ? (
-                <EmptyState text="暂无任务" />
+                <EmptyState text="暂无任务 —— 在上方「提交任务」选择类型后提交；调度自动触发的任务也会出现在这里" />
               ) : (
                 <DataTable
                   columns={jobCols}
@@ -349,7 +403,7 @@ export function RuntimeJobs() {
         </>
       ) : (
         <>
-          <Panel title="新建调度">
+          <Panel title={editingId ? `编辑调度（${editingId}）` : "新建调度"}>
             <div className={s.cols4}>
               <FormRow label="类型">
                 <Select
@@ -387,7 +441,10 @@ export function RuntimeJobs() {
                   options={[
                     { value: "coalesce", label: "coalesce 合并" },
                     { value: "skip", label: "skip 跳过" },
-                    { value: "catchup", label: "catchup 补跑" },
+                    // ⚠️ 后端只认 **catch_up**（schedules.py 白名单：
+                    // catch_up / coalesce / skip）。写成 catchup 会必 400，
+                    // 而界面上看不出是哪个字段错了。
+                    { value: "catch_up", label: "catch_up 补跑" },
                   ]}
                 />
               </FormRow>
@@ -403,7 +460,7 @@ export function RuntimeJobs() {
               </FormRow>
             </div>
             <div style={{ marginTop: 8, display: "flex", gap: 8 }}>
-              <Button size="sm" disabled={busy} onClick={createSchedule}>
+              <Button size="sm" disabled={busy} onClick={submitSchedule}>
                 创建
               </Button>
               <Button size="sm" variant="ghost" onClick={() => void schedules.reload()}>
@@ -432,7 +489,7 @@ export function RuntimeJobs() {
                   {schedules.error}
                 </div>
               ) : (schedules.data?.items.length ?? 0) === 0 ? (
-                <EmptyState text="暂无调度" />
+                <EmptyState text="暂无调度 —— 在上方「新建调度」选择类型并填写 cron 后提交" />
               ) : (
                 <DataTable
                   columns={schedCols}

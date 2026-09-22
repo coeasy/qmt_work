@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Badge,
   Button,
@@ -10,12 +10,16 @@ import {
   Spinner,
   type Column,
 } from "@/design/primitives";
-import { screenApi, fmtBarDate, type ScreenPick, type ScreenRunMeta } from "@/services/api";
+import { screenApi, systemApi, fmtBarDate, type ScreenPick, type ScreenRunMeta } from "@/services/api";
+import type { PageProps } from "@/app/routes";
 import { useAsync } from "@/hooks/useAsync";
 import { useLiveQuotes } from "@/hooks/useLiveQuotes";
+import { useSessionStore } from "@/stores/session";
 import { useWatchlistStore } from "@/stores/watchlist";
 import { fmtDateTime, toTimestamp } from "@/shared/time";
 import { fmtPct, fmtPrice, toneColor } from "@/shared/format";
+import { isLivePrice } from "@/shared/freshness";
+import { useOpenWorkbench } from "@/hooks/useOpenWorkbench";
 import s from "../../domain.module.css";
 
 /**
@@ -34,16 +38,88 @@ import s from "../../domain.module.css";
  *
  * ★ ``run === null`` 时显示「尚未跑过选股」，**不是**空表格 ——
  *   空表格会被读成「今天没选出票」。
+ *
+ * ★ 新增「数据体检」：选股结果的可信度完全取决于跑的时候有没有日线数据。
+ *   若 ``run.bar_date`` 落后于「今日（交易日）/ 最近交易日」，说明日线没同步到最新，
+ *   此时翻结果没有意义 —— 页面直接给出「补充历史数据」按钮（提交
+ *   ``system.sync_bars``），而不是让用户自己去猜该点哪里。
  */
-export function AutoPicks() {
+export interface AutoPicksProps extends Partial<PageProps> {
+  /** 嵌入「选股」工作台页签时为真：由父级承担内边距与滚动，避免双滚动条 */
+  bare?: boolean;
+}
+
+/**
+ * 选股依据的日线是否**落后于「本该有的那一天」**。
+ *
+ * ``expectDate`` 由后端 ``GET /market/session`` 给出（交易日 = 今天，
+ * 非交易日 = 最近交易日），是唯一正确的参照口径。两个曾经踩过的坑：
+ *
+ * ① **不能拿「今天」当判据**：周末/节假日 ``bar_date``（周五）必然早于今天（周日），
+ *    于是每逢休市就误报「行情未更新到最新交易日」—— 而数据其实是最新的。
+ * ② **不能用 ``new Date().toISOString()``**：那是 **UTC** 的今天，UTC+8 的用户在
+ *    早上 8 点前会拿到前一天，判据再错一天。
+ *
+ * 两处（页面级 ``lagging`` 与元数据行内提示）必须走同一个判据，否则同一页会出现
+ * 两套「新鲜」标准。
+ */
+export function isBarDateLagging(barDate: string, expectDate: string): boolean {
+  if (!barDate || !expectDate) return false;
+  return barDate < expectDate;
+}
+
+export function AutoPicks({ bare = false }: AutoPicksProps = {}) {
   const [runId, setRunId] = useState("");
   const [strategy, setStrategy] = useState("");
   const [expanded, setExpanded] = useState<ScreenPick | null>(null);
+  /** 说明卡默认展开一次；关掉后本次会话不再自动弹回来 */
+  const [showIntro, setShowIntro] = useState(true);
+  // 选股结果点一行 ⇒ 直接进行情工作台看这只票（唯一出口，勿各写一遍）
+  const openWorkbench = useOpenWorkbench();
 
   const res = useAsync(() => screenApi.classicPicks({ runId, strategy, limit: 800 }), [runId, strategy]);
   const data = res.data;
   const run = data?.run ?? null;
   const picks = data?.picks ?? [];
+
+  // ---- 数据体检：日线是否同步到「本该有的那一天」 ----
+  const snapshot = useSessionStore((st) => st.snapshot);
+  const refreshSnapshot = useSessionStore((st) => st.refreshSnapshot);
+  useEffect(() => {
+    void refreshSnapshot();
+  }, [refreshSnapshot]);
+
+  /** 期望的数据日：今天是交易日 → 今天；否则 → 最近交易日（周末/节假日） */
+  const expectDate = snapshot
+    ? snapshot.tradingDay
+      ? snapshot.today
+      : snapshot.lastTradingDay
+    : "";
+  const barDate = run?.bar_date ?? "";
+  /** 落后 = 期望有数据那天之后就没再同步过（含从未同步 → barDate 为空） */
+  const lagging = Boolean(expectDate) && Boolean(run) &&
+    (!barDate || isBarDateLagging(barDate, expectDate));
+
+  const [jobMsg, setJobMsg] = useState("");
+  const [jobBusy, setJobBusy] = useState(false);
+  const backfill = async () => {
+    setJobBusy(true);
+    setJobMsg("");
+    try {
+      const r = await systemApi.submitJob({
+        kind: "system.sync_bars",
+        name: "自动选股 · 补历史日线",
+        params: { mode: "full", reason: "auto_picks_lagging" },
+      });
+      setJobMsg(
+        `已提交日线补数据任务 ${r.id}。完成后回到本页点「刷新」，并到「选股 · 经典策略」重跑一次 —— 补数据只补 K 线，不会自动重算选股结果。`,
+      );
+    } catch (e) {
+      setJobMsg(e instanceof Error ? e.message : String(e));
+    } finally {
+      setJobBusy(false);
+    }
+  };
 
   const codes = picks.map((p) => p.code);
   const quotes = useLiveQuotes(codes);
@@ -55,14 +131,22 @@ export function AutoPicks() {
     { key: "name", header: "名称", width: 100, render: (r) => r.name || "--" },
     {
       key: "last",
-      header: "最新",
+      // ★ 表头原写「最新」，但回退值是**选股那一刻的收盘价** —— 与 ScreenPanels
+      //   同口径改成「最新/收盘」，别让收盘价冒充此刻的价。
+      header: "最新/收盘",
       width: 84,
       align: "right",
       mono: true,
       // 实时行情优先；无行情时如实回退选股那一刻的收盘价（两者都不是 0）
       render: (r) => {
         const q = quotes[r.code]?.price;
-        return fmtPrice(q !== undefined && q > 0 ? q : r.close ?? undefined);
+        return isLivePrice(q) ? (
+          fmtPrice(q)
+        ) : (
+          <span title="收盘价（选股就是按这根 K 线的收盘价算的，非实时）">
+            {fmtPrice(r.close ?? undefined)}
+          </span>
+        );
       },
     },
     {
@@ -119,7 +203,57 @@ export function AutoPicks() {
     `${fmtDateTime(toTimestamp(r.created_at))} · ${r.source === "schedule" ? "定时" : "手动"} · 命中 ${r.hits} · 扫描 ${r.scanned}`;
 
   return (
-    <div className={s.page}>
+    <div className={bare ? s.panelHost : s.page}>
+      {/* ---- 这个页面是什么 ----
+          没有这段说明时，用户看到的是「一堆表 + 一堆数字」，既不知道数据从哪来、
+          也不知道多久更新一次、更不知道命中 0 只是什么意思。 */}
+      {showIntro && (
+        <div className={`${s.note} ${s.noteOk} ${s.intro}`}>
+          <div className={s.introHead}>
+            <b>关于自动选股</b>
+            <Button size="sm" variant="ghost" onClick={() => setShowIntro(false)}>
+              收起
+            </Button>
+          </div>
+          <div className={s.introList}>
+            <div>
+              · 这里展示的是<b>定时任务</b> <span className={s.mono}>system.classic_screen</span>
+              （默认每天 16:15）跑出来的结果；每次运行留一个批次，用上方「运行批次」可回看历史。
+            </div>
+            <div>
+              · 结果落库在 <span className={s.mono}>screen_runs</span> /{" "}
+              <span className={s.mono}>screen_picks</span> 两张表，<b>只记录成功的批次</b> ——
+              跑失败的批次在这里看不到，要去「自动化 · 任务运行时」看失败原因。
+            </div>
+            <div>
+              · 想立刻跑一次：切到「经典策略」页签手动运行，或到「自动化 · 任务运行时」立即执行该任务。
+            </div>
+            <div>
+              · <b>命中 0 只 ≠ 行情不好</b>：先看下面的「扫描 N 只」。<b>扫描 0 只</b>说明日线数据没到位，
+              与「扫了 5000 只但没选中」完全是两回事，处理方式也不同。
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ---- 数据体检：日线落后时，翻结果没有意义 ---- */}
+      {lagging && (
+        <div className={`${s.note} ${s.noteWarn}`}>
+          <div className={s.introHead}>
+            <span>
+              {barDate
+                ? `日线数据截至 ${fmtBarDate(barDate)}，落后于${snapshot?.tradingDay ? "今日" : "最近交易日"} ${fmtBarDate(expectDate)}`
+                : "本次运行没有取到任何日线数据"}
+              ：此时看到的是旧数据（甚至可能是空扫描），建议先补齐历史再重跑。
+            </span>
+            <Button size="sm" onClick={() => void backfill()} disabled={jobBusy}>
+              {jobBusy ? "提交中…" : "补充历史数据"}
+            </Button>
+          </div>
+          {jobMsg && <div className={s.introList}>{jobMsg}</div>}
+        </div>
+      )}
+
       <div className={s.toolbar}>
         <FormRow label="运行批次">
           <Select
@@ -163,8 +297,10 @@ export function AutoPicks() {
               扫描 <span className={s.mono}>{run.scanned}</span> 只 · 命中{" "}
               <span className={s.mono}>{run.hits}</span> 只 · 数据截至{" "}
               <span className={s.mono}>{run.bar_date ? fmtBarDate(run.bar_date) : "未知"}</span>
-              {run.bar_date && run.bar_date < new Date().toISOString().slice(0, 10).replace(/-/g, "") && (
-                <span> —— 早于今天，行情未更新到最新交易日，结果仅供参考</span>
+              {/* ★ 判据必须是「最近交易日」（expectDate），不能是「今天」——
+                  详见 isBarDateLagging 的注释（周末误报 + UTC 差一天）。 */}
+              {isBarDateLagging(run.bar_date, expectDate) && (
+                <span> —— 早于最近交易日，行情未更新到最新交易日，结果仅供参考</span>
               )}
               {run.truncated && <span> · 命中过多，仅保留前 800 条</span>}
             </>
@@ -192,7 +328,12 @@ export function AutoPicks() {
               {res.error}
             </div>
           ) : !run ? (
-            <EmptyState text="尚未跑过选股 —— 可到「任务运行时」立即运行 system.classic_screen，或手动跑一次经典策略" />
+            // ★ 空态要给出**下一步动作**：只说「尚未跑过」用户还得自己猜去哪跑。
+            <EmptyState
+              text="尚未跑过选股 —— 定时任务 system.classic_screen 默认每天 16:15 自动运行；现在可以先补日线数据，再到「经典策略」页签手动跑一次。"
+              actionText={jobBusy ? "提交中…" : "先补日线数据"}
+              onAction={() => void backfill()}
+            />
           ) : picks.length === 0 ? (
             <EmptyState
               text={
@@ -202,7 +343,13 @@ export function AutoPicks() {
               }
             />
           ) : (
-            <DataTable columns={cols} rows={picks} rowKey={(r) => `${r.strategy}-${r.code}`} rowHeight={26} />
+            <DataTable
+              columns={cols}
+              rows={picks}
+              rowKey={(r) => `${r.strategy}-${r.code}`}
+              rowHeight={26}
+              onRowClick={(r) => openWorkbench(r.code, r.name ?? "")}
+            />
           )}
         </div>
       </Panel>

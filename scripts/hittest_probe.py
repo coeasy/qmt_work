@@ -120,7 +120,9 @@ def tail(path: Path, lines: int = 25) -> str:
 def main() -> int:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     PROFILE.mkdir(parents=True, exist_ok=True)
-    C.kill_image("qmt_work.exe")
+    # ⚠️ 只清本探针自己的隔离 profile 实例：按镜像名全杀会把**用户正开着的
+    #    客户端**一起杀掉（R18 修，同 client_start_test.py 的理由）。
+    C.kill_own_profile(PROFILE)
     time.sleep(0.8)
     started = time.time()
     env = C.clean_env({"QMT_CLIENT_TEST_MODE": "1", "QMT_CLIENT_SAFE_MODE": "1"})
@@ -245,7 +247,7 @@ def main() -> int:
                               "draggable region 仍未上报给窗口过程")
     finally:
         try:
-            C.kill_image("qmt_work.exe")
+            C.kill_own_profile(PROFILE)
         except Exception:  # noqa: BLE001
             pass
     print(json.dumps(out, ensure_ascii=False, indent=2))

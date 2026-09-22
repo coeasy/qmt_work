@@ -1,4 +1,7 @@
+from core.config import export_dir
 from core.context import AppContext, get_ctx
+from core.paths import PathError, validate_dir
+from core.quote_fields import pick_last_price
 # --- stdlib imports injected by fix_route_imports ---
 import asyncio
 import logging
@@ -25,7 +28,12 @@ from app.sync.state import STREAM_MARKET_SYNC, STREAM_SYNC_BARS, last_run
 
 # 这两个常量定义在 common.py；此前经 aggregates 隐式 re-export 使用，
 # 2026-09-08 改为从源头直接导入，消除「删掉 aggregates 的未使用导入就断」的脆弱耦合。
-from app.services.market.common import ETF_LIST_TTL, ETF_QUOTE_CAP
+from app.services.market.common import (
+    ETF_LIST_TTL,
+    ETF_QUOTE_CAP,
+    METRIC_KEYS,
+    metric_sources,
+)
 from datasource.board import classify_board
 from datasource.instrument import with_exchange_suffix
 from datasource.periods import (
@@ -260,33 +268,115 @@ async def market_quotes(body: dict, ctx: AppContext = Depends(get_ctx)):
         else:
             missing.append(c)
     if missing:
-        # R3（P2-1 漏网）：补齐打源加并发上限，报价牌大清单全 miss 时不打爆 TDX 侧。
-        async def _fill(c):
+        # ★ V17 补丁：补齐打源优先用 **批量** `get_quotes`（绕过 N 只串行节流）。
+        #   tencent 源已重写为真正批量（1 次 HTTP 拉全部），其它源走基类默认（gather 单只）。
+        #   这样报价牌 4 只 = 1 次 HTTP，不再被 SyncEngine 同步任务的全局节流锁串成 N 次
+        #   请求 —— 实测冷启动时整批 5s 超时返空的根因。
+        async def _fill_one(c):
             try:
                 async with QUOTES_FILL_SEM:
                     return await asyncio.wait_for(
-                        m.get_quote(c, source=source, conn_id=conn_id), timeout=5)
+                        m.get_quote(c, source=source, conn_id=conn_id), timeout=8)
             except Exception:  # noqa: BLE001
                 return None
-        res = await asyncio.gather(*[_fill(c) for c in missing])
+
+        async def _fill_batch(cs):
+            """批量补齐 —— 优先走 m.get_quotes（基类默认 gather 单只；tencent/sina 重写为单 HTTP）。"""
+            try:
+                async with QUOTES_FILL_SEM:
+                    res_map = await asyncio.wait_for(
+                        m.get_quotes(cs, source=source, conn_id=conn_id), timeout=10)
+            except Exception:  # noqa: BLE001
+                return [None] * len(cs)
+            # m.get_quotes 在 plugins 链可能不支持（callables 不同），逐个回退单只
+            if not isinstance(res_map, dict):
+                return await asyncio.gather(*[_fill_one(c) for c in cs])
+            return [res_map.get(c) for c in cs]
+
+        res = await _fill_batch(missing)
         for _c, q in zip(missing, res):
             if q and isinstance(q, dict):
                 items.append(q)
+    _normalize_quotes(items)
     return ok({"items": items, "served": len(items), "requested": len(codes)})
+
+
+def _normalize_quotes(items: list) -> list:
+    """行情列表的**统一出口**：补名称 + 归一化最新价。
+
+    ★ 2026-09-20 实测：本端点**优先读 SyncEngine 的实时快照缓存**
+    （`latest_quotes`，券商 WS 推来的原始快照），这条路径**不经过**
+    `DataSourceManager._merge_quote`，所以那里的名称兜底对它无效。
+    结果是：个股有名字（快照里带），**指数一律没有** —— 自选股 / 报价牌里
+    沪深300、创业板指显示成一串 `000300.SH`，与顶部指数条（走 overview，
+    已修好）自相矛盾。
+
+    在这里统一补一次，比让每条前端链路各兜一遍更可靠（新增消费方自动受益）。
+    查不到就置 `""`：前端 `format.ts::namePair` 会渲染成代码占位 ——
+    显示效果与「拿代码当名称」一致，但语义诚实（不再污染 `_is_st` 之类判据）。
+
+    ★★ 价格归一化（2026-09-20 补）：本端点是**唯一**对外返回行情列表的出口，
+    但两条来源的键名**不一致** ——
+      - 券商 WS 快照缓存：给 `price`
+      - eltdx / 打源补齐：给 `last`（见 `marketApi.quote` 注释里那条老警告）
+    前端 `Quote` 类型只有 `price`，直接读 `last` 会得到一堆 `undefined`
+    （「订阅到了但没数字」的老坑）。这里用 `core.quote_fields.pick_last_price`
+    （键序唯一入口）统一成 `price`，前端契约就此唯一。
+
+    ⚠️ 取不到价就**删掉** `price` 键，绝不写 0 —— 前端 `fmtPrice(undefined)`
+    才是诚实的 `--`，`0.00` 会被读成「这只票跌到 0 了」。
+    """
+    from datasource.eltdx_utils import lookup_name
+
+    for it in items or []:
+        if not isinstance(it, dict):
+            continue
+        code = str(it.get("code") or "").strip().upper()
+
+        # ① 名称：查不到 / 「名 == 代码」都置空（前端回退到代码显示）
+        nm = str(it.get("name") or "").strip()
+        if nm.upper() == code:      # 「名称就是代码」= 没有名称
+            nm = ""
+        if not nm and code:
+            nm = lookup_name(code)
+        it["name"] = nm
+
+        # ② 最新价：统一为契约名 price（键序唯一入口 core.quote_fields）
+        px = pick_last_price(it)
+        if px is None:
+            it.pop("price", None)
+        else:
+            it["price"] = px
+    return items
+
+
+#: 「行情快照派生字段」—— 只有**公开行情源**（腾讯/新浪这类）能从一条快照里给出，
+#: 本地 TDX 与券商详情接口都不提供。
+#:
+#: ★ 2026-09-21：清单已上移到 `app/services/market/common.py::METRIC_KEYS`
+#:   （单一真源）。原因是 `/market/analysis` 的估值维度也要按同一份清单去找源
+#:   —— 它此前只认券商财务接口，于是同一份 PE/PB 在 stock-info 有、在 analysis
+#:   却说「无数据」。两处各留一份清单必然再次分叉，故此处只保留别名。
+_METRIC_KEYS = METRIC_KEYS
+_metric_sources = metric_sources
 
 
 @router.get("/market/stock-info")
 async def market_stock_info(code: str, conn_id: str = "", source: str = "auto", ctx: AppContext = Depends(get_ctx)):
-    """股票基本信息：名称 / 板块 / 交易所 / 涨跌停 / 昨收（供右侧面板）。
+    """股票基本信息：名称 / 板块 / 交易所 / 涨跌停 / 昨收 + 行情派生字段（供右侧面板）。
 
     source: auto（券商优先，失败回退 eltdx）/ broker / eltdx
     """
     # 名称表与券商接口均以带后缀代码为键，裸代码会查不到中文名（界面只剩数字）
     code = with_exchange_suffix((code or "").strip().upper())
     board = classify_board(code)
+    # ★ 本地名称兜底：券商/TDX 未回名称时**去查名称表**，绝不拿代码冒充
+    #   （2026-09-20 实测：指数名称表里没有 ⇒ 此前恒显示 `000300.SH`）。
+    #   查不到返回 ""，前端 `format.ts::namePair` 会渲染成代码占位。
+    from datasource.eltdx_utils import lookup_name as _lookup_name
     info = {
         "code": code,
-        "name": code,
+        "name": _lookup_name(code),
         "exchange": board.get("exchange"),
         "board": board.get("board"),
         "high_limit": None,
@@ -294,6 +384,24 @@ async def market_stock_info(code: str, conn_id: str = "", source: str = "auto", 
         "pre_close": None,
         "industry": "",
         "concepts": [],
+        # ---- 扩展字段（2026-09-21）----
+        # 腾讯快照里**本来就有**市值 / PE / PB / 换手 / 振幅 / 均价 / 量比，
+        # 解析出来透出即可，**零额外请求**。其它源（eltdx / broker）拿不到就保持
+        # None —— 前端一律渲染 `--`，绝不用 0 或占位数字冒充。
+        "open": None,
+        "high": None,
+        "low": None,
+        "avg_price": None,
+        "amplitude": None,
+        "turnover_rate": None,
+        "volume_ratio": None,
+        "pe_ttm": None,
+        "pb": None,
+        "circ_mv": None,
+        "total_mv": None,
+        "amount": None,
+        # 行情派生字段实际来自哪个源（详情源提供不了时由公开源补齐；没补上则不出现）
+        "metrics_source": None,
     }
 
     try:
@@ -305,7 +413,19 @@ async def market_stock_info(code: str, conn_id: str = "", source: str = "auto", 
         info["note"] = "未连接券商且 TDX 行情源不可用，板块按代码前缀推断"
         return ok(info)
 
-    info["name"] = det.get("name") or code
+    # ★ 「源都不可用」与「源都在、但都返回空壳」是两回事：前者抛 MarketDataUnavailable
+    #   （上面那条分支），后者会走到这里拿到 **None**（`get_instrument_detail` 全链无内容时
+    #   `return last`，而 last 仍是 None）。典型场景就是**全新安装的客户端**：没连券商、
+    #   本地也没下载过 TDX 数据。
+    #   实测（2026-09-21 打包态）：此前直接 `det.get(...)` ⇒ AttributeError ⇒ **HTTP 500**，
+    #   而右侧「基本信息」恰恰是要「快速查看」的面板 —— 一点开就报错。
+    #   这里降级为「画像字段留空 + 诚实说明」，并**继续走下面的行情补齐**：
+    #   公开行情源与本地 TDX 数据无关，仍可能拿到实时数值，不该一并放弃。
+    if not isinstance(det, dict):
+        info["note"] = "未取到本地画像（未连券商、本地也无该标的资料），仅展示行情字段"
+        det = {}
+
+    info["name"] = det.get("name") or _lookup_name(code)
     info["exchange"] = det.get("exchange") or info["exchange"]
     info["high_limit"] = det.get("high_limit")
     info["low_limit"] = det.get("low_limit")
@@ -313,6 +433,39 @@ async def market_stock_info(code: str, conn_id: str = "", source: str = "auto", 
     info["industry"] = det.get("industry") or ""
     info["concepts"] = det.get("concepts") or []
     info["source"] = det.get("source")
+    # 扩展字段：只在**真的拿到**时覆盖（det 里缺键或值为 None 就保持 None → 前端 `--`）
+    for key in _METRIC_KEYS:
+        val = det.get(key)
+        if val is not None:
+            info[key] = val
+
+    # ---- 缺口补齐：换一个**声明了这些字段**的源再取一次行情 ----
+    #
+    # ⚠️⚠️ 为什么必须有这一步（2026-09-21 打包态实测）：
+    #   详情源优先链是 broker → eltdx，而**本地 TDX 与券商都不提供**市值 / PE / PB /
+    #   换手 / 振幅 / 均价 / 量比（它们是「行情快照派生字段」，只有公开行情源有）。
+    #   打包版自带 eltdx ⇒ 实测 `source=eltdx`，于是这 12 个字段**全是 null**，
+    #   界面上就是一整列 `--` —— 功能等于没做。
+    #
+    # 只对**确有缺口**的字段补，且按源依次尝试；补齐即停。任何异常都吞掉：
+    # 补不上就保持 None（前端 `--`），绝不因此让整个接口失败。
+    missing = [k for k in _METRIC_KEYS if info.get(k) is None]
+    if missing:
+        for name in _metric_sources():
+            if not missing:
+                break
+            try:
+                q = await get_hub().get_quote(code, source=name, conn_id=conn_id or None)
+            except Exception:  # noqa: BLE001 — 补齐是尽力而为，失败不影响主数据
+                q = None
+            if not isinstance(q, dict):
+                continue
+            for key in list(missing):
+                if q.get(key) is not None:
+                    info[key] = q[key]
+                    missing.remove(key)
+            if info.get("metrics_source") is None:
+                info["metrics_source"] = name
     return ok(info)
 
 @router.get("/market/sources")
@@ -341,6 +494,22 @@ async def market_periods(ctx: AppContext = Depends(get_ctx)):
     这样后端新增/下线周期时前端自动跟随，杜绝「点了出别的周期」的静默错误（P0-1）。
     """
     return ok({"periods": all_periods()})
+
+
+def _kline_empty_note(code: str, period: str, src: str) -> str:
+    """「所有源都正常应答、但都没有该标的的 K 线」时的**准确**说明。
+
+    ⚠️ 与「源不可用」（503，另一条分支）必须分开说：这两种空的**成因与处置完全不同**。
+    这里只陈述本请求自己确知的事实（哪个源应答了、本地仓也没有），不去读
+    `last_failure_trace()` —— 那是全局共享的「最近一次」记录，并发下可能来自别的请求。
+    """
+    try:
+        label = spec(period).label
+    except Exception:  # noqa: BLE001 文案拼接失败不该影响响应
+        label = period
+    return (f"行情源（{src}）已正常应答，但没有 {code} 的{label} K 线，"
+            f"本地数据仓也没有该标的。可能原因：新上市 / 长期停牌 / 该周期无成交，"
+            f"或当前数据源不覆盖该标的。")
 
 
 @router.get("/market/kline")
@@ -381,9 +550,19 @@ async def market_kline(code: str, period: str = "1d", count: int = 250,
     except (BrokerError, DataSourceUnavailable) as exc:
         return err(503, str(exc))
     bars = res.get("bars") or []
-    # 彻底无源返回：券商 + eltdx(TDX) 均无数据时，G1-6 先试本地数据仓兜底
-    # （stale 明示、as_of 标数据截至时间、降级≠造假）；本地也无数据才 503。
-    if not bars and not res.get("source"):
+    # ★★ 空 bars 一律先试本地数据仓兜底（2026-09-21 修 A8，用户报「从行情工作台
+    #    打开时 K 线图无法正常展示」的第二个根因）。
+    #
+    # 原条件是 `not bars and not res.get("source")` —— 只有「一个源都没应答」时才兜底。
+    # 而实测最常见的形态恰恰是**源都在、都正常应答、但都返回空壳**：
+    #     GET /market/kline?code=000001.SH  →  {"source":"broker", "count":0, "bars":[]}
+    # 此时 `res["source"]` 是 "broker"（真值）⇒ 兜底被整段跳过 ⇒ 直接 200 + 0 根 +
+    # `note: null` ⇒ 前端 K 线图留一块白板，**没有任何文字说明为什么**。
+    #
+    # 「源都不可用」（抛异常 / 超时）与「源都在但都返回空壳」（正常返回 0 根）是
+    # 两种**不同的空**，只接住前者就会在后者上静默。这里让两者都接住：
+    # 先兜底本地，本地也没有再按成因分叉文案。
+    if not bars:
         from datasource.degrade import envelope, local_bars
         # ⚠️ 必须透传 count：local_bars 默认 limit=500，不透传会让「请求 count=30」
         # 在远程源不可用时返回最多 500 根（实测 320 根 = 本地全量），
@@ -394,6 +573,27 @@ async def market_kline(code: str, period: str = "1d", count: int = 250,
                 {"code": code, "period": period, "count": len(dres.results),
                  "cached_at": None, "note": None, "adjust": adj or "",
                  "bars": dres.results}, dres))
+        src = res.get("source")
+        if src:
+            # 有源应答过 ⇒ 是「空壳」而不是「不可用」。刻意返回 **200 + count:0 + note**
+            # 而不是 503，理由在**用户可见性**上：
+            #   前端 KLineChart 的 `.catch()` 分支（网络/错误码）只能显示一句通用猜测
+            #   「暂无 K 线数据（可能停牌或该周期无成交）」；而 200 + note 会走
+            #   `meta.note` 分支（KLineChart.tsx:377）把**真实原因**写在画布上。
+            #   错误归因必须落到用户看得见的地方，不能退化成一句猜测。
+            #
+            # ⚠️ 这里**不用** `msvc._unavailable()`，两个原因：
+            #   ① 它的框架是「获取失败」—— 而此刻所有源都**成功应答**了，只是没有数据。
+            #      把「都成功了但没数据」说成「获取失败」会把排查方向带偏（本项目
+            #      已经因为这类措辞吃过亏：把「不支持」说成「网络坏了」）。
+            #   ② 它读的是 `get_hub().last_failure_trace()`，那是一份**全局共享的
+            #      「最近一次」**记录；而本端点在 fetch_kline_cached 内部会打多次源调用，
+            #      并发下这份记录完全可能来自**另一个请求**的链路 ⇒ 文案会张冠李戴。
+            #      所以这里只陈述本请求**自己确知**的事实。
+            return ok({"code": code, "period": period, "count": 0,
+                       "source": src, "cached_at": None, "as_of": None,
+                       "note": _kline_empty_note(code, period, src), "adjust": adj or "",
+                       "stale": False, "bars": []})
         return err(503, f"K 线获取失败：{code} 券商不可用、TDX 行情源无数据且本地数据仓为空，请连接券商或检查网络。")
     # ⚠️ stale 一致性（曾经出现 source=cache_stale 却 stale:false 误导用户）：
     # 当缓存层回退供给「过期缓存」时（kline_cache.get_or_fetch 返回 source=cache_stale），
@@ -739,12 +939,27 @@ async def kline_cache_clear(code: str = "", period: str = "", ctx: AppContext = 
 
 # ---------------- 历史 K 线导出到本地指定目录（CSV/JSON） ----------------
 
+def _resolve_export_dir(ctx: AppContext, raw) -> str:
+    """解析导出目录：未指定时用运行期配置 ``offline.export_dir``（默认 <运行目录>/export）。
+
+    ★ 目录可能来自用户输入，必须经 ``core.paths.validate_dir`` 校验：
+    否则填个 ``C:\\Windows\\System32`` 就把导出文件写进系统目录了
+    （轻则权限报错，重则污染系统目录）。校验唯一入口，不在这里另写一套。
+    """
+    rc = ctx.runtime_config
+    v = str(raw or "").strip()
+    if not v:
+        v = str(rc.get("offline.export_dir") or "") if rc else ""
+    return str(validate_dir(str(export_dir(v)), create=True))
+
+
 @router.post("/market/kline/export")
 async def kline_export(body: dict, ctx: AppContext = Depends(get_ctx)):
     """批量导出历史 K 线到本地指定目录（CSV / JSON）。
 
     参数（body JSON）：
-    - dest_dir: 必填，导出目录（不存在自动创建）
+    - dest_dir: **可选**，导出目录（不存在自动创建）；省略时用运行期配置
+      ``offline.export_dir``（默认 ``<运行目录>/export``，可在「设置 → 数据目录」改）
     - codes: 可选，代码列表；省略则导出本地缓存中全部 code×period 序列
     - period: 可选，仅导出该周期
     - count: 每序列导出最近 N 根；0/省略=导出该序列全部根数
@@ -756,6 +971,11 @@ async def kline_export(body: dict, ctx: AppContext = Depends(get_ctx)):
     """
     if ctx.kline_cache is None:
         return err(503, "K 线缓存未初始化")
+    body = dict(body or {})
+    try:
+        body["dest_dir"] = _resolve_export_dir(ctx, body.get("dest_dir"))
+    except PathError as exc:
+        return err(400, str(exc))
     try:
         out = await kline_io.kline_export(ctx.kline_cache, body)
     except ValueError as exc:
@@ -769,14 +989,19 @@ async def kline_export(body: dict, ctx: AppContext = Depends(get_ctx)):
 
 
 @router.get("/market/kline/export")
-async def kline_export_read(dest_dir: str, code: str, period: str = "1d",
+async def kline_export_read(code: str, dest_dir: str = "", period: str = "1d",
                             format: str = "csv", ctx: AppContext = Depends(get_ctx)):
     """读取本地导出目录中已导出的历史 K 线文件（离线/断线时也可用）。
 
     直接读磁盘文件，不依赖券商连接；文件不存在返回 404。
+    ``dest_dir`` 省略时用运行期配置（与 POST 同口径）。
     format: csv | json（须与导出时一致）。
     """
     from gateway.kline_cache import KlineCache
+    try:
+        dest_dir = _resolve_export_dir(ctx, dest_dir)
+    except PathError as exc:
+        return err(400, str(exc))
     path = KlineCache.file_path(code, period, dest_dir, format)
     if not os.path.exists(path):
         return err(404, f"导出文件不存在：{os.path.basename(path)}"
@@ -796,11 +1021,17 @@ async def kline_sync(body: dict, ctx: AppContext = Depends(get_ctx)):
     """把一批股票的最新历史 K 线（含日线 1d、周线 1w）同步到本地指定目录。
 
     流程：确定股票集合 → 逐只回源券商拉取最新 K 线写入本地缓存 → 导出到 dest_dir。
-    参数（body JSON）：dest_dir(必填)/codes/sector/periods/count/format/limit/conn_id。
+    参数（body JSON）：dest_dir(**可选**，省略时用运行期配置 ``offline.export_dir``)/
+    codes/sector/periods/count/format/limit/conn_id。
     单只失败不中断整体（errors 列出）。真实行情，缺数据不伪造。
     """
     if ctx.kline_cache is None:
         return err(503, "K 线缓存未初始化")
+    try:
+        dest = _resolve_export_dir(ctx, (body or {}).get("dest_dir"))
+    except PathError as exc:
+        return err(400, str(exc))
+    body = {**(body or {}), "dest_dir": dest}
 
     async def _get_sector_stocks(sector: str, conn_id):
         b = _need(conn_id)

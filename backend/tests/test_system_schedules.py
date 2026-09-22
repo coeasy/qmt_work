@@ -106,10 +106,10 @@ def test_ensure_default_schedules_never_raises(monkeypatch, tmp_db):
 def test_default_schedules_run_sync_before_screen():
     """日线同步必须早于经典选股，且**不同分钟**。
 
-    ``RESOURCE_GROUP``（app/runtime/jobs.py）把 ``system.sync_bars`` 归入
-    ``local_bars`` 互斥组，但**不含 ``classic_screen``** ⇒ 两者同一时刻会
-    **并发**执行，选股将读到半更新的日线（部分标的已是今天、部分是昨天），
-    选出来的票无法复现。所以「错开」不是美观问题，是正确性问题。
+    「错开」不是美观问题，是正确性问题：选股跑在日线更新之前，就是拿昨天的
+    K 线在选。二者现已**同时**归入 ``local_bars`` 互斥组（app/runtime/jobs.py
+    的 ``RESOURCE_GROUP``），所以时间错开只是第二道保险 —— 用户把 cron 改成
+    同一时刻也不会并发读到半更新的日线。
     """
     from datetime import datetime
 
@@ -196,3 +196,145 @@ def test_migration_v27_is_idempotent(tmp_db):
 
     assert first == second
     assert first["sch-default-sync-bars"] == "0 16 * * 1-5"
+
+
+# ---------------------------------------------------------------------------
+# 相位自愈（normalize_phases）
+# ---------------------------------------------------------------------------
+
+def _set_phase(db, sid, phase):
+    db.execute("UPDATE schedules SET next_run_at=? WHERE id=?", (phase, sid))
+
+
+def test_normalize_phases_fixes_phase_that_lost_sync_with_cron(tmp_db):
+    """★ 相位与 cron 对不上时必须清空，交给调度器按当前 cron 重新对表。
+
+    实测（2026-09-20 真实库）：迁移 v27 把默认同步从 ``30 15`` 改到 ``0 16``、
+    选股从 ``0 16`` 改到 ``15 16``，但 ``UPDATE schedules SET cron=...`` **没有**
+    重算 ``next_run_at`` ⇒ 同步相位仍停在 15:30、选股相位停在 16:00。
+    而 ``ScheduleRunner._fire`` 是**按相位**触发的，于是它真的会在 15:30 跑同步、
+    16:00 跑选股 —— 把「先同步、再选股」**倒着**执行一次，选股读到半更新的日线，
+    正是 v27 想避免的事。配置看起来却完全正常。
+    """
+    _insert_schedule(tmp_db, "s1", "0 16 * * 1-5")           # 16:00
+    _set_phase(tmp_db, "s1", "2026-09-21T15:30:00")          # 旧相位（15:30）
+    _insert_schedule(tmp_db, "s2", "15 16 * * 1-5")          # 16:15
+    _set_phase(tmp_db, "s2", "2026-09-21T16:00:00")          # 旧相位（16:00）
+
+    fixed = ScheduleStore(tmp_db).normalize_phases()
+
+    assert sorted(fixed) == ["s1", "s2"]
+    assert {r["id"]: r["next_run_at"] for r in tmp_db.query(
+        "SELECT id, next_run_at FROM schedules")} == {"s1": "", "s2": ""}
+
+
+def test_normalize_phases_keeps_consistent_phase(tmp_db):
+    """相位本来就是 cron 的合法触发点 ⇒ **不许动它**。
+
+    否则「已到期该补跑的调度」会被清空相位而丢掉补跑机会
+    （``_fire`` 对空相位的行为是「重算下一相位、不立即触发」）。
+    """
+    _insert_schedule(tmp_db, "s1", "0 16 * * 1-5")
+    _set_phase(tmp_db, "s1", "2026-09-21T16:00:00")           # 正是 16:00
+    assert ScheduleStore(tmp_db).normalize_phases() == []
+    assert tmp_db.query("SELECT next_run_at FROM schedules WHERE id='s1'")[0][
+        "next_run_at"] == "2026-09-21T16:00:00"
+
+
+def test_normalize_phases_keeps_past_due_phase(tmp_db):
+    """**已过期**的相位同样是合法触发点 ⇒ 保留，让它照常补跑。
+
+    「过期」不等于「不一致」：这是 catch_up / coalesce 语义的基础。
+    """
+    _insert_schedule(tmp_db, "s1", "0 16 * * 1-5")
+    _set_phase(tmp_db, "s1", "2020-01-06T16:00:00")           # 很久以前，但合法
+    assert ScheduleStore(tmp_db).normalize_phases() == []
+
+
+def test_normalize_phases_skips_unparseable_cron(tmp_db):
+    """cron 本身非法时不碰它（不是这里该修的问题，乱清相位只会更难查）。"""
+    _insert_schedule(tmp_db, "s1", "这不是 cron")
+    _set_phase(tmp_db, "s1", "2026-09-21T15:30:00")
+    assert ScheduleStore(tmp_db).normalize_phases() == []
+
+
+def test_normalize_phases_ignores_empty_phase(tmp_db):
+    """空相位本来就是「待对表」状态，不算不一致。"""
+    _insert_schedule(tmp_db, "s1", "0 16 * * 1-5")
+    _set_phase(tmp_db, "s1", "")
+    assert ScheduleStore(tmp_db).normalize_phases() == []
+
+
+# ---------------------------------------------------------------------------
+# 时区（schedules.timezone 此前是**装饰性字段**：写了但全代码从不读取）
+# ---------------------------------------------------------------------------
+
+def test_next_after_tz_returns_naive_local():
+    """★ 存进库的必须是 naive 本地时间 —— 全项目时间戳都是这个口径。
+
+    存一个带偏移的字符串进去，其余比较点（parse_iso vs local_now）会按本地读，
+    偏移被丢弃 ⇒ 触发时间整整差一小时，且只在跨时区机器上出现。
+    """
+    from datetime import datetime
+
+    from app.runtime.schedules import next_after_tz
+
+    nxt = next_after_tz(CronExpr.parse("0 16 * * 1-5"),
+                        datetime(2026, 9, 19, 10, 0, 0), "Asia/Shanghai")
+    assert nxt.tzinfo is None, f"返回了带时区的时间：{nxt!r}"
+
+
+def test_next_after_tz_shifts_by_offset():
+    """同一 cron 在上海 vs 东京触发：东京 16:00 = 上海 15:00 ⇒ 早一小时。"""
+    from datetime import datetime
+
+    from app.runtime.schedules import next_after_tz
+
+    expr = CronExpr.parse("0 16 * * *")
+    now = datetime(2026, 9, 19, 10, 0, 0)
+    sh = next_after_tz(expr, now, "Asia/Shanghai")
+    tk = next_after_tz(expr, now, "Asia/Tokyo")
+    delta = (tk - sh).total_seconds() / 3600.0
+    assert abs(delta - (-1.0)) < 1e-6, f"上海/东京应相差 1 小时，实际 {delta} 小时"
+
+
+def test_next_after_tz_unknown_falls_back_to_local():
+    """未知时区**降级**而不是抛异常：一个坏字段不该让整台调度停摆。"""
+    from datetime import datetime
+
+    from app.runtime.schedules import next_after_tz
+
+    expr = CronExpr.parse("0 16 * * *")
+    now = datetime(2026, 9, 19, 10, 0, 0)
+    assert next_after_tz(expr, now, "Mars/Olympus") == expr.next_after(now)
+    assert next_after_tz(expr, now, "") == expr.next_after(now)
+
+
+def test_update_cron_recomputes_phase(tmp_db):
+    """★ 改 cron 必须**立刻**重算 next_run_at。
+
+    保留旧相位会让新时间在旧相位到达前一次都不触发 —— 界面上就是
+    「改了触发时间没反应」，而调度看起来完全正常。
+    """
+    from app.runtime.schedules import ScheduleStore
+
+    _insert_schedule(tmp_db, "sch-tz-1", "0 16 * * 1-5")
+    store = ScheduleStore(tmp_db)
+    before = store.get("sch-tz-1")["next_run_at"]
+    store.update("sch-tz-1", cron="0 9 * * 1-5")
+    after = store.get("sch-tz-1")["next_run_at"]
+    assert after and after != before, "改了 cron 却沿用旧相位（新时间不会触发）"
+    # 9 点触发 → 下一次的小时必须是 9
+    assert after[11:13] == "09", after
+
+
+def test_update_rejects_unknown_timezone(tmp_db):
+    """timezone 现在**真的会生效**，因此非法值必须当场拒绝，不能静默收下。"""
+    import pytest
+
+    from app.runtime.schedules import ScheduleStore
+
+    _insert_schedule(tmp_db, "sch-tz-2", "0 16 * * 1-5")
+    store = ScheduleStore(tmp_db)
+    with pytest.raises(ValueError):
+        store.update("sch-tz-2", timezone="Mars/Olympus")

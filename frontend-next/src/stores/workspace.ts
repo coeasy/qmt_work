@@ -105,6 +105,17 @@ export interface WorkspaceState {
   aliveOrder: string[];
 
   open: (pageKey: string, params?: Record<string, unknown>, opts?: OpenOptions) => void;
+  /**
+   * 改名 —— 页面**自己**把标题补成真实名称。
+   *
+   * ★ 为什么需要（2026-09-20 实测）：Tab 标题在 `open()` 那一刻就定死了。
+   * 从列表点一只股票跳工作台时，名称可能还没到位（WS 还没推、REST 兜底还没回），
+   * 于是标题永久停在 `000001.SZ` —— 之后名称到了也**不会变**，用户看到的
+   * 是一个「永远叫代码的 Tab」。改名只能由页面在名称解析出来后主动发起。
+   *
+   * 空标题直接忽略：宁可保留旧标题，也不把标题改成空串（那会显示成一个空 Tab）。
+   */
+  renameTab: (tabId: string, title: string) => void;
   close: (tabId: string) => void;
   closeOthers: (tabId: string) => void;
   /** 关闭该 Tab 右侧的全部 Tab（保留它本身与左侧的） */
@@ -190,6 +201,17 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     const orderOut = touch(aliveOrder, tab.id);
     set({ tabs: tabsOut, activeId: tab.id, aliveOrder: orderOut });
     persist({ tabs: tabsOut, activeId: tab.id, aliveOrder: orderOut });
+  },
+
+  renameTab(tabId, title) {
+    const { tabs, activeId, aliveOrder } = get();
+    const next = String(title ?? "").trim();
+    if (!next) return; // 空标题不改：宁可留旧标题，也不显示成空 Tab
+    const cur = tabs.find((t) => t.id === tabId);
+    if (!cur || cur.title === next) return; // 幂等：避免无意义的重渲染 / 写盘
+    const tabsOut = tabs.map((t) => (t.id === tabId ? { ...t, title: next } : t));
+    set({ tabs: tabsOut });
+    persist({ tabs: tabsOut, activeId, aliveOrder });
   },
 
   close(tabId) {

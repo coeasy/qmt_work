@@ -22,7 +22,7 @@ import time
 from typing import Optional
 
 from core.clock import bar_date  # K 线交易日格式唯一入口（V11 R13）
-from datasource.base import DataSource
+from datasource.base import DataSource, EXT_DETAIL_KEYS
 from datasource.board import classify_board, limit_ratio
 from datasource.instrument import with_exchange_suffix
 from datasource.periods import (
@@ -33,6 +33,20 @@ from datasource.periods import (
 from xtquant_client.base import BrokerError
 
 log = __import__("logging").getLogger("qmt_work.datasource.registry")
+
+
+def _local_name(code: str) -> str:
+    """本地名称兜底（O(1)、无网络）：**唯一实现**在 `datasource/eltdx_utils.py`。
+
+    刻意用函数内 import：`registry` 处于导入链上游（`eltdx_source` 依赖
+    `eltdx_utils`），模块级 import 容易踩循环导入。Python 会缓存模块，
+    每次调用的额外开销只是一次 dict 查找。
+    """
+    try:
+        from datasource.eltdx_utils import lookup_name
+        return lookup_name(code)
+    except Exception:  # noqa: BLE001  名称查不到不该让行情链路整体失败
+        return ""
 
 
 def bars_last_date(bars) -> str:
@@ -466,11 +480,31 @@ class DataSourceManager:
     def _merge_quote(raw: dict, code: str, board: dict, detail: dict,
                      src: str, industry: str = "", concepts=None) -> dict:
         raw = dict(raw)
-        raw["name"] = detail.get("name") or raw.get("name") or code
+        # ★ 名称兜底必须**真的去查名称**，不能拿代码冒充（2026-09-20 实测修复）。
+        #
+        # 为什么之前指数名恒为代码：详情层（instrument_detail）对**指数/板块**这类
+        # 没有真实合约资料的品种，会把 name **回落成代码本身**（实测 broker 与 eltdx
+        # 都如此）。`_from_plugin` 早就发现并打了补丁，但 `_from_broker` **没有** ——
+        # 于是「连着券商」这条最常用的路径上，详情名（=代码）把源层已解析好的
+        # 「沪深300」覆盖掉，界面只剩 `000300.SH`。
+        #
+        # 修法：把「详情名 == 代码」一律视为**没有名称**，逐级回退到
+        # 源层名称 → 本地名称表/内置指数表 → 空串（前端 `format.ts::namePair`
+        # 会把空串渲染成代码占位，显示效果一致但语义诚实，不再污染 `_is_st` 之类判据）。
+        det_name = str(detail.get("name") or "").strip()
+        if det_name.upper() == code.upper():
+            det_name = ""
+        raw["name"] = (det_name or str(raw.get("name") or "").strip()
+                       or _local_name(code) or "")
         raw["exchange"] = detail.get("exchange") or board.get("exchange")
         raw["high_limit"] = detail.get("high_limit") or detail.get("up_limit_price")
         raw["low_limit"] = detail.get("low_limit") or detail.get("down_limit_price")
-        raw["pre_close"] = detail.get("pre_close") or raw.get("lastClose")
+        # 昨收三级回退：详情层 → 源层 pre_close → 源层 lastClose（券商口径名）。
+        # ★ 中间那级是批量路径必需的：公开源的批量画像只给 name/pre_close/last/...
+        # 六个键，若某级缺失，少了 ``raw["pre_close"]`` 这一级会把源层已解析好的昨收
+        # **直接抹成 None**，进而让下面 change/change_pct 的推导整体失效（涨跌全变 None）。
+        raw["pre_close"] = (detail.get("pre_close") or raw.get("pre_close")
+                            or raw.get("lastClose"))
         raw["board"] = board.get("board")
         if industry:
             raw["industry"] = industry
@@ -603,6 +637,110 @@ class DataSourceManager:
                 return q
         return None
 
+    # ---------- 行情快照（批量） ----------
+    async def get_quotes(self, codes, source: str = "auto",
+                         conn_id: Optional[str] = None) -> dict:
+        """批量盘口快照 —— ``{code: dict | None}``。
+
+        ★ 为什么必须有这个方法（2026-09-20 实测）：``/market/quotes`` 的自选股 /
+        报价牌冷启动要一次拉 4~N 只。此前它逐只调本类的 ``get_quote``，而公开源
+        有 **全局 0.3s 节流锁**（``_PublicSource._MIN_INTERVAL``，跨请求共享），
+        N 只 = N 次 HTTP + N 次锁等待；同步任务在前面占着锁时，冷启动 4 只
+        **一只都拿不到**（items 恒空）。批量接口让 N 只收敛成 1 次 HTTP。
+
+        与 ``get_quote`` 的语义差异（重要，勿混淆）：
+        - ``get_quote`` 的 auto 是「逐个源尝试，第一个成功的整体返回」；
+          批量版是「**同一源内**批量拉取，未拿到的 code **带着缺口继续走下一个源**」，
+          即降级粒度是 **code 级** 而不是整批级 —— 一批里 3 只成功 1 只失败时，
+          失败的 1 只仍有机会被下一个源补上，成功的 3 只不会被重来一遍。
+        - 券商没有批量接口（QMT 盘口是逐只订阅的），故 broker 分支仍是并发单只，
+          与 ``get_quote(broker)`` 语义完全一致。
+
+        ⚠️ 返回值**总包含全部入参 code**（拿不到的显式置 None），调用方据此决定
+        是否走兜底；绝不静默丢键。
+        """
+        source = self._validate_source(source)
+        # 规范化 + 去重（保序）：券商只认 600519.SH，名称表也以带后缀代码为键
+        ordered: list = []
+        seen: set = set()
+        for raw_code in codes or []:
+            full = with_exchange_suffix(raw_code)
+            if full and full not in seen:
+                seen.add(full)
+                ordered.append(full)
+        if not ordered:
+            return {}
+        boards = {c: classify_board(c) for c in ordered}
+        out: dict = {c: None for c in ordered}
+
+        async def _plugin_batch(name: str, todo: list) -> dict:
+            src = self._plugins.get(name)
+            if src is None:
+                return {c: None for c in todo}
+            raws = await self._call_source(name, src.get_quotes(todo))
+            if not isinstance(raws, dict):
+                return {c: None for c in todo}
+            hit = [c for c in todo if raws.get(c)]
+            dets: dict = {}
+            # ① 画像**先从已取到的快照派生**（公开源零额外 HTTP —— 见
+            #    ``_PublicSource.derive_detail``）；不能派生的才回源批量取。
+            #    这样一次批量 = 1 次 HTTP；否则画像会再打一次，收益砍半。
+            todo_det: list = []
+            for c in hit:
+                try:
+                    d = src.derive_detail(raws[c])
+                except Exception:  # noqa: BLE001  派生是增强项，失败不该拖垮行情
+                    d = None
+                if d:
+                    dets[c] = d
+                else:
+                    todo_det.append(c)
+            if todo_det:
+                got = await self._call_source(name, src.get_details(todo_det))
+                if isinstance(got, dict):
+                    dets.update({c: v for c, v in got.items() if v})
+            res: dict = {}
+            for c in todo:
+                raw = raws.get(c)
+                if not raw:
+                    res[c] = None
+                    continue
+                det = dets.get(c) or {}
+                # 与 _from_plugin 同一条规则：详情名缺失或等于代码时回退源层名称，
+                # 否则指数会被详情层的「名称 == 代码」覆盖成 000001.SH。
+                det_name = str(det.get("name") or "").strip()
+                if not det_name or det_name.upper() == c.upper():
+                    if raw.get("name"):
+                        det = {**det, "name": raw["name"]}
+                res[c] = self._merge_quote(
+                    raw, c, boards[c], det, name,
+                    industry=det.get("industry") or "",
+                    concepts=det.get("concepts") or [])
+            return res
+
+        async def _broker_batch(todo: list) -> dict:
+            results = await asyncio.gather(
+                *[self.get_quote(c, "broker", conn_id) for c in todo],
+                return_exceptions=True)
+            return {c: (None if isinstance(r, Exception) else r)
+                    for c, r in zip(todo, results)}
+
+        if source == "broker":
+            return await _broker_batch(ordered)
+        if source in self._plugins:
+            return await _plugin_batch(source, ordered)
+        # auto：code 级降级 —— 缺口交给链上的下一个源
+        for name in self._resolve_sources(source, "quote"):
+            todo = [c for c in ordered if out.get(c) is None]
+            if not todo:
+                break
+            part = await (_broker_batch(todo) if name == "broker"
+                          else _plugin_batch(name, todo))
+            for c, q in (part or {}).items():
+                if q is not None:
+                    out[c] = q
+        return out
+
     # ---------- 合约基础信息 ----------
     async def get_instrument_detail(self, code: str, source: str = "auto",
                                     conn_id: Optional[str] = None) -> Optional[dict]:
@@ -647,12 +785,16 @@ class DataSourceManager:
             det = await self._call_source(name, src.get_instrument_detail(code))
             if not det:
                 return None
+            # ★ 快照派生字段必须**原样透出**：早先这里只挑固定的 6 个键，
+            #   插件层新解析出来的市值 / PE / PB / 换手… 全在这一步被丢掉，
+            #   端点恒返回 null —— 而直接调插件的单测是全绿的（绕过了 manager）。
+            #   常量与插件层共用 `EXT_DETAIL_KEYS`，杜绝两边漂移。
+            ext = {k: det.get(k) for k in EXT_DETAIL_KEYS}
             return {
                 **base,
+                **ext,
                 "name": det.get("name") or code,
                 "exchange": det.get("exchange") or base["exchange"],
-                "high_limit": det.get("high_limit"),
-                "low_limit": det.get("low_limit"),
                 "pre_close": det.get("pre_close"),
                 "industry": det.get("industry") or "",
                 "concepts": det.get("concepts") or [],

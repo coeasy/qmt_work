@@ -3,6 +3,7 @@ import {
   Badge,
   Button,
   ConfirmButton,
+  ConfirmModal,
   DataTable,
   EmptyState,
   FormRow,
@@ -39,6 +40,10 @@ export function ApiKeys() {
   const [banner, setBanner] = useState<{ tone: "ok" | "error"; text: string } | null>(null);
   const [plaintext, setPlaintext] = useState<{ label: string; key: string } | null>(null);
   const [selected, setSelected] = useState<number[]>([]);
+  /** 批量删除的模态确认（批量 ⇒ ConfirmModal，见按钮处注释） */
+  const [confirmBatch, setConfirmBatch] = useState(false);
+  /** 「清理 N 天未使用」会**真删**密钥且没有预演 ⇒ 必须确认 */
+  const [confirmClean, setConfirmClean] = useState(false);
   const [cleanDays, setCleanDays] = useState("30");
 
   const create = async () => {
@@ -212,16 +217,23 @@ export function ApiKeys() {
   return (
     <div className={s.page}>
       <div className={s.toolbar}>
-        <ConfirmButton
+        {/* ★ 批量删除走 ConfirmModal（同 Alerts/Webhooks），理由见 ConfirmButton 文档：
+            批量删除属高风险，要让人读一遍条数再确认。 */}
+        <Button
+          size="sm"
+          variant="danger"
           disabled={busy || selected.length === 0}
-          confirmText={`确认删除 ${selected.length} 条`}
-          onConfirm={() => void batchRemove()}
+          onClick={() => setConfirmBatch(true)}
         >
           批量删除（{selected.length}）
-        </ConfirmButton>
+        </Button>
         <span className={s.spacer} />
         <Input value={cleanDays} onChange={(e) => setCleanDays(e.target.value)} mono style={{ width: 60 }} />
-        <Button size="sm" variant="ghost" disabled={busy} onClick={() => void cleanUnused()}>
+        {/*
+          ★ 这个按钮**真删密钥**（后端 DELETE FROM api_keys）且**没有预演**，
+            原先点一下就执行 —— 一次误触可能废掉还在用的集成（脚本 / MCP / 定时任务）。
+        */}
+        <Button size="sm" variant="ghost" disabled={busy} onClick={() => setConfirmClean(true)}>
           清理 N 天未使用
         </Button>
         <Button size="sm" variant="ghost" onClick={() => void keys.reload()}>
@@ -294,12 +306,54 @@ export function ApiKeys() {
               {keys.error}
             </div>
           ) : (keys.data?.length ?? 0) === 0 ? (
-            <EmptyState text="暂无 API Key" />
+            <EmptyState text="暂无 API Key —— 在上方「新建密钥」填写名称与权限后创建" />
           ) : (
             <DataTable columns={cols} rows={keys.data ?? []} rowKey={(r) => String(r.id)} rowHeight={24} />
           )}
         </div>
       </Panel>
+
+      <ConfirmModal
+        open={confirmBatch}
+        title="批量删除 API Key"
+        danger
+        confirmText={`确认删除 ${selected.length} 条`}
+        message={
+          <>
+            将删除选中的 <b>{selected.length}</b> 个密钥。删除后
+            <b>使用这些密钥的客户端（脚本 / MCP / 定时任务）会立即失效</b>
+            （后端会同步作废缓存）。
+          </>
+        }
+        warn="删除后不可恢复"
+        onConfirm={() => {
+          setConfirmBatch(false);
+          void batchRemove();
+        }}
+        onCancel={() => setConfirmBatch(false)}
+      />
+
+      <ConfirmModal
+        open={confirmClean}
+        title="清理长期未使用的 API Key"
+        danger
+        confirmText="确认清理"
+        message={
+          <>
+            将删除超过 <b>{Number(cleanDays) || 30}</b> 天未使用的密钥；
+            「从未使用」的按其<b>创建时间</b>判断，同样需超过该天数才会被删。
+            <br />
+            ⚠ 这个操作<b>没有预演</b>：点下去直接删，界面只在事后提示删了几个。
+            使用中的客户端若正用着这些密钥会立即失效。
+          </>
+        }
+        warn="删除后不可恢复"
+        onConfirm={() => {
+          setConfirmClean(false);
+          void cleanUnused();
+        }}
+        onCancel={() => setConfirmClean(false)}
+      />
     </div>
   );
 }

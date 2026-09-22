@@ -13,8 +13,8 @@ import {
  * 主题与涨跌色通过 <html> 的 data-* 属性驱动，设计令牌自动生效。
  *
  * ★ 主题三态：`auto`（跟随系统）/ `dark` / `light`。
- *   - 首次进入（无持久化记录）默认 `dark` + `通达信黑` 背景（A 股终端标配），
- *     直接进入专业终端的深色工作态，无需先手动切主题。
+ *   - 首次进入（无持久化记录）默认 `light` + `晨曦白` 背景 —— 新用户第一眼
+ *     更容易看清界面结构；要深色在「设置 · 界面偏好」一键切换，选择会被记住。
  *   - 用户在状态栏或设置页显式选择后可以切到 `跟随系统` / `浅色` / 其它皮肤，
  *     pref 落盘，此后按用户选择生效。
  *   - `auto` 模式下监听系统主题变化并实时切换（如夜间自动转深色）。
@@ -54,14 +54,40 @@ interface Persisted {
    * 预热脚本里不重复实现派生逻辑，单一真源仍在 design/skins.ts。
    */
   customTokens: Record<string, string>;
+  /**
+   * 强调色（accent）。此前 accent **写死在 tokens.css**、界面无法调整 ——
+   * 空串表示「用主题默认」，此时不写内联变量（让 CSS 兜底）。
+   */
+  accent: string;
 }
 
-/** 读取系统主题；matchMedia 在极老环境或 SSR 下可能缺失，兜底 dark */
+/** ``#rrggbb`` → 一套 accent 令牌（主色 / 悬浮 / 淡底）。 */
+export function accentTokens(hex: string): Record<string, string> {
+  const n = parseInt(hex.slice(1), 16);
+  const r = (n >> 16) & 255;
+  const g = (n >> 8) & 255;
+  const b = n & 255;
+  const lighten = (amt: number) =>
+    "#" +
+    [r, g, b]
+      .map((c) => Math.min(255, Math.round(c + (255 - c) * amt)).toString(16).padStart(2, "0"))
+      .join("");
+  return {
+    "--accent": hex,
+    "--accent-hover": lighten(0.18),
+    "--accent-dim": `rgba(${r}, ${g}, ${b}, 0.16)`,
+  };
+}
+
+const ACCENT_KEYS = ["--accent", "--accent-hover", "--accent-dim"];
+export const ACCENT_RE = /^#[0-9a-f]{6}$/i;
+
+/** 读取系统主题；matchMedia 在极老环境或 SSR 下可能缺失，兜底 light（与默认浅色一致） */
 function systemTheme(): Theme {
   try {
     return window.matchMedia(DARK_QUERY).matches ? "dark" : "light";
   } catch {
-    return "dark";
+    return "light";
   }
 }
 
@@ -75,21 +101,22 @@ function isTheme(t: unknown): t is Theme {
 
 function load(): Persisted {
   const fallback: Persisted = {
-    themePref: "dark",
+    themePref: "light",
     updown: "red-up",
     dataPanelTab: "watchlist",
     dataPanelOpen: true,
     skin: DEFAULT_SKIN_ID,
-    customBg: "#0a0a0a",
+    customBg: "#f2f4f8",
     customTokens: {},
+    accent: "",
   };
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return fallback;
     const p = JSON.parse(raw) as Partial<Persisted> & { theme?: unknown };
     // 迁移：旧版本写的是已解析的 theme，没有 themePref；
-    // 非法 / 缺失的 theme 回退到新默认（深色 + 通达信黑），而非 auto
-    let themePref: ThemePref = "dark";
+    // 非法 / 缺失的 theme 回退到新默认（浅色 + 晨曦白），而非 auto
+    let themePref: ThemePref = "light";
     if (p.themePref === "auto" || isTheme(p.themePref)) themePref = p.themePref;
     else if (isTheme(p.theme)) themePref = p.theme;
     return {
@@ -103,6 +130,8 @@ function load(): Persisted {
       skin: typeof p.skin === "string" ? p.skin : "",
       customBg: typeof p.customBg === "string" && p.customBg ? p.customBg : "#0a0a0a",
       customTokens: {},
+      // 非法 accent 直接回退空串（用 CSS 默认），绝不写半个颜色进 DOM
+      accent: typeof p.accent === "string" && ACCENT_RE.test(p.accent) ? p.accent : "",
     };
   } catch {
     return fallback;
@@ -145,6 +174,12 @@ function apply(p: Persisted): Theme {
   }
   if (active) root.dataset.skin = active;
   else delete root.dataset.skin;
+
+  // 强调色：空串 = 用主题默认（清掉内联变量让 CSS 兜底）
+  for (const k of ACCENT_KEYS) root.style.removeProperty(k);
+  if (ACCENT_RE.test(p.accent ?? "")) {
+    for (const [k, v] of Object.entries(accentTokens(p.accent))) root.style.setProperty(k, v);
+  }
   return theme;
 }
 
@@ -164,6 +199,8 @@ interface UiState extends Persisted {
   setSkin: (id: string) => void;
   /** 自定义背景色：切到 custom 皮肤并按背景明暗对齐主题方向 */
   setCustomBg: (hex: string) => void;
+  /** 强调色：非法值按「清空」处理（回退 CSS 默认），绝不写半个颜色进 DOM */
+  setAccent: (hex: string) => void;
   setDataPanelTab: (t: DataPanelTab) => void;
   toggleDataPanel: () => void;
   setCommandOpen: (open: boolean) => void;
@@ -183,6 +220,7 @@ function pick(s: UiState): Persisted {
     skin: s.skin,
     customBg: s.customBg,
     customTokens: tokens ?? {},
+    accent: s.accent,
   };
 }
 
@@ -250,6 +288,16 @@ export const useUiStore = create<UiState>((set, get) => ({
       theme,
       activeSkin: resolveSkin(CUSTOM_SKIN_ID, hex, theme).active,
     });
+  },
+
+  setAccent(hex) {
+    // 非法值 → 清空（回退 CSS 默认），**不要**静默保留旧值：
+    // 用户看到颜色没变会以为「保存了但没生效」，而实际上根本没写进去。
+    const v = ACCENT_RE.test(hex || "") ? hex.toLowerCase() : "";
+    const next = { ...pick(get()), accent: v };
+    const theme = apply(next);
+    persist(next);
+    set({ accent: v, theme });
   },
 
   setDataPanelTab(t) {

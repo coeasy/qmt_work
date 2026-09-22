@@ -144,31 +144,41 @@
 
 /* ---- 工作台布局 ---- */
 
+/*
+ * 两列：主区（图表 + 底部坞）+ 右栏（五档 / 成交流 / 快捷下单）。
+ *
+ * ★ 原先是三列，左栏独占 240~300px 放报价牌 —— 但报价牌只在「订阅到行情」时
+ *   才有内容，其余时候是一整列空白。
+ * ★ 后来报价牌一度并入右栏（五档下方），但自选股同时也在左侧数据面板常驻，
+ *   同一份列表出现两次。现在右栏只放「当前这一只票」的盘口/成交流/下单，
+ *   自选股统一由左侧数据面板承载，左右各司其职。
+ */
 .work {
   display: grid;
-  grid-template-columns: minmax(240px, 300px) minmax(0, 1fr) minmax(260px, 320px);
+  grid-template-columns: minmax(0, 1fr) minmax(300px, 360px);
   gap: var(--sp-2);
   flex: 1 1 auto;
   min-height: 0;
   padding: var(--sp-2);
 }
 
-/* 窄屏（窗口被拖窄 / 笔记本小屏）：收起左侧报价牌，只留图表 + 盘口 */
+/* 笔记本小屏：右栏收窄（仍保留下单区） */
 @media (max-width: 1180px) {
   .work {
-    grid-template-columns: minmax(0, 1fr) minmax(240px, 300px);
-  }
-  .workAside {
-    display: none;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 290px);
   }
 }
 
-.workAside {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-2);
-  min-height: 0;
-  min-width: 0;
+/* 极窄：改为上下堆叠，右栏高度封顶并整体可滚动（不会把主图压没） */
+@media (max-width: 900px) {
+  .work {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr) auto;
+    overflow: auto;
+  }
+  .workRight {
+    max-height: 56vh;
+  }
 }
 
 .workMain {
@@ -313,6 +323,22 @@
 
 /* ---- 面板内的说明条（降级原因 / 数据截至日） ---- */
 
+/*
+ * 自选报价牌的收缩态（无行情时）。
+ * 只占一行高度 + 说明原因 + 「查看清单」入口：空白占位会把下面的下单区顶出屏幕，
+ * 而什么都不显示又会被读成「软件坏了」。
+ */
+.shrunkRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  padding: 5px var(--sp-2);
+  font-size: var(--font-xs);
+  color: var(--text-faint);
+  line-height: 1.4;
+}
+
 .panelNote {
   padding: 2px var(--sp-2) var(--sp-1);
   font-size: var(--font-xs);
@@ -342,6 +368,86 @@
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
   gap: var(--sp-2);
+}
+
+/* ---- 基本面：6 维收成一排（默认收起，点击展开） ----
+ *
+ * 底部坞的高度是从图表那里借来的（.dock 的 max-height: 42%），所以这里的目标是
+ * 「一行看完 6 维、明细按需展开」，而不是把 6 块表格全铺开。
+ * flex-basis 为 0 + min-width 兜底：宽度够就 6 个平分一行，窄到放不下才换行
+ * （不写死 6 列，否则窄窗口下每格只剩几十像素、摘要全被省略号吃掉）。 */
+
+.dimRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.dimChip {
+  flex: 1 1 0;
+  min-width: 118px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-2);
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  min-width: 0;
+}
+
+.dimChip:hover {
+  background: var(--bg-hover);
+}
+
+/* 展开态：用强调色边框 + 更亮的底色，让「现在看的是哪一维」在 6 格里一眼可辨 */
+.dimChipOpen {
+  border-color: var(--accent);
+  background: var(--bg-3);
+}
+
+.dimChipHead {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-width: 0;
+}
+
+.dimTitle {
+  font-size: var(--font-xs);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.dimSummary {
+  width: 100%;
+  font-size: var(--font-xs);
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dimDetail {
+  margin-top: var(--sp-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-2);
+  padding: var(--sp-2);
+}
+
+.dimNote {
+  margin-top: var(--sp-1);
+  font-size: var(--font-xs);
+  color: var(--text-faint);
+  line-height: 1.5;
 }
 
 .section {

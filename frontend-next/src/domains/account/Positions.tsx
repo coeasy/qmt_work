@@ -14,6 +14,8 @@ import { tradeApi } from "@/services/api";
 import { useAsync } from "@/hooks/useAsync";
 import { useLiveQuotes } from "@/hooks/useLiveQuotes";
 import { useBrokerStore } from "@/stores/broker";
+import { useWorkspaceStore } from "@/stores/workspace";
+import { useOpenWorkbench } from "@/hooks/useOpenWorkbench";
 import {
   fmtAmount,
   fmtMoney,
@@ -24,6 +26,7 @@ import {
   tone,
   toneColor,
 } from "@/shared/format";
+import { isLivePrice, staleQuoteNote } from "@/shared/freshness";
 import type { Deal, Order, Position } from "@/shared/types";
 import s from "../domain.module.css";
 
@@ -49,6 +52,9 @@ type Tab = "positions" | "orders" | "deals";
  */
 export function Positions() {
   const connections = useBrokerStore((st) => st.connections);
+  const open = useWorkspaceStore((st) => st.open);
+  // 持仓 / 委托 / 成交 点一行 ⇒ 直接进行情工作台看这只票（唯一出口，勿各写一遍）
+  const openWorkbench = useOpenWorkbench();
   const active = connections.find((c) => c.active);
   const connected = connections.some((c) => c.connected);
 
@@ -90,12 +96,18 @@ export function Positions() {
    * 此前这里只有 try/finally、没有 catch：券商拒单 / 委托已成不可撤 / 连接断开
    * 都会被静默吞掉，界面只是刷新一次列表 —— 用户以为「已经撤掉了」，
    * 实际委托还挂在市场里。撤单是**有真实后果**的操作，静默失败等于骗人。
+   *
+   * ★ 必须显式带上 ``conn_id``（2026-09-20）：后端已把「指定了 conn_id 却取不到该
+   * 连接」改成**报错而不是静默回退到 active**（防止多账户下撤错单）；但前端一直不传
+   * ⇒ 这道保险等于没接上（本项目反复出现的「能力存在但没人调用」）。列表本来就是
+   * active 连接的数据，这里把 active 的 conn_id 一起传下去：若期间用户切了活跃账户，
+   * 后端会明确拒绝，而不是把撤单打到另一个账户上。
    */
   const cancelOrder = useCallback(
     async (orderId: string) => {
       setActError(null);
       try {
-        await tradeApi.cancel(orderId);
+        await tradeApi.cancel(orderId, active?.conn_id ?? "");
       } catch (e) {
         setActError(
           `撤单失败（${orderId}）：${e instanceof Error ? e.message : String(e)}`,
@@ -104,21 +116,35 @@ export function Positions() {
         void orders.reload();
       }
     },
-    [orders],
+    [orders, active?.conn_id],
   );
 
   /** 最新价：实时行情优先，缺失回退券商快照（都不是 0） */
   const lastPrice = (r: Position): number | undefined => {
-    const q = quotes[r.code];
-    if (q !== undefined && q.price > 0) return q.price;
-    return r.price;
+    const q = quotes[r.code]?.price;
+    return isLivePrice(q) ? q : r.price;
   };
   /** 今日涨跌幅：只有实时行情才有，券商持仓接口不返回 */
   const lastPct = (r: Position): number | undefined => quotes[r.code]?.change_pct;
 
+  /**
+   * ★ 这一行显示的到底是不是**实时价**。
+   *
+   * 项目里反复强调「非空 ≠ 够新」，但修复前本页「最新价」列把「实时行情价」和
+   * 「券商查询快照价」渲染得一模一样，而市值 / 盈亏 / 盈亏比三列又都由同一个
+   * `lastPrice` 派生 ⇒ 用户会把一次查询时的快照（非交易时段就是最近收盘价）
+   * 当成实时价，据此判断盈亏。金额类误判代价高，界面必须能区分。
+   *
+   * 注意这里**不猜测原因**：只陈述「这个值不是实时行情」，原因可能是没连券商、
+   * 没订阅到、或刚打开还没推过来 —— 三种都成立，不编故事。
+   */
+  const isLive = (r: Position): boolean => isLivePrice(quotes[r.code]?.price);
+  const posRows = positions.data ?? [];
+  const staleCount = posRows.filter((r) => !isLive(r)).length;
+
   const positionCols: Column<Position>[] = [
     { key: "code", header: "代码", width: 96, mono: true, render: (r) => r.code },
-    { key: "name", header: "名称", width: 92, render: (r) => r.name ?? "--" },
+    { key: "name", header: "名称", width: 92, render: (r) => r.name || r.code || "--" },
     { key: "vol", header: "持仓", width: 76, align: "right", mono: true, render: (r) => String(r.volume) },
     {
       key: "avail",
@@ -135,9 +161,20 @@ export function Positions() {
       width: 74,
       align: "right",
       mono: true,
-      render: (r) => (
-        <span style={{ color: toneColor(lastPct(r)) }}>{fmtPrice(lastPrice(r))}</span>
-      ),
+      render: (r) =>
+        isLive(r) ? (
+          // 实时行情价 —— 正常渲染
+          <span style={{ color: toneColor(lastPct(r)) }}>{fmtPrice(lastPrice(r))}</span>
+        ) : (
+          // 券商查询快照价 —— 加虚线下划线 + hover 说明，避免被当成实时价
+          <span
+            className={s.stalePrice}
+            style={{ color: toneColor(lastPct(r)) }}
+            title="非实时：未取到实时行情，这是券商查询快照价（非交易时段即最近收盘价）；市值/盈亏由同一价格派生"
+          >
+            {fmtPrice(lastPrice(r))}
+          </span>
+        ),
     },
     {
       key: "chg",
@@ -156,7 +193,7 @@ export function Positions() {
       // 有实时价就按最新价重算（市值本就是价格的即时函数），否则用券商快照
       render: (r) => {
         const p = lastPrice(r);
-        const mv = p !== undefined && p > 0 ? p * r.volume : r.market_value;
+        const mv = isLivePrice(p) ? p * r.volume : r.market_value;
         return fmtMoney(mv);
       },
     },
@@ -168,7 +205,7 @@ export function Positions() {
       mono: true,
       render: (r) => {
         const p = lastPrice(r);
-        const v = p !== undefined && p > 0 && r.cost !== undefined ? (p - r.cost) * r.volume : r.profit;
+        const v = isLivePrice(p) && r.cost !== undefined ? (p - r.cost) * r.volume : r.profit;
         return <span style={{ color: toneColor(v) }}>{fmtMoney(v)}</span>;
       },
     },
@@ -181,7 +218,7 @@ export function Positions() {
       render: (r) => {
         const p = lastPrice(r);
         const v =
-          p !== undefined && p > 0 && r.cost !== undefined && r.cost > 0
+          isLivePrice(p) && r.cost !== undefined && r.cost > 0
             ? ((p - r.cost) / r.cost) * 100
             : r.profit_pct;
         return <span style={{ color: toneColor(v) }}>{fmtPct(v)}</span>;
@@ -192,7 +229,7 @@ export function Positions() {
   const orderCols: Column<Order>[] = [
     { key: "oid", header: "委托号", width: 110, mono: true, render: (r) => r.order_id },
     { key: "code", header: "代码", width: 96, mono: true, render: (r) => r.code },
-    { key: "name", header: "名称", width: 88, render: (r) => r.name ?? "--" },
+    { key: "name", header: "名称", width: 88, render: (r) => r.name || r.code || "--" },
     {
       key: "side",
       header: "方向",
@@ -285,9 +322,30 @@ export function Positions() {
         </Button>
       </div>
 
+      {/* 提示里点名了「连接管理」，就该**真的能点过去** —— 只写在文案里等于让用户
+          自己去菜单里找（本项目反复出现的「说了去哪但没入口」）。 */}
       {!connected && (
         <div className={`${s.note} ${s.noteWarn}`}>
           当前无已连接券商。查询类端点会返回 503（零 mock 契约），请先到「连接管理」添加并连接券商。
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={() => open("brokers", {}, { title: "连接管理" })}
+          >
+            去连接管理
+          </Button>
+        </div>
+      )}
+
+      {/* ★ 快照冒充实时价是本页最隐蔽的误判源：持仓列表里每一行都可能停在不同时刻，
+          只看数字完全分辨不出来。没连券商时上面已经有提示，这里只补「连着但仍无行情」。 */}
+      {tab === "positions" && connected && staleCount > 0 && (
+        <div className={s.note}>
+          {staleQuoteNote(
+            staleCount,
+            posRows.length,
+            "非交易时段即最近收盘价；「最新价」（带虚线下划线者）与由其派生的市值、盈亏、盈亏比都不是实时值。",
+          )}
         </div>
       )}
 
@@ -338,14 +396,28 @@ export function Positions() {
               rows={positions.data ?? []}
               rowKey={(r) => r.code}
               rowHeight={24}
+              onRowClick={(r) => openWorkbench(r.code, r.name)}
               /* 行底色跟「今日涨跌」（行情），盈亏由盈亏列自己着色 ——
                  一处只表达一件事，否则同一行两种颜色互相打架。 */
               rowTone={(r) => tone(lastPct(r))}
             />
           ) : tab === "orders" ? (
-            <DataTable columns={orderCols} rows={orders.data ?? []} rowKey={(r) => r.order_id} rowHeight={24} />
+            <DataTable
+              columns={orderCols}
+              rows={orders.data ?? []}
+              rowKey={(r) => r.order_id}
+              rowHeight={24}
+              onRowClick={(r) => openWorkbench(r.code, r.name)}
+            />
           ) : (
-            <DataTable columns={dealCols} rows={deals.data ?? []} rowKey={(r) => r.deal_id} rowHeight={24} />
+            <DataTable
+              columns={dealCols}
+              rows={deals.data ?? []}
+              rowKey={(r) => r.deal_id}
+              rowHeight={24}
+              /* Deal 行没有 name 字段（后端成交记录只带 code） */
+              onRowClick={(r) => openWorkbench(r.code)}
+            />
           )}
         </div>
       </Panel>

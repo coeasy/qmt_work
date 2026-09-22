@@ -1,6 +1,16 @@
 import { useEffect, useState } from "react";
 import { Badge, Button, DataTable, EmptyState, Panel, type Column } from "@/design/primitives";
-import { marketApi, systemApi, type CapabilityItem, type KlineCacheStats, type KlineSyncStatus } from "@/services/api";
+import {
+  marketApi,
+  systemApi,
+  type CapabilityItem,
+  type DataProviderInfo,
+  type DataProvidersResponse,
+  type DatahubPolicies,
+  type KlineCacheStats,
+  type KlineSyncStatus,
+  type SourceDiagnostics,
+} from "@/services/api";
 import { useQuotesStore } from "@/stores/quotes";
 import { fmtDate } from "@/shared/time";
 import s from "./systemstatus.module.css";
@@ -34,6 +44,14 @@ export function SystemStatus() {
   const [capErr, setCapErr] = useState("");
   const [sync, setSync] = useState<KlineSyncStatus | null>(null);
   const [cache, setCache] = useState<KlineCacheStats | null>(null);
+  /** 数据源矩阵（/data/providers）—— 未接界面前「哪个源挂了」只能翻 API */
+  const [providers, setProviders] = useState<DataProvidersResponse | null>(null);
+  const [providersErr, setProvidersErr] = useState("");
+  /** 限流策略（/datahub/policies）：行情多久算过期、多久合并一次请求 */
+  const [policies, setPolicies] = useState<DatahubPolicies | null>(null);
+  /** 最近一次数据源失败溯源（/data/source/diagnostics）—— 把「不支持」从「网络坏了」里捞出来 */
+  const [diag, setDiag] = useState<SourceDiagnostics | null>(null);
+  const [probeBusy, setProbeBusy] = useState(false);
   const [err, setErr] = useState("");
   const socketState = useQuotesStore((st) => st.socketState);
   const refs = useQuotesStore((st) => st.refs);
@@ -68,6 +86,25 @@ export function SystemStatus() {
       .klineCacheStats()
       .then(setCache)
       .catch(() => setCache(null));
+    void systemApi
+      .dataProviders()
+      .then((r) => {
+        setProviders(r ?? null);
+        setProvidersErr("");
+      })
+      // ★ 失败必须可见：置空会让「接口挂了」和「没有数据源」长得一样
+      .catch((e: unknown) => {
+        setProviders(null);
+        setProvidersErr(e instanceof Error ? e.message : String(e));
+      });
+    void systemApi
+      .datahubPolicies()
+      .then(setPolicies)
+      .catch(() => setPolicies(null));
+    void systemApi
+      .sourceDiagnostics()
+      .then((d) => setDiag(d ?? null))
+      .catch(() => setDiag(null));
   };
 
   useEffect(load, []);
@@ -83,6 +120,36 @@ export function SystemStatus() {
           {r.status === "pass" ? "正常" : r.status === "warn" ? "告警" : "异常"}
         </Badge>
       ),
+    },
+  ];
+
+  /** 数据源画像列：status 是后端算好的结论（active/dependency/commercial 三者合成） */
+  const providerCols: Column<DataProviderInfo>[] = [
+    { key: "provider", header: "源", width: 110, mono: true, render: (r) => String(r.provider) },
+    { key: "name", header: "名称", width: 150, render: (r) => String(r.name ?? "—") },
+    {
+      key: "status", header: "状态", width: 110,
+      render: (r) => {
+        const st = String(r.status ?? "");
+        const tone = st === "active" ? "success" : st === "dependency-ready" ? "warning" : "neutral";
+        return <Badge tone={tone}>{st || "—"}</Badge>;
+      },
+    },
+    {
+      key: "caps", header: "能力数", width: 80, mono: true,
+      render: (r) => String(r.capabilities?.length ?? 0),
+    },
+    {
+      key: "commercial", header: "商用", width: 70,
+      render: (r) => (
+        <Badge tone={r.commercial_ok ? "success" : "neutral"}>
+          {r.commercial_ok ? "允许" : "禁止"}
+        </Badge>
+      ),
+    },
+    {
+      key: "note", header: "说明",
+      render: (r) => String(r.license_note ?? r.requires ?? "—"),
     },
   ];
 
@@ -222,6 +289,123 @@ export function SystemStatus() {
               </div>
             </>
           )}
+        </div>
+      </Panel>
+
+      <Panel title="数据源与限流">
+        {providersErr ? (
+          <EmptyState text={`数据源矩阵加载失败：${providersErr}`} />
+        ) : !providers ? (
+          <EmptyState text="数据源矩阵不可用" />
+        ) : (
+          <>
+            <div className={s.kv}>
+              <span>选股可用性</span>
+              <span>
+                <Badge tone={providers.screening_ready ? "success" : "warning"}>
+                  {providers.screening_ready ? "可用" : "不可用"}
+                </Badge>
+                {providers.screening_providers?.length
+                  ? ` ${providers.screening_providers.join(" / ")}`
+                  : ""}
+              </span>
+            </div>
+            <div className={s.kv}>
+              <span>本地数据</span>
+              <span>{providers.local_data_available ? "可用" : "不可用"}</span>
+            </div>
+            <div className={s.kv}>
+              <span>商用模式</span>
+              <span>{providers.commercial_mode ? "是" : "否"}</span>
+            </div>
+            <div className={s.kv}>
+              <span>默认源策略</span>
+              <span className={s.mono}>{providers.default_source_policy ?? "—"}</span>
+            </div>
+            <div className={s.kv}>
+              <span>降级链版本</span>
+              <span className={s.mono}>{providers.chain_version ?? "—"}</span>
+            </div>
+            <div className={s.tableArea} style={{ maxHeight: 200 }}>
+              <DataTable
+                columns={providerCols}
+                rows={providers.providers ?? []}
+                rowKey={(r) => String(r.provider)}
+              />
+            </div>
+          </>
+        )}
+        {/* 限流策略：行情多久过期、多久合并一次 —— 决定「数据看着没更新」是不是配置问题 */}
+        {policies ? (
+          <>
+            <div className={s.kv}>
+              <span>默认 TTL</span>
+              <span className={s.mono}>
+                {policies.default?.ttl_ms ?? "—"} ms（最小间隔{" "}
+                {policies.default?.min_interval_ms ?? "—"} ms，合并窗口{" "}
+                {policies.default?.coalesce_within_ms ?? "—"} ms）
+              </span>
+            </div>
+            <div className={s.kv}>
+              <span>主题策略</span>
+              <span className={s.mono}>
+                {Object.keys(policies.topics ?? {}).length} 条（
+                {Object.entries(policies.topics ?? {})
+                  .slice(0, 4)
+                  .map(([k, v]) => `${k}:${v?.ttl_ms ?? "—"}ms`)
+                  .join("，")}
+                {Object.keys(policies.topics ?? {}).length > 4 ? " …" : ""}）
+              </span>
+            </div>
+          </>
+        ) : null}
+      </Panel>
+
+      <Panel title="数据源失败溯源">
+        <div className={s.kv}>
+          <span>能力</span>
+          <span className={s.mono}>{diag?.capability ?? "sector"}</span>
+        </div>
+        <div className={s.kv}>
+          <span>本应被尝试</span>
+          <span className={s.mono}>
+            {diag?.chain?.length
+              ? diag.chain.join(" → ")
+              : "（空 ⇒ 该源不提供该能力，不是网络问题）"}
+          </span>
+        </div>
+        <div className={s.kv}>
+          <span>实际尝试</span>
+          <span className={s.mono}>
+            {diag?.tried?.length
+              ? diag.tried.join("；")
+              : diag?.chain?.length === 0
+                ? "（无源可试）"
+                : "（暂无最近失败记录，点右侧「触发探测」可主动跑一次）"}
+          </span>
+        </div>
+        {diag?.interpretation ? (
+          <div className={s.kv}>
+            <span>解读</span>
+            <span className={s.mono}>{diag.interpretation}</span>
+          </div>
+        ) : null}
+        <div style={{ marginTop: 8 }}>
+          <Button
+            size="sm"
+            disabled={probeBusy}
+            onClick={async () => {
+              setProbeBusy(true);
+              try {
+                const d = await systemApi.sourceDiagnostics({ probe: 1 });
+                setDiag(d ?? null);
+              } finally {
+                setProbeBusy(false);
+              }
+            }}
+          >
+            {probeBusy ? "探测中…" : "触发探测（broker × sector）"}
+          </Button>
         </div>
       </Panel>
 

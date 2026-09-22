@@ -96,20 +96,21 @@ export function McpTools() {
 
   return (
     <div className={s.page}>
-      <div className={s.stats}>
-        <div className={s.stat}>
-          <div className={s.statLabel}>工具总数</div>
-          <div className={s.statValue}>{d.count}</div>
+      {/* ★ 端点与监听地址是要**照着抄**的字符串，改成一行条后每格变窄 ⇒
+          这里必须给足横向空间，故用标准格宽（128px）而非 dense，并把
+          transport / auth 放悬浮而不是删掉（删了就无从判断要不要带鉴权）。 */}
+      <div className={s.statRow}>
+        <div className={s.statRowItem}>
+          <span className={s.statRowLabel}>工具总数</span>
+          <span className={s.statRowValue}>{d.count}</span>
         </div>
-        <div className={s.stat}>
-          <div className={s.statLabel}>接入端点</div>
-          <div className={s.statValue}>{d.endpoint}</div>
-          <div className={s.statSub}>{d.transport}</div>
+        <div className={s.statRowItem} title={`传输方式：${d.transport}`}>
+          <span className={s.statRowLabel}>接入端点</span>
+          <span className={s.statRowValue}>{d.endpoint}</span>
         </div>
-        <div className={s.stat}>
-          <div className={s.statLabel}>监听地址</div>
-          <div className={s.statValue}>{d.bind}</div>
-          <div className={s.statSub}>{d.auth}</div>
+        <div className={s.statRowItem} title={`鉴权：${d.auth}`}>
+          <span className={s.statRowLabel}>监听地址</span>
+          <span className={s.statRowValue}>{d.bind}</span>
         </div>
       </div>
 

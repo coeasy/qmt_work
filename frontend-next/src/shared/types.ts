@@ -464,7 +464,13 @@ export interface RuntimeJobList {
   count: number;
 }
 
-/** 调度（app/runtime/schedules.py）——字段是 id / kind。 */
+/** 调度（app/runtime/schedules.py）——字段是 id / kind。
+ *
+ * ⚠️ 时间字段名是 **next_run_at / last_run_at**（后端连列名一起返回，
+ * 见 ``schedules.py`` 的 ``_decorate``）。此前这里写的是 ``next_run/last_run``，
+ * 界面于是**永远读到 undefined**、两列恒显示 `--` —— 端点 200、契约测试也抓不到，
+ * 因为它从不校验字段名。改字段名必须同时改 RuntimeJobs 的两列渲染。
+ */
 export interface ScheduleItem {
   id: string;
   kind: string;
@@ -473,8 +479,8 @@ export interface ScheduleItem {
   enabled: boolean;
   misfire_policy: string;
   params?: Record<string, unknown>;
-  next_run?: string;
-  last_run?: string;
+  next_run_at?: string;
+  last_run_at?: string;
   last_status?: string;
 }
 

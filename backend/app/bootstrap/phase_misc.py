@@ -6,10 +6,12 @@
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from fastapi import FastAPI
 
+from core.config import settings
 from core.state import state
 
 log = logging.getLogger("qmt_work.bootstrap.misc")
@@ -110,6 +112,18 @@ async def setup(app: FastAPI) -> dict:
         store = ScheduleStore(state.db)
         from app.runtime.eod import ensure_default_schedule
         ensure_default_schedule(state.db)    # F9 修复：默认 18:30 EOD，enabled
+        # ★ 启动即校验「相位是否还跟得上自己的 cron」。
+        #   调度是**按相位**触发的，任何直接改 cron 的路径（迁移、手工 SQL）留下的
+        #   过期相位都会让它按旧时间跑 —— 配置看起来却完全正常。实测迁移 v27 就是
+        #   这种情况（同步相位停在 15:30、选股停在 16:00，顺序被倒置）。
+        #   这里统一清空不一致的相位，由 runner 按当前 cron 重新对表。
+        try:
+            fixed = store.normalize_phases()
+            if fixed:
+                log.warning("已重置 %d 个与 cron 不一致的调度相位：%s",
+                            len(fixed), ", ".join(fixed))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("调度相位校验失败（不影响调度本身）：%s", exc)
         runner = ScheduleRunner(store, runtime, tick_seconds=30.0)
         runner.start()  # 同步方法（内部 ensure_future 后台循环），不可 await
         state.schedule_runner = runner
@@ -117,6 +131,32 @@ async def setup(app: FastAPI) -> dict:
                  len(store.list(enabled_only=True)))
     except Exception as exc:  # noqa: BLE001
         log.warning("durable scheduler 启动失败（不影响其他能力）：%s", exc)
+
+    # ---- 主库备份：必须是**最后一个**阶段 ----
+    # ★ 为什么放这里而不是 watchdogs（2026-09-20 迁来）：启动备份要记录「源库指纹」
+    #   用于「主库没变化就跳过」，而本阶段之前还有 replay / misc 前半段在写库 ⇒
+    #   在 watchdogs 阶段记下的指纹当场就过期，「客户端反复启停不重复整库复制」
+    #   永远不成立（实测：每次启动都白复制一份 1GB+ 的主库）。
+    #   放到所有阶段都写完、库已静止之后，指纹才是准的。
+    db_backup = None
+    if settings.db_backup_enabled:
+        from gateway.db_backup import DBBackup
+        db_backup = DBBackup(
+            settings.db_path, keep=settings.db_backup_keep,
+            interval=settings.db_backup_interval, db=state.db,
+            max_total_mb=settings.db_backup_max_total_mb,
+            min_keep=settings.db_backup_min_keep)
+        # 1GB+ 主库的一致性复制要数秒：丢线程，否则整个启动被它拖住
+        # （就绪广播、前端首屏全在等它）。
+        await asyncio.to_thread(db_backup.backup_once, "startup")
+        await db_backup.start()
+        # ★ 日志必须同时报「份数」与「体积」两个上限：只报 keep 会让人以为备份占用
+        #   有界，而实测 1.14GB 主库 × 10 份 = 11GB（磁盘真被吃满过）。
+        log.info("db backup enabled: interval=%.0fs keep=%d max_total=%sMB min_keep=%d",
+                 settings.db_backup_interval, settings.db_backup_keep,
+                 settings.db_backup_max_total_mb, settings.db_backup_min_keep)
+    # 停机阶段与 /config/paths 的占用展示都从上下文取
+    state.db_backup = db_backup
 
     log.info("qmt_work started (real broker mode)")
     return {}

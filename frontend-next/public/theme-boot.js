@@ -14,9 +14,9 @@
  */
 (function () {
   try {
-    // 首次启动（无持久化记录）默认暗色 + 通达信黑背景，与 src/stores/ui.ts 的
+    // 首次启动（无持久化记录）默认浅色 + 晨曦白背景，与 src/stores/ui.ts 的
     // load() fallback 保持一致。改这里记得同步那边。
-    var DEFAULT_SKIN = "tongdaxin";
+    var DEFAULT_SKIN = "light";
     var el = document.documentElement;
     var raw = localStorage.getItem("qmt.ui.v1");
     var p = raw ? JSON.parse(raw) || {} : {};
@@ -24,7 +24,7 @@
     var pref = p.themePref;
     if (pref !== "auto" && pref !== "dark" && pref !== "light") {
       // 老版本只存了已解析的 theme；非法 / 缺失则回退到新默认（深色），而非 auto
-      pref = p.theme === "dark" || p.theme === "light" ? p.theme : "dark";
+      pref = p.theme === "dark" || p.theme === "light" ? p.theme : "light";
     }
     var theme =
       pref === "auto"
@@ -37,7 +37,7 @@
     el.dataset.themePref = pref;
 
     if (typeof p.skin === "string" && p.skin) el.dataset.skin = p.skin;
-    else if (!raw) el.dataset.skin = DEFAULT_SKIN; // 首次启动默认通达信黑
+    else if (!raw) el.dataset.skin = DEFAULT_SKIN; // 首次启动默认晨曦白
     if (p.updown === "green-up") el.dataset.updown = "green-up";
 
     if (p.skin === "custom" && p.customTokens && typeof p.customTokens === "object") {

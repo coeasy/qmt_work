@@ -62,7 +62,23 @@ async def signal_confirm(body: dict, ctx: AppContext = Depends(get_ctx)):
     token = body.get("confirm_token", "")
     if not token:
         return err(400, "缺少 confirm_token")
-    res = await ctx.signal_router.confirm(token, body.get("totp_code", ""))
+    # ★★ TOTP 字段名必须两种都收（2026-09-20 实测修复）。
+    #
+    # 此前只读 `totp_code`，而前端 `signalApi.confirm()`（trade.ts）发的是 **`totp`**
+    # —— 两侧各用一个名字，中间没有任何归一化。后果不是「少个参数」而是：
+    # **一旦启用 TOTP，大额单的二次确认永远无法通过**，且报错文案把责任推给用户
+    # （「TOTP 校验失败，请重新发起信号」），用户重试到天荒地老也不会成功。
+    # 等于「开了安全开关就再也下不了大额单」。
+    #
+    # 实测对照（同一合法 TOTP 码、同一挂起令牌、mode=paper、本机真实库）：
+    #   {"confirm_token":T,"totp":"231417"}      → 400「TOTP 校验失败，请重新发起信号」
+    #   {"confirm_token":T,"totp_code":"231417"} → TOTP 通过，继续走到下一道真实校验
+    # 唯一差异就是字段名。
+    #
+    # 归一化放在**后端**：前端（含已分发的 Electron 客户端）无需升级即可立即生效，
+    # 同时接受新老两种写法。前端已同步改为发规范名 `totp_code`。
+    totp_code = str(body.get("totp_code") or body.get("totp") or "")
+    res = await ctx.signal_router.confirm(token, totp_code)
     if res.get("ok"):
         return ok(res)
     return err(400, res.get("reason", "确认失败"), res)

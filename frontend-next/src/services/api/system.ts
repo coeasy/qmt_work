@@ -28,6 +28,23 @@ export interface NotificationConfig {
   [k: string]: unknown;
 }
 
+/**
+ * 外观配置（`/config/ui`）。
+ *
+ * ⚠️ 后端**不认识**皮肤目录（那在前端 ``design/skins.ts``），只做**存储 + 形状校验**；
+ * 所以后端返回的 ``fields`` 是它认识的字段名清单，不要指望它校验皮肤 id 是否真实存在。
+ * 服务器这份是**权威**：界面本地仍有一份 localStorage（离线可用），但换机器 /
+ * 清缓存后能从服务器拉回来 —— 此前外观只存 localStorage，换台机器就回到默认皮肤。
+ */
+export interface UiAppearance {
+  skin_id: string;
+  /** #RGB / #RRGGBB；空 = 用主题默认 */
+  accent: string;
+  /** compact / comfortable */
+  density: string;
+  wallpaper: string;
+}
+
 /** 通知配置创建/更新载荷（notifications.py:save_notification）。带 id 即更新。 */
 export interface NotificationPayload {
   id?: number;
@@ -250,6 +267,36 @@ export const systemApi = {
   auditVerify: (limit = 200_000) =>
     http.get<AuditVerifyResult>("/audit/verify", { query: { limit } }),
 
+  /* ---- 外观（服务器权威，换机器/清缓存能拉回来） ---- */
+
+  uiAppearance: () =>
+    http.get<{ appearance: UiAppearance; defaults: UiAppearance; fields: string[] }>(
+      "/config/ui",
+    ),
+
+  /** 可按字段部分提交（后端合并后再落库） */
+  updateUiAppearance: (patch: Partial<UiAppearance>) =>
+    http.put<{ saved: boolean; changed: string[]; appearance: UiAppearance }>(
+      "/config/ui",
+      patch,
+    ),
+
+  resetUiAppearance: () =>
+    http.post<{ reset: boolean; appearance: UiAppearance }>("/config/ui/reset"),
+
+  /** 导出：可抄给另一台机器（返回体本身即导入所需格式） */
+  exportUiAppearance: () =>
+    http.get<{ version: number; kind: string; exported_at: string; appearance: UiAppearance }>(
+      "/config/ui/export",
+    ),
+
+  /** 导入：接受导出对象本身，也接受它的 appearance 字段 */
+  importUiAppearance: (body: Record<string, unknown>) =>
+    http.post<{ imported: boolean; changed: string[]; appearance: UiAppearance }>(
+      "/config/ui/import",
+      body,
+    ),
+
   /* ---- 通知渠道 ---- */
 
   notifications: () => http.get<NotificationConfig[]>("/notifications"),
@@ -263,6 +310,14 @@ export const systemApi = {
   /** ★ 批量删除的 body 键是 ids（与 alerts / webhooks / api-keys 一致） */
   batchDeleteNotifications: (ids: number[]) =>
     http.post<{ deleted: number }>("/notifications/batch-delete", { ids }),
+
+  dataProviders: () => http.get<DataProvidersResponse>("/data/providers"),
+  dataProvidersHealth: () => http.get<DataProvidersHealth>("/data/providers/health"),
+  datahubPolicies: () => http.get<DatahubPolicies>("/datahub/policies"),
+  sourceDiagnostics: (params: { capability?: string; probe?: number } = {}) =>
+    http.get<SourceDiagnostics>("/data/source/diagnostics", { query: params }),
+
+
 
   notificationLogs: (limit = 50) =>
     http.get<unknown[]>("/notifications/logs", { query: { limit } }),
@@ -528,3 +583,69 @@ export const screenApi = {
   /** 自然语言 → 可编辑条件树（不执行） */
   nl: (text: string) => http.post<NlScreenResult>("/market/screen/nl", { text }),
 };
+
+/* ---------------- 数据面（datahub.py：数据源矩阵 / 健康 / 限流策略） ---------------- */
+
+/** 单个数据源画像（`/data/providers.providers[]`）。 */
+export interface DataProviderInfo {
+  provider: string;
+  name?: string;
+  transport?: string;
+  capabilities?: string[];
+  active?: boolean;
+  dependency_available?: boolean;
+  commercial_ok?: boolean;
+  status?: string;
+  requires?: string;
+  optional_dependency?: string;
+  license_note?: string;
+  [k: string]: unknown;
+}
+
+/** 数据源矩阵（`/data/providers`）—— 除 providers 外还有降级链与选股可用性。 */
+export interface DataProvidersResponse {
+  chain_version?: string;
+  default_source_policy?: string;
+  commercial_mode?: boolean;
+  capability_chains?: Record<string, string[]>;
+  chain_resolved?: Record<string, string[]>;
+  providers?: DataProviderInfo[];
+  screening_ready?: boolean;
+  screening_providers?: string[];
+  local_data_available?: boolean;
+  [k: string]: unknown;
+}
+
+/** 逐源健康探测（`/data/providers/health`）。 */
+export interface DataProvidersHealth {
+  providers?: DataProviderInfo[];
+  [k: string]: unknown;
+}
+
+/** 限流策略项（`/datahub/policies`）：ttl / 最小间隔 / 合并窗口 / 优先级。 */
+export interface DatahubPolicy {
+  ttl_ms?: number;
+  min_interval_ms?: number;
+  coalesce_within_ms?: number;
+  priority?: string;
+  stale_ok?: boolean;
+  [k: string]: unknown;
+}
+
+export interface DatahubPolicies {
+  default?: DatahubPolicy;
+  topics?: Record<string, DatahubPolicy>;
+  [k: string]: unknown;
+}
+
+/** 数据源失败溯源（`/data/source/diagnostics`）。
+ *  `chain` —— 本应被尝试的源；空列表 ≠ 网络坏，而是「该源刻意不提供该能力」。
+ *  `tried` —— 实际尝试的过程与每步原因。 */
+export interface SourceDiagnostics {
+  capability?: string;
+  probed?: boolean;
+  chain?: string[];
+  tried?: string[];
+  interpretation?: string;
+  [k: string]: unknown;
+}

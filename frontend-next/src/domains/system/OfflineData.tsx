@@ -20,6 +20,7 @@ import {
   fmtBarDate,
 } from "@/services/api";
 import { fmtDateTime, toTimestamp } from "@/shared/time";
+import { DataPaths } from "./DataPaths";
 import s from "./offline.module.css";
 
 /**
@@ -368,7 +369,7 @@ export function OfflineData() {
                     ⚠️ 取自 sync.bars 流：热刷新的 detail 里没有 stale。 */}
                 {bars.stale ? (
                   <div className={s.noteError}>
-                    上次日线同步有 {bars.stale} 只标的的数据**陈旧**（最新截至
+                    上次日线同步有 {bars.stale} 只标的的数据「陈旧」（最新截至
                     {bars.as_of_max ? ` ${fmtBarDate(String(bars.as_of_max))}` : "未知"}）。
                     这通常意味着券商客户端本地历史未下载到近期，或在线数据源不可用。
                   </div>
@@ -378,9 +379,9 @@ export function OfflineData() {
                     又写了一遍。这里必须明确否定它。 */}
                 {bars.sync_mode === "full" && bars.paged === false ? (
                   <div className={s.noteError}>
-                    上次**全量回补未生效**：当前数据源链上没有任何源支持按日期区间
+                    上次「全量回补未生效」：当前数据源链上没有任何源支持按日期区间
                     取数（免费在线源只接受「最近 N 根」），实际退化为单次大窗口，
-                    历史**没有**真正补齐。请到「连接管理」连接券商后重跑 ——
+                    历史并没有真正补齐。请到「连接管理」连接券商后重跑 ——
                     券商渠道是唯一支持按年翻页取历史的数据源。
                   </div>
                 ) : null}
@@ -473,6 +474,9 @@ export function OfflineData() {
         </Panel>
       </div>
 
+      {/* ---- 数据目录（P0-3 II）：导出目录 / 冷库目录运行期可改，主库需重启 ---- */}
+      <DataPaths />
+
       <Panel
         title="本地数据覆盖度"
         extra={
@@ -527,7 +531,7 @@ export function OfflineData() {
               {stale ? (
                 <div className={s.noteWarn}>
                   本地日线最新到 {fmtBarDate(cov.latest_day)}，而当前应看
-                  {fmtBarDate(asOf)} 的行情 —— 数据**未更新到最新交易日**。
+                  {fmtBarDate(asOf)} 的行情 —— 数据尚未更新到最新交易日。
                   若已开启定时同步，请检查「定时任务」里
                   <code className={s.code}>system.sync_bars</code> 是否失败。
                 </div>

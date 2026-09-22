@@ -3,6 +3,7 @@ import {
   Badge,
   Button,
   ConfirmButton,
+  ConfirmModal,
   DataTable,
   EmptyState,
   FormRow,
@@ -36,6 +37,10 @@ export function Alerts() {
   const [editing, setEditing] = useState<AlertRulePayload | null>(null);
   const [busy, setBusy] = useState(false);
   const [banner, setBanner] = useState<{ tone: "ok" | "error"; text: string } | null>(null);
+  /** 批量删除的勾选；删除后必须清理，否则会残留指向已删 id 的勾选态 */
+  const [selected, setSelected] = useState<number[]>([]);
+  /** 批量删除的模态确认（批量 ⇒ 走 ConfirmModal，见下方按钮处注释） */
+  const [confirmBatch, setConfirmBatch] = useState(false);
 
   const blank: AlertRulePayload = {
     name: "",
@@ -100,6 +105,22 @@ export function Alerts() {
     }
   };
 
+  const batchRemove = async () => {
+    if (!selected.length) return;
+    setBusy(true);
+    setBanner(null);
+    try {
+      const res = await alertApi.batchDelete(selected);
+      setBanner({ tone: "ok", text: `已批量删除 ${res.deleted} 条规则` });
+      setSelected([]);
+      await rules.reload();
+    } catch (e) {
+      setBanner({ tone: "error", text: e instanceof Error ? e.message : String(e) });
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const testRule = async (r: AlertRule) => {
     setBusy(true);
     setBanner(null);
@@ -114,7 +135,28 @@ export function Alerts() {
     }
   };
 
+  const all = rules.data ?? [];
+
   const cols: Column<AlertRule>[] = [
+    {
+      key: "sel",
+      // ⚠️ Column.header 只接受 string（DataTable 的表头不是 ReactNode），
+      // 传 Element 会直接编译不过 —— 全选框放进表头单元格的写法在这里不可用。
+      header: "",
+      width: 44,
+      render: (r) => (
+        <input
+          type="checkbox"
+          aria-label={`选择规则 ${r.id}`}
+          checked={selected.includes(r.id)}
+          onChange={() =>
+            setSelected((prev) =>
+              prev.includes(r.id) ? prev.filter((x) => x !== r.id) : [...prev, r.id],
+            )
+          }
+        />
+      ),
+    },
     { key: "id", header: "ID", width: 56, mono: true, render: (r) => String(r.id) },
     { key: "name", header: "名称", width: 150, render: (r) => r.name || "--" },
     { key: "event", header: "事件", width: 130, mono: true, render: (r) => r.event || "*" },
@@ -172,6 +214,27 @@ export function Alerts() {
       <div className={s.toolbar}>
         <Button size="sm" onClick={() => setEditing({ ...blank })}>
           新建规则
+        </Button>
+        <span className={s.muted}>已选 {selected.length} 条</span>
+        <Button
+          size="sm"
+          variant="ghost"
+          onClick={() => setSelected(selected.length === all.length ? [] : all.map((r) => r.id))}
+        >
+          {selected.length === all.length && all.length > 0 ? "取消全选" : "全选"}
+        </Button>
+        {/*
+          ★ 批量删除走 **ConfirmModal**，不是 ConfirmButton。
+          判据（ConfirmButton 文档）：行内单条删除用两段式按钮；**批量删除**属高风险，
+          要让人读一遍「将删除 N 条」再确认 —— 一次误触删掉全部告警规则 = 把监控静音。
+        */}
+        <Button
+          size="sm"
+          variant="danger"
+          disabled={busy || !selected.length}
+          onClick={() => setConfirmBatch(true)}
+        >
+          批量删除
         </Button>
         <span className={s.spacer} />
         <Button size="sm" variant="ghost" onClick={() => void rules.reload()}>
@@ -308,6 +371,27 @@ export function Alerts() {
           )}
         </div>
       </Panel>
+
+      <ConfirmModal
+        open={confirmBatch}
+        title="批量删除告警规则"
+        danger
+        confirmText={`确认删除 ${selected.length} 条`}
+        message={
+          <>
+            将删除选中的 <b>{selected.length}</b> 条告警规则，删除后这些规则不再触发，
+            <b>已发出的历史通知不会被清除</b>。
+            <br />
+            若只是想临时停掉，用「启用/停用」更安全。
+          </>
+        }
+        warn="删除后不可恢复"
+        onConfirm={() => {
+          setConfirmBatch(false);
+          void batchRemove();
+        }}
+        onCancel={() => setConfirmBatch(false)}
+      />
     </div>
   );
 }

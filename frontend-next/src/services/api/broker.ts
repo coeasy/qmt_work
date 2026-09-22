@@ -132,6 +132,8 @@ export const brokerApi = {
     client_mode?: string;
     session_id?: number;
     label?: string;
+    /** ★ 显式带 conn_id = **编辑**既有连接（后端会跳过「同身份去重」，按 id 更新） */
+    conn_id?: string;
     /** 后端默认 true：建连即拉起子进程握手（routes/broker.py 的 add_broker） */
     autoconnect?: boolean;
   }) => http.post<BrokerConnection & { reused?: boolean }>("/brokers", body),

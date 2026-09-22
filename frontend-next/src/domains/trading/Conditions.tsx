@@ -187,7 +187,7 @@ export function Conditions() {
 
             {quote && (
               <div className={s.note}>
-                {quote.name ?? normCode} · 最新 <span className={s.mono}>{fmtPrice(quote.price)}</span>
+                {quote.name || normCode} · 最新 <span className={s.mono}>{fmtPrice(quote.price)}</span>
               </div>
             )}
 
@@ -293,7 +293,7 @@ export function Conditions() {
                 {st.error}
               </div>
             ) : orders.length === 0 ? (
-              <EmptyState text="暂无条件单" />
+              <EmptyState text="暂无条件单 —— 在上方「新建条件单」设置触发条件与委托参数后提交" />
             ) : (
               <DataTable columns={cols} rows={orders} rowKey={(r) => r.id} rowHeight={24} />
             )}

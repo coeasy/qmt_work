@@ -41,7 +41,12 @@ export function L2Panel({
     );
   }
 
-  if (ticks.length === 0) return <EmptyState text="暂无逐笔数据" />;
+  // 逐笔（L2）只有券商网关给，TDX 公共行情不含 ⇒ 未连券商时为空是**预期**，不是故障。
+  // 不写这句，用户会以为逐笔功能坏了。
+  if (ticks.length === 0)
+    return (
+      <EmptyState text="暂无逐笔数据 —— 逐笔成交（L2）由券商网关提供，TDX 公共行情不含逐笔明细；未连接券商时为空是预期行为" />
+    );
 
   return (
     <div className={d.scroll}>

@@ -177,3 +177,125 @@ export const researchApi = {
   attribution: (body: Record<string, unknown>) =>
     http.post<AttributionResponse>("/research/attribution", body),
 };
+
+/* ---------------- 回测（口径来源：app/routes/backtest.py + backtest/__init__.py） ---------------- */
+
+/**
+ * 回测作业。
+ *
+ * ⚠️ 两种来源形状不同：**内存作业**给 `params` / `result` 对象；**DB 行**给
+ * `params_json` / `result_json` 字符串（且 `result` 可能是字符串）。
+ * 之前这里没有界面，于是「回测跑完没有」只能翻库 —— 页面必须同时吃下两种形状。
+ */
+export interface BacktestJob {
+  id: string;
+  kind?: string;
+  status?: string;
+  progress?: number;
+  params?: unknown;
+  params_json?: string;
+  result?: unknown;
+  result_json?: string;
+  error?: string;
+  created_at?: string;
+  updated_at?: string;
+  [k: string]: unknown;
+}
+
+/** tools/metrics.py::compute_metrics 的输出（字段可能缺省，故全部可选）。 */
+export interface BacktestMetrics {
+  total_return?: number;
+  annual_return?: number;
+  annual_volatility?: number;
+  sharpe?: number;
+  sortino?: number;
+  max_drawdown?: number;
+  calmar?: number | null;
+  win_rate?: number;
+  trade_count?: number;
+  avg_pnl?: number;
+  var95?: number | null;
+  cvar95?: number | null;
+  rating?: string;
+  /** 样本不足时后端**主动声明**「VaR/CVaR 不具统计意义」，界面必须照显示 */
+  tail_metrics_note?: string;
+  profit_factor?: number | null;
+  payoff_ratio?: number | null;
+  avg_win?: number;
+  avg_loss?: number;
+  annualization?: number;
+  period?: string;
+  [k: string]: unknown;
+}
+
+export interface BacktestResult {
+  id?: number;
+  equity?: number[];
+  trades?: Record<string, unknown>[];
+  metrics?: BacktestMetrics;
+  train?: unknown;
+  test?: unknown;
+  [k: string]: unknown;
+}
+
+export const backtestApi = {
+  jobs: () => http.get<BacktestJob[]>("/backtest/jobs"),
+  job: (id: string) => http.get<BacktestJob>(`/backtest/jobs/${id}`),
+  /** kind: backtest / compare / sensitivity / sweep（后端白名单，写错 400） */
+  submit: (body: { kind?: string; params: Record<string, unknown> }) =>
+    http.post<BacktestJob>("/backtest/jobs", body),
+  /** DELETE 单个 = 取消（只对 pending/running 有效，后端返回 cancelled:false 表示没取消掉） */
+  cancel: (id: string) => http.del<{ cancelled: boolean }>(`/backtest/jobs/${id}`),
+  batchDelete: (ids: string[]) =>
+    http.post<{ deleted: number }>("/backtest/jobs/batch-delete", { ids }),
+  sweep: (body: Record<string, unknown>) => http.post<BacktestJob>("/backtest/sweep", body),
+};
+
+/* ---------------- 策略市场（口径来源：app/routes/strategy_market.py） ---------------- */
+
+/** 内置模板目录项（`tools/strategy_market.strategy_catalog`）。 */
+export interface MarketCatalogItem {
+  id: string;
+  name?: string;
+  type?: string;
+  description?: string;
+  params_schema?: unknown[];
+  [k: string]: unknown;
+}
+
+/** 市场里的一条策略（`_row_to_dict` 会把 tags_json 解成 tags 数组）。 */
+export interface MarketStrategy {
+  id: string;
+  title?: string;
+  author?: string;
+  description?: string;
+  type?: string;
+  tags?: string[];
+  content?: string;
+  created_at?: string;
+  downloads?: number;
+  [k: string]: unknown;
+}
+
+export const strategyMarketApi = {
+  catalog: () => http.get<MarketCatalogItem[]>("/strategy-market/catalog"),
+  list: (tag?: string, limit = 50) =>
+    http.get<MarketStrategy[]>("/strategy-market/market", {
+      query: { ...(tag ? { tag } : {}), limit },
+    }),
+  get: (id: string) => http.get<MarketStrategy>(`/strategy-market/market/${id}`),
+  /** 发布：{strategy_id?, title, author?, description?, type, content, tags?} */
+  publish: (body: Record<string, unknown>) =>
+    http.post<MarketStrategy>("/strategy-market/publish", body),
+  /** 安装到 QMT 客户端 mpython 目录：{id, client_path}（client_path 空 ⇒ 400） */
+  install: (body: { id: string; client_path: string }) =>
+    http.post<Record<string, unknown>>("/strategy-market/install", body),
+  exportBundle: (body: { ids: string[]; path?: string }) =>
+    http.post<Record<string, unknown>>("/strategy-market/export", body),
+  importBundle: (body: { path: string }) =>
+    http.post<Record<string, unknown>>("/strategy-market/import", body),
+  exportJson: (body: { id: string; path?: string }) =>
+    http.post<Record<string, unknown>>("/strategy-market/export-json", body),
+  importJson: (body: { path: string }) =>
+    http.post<Record<string, unknown>>("/strategy-market/import-json", body),
+};

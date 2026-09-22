@@ -130,10 +130,14 @@ async def run_eod_pipeline(params: dict) -> dict:
             failed = int(steps["bars_sync"].get("failed_count") or 0)
             quality = "final" if (failed == 0 and written > 0 and not degraded) else (
                 "provisional" if written > 0 else "invalid")
+        # ★ 批次号取**同步汇总里的真实批次号**：EOD 的 params 里通常没有 batch_id，
+        #   此时 BarsSyncer 会内部生成 ``bars-<hex>`` —— 必须把它捞出来回查，
+        #   否则快照 row_count 恒为 0（见 datasource/snapshots.py 的说明）。
+        _batch = str(params.get("batch_id") or sync_summary.get("batch_id") or "")
         snap = DatasetSnapshotStore(db).publish_local_bars(
-            "cn_equity_daily", str(params.get("batch_id") or ""),
+            "cn_equity_daily", _batch,
             str(params.get("primary_provider") or "auto"),
-            str(params.get("batch_id") or ""),
+            _batch,
             quality_state=quality,
             calendar_version=str(steps.get("calendar", {}).get("days", "")),
             adjustment_version=str(params.get("adjust") or "qfq"),

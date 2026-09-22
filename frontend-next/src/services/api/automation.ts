@@ -104,8 +104,10 @@ export const alertApi = {
  */
 export const webhookApi = {
   list: () => http.get<WebhookSub[]>("/webhooks"),
-  create: (body: { name?: string; url: string; events?: string; enabled?: boolean }) =>
-    http.post<{ id: number }>("/webhooks", body),
+  /** ★ 带 id 即更新（后端 `save_sub` 按 id 走 UPDATE）—— 新建与编辑同一个端点 */
+  create: (
+    body: { id?: number; name?: string; url: string; events?: string; enabled?: boolean },
+  ) => http.post<{ id: number }>("/webhooks", body),
   remove: (sid: number) => http.del<{ deleted: boolean }>(`/webhooks/${sid}`),
   batchDelete: (ids: number[]) =>
     http.post<{ deleted: number }>("/webhooks/batch-delete", { ids }),
@@ -120,9 +122,20 @@ export const portfolioApi = {
   syncTarget: (body: { mode: "shares" | "amount" | "ratio"; targets: Record<string, number>; dry_run?: boolean }) =>
     http.post<Record<string, unknown>>("/target-portfolio/sync", body),
   plans: () => http.get<unknown[]>("/target-portfolio/plans"),
-  createPlan: (body: Record<string, unknown>) =>
-    http.post<{ pid: string }>("/target-portfolio/plans", body),
-  deletePlan: (pid: string) => http.del<{ ok: boolean }>(`/target-portfolio/plans/${pid}`),
+  /**
+   * 新建 / 更新计划（同一个端点）。
+   *
+   * ⚠️ 两处曾写错，都是「契约手抄」的典型代价：
+   * 1. 后端返回的是 **{id: number}**，不是 {pid} —— 按 pid 读永远 undefined；
+   * 2. 此前**不支持更新**（后端 save_plan 没接 id），编辑只能删了重建，
+   *    而重建会把 status 打回 draft ⇒ 「正在按这个计划调仓」的事实悄悄消失。
+   * 现在带 id 即更新，且不覆盖 status。
+   */
+  createPlan: (body: { id?: number; name?: string; weights?: Record<string, number> }) =>
+    http.post<{ id: number }>("/target-portfolio/plans", body),
+  /** ★ 返回体是 {deleted: true}，不是 {ok} */
+  deletePlan: (pid: number | string) =>
+    http.del<{ deleted: boolean }>(`/target-portfolio/plans/${pid}`),
   /** ★ 批量删除的 body 键是 ids（与 alerts / webhooks / api-keys 一致） */
   batchRemovePlans: (ids: number[]) =>
     http.post<{ deleted: number }>("/target-portfolio/plans/batch-delete", { ids }),

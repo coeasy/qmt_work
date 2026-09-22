@@ -209,7 +209,7 @@ async def scan_async(
                 f"未知经典策略：{classic}（可选 {', '.join(STRATEGY_IDS)}）")
         _t0 = _time.perf_counter()
         results = await asyncio.to_thread(
-            run_classic, bars_map, classic, classic_params)
+            run_classic, bars_map, classic, classic_params, 0, uni["names"])
         scanned = len(bars_map)
         elapsed_ms = int((_time.perf_counter() - _t0) * 1000)
         # 经典策略已按自身口径排序（海龟按成交额、其余按涨跌幅），

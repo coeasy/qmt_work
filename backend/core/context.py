@@ -69,6 +69,11 @@ class AppContext:
     strategy_runtime: Any = None
     market_sync: Any = None
     schedule_runner: Any = None
+    # DB 自动备份：bootstrap/phase_watchdogs 装配，shutdown 停止，routes/config 读占用。
+    # 2026-09-20：此前只存在 app.state._db_backup（AppContext 之外的私有属性），
+    # 于是路由**没有任何途径**拿到它 —— 11GB 备份占用在界面上完全不可见。
+    # 占用类能力必须能被「读展示」的层拿到，否则等于不存在。
+    db_backup: Any = None
 
     # ---- 生命周期状态（由 core.state.AppState 的方法维护）----
     started_at: float = 0.0

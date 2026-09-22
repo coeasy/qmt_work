@@ -14,6 +14,7 @@ import logging
 import uuid
 from datetime import datetime
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 from app.runtime.cron import CronExpr
 from core.clock import local_now, now_iso, parse_iso
@@ -23,6 +24,48 @@ log = logging.getLogger("qmt_work.runtime.schedules")
 
 #: catch_up 单次唤醒最多补跑数（防长停机后雪崩）
 MAX_CATCHUP = 8
+
+
+def _tzinfo(name: str):
+    """解析时区；未知/空返回 ``None``（调用方按本地时间解释，**绝不**因此崩调度）。"""
+    name = str(name or "").strip()
+    if not name:
+        return None
+    try:
+        return ZoneInfo(name)
+    except Exception as exc:  # noqa: BLE001 未知时区名 / 无 tzdata
+        log.warning("调度时区 %r 无法解析（%s），按本地时间解释 cron", name, exc)
+        return None
+
+
+def next_after_tz(expr: CronExpr, dt: datetime, tzname: str = "") -> datetime:
+    """按 ``tzname`` 解释 cron 的「几点几分」，但**返回本地 naive 时间**。
+
+    ## 为什么时区此前是装饰性的
+
+    ``schedules.timezone`` 列一直写着 ``Asia/Shanghai``，但全代码**从不读取**它
+    ⇒ 调度在任意时区的机器上都会按**机器本地时间**触发。对国内用户看不出问题
+    （本地就是上海），但把客户端带到东京/纽约就变成「收盘后同步」跑在当地的 16:00。
+
+    ## 为什么返回本地 naive 而不是带偏移
+
+    全项目时间戳统一是 **naive 本地**（``core/clock.local_now`` / ``parse_iso``
+    都是这个口径）。若这里存一个带 ``+09:00`` 的字符串，其余比较点
+    （``parse_iso(next_run_at)`` vs ``local_now()``）会按本地去读 ⇒ 偏移被丢弃，
+    触发时间整整差一个小时，而且只在跨时区机器上出现 —— 最难查的那类问题。
+    所以：**解释**用时区，**存储**用本地。
+    """
+    tz = _tzinfo(tzname)
+    if tz is None:
+        return expr.next_after(dt)
+    local_tz = dt.astimezone().tzinfo or tz        # naive → 认定为本机时区
+    wall = dt.replace(tzinfo=local_tz).astimezone(tz)
+    nxt = expr.next_after(wall)
+    if nxt is None:
+        return nxt
+    if nxt.tzinfo is None:
+        nxt = nxt.replace(tzinfo=tz)
+    return nxt.astimezone(local_tz).replace(tzinfo=None)
 
 
 class ScheduleStore:
@@ -39,6 +82,7 @@ class ScheduleStore:
         if misfire_policy not in ("catch_up", "coalesce", "skip"):
             raise ValueError(f"invalid misfire_policy: {misfire_policy}")
         sid = schedule_id or f"sch-{uuid.uuid4().hex[:10]}"
+        tzname = "Asia/Shanghai"
         # V11 R8：**显式**写 created_at/updated_at。
         # 旧写法省略这两列 → 走建表时的 DEFAULT ``datetime('now','localtime')``
         # （产出 "2026-09-16 18:57:49"，**空格分隔**），而 update() 写的是
@@ -46,10 +90,12 @@ class ScheduleStore:
         # Python 成为唯一真源，DEFAULT 永不生效（不改表结构，零迁移风险）。
         row = {
             "id": sid, "name": name or kind, "kind": kind, "cron": expr.raw,
-            "timezone": "Asia/Shanghai", "enabled": 1 if enabled else 0,
+            "timezone": tzname, "enabled": 1 if enabled else 0,
             "misfire_policy": misfire_policy,
             "params_json": json.dumps(params or {}, ensure_ascii=False),
-            "last_run_at": "", "next_run_at": _iso(expr.next_after(local_now())),
+            # ★ 按 tzname 解释 cron —— 此前这里写死 expr.next_after(local_now())，
+            #   timezone 列于是成了纯装饰（裁定：保留并让它生效）。
+            "last_run_at": "", "next_run_at": _iso(next_after_tz(expr, local_now(), tzname)),
             "created_at": now_iso(), "updated_at": now_iso(),
         }
         self._db.upsert("schedules", row)
@@ -70,14 +116,25 @@ class ScheduleStore:
         cur = self.get(sid)
         if cur is None:
             return None
-        if "cron" in fields and fields["cron"]:
-            CronExpr.parse(fields["cron"])            # 校验
+        new_tz = str(fields.get("timezone") or "").strip()
+        if new_tz and _tzinfo(new_tz) is None:
+            raise ValueError(f"未知时区：{new_tz}")
+        new_cron = str(fields.get("cron") or "").strip()
+        if new_cron:
+            CronExpr.parse(new_cron)                  # 校验
         if "enabled" in fields:
             fields["enabled"] = 1 if fields["enabled"] else 0
         if "params" in fields:
             fields["params_json"] = json.dumps(fields.pop("params") or {},
                                                 ensure_ascii=False)
-        allowed = {"name", "cron", "enabled", "misfire_policy",
+        # ★ cron 或 timezone 任一变化都必须**立刻重算相位**。
+        #   保留旧的 next_run_at 会让新时间在旧相位到达前一次都不触发 ——
+        #   界面上表现为「改了触发时间没反应」，而调度本身看起来完全正常。
+        if new_cron or new_tz:
+            expr = CronExpr.parse(new_cron or str(cur.get("cron") or ""))
+            fields["next_run_at"] = _iso(next_after_tz(
+                expr, local_now(), new_tz or str(cur.get("timezone") or "")))
+        allowed = {"name", "cron", "enabled", "misfire_policy", "timezone",
                    "params_json", "last_run_at", "next_run_at"}
         sets = {k: v for k, v in fields.items() if k in allowed}
         if not sets:
@@ -92,6 +149,64 @@ class ScheduleStore:
             return False
         self._db.execute("DELETE FROM schedules WHERE id=?", (sid,))
         return True
+
+    def normalize_phases(self) -> list[str]:
+        """把「与自己的 cron 对不上」的 ``next_run_at`` 清空，交给调度器重算。
+
+        ## 为什么必须有这一步
+
+        ``next_run_at`` 是**相位**（下次触发的时刻），它由 ``cron`` 派生。任何直接
+        改 ``cron`` 而不同步重算相位的路径都会留下一个「配置说 16:00、相位却指着
+        15:30」的调度 —— 而 ``ScheduleRunner._fire`` 是**按相位**触发的，于是它真的
+        会在 15:30 跑，配置看起来完全正常。
+
+        这不是假设：迁移 v27 把默认同步从 ``30 15`` 改到 ``0 16``、选股从 ``0 16``
+        改到 ``15 16``，但 ``UPDATE schedules SET cron=...`` 没有重算 ``next_run_at``。
+        实测（2026-09-20 真实库）：同步相位仍停在 15:30、选股相位停在 16:00 ——
+        等于把「先同步、再选股」的顺序**倒着**执行一次，选股会读到半更新的日线，
+        正是 v27 想避免的事。而这两条链路的 ``last_run_at`` 都是空，说明它一次都
+        还没跑过，**下个工作日就会按错的时间跑**。
+
+        ## 判据
+
+        ``next_run_at`` 是合法相位的充要条件：把它减 1 秒再求「下一次触发」，
+        应当**回到它自己**（相位是它自己之前最近的一个 cron 触发点）。
+        与 cron 无关的、落在过去的、星期几不对的值都会被这条判据识破。
+
+        清空（而非直接重算）是刻意的：``_fire`` 对空相位的行为是「重算下一相位、
+        **不立即触发**」，语义正好是「按当前配置重新对表」。同时保留了过去相位的
+        误触发能力 —— 已到期该补跑的调度仍会正常补跑。
+
+        返回被重置的调度 id 列表。
+        """
+        from datetime import timedelta
+
+        fixed: list[str] = []
+        for sch in self.list():
+            sid = str(sch.get("id") or "")
+            phase_s = str(sch.get("next_run_at") or "").strip()
+            if not phase_s:
+                continue                      # 无相位：调度器自己会重算
+            try:
+                expr = CronExpr.parse(str(sch.get("cron") or ""))
+            except Exception:                 # noqa: BLE001 cron 本身非法 → 不动它
+                continue
+            tzname = str(sch.get("timezone") or "")
+            phase = parse_iso(phase_s)
+            if phase is None:
+                self.update(sid, next_run_at="")
+                fixed.append(sid)
+                continue
+            probe = next_after_tz(expr, phase - timedelta(seconds=1), tzname)
+            if probe is None or probe != phase:
+                log.warning(
+                    "调度 %s(%s) 相位与 cron 不一致：next_run_at=%s 但 cron=%s 的下一次是 %s"
+                    " —— 已清空相位，按当前 cron 重新对表",
+                    sid, sch.get("name") or sch.get("kind"), phase_s,
+                    sch.get("cron"), probe.isoformat(timespec="seconds") if probe else "None")
+                self.update(sid, next_run_at="")
+                fixed.append(sid)
+        return fixed
 
     def _decorate(self, row: dict) -> dict:
         row = dict(row)
@@ -159,17 +274,19 @@ class ScheduleRunner:
     def _fire(self, sch: dict, now: datetime) -> list[str]:
         expr = CronExpr.parse(sch["cron"])
         policy = sch.get("misfire_policy") or "coalesce"
+        # ★ cron 的「几点」按本调度自己的时区解释（此前从不读取 ⇒ 装饰性字段）
+        tzname = str(sch.get("timezone") or "")
         last_s = sch.get("next_run_at") or ""
         # 无相位（新建/历史损坏）：重算下一相位，不立即触发
         if not last_s:
-            self._store.update(sch["id"], next_run_at=_iso(expr.next_after(now)))
+            self._store.update(sch["id"], next_run_at=_iso(next_after_tz(expr, now, tzname)))
             return []
         # V11 R8：经 core.clock.parse_iso 宽容解析（裸值/空格分隔/带偏移均可），
         # 并与 tick_once 传入的 naive ``now`` 同口径 —— 旧写法 fromisoformat 遇到
         # 带偏移的历史值会在 ``due > now`` 处抛 TypeError。
         due = parse_iso(last_s)
         if due is None:
-            self._store.update(sch["id"], next_run_at=_iso(expr.next_after(now)))
+            self._store.update(sch["id"], next_run_at=_iso(next_after_tz(expr, now, tzname)))
             return []
         if due > now:
             return []                              # 未到期
@@ -183,7 +300,7 @@ class ScheduleRunner:
             cur = due
             while cur <= now and len(missed) < MAX_CATCHUP:
                 missed.append(cur)
-                nxt = expr.next_after(cur)
+                nxt = next_after_tz(expr, cur, tzname)
                 if nxt is None:
                     break
                 cur = nxt
@@ -195,7 +312,7 @@ class ScheduleRunner:
         # catch_up 已把错过序列补完，同样从 now 起算下一相位。
         self._store.update(
             sch["id"], last_run_at=_iso(missed[-1]) if missed else "",
-            next_run_at=_iso(expr.next_after(now)))
+            next_run_at=_iso(next_after_tz(expr, now, tzname)))
         return submitted
 
     def _submit(self, sch: dict, fire_at: datetime) -> str:

@@ -213,7 +213,7 @@ export function Settings() {
         <>
           <div className={s.toolbar}>
             <span className={s.muted}>
-              改动 {Object.keys(changed).length} 项 —— 保存后**立即生效**，无需重启
+              改动 {Object.keys(changed).length} 项 —— 保存后立即生效，无需重启
             </span>
             <span className={s.spacer} />
             <Button size="sm" disabled={busy || Object.keys(changed).length === 0} onClick={() => void saveEngine()}>
@@ -501,7 +501,8 @@ function UiPrefs() {
         </div>
 
         <div className={s.muted} style={{ marginTop: 6, whiteSpace: "normal", lineHeight: 1.5 }}>
-          预设配色对标通达信 / 大智慧 / 同花顺 的经典黑底（纯黑、近黑微灰、石板蓝、墨绿…），默认即为通达信黑。
+          预设配色提供五套深色（极夜黑、石墨黑、曜石黑、石板蓝、墨绿）与一套浅色（晨曦白，默认），
+          命名与任何第三方软件无关。
           自定义背景色时会按背景明暗<b>自动配套</b>文字与边框色，不会出现「白底白字」；
           涨跌色与强调色<b>不受</b>背景色影响，仍是独立设置。
         </div>
@@ -529,7 +530,182 @@ function UiPrefs() {
           <span className={s.muted}>独立于明暗主题与背景配色，仅影响行情涨跌色</span>
         </div>
       </Panel>
+
+      <UiCloudSync />
     </>
+  );
+}
+
+/**
+ * 外观的**云端同步 + 强调色可调**（P1-G）。
+ *
+ * 缺口背景：accent 此前写死在 ``design/tokens.css``、界面完全不能调；外观又只存在
+ * localStorage，换台机器或清一次缓存就回到默认皮肤 —— 用户会以为「软件把我的设置丢了」。
+ *
+ * 设计取舍：
+ * - **服务器是权威**，本机 localStorage 是离线缓存，两者冲突时以服务器为准；
+ * - **不自动覆盖本机**：从服务器拉到值后要用户点「应用到本机」才生效，
+ *   否则一进设置页界面就自己变色，比不生效更吓人；
+ * - accent 非法值**清空**而不是保留旧值（保留会让用户以为保存成功但没生效）。
+ */
+function UiCloudSync() {
+  const accent = useUiStore((st) => st.accent);
+  const setAccent = useUiStore((st) => st.setAccent);
+  const skin = useUiStore((st) => st.skin);
+  const customBg = useUiStore((st) => st.customBg);
+
+  const remote = useAsync(() => systemApi.uiAppearance(), []);
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<{ tone: "ok" | "error" | "warn"; text: string } | null>(null);
+  const [draft, setDraft] = useState(accent);
+
+  const say = (tone: "ok" | "error" | "warn", text: string) => setNote({ tone, text });
+
+  const save = async () => {
+    setBusy(true);
+    try {
+      const r = await systemApi.updateUiAppearance({
+        skin_id: skin || DEFAULT_SKIN_ID,
+        // skin=custom 时把自定义背景色一并带上，否则服务器上的皮肤 id 无法还原颜色
+        accent: accent || "",
+        density: remote.data?.appearance.density || "comfortable",
+      });
+      say("ok", `已保存到服务器（改动字段：${r.changed.join("、") || "无"}）`);
+      await remote.reload();
+    } catch (e) {
+      say("error", `保存失败：${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const restore = async () => {
+    const ap = remote.data?.appearance;
+    if (!ap) return;
+    setAccent(ap.accent || "");
+    setDraft(ap.accent || "");
+    say("ok", `已应用服务器上的外观（皮肤 ${ap.skin_id || "默认"}）`);
+  };
+
+  const exportJson = async () => {
+    try {
+      const blobData = await systemApi.exportUiAppearance();
+      const blob = new Blob([JSON.stringify(blobData, null, 2)], {
+        type: "application/json",
+      });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = "qmt-ui-appearance.json";
+      a.click();
+      URL.revokeObjectURL(a.href);
+      say("ok", "已导出 qmt-ui-appearance.json");
+    } catch (e) {
+      say("error", `导出失败：${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+
+  const importJson = async (file: File) => {
+    setBusy(true);
+    try {
+      const parsed = JSON.parse(await file.text()) as Record<string, unknown>;
+      const r = await systemApi.importUiAppearance(parsed);
+      setAccent(r.appearance.accent || "");
+      setDraft(r.appearance.accent || "");
+      say("ok", `已导入并应用（字段：${r.changed.join("、")}）`);
+      await remote.reload();
+    } catch (e) {
+      say("error", `导入失败：${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Panel title="强调色与云端同步">
+      <div className={s.toolbar}>
+        <span className={s.muted}>强调色</span>
+        <input
+          type="color"
+          className={s.colorInput}
+          aria-label="强调色"
+          value={accent || "#3b82f6"}
+          onChange={(e) => {
+            setDraft(e.target.value);
+            setAccent(e.target.value);
+          }}
+        />
+        <Input
+          value={draft}
+          mono
+          style={{ width: 96 }}
+          aria-label="强调色 HEX"
+          placeholder="#3b82f6"
+          onChange={(e) => setDraft(e.target.value)}
+          onBlur={() => setAccent(draft)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") setAccent(draft);
+          }}
+        />
+        <Button size="sm" variant="ghost" disabled={busy} onClick={() => setAccent("")}>
+          用默认色
+        </Button>
+        <span className={s.spacer} />
+        <span className={s.muted}>当前：{accent || "主题默认"}</span>
+      </div>
+
+      <div className={s.toolbar} style={{ marginTop: 8 }}>
+        <Button size="sm" variant="primary" disabled={busy} onClick={() => void save()}>
+          保存到服务器
+        </Button>
+        <Button size="sm" disabled={busy || !remote.data} onClick={() => void restore()}>
+          从服务器恢复
+        </Button>
+        <Button size="sm" variant="ghost" onClick={() => void exportJson()}>
+          导出 JSON
+        </Button>
+        <label className={s.muted} style={{ cursor: "pointer" }}>
+          导入 JSON
+          <input
+            type="file"
+            accept="application/json,.json"
+            style={{ display: "none" }}
+            onChange={(e) => {
+              const f = e.target.files?.[0];
+              if (f) void importJson(f);
+              e.target.value = "";
+            }}
+          />
+        </label>
+        <span className={s.spacer} />
+        <span className={s.muted}>
+          {remote.error
+            ? `服务器外观读取失败：${remote.error}（仍可本地使用）`
+            : remote.data
+              ? `服务器：皮肤 ${remote.data.appearance.skin_id || "默认"} · 强调色 ${
+                  remote.data.appearance.accent || "默认"
+                }`
+              : "读取中…"}
+        </span>
+      </div>
+
+      {note ? (
+        <div
+          className={
+            note.tone === "ok" ? s.noteOk : note.tone === "warn" ? s.noteWarn : s.noteError
+          }
+          style={{ marginTop: 6 }}
+        >
+          {note.text}
+        </div>
+      ) : null}
+
+      <div className={s.muted} style={{ marginTop: 6, whiteSpace: "normal", lineHeight: 1.5 }}>
+        外观此前只存在浏览器本地，换机器 / 清缓存即丢。现在服务器保存一份权威配置，
+        可在另一台机器上「导入 JSON」还原；自定义背景色（
+        {skin === "custom" ? customBg : "当前未使用自定义"}）请连同皮肤一并保存，
+        否则只还原皮肤 id 无法还原颜色。
+      </div>
+    </Panel>
   );
 }
 

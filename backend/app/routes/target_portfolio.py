@@ -32,10 +32,17 @@ async def target_portfolio_list(ctx: AppContext = Depends(get_ctx)):
 
 @router.post("/target-portfolio/plans")
 async def target_portfolio_save(body: dict, ctx: AppContext = Depends(get_ctx)):
-    """创建/提交target-portfolio / plans（POST /target-portfolio/plans）。"""
+    """创建/提交target-portfolio / plans（POST /target-portfolio/plans）。
+
+    ★ **带 id 即更新**（与 notifications / alerts / webhooks 同一套约定）：
+    不新增 PUT 路由就不会动到契约基线与 MCP 能力清单。
+    ⚠️ 更新不存在 id 时返回 ``id=0``（不是新建）—— 界面须据此提示「计划已不存在」。
+    """
     from tools.target_portfolio import TargetPortfolioEngine
     nid = TargetPortfolioEngine(ctx.broker_manager, ctx.signal_router, ctx.db).save_plan(
-        body.get("name", ""), body.get("weights", {}))
+        body.get("name", ""), body.get("weights", {}), int(body.get("id") or 0))
+    if int(body.get("id") or 0) and not nid:
+        return err(404, f"计划 #{body.get('id')} 不存在（可能已被删除）")
     return ok({"id": nid})
 
 @router.delete("/target-portfolio/plans/{pid}")

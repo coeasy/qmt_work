@@ -49,18 +49,18 @@ afterEach(() => {
 });
 
 describe("主题偏好 · 默认与系统跟随", () => {
-  it("无持久化记录时默认深色 + 通达信黑背景", async () => {
+  it("无持久化记录时默认浅色 + 晨曦白背景（不跟随系统）", async () => {
     setSystemDark(true);
     const store = await freshStore();
-    expect(store.getState().themePref).toBe("dark");
-    expect(store.getState().theme).toBe("dark");
-    expect(store.getState().activeSkin).toBe("tongdaxin");
+    expect(store.getState().themePref).toBe("light");
+    expect(store.getState().theme).toBe("light");
+    expect(store.getState().activeSkin).toBe("light");
 
     setSystemDark(false);
     const lightStore = await freshStore();
-    expect(lightStore.getState().themePref).toBe("dark");
-    expect(lightStore.getState().theme).toBe("dark");
-    expect(lightStore.getState().activeSkin).toBe("tongdaxin");
+    expect(lightStore.getState().themePref).toBe("light");
+    expect(lightStore.getState().theme).toBe("light");
+    expect(lightStore.getState().activeSkin).toBe("light");
   });
 
   it("显式选择 跟随系统(auto) 时按系统主题解析", async () => {
@@ -111,12 +111,12 @@ describe("主题偏好 · 持久化与迁移", () => {
     expect(store.getState().theme).toBe("light");
   });
 
-  it("老版本 theme 值非法时回退默认（深色）", async () => {
+  it("老版本 theme 值非法时回退默认（浅色）", async () => {
     setSystemDark(false);
     localStorage.setItem(KEY, JSON.stringify({ theme: "solarized" }));
     const store = await freshStore();
-    expect(store.getState().themePref).toBe("dark");
-    expect(store.getState().theme).toBe("dark");
+    expect(store.getState().themePref).toBe("light");
+    expect(store.getState().theme).toBe("light");
   });
 
   it("setThemePref 立即改写 DOM 并落盘", async () => {
@@ -134,26 +134,26 @@ describe("主题偏好 · 持久化与迁移", () => {
     expect(reloaded.getState().theme).toBe("light");
   });
 
-  it("toggleTheme 基于当前生效主题取反（auto 下也能用）", async () => {
+  it("toggleTheme 基于当前生效主题取反（默认浅色 → 深色 → 浅色）", async () => {
     setSystemDark(true);
     const store = await freshStore();
+    expect(store.getState().theme).toBe("light");
+
+    store.getState().toggleTheme();
     expect(store.getState().theme).toBe("dark");
+    expect(store.getState().themePref).toBe("dark");
 
     store.getState().toggleTheme();
     expect(store.getState().theme).toBe("light");
     expect(store.getState().themePref).toBe("light");
-
-    store.getState().toggleTheme();
-    expect(store.getState().theme).toBe("dark");
-    expect(store.getState().themePref).toBe("dark");
   });
 
-  it("损坏的 localStorage 内容不会抛错，回退默认（深色）", async () => {
+  it("损坏的 localStorage 内容不会抛错，回退默认（浅色）", async () => {
     setSystemDark(false);
     localStorage.setItem(KEY, "{ 这不是 JSON");
     const store = await freshStore();
-    expect(store.getState().themePref).toBe("dark");
-    expect(store.getState().theme).toBe("dark");
+    expect(store.getState().themePref).toBe("light");
+    expect(store.getState().theme).toBe("light");
   });
 });
 

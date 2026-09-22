@@ -80,6 +80,15 @@ export function Brokers() {
   /** 批量删除是破坏性动作 ⇒ 走模态确认，不用 window.confirm */
   const [confirmBatch, setConfirmBatch] = useState(false);
   const [healthBusy, setHealthBusy] = useState("");
+  /**
+   * 非空 = 正在编辑该连接。
+   *
+   * 此前这一页**只能删了重建**：想改一个资金账号就得先删连接，而删掉活跃连接
+   * 又被后端约束挡着 ⇒ 「改配置」这个最普通的需求无解。
+   * 后端 `POST /brokers` 早支持显式 `conn_id`（= 按 id 更新、跳过同身份去重），
+   * 只是界面没接上。
+   */
+  const [editingId, setEditingId] = useState("");
   /** conn_id → 最近一次健康探测结果 */
   const [healthMap, setHealthMap] = useState<Record<string, Record<string, unknown>>>({});
 
@@ -156,16 +165,22 @@ export function Brokers() {
       // 因此这里不能再写「点击『连接』建立会话」—— 那会引导用户去点一个已经连上的
       // 连接，把「重复操作」误当成「必要步骤」。
       const created = await brokerApi.add({
+        // ★ 带 conn_id 即更新既有连接；不带才是新建（后端据此决定是否去重）
+        ...(editingId ? { conn_id: editingId } : {}),
         broker_id: brokerId, client_path: clientPath,
         account_id: accountId, account_type: accountType,
       });
+      const wasEdit = !!editingId;
       setClientPath("");
       setAccountId("");
+      setEditingId("");
       await load();
       setMsg(
-        created?.reused
-          ? "已存在相同连接（同客户端 + 同资金账号），已复用，未重复添加"
-          : "已添加连接并尝试建立会话；结果见下方「已有连接」列表",
+        wasEdit
+          ? "已保存连接修改；如修改了客户端路径/账号，请点「健康」复核连通性"
+          : created?.reused
+            ? "已存在相同连接（同客户端 + 同资金账号），已复用，未重复添加"
+            : "已添加连接并尝试建立会话；结果见下方「已有连接」列表",
       );
     } catch (e) {
       setMsg(e instanceof Error ? e.message : String(e));
@@ -313,7 +328,25 @@ export function Brokers() {
         {detectMsg && <div className={s.msg}>{detectMsg}</div>}
       </Panel>
 
-      <Panel title="新增连接">
+      <Panel
+        title={editingId ? `编辑连接 ${editingId}` : "新增连接"}
+        extra={
+          editingId ? (
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => {
+                setEditingId("");
+                setClientPath("");
+                setAccountId("");
+                setMsg("已取消编辑");
+              }}
+            >
+              取消编辑
+            </Button>
+          ) : null
+        }
+      >
         <div className={s.form}>
           <FormRow label="券商">
             <Select
@@ -355,7 +388,7 @@ export function Brokers() {
               探测环境
             </Button>
             <Button variant="primary" onClick={onAdd} disabled={busy}>
-              添加连接
+              {editingId ? "保存修改" : "添加连接"}
             </Button>
           </div>
           {msg && <div className={s.msg}>{msg}</div>}
@@ -476,6 +509,20 @@ export function Brokers() {
                   onClick={() => void setActive(c.conn_id)}
                 >
                   设为活跃
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => {
+                    setEditingId(c.conn_id);
+                    setBrokerId(c.broker_id || "generic");
+                    setClientPath(c.client_path || "");
+                    setAccountId(c.account_id || "");
+                    setAccountType(c.account_type || "STOCK");
+                    setMsg(`正在编辑连接 ${c.conn_id}，改完点下方「保存修改」`);
+                  }}
+                >
+                  编辑
                 </Button>
                 <Button
                   size="sm"

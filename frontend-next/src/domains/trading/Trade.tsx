@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Badge,
   Button,
@@ -11,12 +11,19 @@ import {
   Tabs,
   type Column,
 } from "@/design/primitives";
-import { tradeApi } from "@/services/api";
+import { tradeApi, signalApi } from "@/services/api";
 import { useBrokerStore } from "@/stores/broker";
+import { useWorkspaceStore } from "@/stores/workspace";
+import { useOpenWorkbench } from "@/hooks/useOpenWorkbench";
+import { useLiveQuotes } from "@/hooks/useLiveQuotes";
+import { useAsync } from "@/hooks/useAsync";
 import { fmtPct, fmtPrice, normalizeCode, orderStatusLabel, orderStatusTone } from "@/shared/format";
+import { isLivePrice, staleQuoteNote } from "@/shared/freshness";
 import type { Deal, Order, Position } from "@/shared/types";
 import { OrderForm } from "./OrderForm";
 import s from "./trade.module.css";
+// 跨域通用样式（.stalePrice 等）在 domains/domain.module.css，本页已有 `s` 故别名引入
+import ds from "../domain.module.css";
 
 type ResultTone = "success" | "danger" | "warning" | "info";
 
@@ -44,7 +51,38 @@ interface Banner {
  */
 export function Trade() {
   const connections = useBrokerStore((st) => st.connections);
+  const open = useWorkspaceStore((st) => st.open);
+  // 持仓 / 委托 / 成交 点一行 ⇒ 直接进行情工作台看这只票（唯一出口，勿各写一遍）
+  const openWorkbench = useOpenWorkbench();
   const activeConn = connections.find((c) => c.active)?.conn_id ?? "";
+  /**
+   * ★ 空列表必须先问「是查不了，还是真的空」。
+   * `refresh()` 对未连接券商的情况是**静默吞异常**（`catch {}`），于是三个列表
+   * 都拿到 `[]` —— 若直接显示「暂无持仓数据」，就把「连不上」说成了「没有」，
+   * 用户会以为是账户空、而不是接口没数据。这里与 `Positions.tsx` 同口径。
+   */
+  const connected = connections.some((c) => c.connected);
+
+  /**
+   * ★ 信号模式：决定「下面三张表是不是这笔委托的去处」。
+   *
+   * 后端信号模式默认就是 **paper**（`SignalRouter._load_persisted_mode("paper")`），
+   * 而持仓/委托/成交三个接口**只读券商**（`/trade/*` 恒走 active 连接）。
+   * 于是「已连券商 + 默认 paper」时：用户下单 → 本地撮合成交，而这一页显示的
+   * 是**券商**账本 —— 刚买的票不在持仓里，用户会以为单子丢了或没成交。
+   * 这里把成因显式写出来（订单表单侧同样有提示，见 `orderExecutionNote`）。
+   */
+  const sigMode = useAsync(() => signalApi.getMode(), []).data?.mode;
+  const modeNote = (() => {
+    if (sigMode === "paper") {
+      return "当前信号模式为「模拟盘」：下表是券商账户的持仓 / 委托 / 成交，"
+        + "模拟盘的成交不在其中 —— 模拟盘账本请到「账户 · 模拟盘」查看。";
+    }
+    if (sigMode === "dry_run") {
+      return "当前信号模式为「预演」：下单只返回计划，不会产生券商委托或成交，下表不会变化。";
+    }
+    return "";
+  })();
 
   /** 撤单结果与撤单相关提示（下单自身的提示在 OrderForm 内） */
   const [banner, setBanner] = useState<Banner | null>(null);
@@ -88,13 +126,49 @@ export function Trade() {
     void refresh();
   }, [refresh]);
 
+  /**
+   * ★ 「现价」列必须叠加实时行情。
+   *
+   * 修复前这一列直接渲染 `position.price` —— 那是券商**查询那一刻**给的快照，
+   * 之后不会自己更新，而表头叫「现价」。用户在这一页盯着的数字其实停在刷新那一下，
+   * 却会被当成实时价用来决定下单价格。`Positions.tsx` 已经叠加了行情，同口径对齐。
+   *
+   * 叠加后仍可能取不到行情（未连接 / 未订阅 / 非交易时段），此时如实回退快照，
+   * 但**标出来**（虚线下划线 + hover 说明），不让它冒充实时值。
+   */
+  const positionCodes = useMemo(() => positions.map((p) => p.code), [positions]);
+  const quotes = useLiveQuotes(positionCodes);
+  const lastPrice = (r: Position): number | undefined =>
+    isLivePrice(quotes[r.code]?.price) ? quotes[r.code]?.price : r.price;
+  const isLive = (r: Position): boolean => isLivePrice(quotes[r.code]?.price);
+  const staleCount = positions.filter((r) => !isLive(r)).length;
+
   const positionCols: Column<Position>[] = [
     { key: "code", header: "代码", width: 92, mono: true, render: (r) => r.code },
-    { key: "name", header: "名称", width: 88, render: (r) => r.name ?? "--" },
+    { key: "name", header: "名称", width: 88, render: (r) => r.name || r.code || "--" },
     { key: "volume", header: "持仓", width: 70, align: "right", mono: true, render: (r) => String(r.volume) },
     { key: "avail", header: "可用", width: 70, align: "right", mono: true, render: (r) => String(r.avail ?? "--") },
     { key: "cost", header: "成本", width: 72, align: "right", mono: true, render: (r) => fmtPrice(r.cost) },
-    { key: "price", header: "现价", width: 72, align: "right", mono: true, render: (r) => fmtPrice(r.price) },
+    {
+      key: "price",
+      header: "现价",
+      width: 72,
+      align: "right",
+      mono: true,
+      render: (r) =>
+        isLive(r) ? (
+          // 实时行情价
+          fmtPrice(lastPrice(r))
+        ) : (
+          // 券商查询快照价 —— 标出来，别当成实时价拿去下单
+          <span
+            className={ds.stalePrice}
+            title="非实时：未取到实时行情，这是券商查询快照价（非交易时段即最近收盘价），下单前请自行确认价格"
+          >
+            {fmtPrice(lastPrice(r))}
+          </span>
+        ),
+    },
     { key: "mv", header: "市值", width: 90, align: "right", mono: true, render: (r) => fmtPrice(r.market_value) },
     {
       key: "pct",
@@ -216,31 +290,71 @@ export function Trade() {
             value={tab}
             onChange={setTab}
           />
+          {modeNote && (
+            <div className={s.warnBar} role="status">
+              {modeNote}
+            </div>
+          )}
           <div className={s.tableArea}>
+            {/* ★ 现货价冒充实时价在这一页代价最高：「现价」是要拿去下单的参考价。
+                没连券商时下面的空态已经说明原因，这里只补「连着但仍拿不到行情」。 */}
+            {tab === "positions" && connected && staleCount > 0 && (
+              <div className={s.banner} data-tone="warning" role="status">
+                {staleQuoteNote(
+                  staleCount,
+                  positions.length,
+                  "「现价」（带虚线下划线者）不是实时值，下单前请自行确认价格。",
+                )}
+              </div>
+            )}
             {tab === "positions" &&
               (positions.length ? (
                 <DataTable
                   columns={positionCols}
                   rows={positions}
                   rowKey={(r) => r.code}
+                  onRowClick={(r) => openWorkbench(r.code, r.name)}
                   rowTone={(r) =>
                     r.profit_pct && r.profit_pct > 0 ? 1 : r.profit_pct && r.profit_pct < 0 ? -1 : 0
                   }
                 />
               ) : (
-                <EmptyState text="暂无持仓数据" />
+                <EmptyState
+                  text={connected ? "当前账户无持仓" : "未连接券商，无法查询持仓"}
+                  actionText={connected ? undefined : "去连接"}
+                  onAction={connected ? undefined : () => open("brokers", {}, { title: "连接管理" })}
+                />
               ))}
             {tab === "orders" &&
               (orders.length ? (
-                <DataTable columns={orderCols} rows={orders} rowKey={(r) => r.order_id} />
+                <DataTable
+                  columns={orderCols}
+                  rows={orders}
+                  rowKey={(r) => r.order_id}
+                  onRowClick={(r) => openWorkbench(r.code, r.name)}
+                />
               ) : (
-                <EmptyState text="暂无委托" />
+                <EmptyState
+                  text={connected ? "当前账户无委托" : "未连接券商，无法查询委托"}
+                  actionText={connected ? undefined : "去连接"}
+                  onAction={connected ? undefined : () => open("brokers", {}, { title: "连接管理" })}
+                />
               ))}
             {tab === "deals" &&
               (deals.length ? (
-                <DataTable columns={dealCols} rows={deals} rowKey={(r) => r.deal_id} />
+                <DataTable
+                  columns={dealCols}
+                  rows={deals}
+                  rowKey={(r) => r.deal_id}
+                  /* Deal 行没有 name 字段（后端成交记录只带 code） */
+                  onRowClick={(r) => openWorkbench(r.code)}
+                />
               ) : (
-                <EmptyState text="暂无成交" />
+                <EmptyState
+                  text={connected ? "当前账户无成交" : "未连接券商，无法查询成交"}
+                  actionText={connected ? undefined : "去连接"}
+                  onAction={connected ? undefined : () => open("brokers", {}, { title: "连接管理" })}
+                />
               ))}
           </div>
         </Panel>

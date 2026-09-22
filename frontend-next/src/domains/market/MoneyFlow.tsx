@@ -157,31 +157,33 @@ export function MoneyFlow() {
             <Spinner label="加载资金流…" />
           ) : d ? (
             <>
-              <div className={s.stats}>
-                <div className={s.stat}>
-                  <span className={s.statLabel}>外盘（主买，手）</span>
-                  <span className={s.statValue} style={{ color: "var(--up)" }}>
+              {/* ★ 一行条：这四个数要放在一起比（外盘 vs 内盘 → 净流入），
+                  卡片网格在窄屏塌成一列就把「对比」这件事打散了。
+                  括号里的口径说明改悬浮，不占横向空间。 */}
+              <div className={s.statRow}>
+                <div className={s.statRowItem} title="外盘 = 主买成交量（手）">
+                  <span className={s.statRowLabel}>外盘</span>
+                  <span className={s.statRowValue} style={{ color: "var(--up)" }}>
                     {fmtAmount(d.outside)}
                   </span>
                 </div>
-                <div className={s.stat}>
-                  <span className={s.statLabel}>内盘（主卖，手）</span>
-                  <span className={s.statValue} style={{ color: "var(--down)" }}>
+                <div className={s.statRowItem} title="内盘 = 主卖成交量（手）">
+                  <span className={s.statRowLabel}>内盘</span>
+                  <span className={s.statRowValue} style={{ color: "var(--down)" }}>
                     {fmtAmount(d.inside)}
                   </span>
                 </div>
-                <div className={s.stat}>
-                  <span className={s.statLabel}>净流入（外-内）</span>
-                  <span className={s.statValue} style={{ color: toneColor(d.net) }}>
+                <div className={s.statRowItem} title="净流入 = 外盘 − 内盘">
+                  <span className={s.statRowLabel}>净流入</span>
+                  <span className={s.statRowValue} style={{ color: toneColor(d.net) }}>
                     {fmtAmount(d.net)}
                   </span>
                 </div>
-                <div className={s.stat}>
-                  <span className={s.statLabel}>量比</span>
-                  <span className={s.statValue}>
+                <div className={s.statRowItem} title={`数据时间 ${d.ts ?? "—"}`}>
+                  <span className={s.statRowLabel}>量比</span>
+                  <span className={s.statRowValue}>
                     {d.volume_ratio === null || d.volume_ratio === undefined ? "—" : d.volume_ratio.toFixed(2)}
                   </span>
-                  <span className={s.statSub}>{d.ts ?? ""}</span>
                 </div>
               </div>
 
@@ -196,7 +198,14 @@ export function MoneyFlow() {
               </Panel>
             </>
           ) : (
-            <EmptyState text="无数据" />
+            // ★ 空态要把「为什么空」说清楚：这里不是报错（报错走上面 note 分支），
+            // 而是后端正常返回但拿不到快照 —— 非交易时段 / 代码不受支持最常见。
+            // 沿用错误分支里那句口径说明，别只留「无数据」三个字。
+            <EmptyState
+              text="无资金流数据 —— 依赖 TDX 公共行情的内外盘快照，非交易时段或该代码不受支持时为空（零 mock，不补 0）"
+              actionText="重新查询"
+              onAction={() => void mf.reload()}
+            />
           )}
         </>
       ) : (
@@ -232,25 +241,24 @@ export function MoneyFlow() {
             <Spinner label="聚合成分股资金流…" />
           ) : bmf.data ? (
             <>
-              <div className={s.stats}>
-                <div className={s.stat}>
-                  <span className={s.statLabel}>板块净流入（手）</span>
-                  <span className={s.statValue} style={{ color: toneColor(bmf.data.total_net) }}>
+              <div className={s.statRow}>
+                <div className={s.statRowItem} title="板块成分股净流入合计（手）">
+                  <span className={s.statRowLabel}>净流入</span>
+                  <span className={s.statRowValue} style={{ color: toneColor(bmf.data.total_net) }}>
                     {fmtAmount(bmf.data.total_net)}
                   </span>
                 </div>
-                <div className={s.stat}>
-                  <span className={s.statLabel}>内盘合计</span>
-                  <span className={s.statValue}>{fmtAmount(bmf.data.total_inside)}</span>
+                <div className={s.statRowItem}>
+                  <span className={s.statRowLabel}>内盘合计</span>
+                  <span className={s.statRowValue}>{fmtAmount(bmf.data.total_inside)}</span>
                 </div>
-                <div className={s.stat}>
-                  <span className={s.statLabel}>外盘合计</span>
-                  <span className={s.statValue}>{fmtAmount(bmf.data.total_outside)}</span>
+                <div className={s.statRowItem}>
+                  <span className={s.statRowLabel}>外盘合计</span>
+                  <span className={s.statRowValue}>{fmtAmount(bmf.data.total_outside)}</span>
                 </div>
-                <div className={s.stat}>
-                  <span className={s.statLabel}>有效成分股</span>
-                  <span className={s.statValue}>{bmf.data.count}</span>
-                  <span className={s.statSub}>更新于 {bmf.data.ts}</span>
+                <div className={s.statRowItem} title={`更新于 ${bmf.data.ts}`}>
+                  <span className={s.statRowLabel}>有效成分股</span>
+                  <span className={s.statRowValue}>{bmf.data.count}</span>
                 </div>
               </div>
 
@@ -271,7 +279,11 @@ export function MoneyFlow() {
               </Panel>
             </>
           ) : (
-            <EmptyState text="无数据" />
+            <EmptyState
+              text="无板块资金流数据 —— 仅支持 TDX 板块指数代码（881xxx 行业 / 880xxx 概念·统计），其他代码会被后端显式拒绝"
+              actionText="重新查询"
+              onAction={() => void bmf.reload()}
+            />
           )}
         </>
       )}

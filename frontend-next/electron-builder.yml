@@ -23,9 +23,22 @@ directories:
 files:
   - "electron/**/*"
   - "package.json"
+  # ★★ 托盘图标必须**打进 asar**（2026-09-22 修的真缺陷）。
+  # 主进程托盘用 `path.join(__dirname, "..", "build", "icon.png")` 定位它，
+  # 而 `__dirname` 在打包态是 `resources/app.asar/electron` ⇒ 目标是
+  # `resources/app.asar/build/icon.png`。此前 `files` 只有 electron/** 与 package.json，
+  # 该文件**没进包**（实测 asar 1531 条里 `build/` 与 `icon.*` 命中 0 条）
+  # ⇒ `existsSync` 恒 false ⇒ 托盘不创建 ⇒ 关闭窗口后**再也退不出去**。
+  # ⚠️ `directories.buildResources: build` 只决定「安装包/EXE 用哪个图标」，
+  #    **不会**把它塞进 asar —— 这两件事必须分开配。
+  - "build/icon.png"
 extraResources:
   - from: ../backend/dist
     to: backend
+  # 托盘图标的第二条独立路径（`process.resourcesPath/build/icon.png`）：
+  # 与 asar 内那份互为冗余，任何一条可用即可建起托盘。
+  - from: build/icon.png
+    to: build/icon.png
 win:
   signAndEditExecutable: true
   target:

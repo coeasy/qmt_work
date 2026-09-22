@@ -18,7 +18,18 @@ contextBridge.exposeInMainWorld("electronAPI", {
   windowMinimize: () => ipcRenderer.invoke("window-minimize"),
   windowToggleMaximize: () => ipcRenderer.invoke("window-toggle-maximize"),
   windowClose: () => ipcRenderer.invoke("window-close"),
+  // ---- 真退出（结束进程，含后端优雅停机）----
+  // ⚠️ 与 windowClose **不同**：windowClose 只是「隐藏到托盘」（托盘可用时），
+  // 程序仍在后台跑；quitApp 才是真正结束。
+  // 存在的理由：Win11 默认把新托盘图标折叠进「隐藏的图标」溢出层，用户常常
+  // 看不到它 ⇒ 退出入口不能只依赖托盘。页面上必须有明确可见的「退出」。
+  quitApp: () => ipcRenderer.invoke("app-quit"),
   windowIsMaximized: () => ipcRenderer.invoke("window-is-maximized"),
+  // ---- 数据目录设置：打开系统「选择文件夹」对话框 ----
+  // 返回 null = 用户取消（**不是**失败，调用方不要弹错误提示）。
+  // 浏览器/单测环境没有这个能力，调用方必须能降级到手输路径。
+  selectDirectory: (opts) => ipcRenderer.invoke("select-directory", opts || {}),
+
   /** 订阅最大化状态变化；返回取消订阅函数（组件卸载时务必调用）。 */
   onWindowMaximizeChange: (cb) => {
     const handler = (_e, maximized) => {

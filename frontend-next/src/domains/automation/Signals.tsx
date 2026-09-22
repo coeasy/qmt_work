@@ -174,7 +174,7 @@ export function Signals() {
             </FormRow>
             {quote && (
               <div className={s.note}>
-                {quote.name ?? normCode} · 最新 <span className={s.mono}>{fmtPrice(quote.price)}</span>
+                {quote.name || normCode} · 最新 <span className={s.mono}>{fmtPrice(quote.price)}</span>
               </div>
             )}
             <FormRow label="方向">

@@ -124,6 +124,94 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* ---- 单行统计条 ----
+   与 .stats（卡片网格，窄屏会塌成一列）的分工：
+   .statRow 永远只有一行，窗口再窄也只是横向滚动，不会换行堆叠。 */
+
+.statRow {
+  display: flex;
+  align-items: stretch;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.statRowItem {
+  flex: 1 1 0;
+  min-width: 128px;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 6px 10px;
+  white-space: nowrap;
+  border-left: 1px solid var(--border);
+}
+
+.statRowItem:first-child {
+  border-left: none;
+}
+
+/* 指标多（≥5 项）时收窄每格，避免一行塞不下而截断数值 */
+.statRowDense .statRowItem {
+  min-width: 104px;
+}
+
+/* 值后面的小标记（如「已降级」）—— 让关键警示在**一行内**仍然可见，
+   而不必退回成两行（两行就破坏了一行条的初衷）。 */
+.statRowTag {
+  margin-left: 6px;
+  padding: 0 4px;
+  font-size: var(--font-xs);
+  font-weight: 400;
+  border-radius: var(--radius-sm);
+  background: var(--warning-dim);
+  color: var(--warning);
+  white-space: nowrap;
+}
+
+.statRowLabel {
+  flex: 0 0 auto;
+  font-size: var(--font-xs);
+  color: var(--text-faint);
+}
+
+.statRowValue {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: var(--font-lg);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ---- 页面说明卡（自动选股等「第一次进来会懵」的页面） ---- */
+
+.intro {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+
+.introHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+
+.introList {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-top: 2px;
+  line-height: 1.55;
+}
+
 /* ---- 键值表 ---- */
 
 .kv {
@@ -190,6 +278,19 @@
 
 .muted {
   color: var(--text-faint);
+}
+
+/*
+  「非实时价」标记：拿不到实时行情时，持仓/报价里显示的是后端快照价
+  （可能是上一交易日收盘）。虚线下划线 + help 光标，既不抢眼也让人一眼看出
+  「这个数不是现价」—— 悬浮再给出具体来源与时间。
+*/
+.stalePrice {
+  cursor: help;
+  text-decoration: underline;
+  text-decoration-style: dotted;
+  text-decoration-color: var(--text-faint);
+  text-underline-offset: 2px;
 }
 
 .up {

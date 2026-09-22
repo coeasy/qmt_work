@@ -226,11 +226,15 @@ def _publish_snapshot_runner(params: dict) -> Runner:
     async def _run(job: dict) -> dict:
         from datasource.snapshots import DatasetSnapshotStore
         store = DatasetSnapshotStore(_db())
+        # ★ 未显式给批次号时回退到「最近一次写入 local_bars 的批次」。
+        #   此前传空串 ⇒ 快照必然 0 行（还标着 complete）。手动触发发布任务的
+        #   用户意图显然不是「发布一份空数据集」。
+        batch = str(params.get("batch_id") or "") or store.latest_batch_id()
         snap = store.publish_local_bars(
             str(params.get("dataset") or "cn_equity_daily"),
-            str(params.get("batch_id") or ""),
+            str(params.get("version") or batch),
             str(params.get("provider_id") or "auto"),
-            str(params.get("batch_id") or ""),
+            batch,
             quality_state=str(params.get("quality_state") or "provisional"),
             calendar_version=str(params.get("calendar_version") or ""),
             adjustment_version=str(params.get("adjustment_version") or "qfq"),
@@ -293,10 +297,70 @@ def _classic_screen_runner(params: dict) -> Runner:
         if max_codes and max_codes > 0:
             codes = codes[:max_codes]
 
+        # ★ 长任务必须**边干边报进度**。全市场取数（5000+ 只）与全池形态识别都是
+        #   几十秒级的段，中间不报进度会让界面停在「执行中 0%」一动不动 ——
+        #   用户分不清「在跑」和「卡死」。租约也靠 report 续期（见 jobs.py 的 reaper）。
+        _rep0 = job.get("report") or (lambda *a, **k: None)
+        _rep0(2, f"股票池 {len(codes)} 只，开始取日线…")
+
         bp = BarsProvider()
         bars_map, report = await bp.get_bars_batch(
             codes, period=period, adjust=adjust, policy_str=policy,
             offline=bool(params.get("offline")), lite=True)
+        _rep0(35, f"日线就绪 {len(bars_map or {})} 只，开始逐只形态识别…")
+
+        # ★ 启动前置体检：日线是不是已经同步到「最近交易日」。
+        #
+        #   选股结果的全部意义建立在「数据是新的」之上 —— 用上上周的日线跑出来的
+        #   命中，与今天的行情毫无关系。此前这条链路的毛病是：日线没同步（或只同步
+        #   到半年前）照样一路跑完并报成功，用户看到「今天没选出票」，真相却是
+        #   「数据根本没到位」。现在发现落后就**先补历史再选**。
+        #
+        # ⚠️ 判据是「落后于最近交易日」，不是「非空」—— 「非空 ≠ 够新」（V11）：
+        #   券商本地库可能只到一年前却照样非空。
+        from datetime import date as _date
+
+        from app.screener.picks import bars_last_date as _last_date_of
+        from app.sync.calendar import prev_trading_day as _prev_trading_day
+        from core.clock import bar_date as _bar_date
+
+        _rep = job.get("report") or (lambda *a, **k: None)
+        expect_date = _bar_date(_prev_trading_day(_date.today(), include_self=True))
+        last_date = _last_date_of(bars_map) if bars_map else ""
+        # 默认开启；显式传 auto_backfill=False 才关（用 `is not False` 而非布尔真值，
+        # 避免 0 / "" 这类 falsy 配置被当成「没传」而静默改变行为）。
+        auto_backfill = params.get("auto_backfill") is not False
+        backfill_note = ""
+
+        # ★ 「日期未知」必须按**落后**处理，不能按「不落后」。
+        #   旧写法 ``(last_date and last_date < expect_date)`` 在 ``last_date == ""``
+        #   时为假 ⇒ 「取到了 K 线但解析不出日期」被当成数据是新的，于是既不补数、
+        #   也不告警。无法确认新鲜度时唯一诚实的动作是**当作陈旧去补**。
+        _stale = bool(expect_date) and (not last_date or last_date < expect_date)
+        if auto_backfill and expect_date and (not bars_map or _stale):
+            _rep(0, f"日线截至 {last_date or '无'}，落后于 {expect_date}，先补历史数据")
+            _sync_job = {"id": str(job.get("id") or job.get("job_id") or ""), "report": _rep}
+            _sync_params = {
+                "adjust": adjust,
+                "lookback": int(params.get("backfill_lookback") or 320),
+                "concurrency": int(params.get("concurrency") or 8),
+                # 默认**增量**：全量回补是几小时级的作业，不能因为一次选股就触发。
+                "mode": str(params.get("backfill_mode") or "incremental"),
+                "limit": int(params.get("backfill_limit") or 0),
+            }
+            try:
+                await _sync_bars_runner(_sync_params)(_sync_job)
+                backfill_note = f"已自动补历史（{expect_date} 之前缺失）"
+            except Exception as _exc:
+                # 补数失败**不掩盖选股本身**：照常跑完，但把失败原因带进结果，
+                # 否则用户只会看到「命中 0 只」而永远不知道是补数挂了。
+                backfill_note = f"自动补历史失败：{_exc}"
+                log.warning("classic_screen 自动补历史失败：%s", _exc)
+            # 补完必须**重新取一次** —— 否则这次选股用的还是补之前的旧数据
+            bars_map, report = await bp.get_bars_batch(
+                codes, period=period, adjust=adjust, policy_str=policy,
+                offline=bool(params.get("offline")), lite=True)
+            last_date = _last_date_of(bars_map) if bars_map else ""
 
         # ★ 护栏：「扫了 0 只」不是「今天没选出票」，是**根本没拿到数据**。
         #   此前这里会一路跑到 run_classic，返回 total_hits=0 并报成功 ——
@@ -309,10 +373,14 @@ def _classic_screen_runner(params: dict) -> Runner:
                 + (f"；降级原因：{report.degraded_reason}" if report.degraded_reason else ""))
 
         results: dict[str, list] = {}
-        for sid in strategies:
+        for i, sid in enumerate(strategies):
             # 全池逐只形态识别是纯 CPU ⇒ 必须移出事件循环
+            _rep0(35 + int(60 * i / max(1, len(strategies))),
+                  f"形态识别 {i + 1}/{len(strategies)}：{sid}")
             results[sid] = await _asyncio.to_thread(
-                run_classic, bars_map, sid, params.get("classic_params"), limit)
+                run_classic, bars_map, sid, params.get("classic_params"), limit,
+                uni.get("names") or {})
+        _rep0(96, "结果落库…")
 
         total_hits = sum(len(v) for v in results.values())
         # ★ 落库：定时选股的结果必须**有稳定的界面**。此前只存在于本作业的返回值里，
@@ -323,9 +391,11 @@ def _classic_screen_runner(params: dict) -> Runner:
         saved = save_run(
             results=results, scanned=len(bars_map), source="schedule",
             job_id=str(job.get("id") or job.get("job_id") or ""),
-            bar_date=bars_last_date(bars_map),
+            bar_date=last_date,
             degraded=bool(report.degraded),
             degraded_reason=report.degraded_reason or "",
+            # 名称兜底：即使某策略行没带 name，也按股票池的名称表补上
+            names=uni.get("names") or {},
         )
 
         return {
@@ -338,7 +408,14 @@ def _classic_screen_runner(params: dict) -> Runner:
                            else f"命中 {total_hits} 只"),
             "run_id": saved.get("run_id", ""),
             "saved": saved.get("saved", 0),
-            "bar_date": bars_last_date(bars_map),
+            "bar_date": last_date,
+            # ★ 数据新鲜度：选股依据的是哪一天、本该是哪一天、是否自动补过。
+            #   没有这三项时，「命中 0 只」与「数据没到位」在界面上长得一模一样。
+            "expect_bar_date": expect_date,
+            # 「日期未知」也算落后（与上面的补数判据同口径）：宁可说「无法确认」，
+            # 也不能把一个空的 bar_date 报告成「数据是最新的」。
+            "data_lag": bool(expect_date and (not last_date or last_date < expect_date)),
+            "auto_backfill": backfill_note,
             "results": results,
             "provider": report.provider_used,
             "degraded": report.degraded,
@@ -376,9 +453,11 @@ def runner_for(kind: str) -> Runner | None:
 # 18:30 再跑 EOD 全流程对账/快照（既有的 ensure_default_schedule）。
 # 若把选股排在日线更新之前，它会拿昨天的 K 线跑，选出的是「昨天的结果」。
 #
-# ⚠️ 两者**必须错开**：``RESOURCE_GROUP``（app/runtime/jobs.py）把 sync_bars 归入
-#    ``local_bars`` 互斥组，但**不含 ``classic_screen``** ⇒ 同一时刻会**并发**，
-#    选股将读到半更新的日线。改同步时间时务必同步顺延选股。
+# ⚠️ 两者**必须错开**（双保险）：
+#   ① 顺序：16:00 日线落库 → 16:15 才选股（倒过来就是拿昨天的 K 线跑）；
+#   ② 资源组：``RESOURCE_GROUP``（app/runtime/jobs.py）已把二者都归入
+#      ``local_bars`` 互斥组 ⇒ 即使用户把 cron 改成同一时刻也不会并发
+#      （此前只靠时间错开，改个 cron 就会读到半更新的日线）。
 #    存量部署的旧值由迁移 v27 对齐（且只在用户没改过时生效）。
 DEFAULT_SCHEDULES: tuple[dict, ...] = (
     {

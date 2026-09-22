@@ -121,7 +121,11 @@ export function Search() {
             ) : !submitted ? (
               <EmptyState text="输入关键字开始检索" />
             ) : (results.data?.length ?? 0) === 0 ? (
-              <EmptyState text="无匹配标的" />
+              // 后端 `/market/search` 的口径（market.py docstring）：代码 / 中文名 /
+              // 拼音首字母 / 板块名 模糊匹配，**完全离线、基于本地缓存**。
+              // 所以「检索不到」有两种成因 —— 关键字不对，或本地标的库还没同步。
+              // 只写「无匹配标的」会让用户以为自己把代码记错了。
+              <EmptyState text="无匹配标的 —— 支持代码 / 中文名 / 拼音首字母 / 板块名；检索走本地缓存，若本地标的库尚未同步也会检索不到" />
             ) : (
               <DataTable
                 columns={cols}

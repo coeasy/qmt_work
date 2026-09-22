@@ -3,7 +3,8 @@ import { useUiStore, type DataPanelTab } from "@/stores/ui";
 import { useWatchlistStore } from "@/stores/watchlist";
 import { useWorkspaceStore, collectLeaves, type PaneNode } from "@/stores/workspace";
 import { useQuoteSubscription } from "@/hooks/useQuoteSubscription";
-import { useLiveQuotes } from "@/hooks/useLiveQuotes";
+import { useDisplayQuotes } from "@/hooks/useLiveQuotes";
+import { useOpenWorkbench } from "@/hooks/useOpenWorkbench";
 import { ConfirmButton } from "@/design/primitives";
 import { OrderBookPanel } from "@/domains/market/panels/OrderBookPanel";
 import { fmtPct, fmtPrice, namePair, toneColor } from "@/shared/format";
@@ -131,11 +132,11 @@ function AlertsShortcut() {
 function WatchlistPanel() {
   const codes = useWatchlistStore((st) => st.codes);
   const remove = useWatchlistStore((st) => st.remove);
-  const open = useWorkspaceStore((st) => st.open);
+  const openWorkbench = useOpenWorkbench();
   // 订阅聚合：整个面板只占 codes.length 个服务端订阅，与打开多少 Tab 无关。
-  // 用 useLiveQuotes 而不是「订阅 + 取 store」两行 —— 漏掉订阅不会报错，
-  // 只会让价格永远停在「--」，是「界面没有真实数据」里最难发现的一类。
-  const quotes = useLiveQuotes(codes);
+  // ★ 用 useDisplayQuotes（而不是 useLiveQuotes）—— 休市 / 未连券商时 WS 一条都不推，
+  //   直接用实时 hook 会让这里满屏 `--`；展示 hook 会回退到最近交易日收盘。
+  const quotes = useDisplayQuotes(codes);
 
   if (codes.length === 0) {
     return <div className={d.empty}>自选股为空，在 K 线页点击「加自选」</div>;
@@ -153,7 +154,9 @@ function WatchlistPanel() {
             key={code}
             className={d.row}
             onClick={() =>
-              open("quote", { code, name: q?.name ?? "" }, { title: q?.name ?? code })
+              // ★ 点自选股进「行情工作台」（K 线 + 分时 + 盘口 + 成交流 + 下单同屏），
+              //   而不是只开一个 K 线页。唯一出口 `useOpenWorkbench`。
+              openWorkbench(code, q?.name ?? "")
             }
           >
             <div style={{ minWidth: 0 }}>
@@ -171,7 +174,7 @@ function WatchlistPanel() {
                 隐式第二行、溢出压在下一行上 —— 点第 N+1 行会删掉第 N 行。 */}
             <ConfirmButton
               className={d.remove}
-              title={`移除自选 ${q?.name ?? code}`}
+              title={`移除自选 ${q?.name || code}`}
               confirmText="确认"
               onConfirm={() => remove(code)}
             >

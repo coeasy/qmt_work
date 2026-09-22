@@ -444,11 +444,17 @@ def evaluate_classic(bars: Sequence[Any], strategy_id: str,
 
 def run_classic(bars_by_code: Dict[str, Sequence[Any]], strategy_id: str,
                 params: Optional[Dict[str, Any]] = None,
-                limit: int = 0) -> List[Dict[str, Any]]:
+                limit: int = 0,
+                names: Optional[Dict[str, str]] = None) -> List[Dict[str, Any]]:
     """对一批股票执行一个经典策略，返回命中列表（含明细，便于界面解释）。
 
     ``rps_breakout`` 会先在全池上算区间收益并排名得到 RPS —— 这是横截面指标，
     必须两步走：先排名，再逐只判断。
+
+    ``names``：股票池的代码→名称映射（来自 ``resolve_universe``，已含本地名称表补全）。
+    ★ 2026-09-20 补：此前本函数**完全不设 ``name`` 字段**，导致经典策略结果在界面
+    「名称」列只能显示占位符，落库 ``screen_picks.name`` 也恒为 ``''``（实测）。
+    与条件选股结果同构是硬要求 —— 两条链路的结果都进同一张表。
     """
     if strategy_id not in CLASSIC_STRATEGIES:
         return []
@@ -468,6 +474,8 @@ def run_classic(bars_by_code: Dict[str, Sequence[Any]], strategy_id: str,
         if not ok:
             continue
         row = {"code": code, "strategy": strategy_id}
+        # 名称：查不到就留空（零 mock，绝不编造），由前端显式渲染成占位符。
+        row["name"] = str((names or {}).get(code, "") or "")
         # 补 close / change_pct，使结果与既有条件选股**同构**：
         # 引擎按 _SORT_KEYS(score/change_pct/close/volume) 排序，界面也读这两个字段，
         # 缺了会导致经典策略结果排不了序、界面显示空白。

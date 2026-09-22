@@ -63,17 +63,41 @@ export {
 export type { AlertRulePayload, AlgoSubmitPayload, LimitUpStartOptions } from "./automation";
 
 export { systemApi, referenceApi, screenApi } from "./system";
+export { pathsApi } from "./paths";
+export type {
+  BackupActionResult,
+  BackupFileInfo,
+  BackupPruneResult,
+  BackupPruneResultFull,
+  BackupRunResult,
+  BackupStats,
+  PathCandidate,
+  PathDirInfo,
+  PathKind,
+  PathsMigrateResult,
+  PathsResponse,
+  PathsSetResult,
+  PathValidateResult,
+} from "./paths";
 export type {
   CapabilitiesResponse,
   CapabilitiesSummary,
   CapabilityItem,
   ClassicPicksResponse,
   ClassicStrategy,
+  DatahubPolicies,
+  SourceDiagnostics,
+  DatahubPolicy,
+  DataProviderInfo,
+  DataProvidersHealth,
+  DataProvidersResponse,
   HealthCheck,
   HealthResponse,
   LiveResponse,
   McpCapabilities,
   NlScreenResult,
+  NotificationConfig,
+  NotificationPayload,
   ReadyResponse,
   RuntimeJobSubmit,
   ScheduleCreate,
@@ -93,9 +117,14 @@ export type {
   PaperTrade,
 } from "./paper";
 
-export { researchApi } from "./research";
+export { researchApi, backtestApi, strategyMarketApi } from "./research";
 export type {
   AttributionResponse,
+  BacktestJob,
+  BacktestMetrics,
+  BacktestResult,
+  MarketCatalogItem,
+  MarketStrategy,
   CorrelationResponse,
   FactorComputeResult,
   FactorInfo,

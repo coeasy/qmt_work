@@ -180,10 +180,62 @@ def kill_tree(pid: int) -> None:
 
 
 def kill_image(image: str) -> int:
+    """按镜像名杀**全部**同名进程。
+
+    ⚠️ 危险：会连带杀掉**用户正在用的客户端**。除「确实要清场」的场合外，
+    请优先用 ``kill_own_profile()``（只清自己隔离 profile 的实例）。
+    """
     pids = pids_of(image)
     for pid in pids:
         kill_tree(pid)
     return len(pids)
+
+
+def kill_own_profile(profile: Path, image: str = "qmt_work.exe") -> int:
+    """只杀「属于指定隔离 profile」的实例 —— 给其它探针脚本复用的安全出口。
+
+    （理由与实现见 ``pids_of_profile``；此处只是补一个「查到就杀」的便捷封装，
+    避免各探针各自去拼 ``pids_of`` / ``kill_image`` 又把用户客户端带走。）
+    """
+    pids = pids_of_profile(image, profile)
+    for pid in pids:
+        kill_tree(pid)
+    return len(pids)
+
+
+def pids_of_profile(image: str, profile: Path) -> set[int]:
+    """取「命令行里带**本脚本自己的隔离 profile**」的进程 PID。
+
+    ⚠️★ 为什么不能按镜像名一刀切（2026-09-21 实测踩到）：
+      本脚本用 ``--user-data-dir=<隔离 profile>`` 把数据与用户真实客户端隔离，
+      却又按镜像名把**所有** ``qmt_work.exe`` 杀掉 —— 于是「跑一次自检」等于
+      「把用户正开着的客户端静默杀掉」。实测现象：跑完自检后手动启动的客户端
+      不见了，一度误判成「客户端自己崩了」。
+      隔离了数据却不区分进程归属，是自相矛盾。既然 Electron 的
+      ``requestSingleInstanceLock()`` 按 **userData 目录**区分实例，那么按
+      profile 精确清理就足以保证「上次残留不撞锁」，同时完全不碰用户的客户端。
+
+    ⚠️ 查询失败时**刻意不退回**「按镜像名全杀」：宁可少杀（最坏是撞单实例锁、
+    本次测试报红，人一看就知道）也不要误杀用户正在用的客户端。
+    """
+    marker = str(profile).replace("\\", "/").lower()
+    ps = ("Get-CimInstance Win32_Process -Filter \"Name='%s'\" | "
+          "ForEach-Object { $_.ProcessId.ToString() + [char]9 + $_.CommandLine }" % image)
+    try:
+        raw = subprocess.run(["powershell", "-NoProfile", "-NonInteractive",
+                              "-Command", ps],
+                             capture_output=True, timeout=40).stdout
+    except Exception:  # noqa: BLE001
+        return set()
+    pids: set[int] = set()
+    for line in raw.decode("utf-8", "replace").splitlines():
+        pid_s, sep, cmd = line.partition("\t")
+        if not sep:
+            continue
+        pid_s = pid_s.strip()
+        if pid_s.isdigit() and marker in cmd.replace("\\", "/").lower():
+            pids.add(int(pid_s))
+    return pids
 
 
 def clean_env(extra: dict[str, str] | None = None) -> dict[str, str]:
@@ -471,6 +523,20 @@ def screenshot_window(hwnd: int, out: Path,
     return f"{out.name} {width}x{height}{note}", colors, size
 
 
+def last_dominant_share() -> float:
+    """最近一次截图的**主色占比**（诊断用）。
+
+    ⚠️ ``capture_screen`` 是在 ``screenshot_window()`` 内部局部导入的，在 ``main()``
+    里不在作用域 —— R18 实测直接引用会 ``NameError``（脚本在窗口阶段崩掉、退出码 1）。
+    这里单独封装一次导入，并吞掉一切异常：它只是诊断输出，绝不能把自检弄挂。
+    """
+    try:
+        import capture_screen  # type: ignore
+        return float(capture_screen.LAST_STATS.get("dominant_share", 0) or 0)
+    except Exception:  # noqa: BLE001
+        return 0.0
+
+
 # ----------------------------------------------------------------------- 主流程
 
 def pick_target(requested: str) -> str:
@@ -538,8 +604,14 @@ def main() -> int:
 
     # ---------- 阶段 0：清理 ----------
     print("\n[0/7] 清理残留")
-    pre_client = pids_of("qmt_work.exe")
-    pre_electron = pids_of("electron.exe") if target == "dev" else set()
+    # ★ 只清理**属于本脚本隔离 profile** 的残留实例（理由见 pids_of_profile）。
+    #   用户的客户端用的是默认 userData，不归本脚本管 —— 绝不动它。
+    # ⚠️ foreign 必须在**杀之前**统计：杀完再数会把刚清掉的进程算成「别人的」，
+    #    报出来的数字就是假的（这条消息的全部意义就是如实告知用户）。
+    pre_all = pids_of("qmt_work.exe")
+    pre_client = pids_of_profile("qmt_work.exe", profile)
+    foreign = len(pre_all - pre_client)
+    pre_electron = pids_of_profile("electron.exe", profile) if target == "dev" else set()
     for pids, name in ((pre_client, "qmt_work.exe"), (pre_electron, "electron.exe")):
         for pid in pids:
             info(f"清理遗留进程 {name} pid={pid}")
@@ -552,7 +624,8 @@ def main() -> int:
     stale_files = [name for name in ("port.txt", "startup-error.log", "window-ready.txt")
                    if (profile / name).exists() and not fresh(profile / name)]
     record("prep", "残留进程已清理，无文件删除", True,
-           f"清理 qmt_work={len(pre_client)} electron={len(pre_electron)} "
+           f"清理本脚本实例 qmt_work={len(pre_client)} electron={len(pre_electron)}"
+           f"，另有 {foreign} 个 qmt_work 非本脚本实例（用户客户端）保持运行"
            f"（忽略陈旧状态文件 {len(stale_files)} 个）")
     # 后端数据目录里的 .qmt_work.lock 也不删：run.py 用的是 msvcrt 字节范围锁，
     # 进程退出即自动释放，残留的锁文件本身无害（旧做法靠删文件兜底，属于过度操作）。
@@ -652,7 +725,7 @@ def main() -> int:
         diag.append("后端文件日志尾部:\n"
                     + backend_file_log_tail([profile] + ([run_dir] if run_dir else [])))
         record("ready", "启动失败诊断信息", False, "\n".join(diag))
-        teardown(proc, port, image_name)
+        teardown(proc, port, image_name, profile)
         return _finish(report_path, started, target)
 
     base = f"http://127.0.0.1:{port}"
@@ -770,15 +843,20 @@ def main() -> int:
             # 「原生标题栏 + 菜单栏 + 纯底色空窗」（18 色 / 8450 bytes，两次字节数**完全一致**），
             # 而 dev.log 里 `[desktop] window loaded` 之后仍在拉 Dashboard chunk、
             # `/api/v1/account/status` 已 200 —— 即**页面本身没问题，是截图抢跑了**。
-            # 改为**轮询到渲染出来为止**（最长 12s）。断言强度不变：
-            # 12s 内始终渲染不出来，仍然判失败。
+            # 改为**轮询到渲染出来为止**（最长 30s）。断言强度不变：
+            # 30s 内始终渲染不出来，仍然判失败（真·纯色空窗会一直空着，不会因为放宽
+            # 等待而变绿）。⚠️ 12s → 30s（2026-09-21 R18）：**刚打包完的第一次冷启动**
+            # 实测在 12.2s 时只采样到 40 色，而截图里顶部导航、左侧自选股、页签、底部
+            # 状态栏全都渲染出来了 —— 内容区停在 `PaneTree` 的 Suspense 占位「加载页面…」
+            # （懒加载分片还没到）。同一份产物**紧接着重跑即 28/28、93 色、仅 1.0s**，
+            # 属冷启动时序假阴性，不是渲染失败。
             t0 = time.time()
             detail, colors, size = "未截图", 0, 0
             while True:
                 time.sleep(0.5)
                 detail, colors, size = screenshot_window(
                     main_win["hwnd"], shot, main_win["rect"])
-                if colors >= 50 or time.time() - t0 >= 12.0:
+                if colors >= 50 or time.time() - t0 >= 30.0:
                     break
             waited = round(time.time() - t0, 1)
             if args.settle > 0:
@@ -792,13 +870,16 @@ def main() -> int:
             record("window", "窗口截图已产出", size > 5000, f"{detail} / {size} bytes")
             # 纯色画面 = 窗口在但页面没渲染出来（白/黑屏），是本项目历史上真实发生过的
             # 故障形态。以「采样到的不同颜色数」作为「是否真的渲染了内容」的交叉验证。
+            # 失败时把**主色占比**也打出来（诊断）：纯色空窗 ≈ 1.0，真渲染的界面远低于它，
+            # 于是「真·空窗」与「渲染了但某块懒加载还没到」能一眼分开，不必再靠复现去猜。
+            share = last_dominant_share()
             record("window", "窗口已实际渲染（非纯色空窗）", colors >= 50,
-                   f"采样到的不同颜色数={colors}（等待 {waited}s）")
+                   f"采样到的不同颜色数={colors}（等待 {waited}s，主色占比={share}）")
             unfocus_window(main_win["hwnd"])
 
     # ---------- 阶段 7：停机 + 零残留 ----------
     print("\n[7/7] 优雅停机与零残留")
-    residue = teardown(proc, port, image_name)
+    residue = teardown(proc, port, image_name, profile)
     record("shutdown", "关闭后零残留进程", residue == 0, f"残留 {residue} 个")
 
     return _finish(report_path, started, target)
@@ -828,8 +909,14 @@ def _first_asset(html: str) -> str | None:
 
 
 def teardown(proc: subprocess.Popen, port: int | None,
-             image: str = "qmt_work.exe") -> int:
-    """优雅停机（scheduler/shutdown）-> 进程树强杀 -> 返回残留进程数。"""
+             image: str = "qmt_work.exe", profile: Path | None = None) -> int:
+    """优雅停机（scheduler/shutdown）-> 进程树强杀 -> 返回**本脚本实例**的残留数。
+
+    ⚠️★ 残留判定也必须按 profile 收敛（2026-09-21）：
+      此前用 ``pids_of(image)`` 统计「关闭后零残留进程」，于是**只要用户自己开着
+      客户端，这条断言就必然 FAIL** —— 把「别人的进程」算成「我没清干净」。
+      按 profile 统计后，「零残留」才真正表达「本脚本起的那棵树清干净了」。
+    """
     if port:
         http_post(f"http://127.0.0.1:{port}/api/v1/scheduler/shutdown", {}, timeout=4)
         info("已发送优雅停机请求")
@@ -837,11 +924,14 @@ def teardown(proc: subprocess.Popen, port: int | None,
     if proc.poll() is None:
         kill_tree(proc.pid)
     time.sleep(2)
-    leftover = pids_of(image)
-    for pid in leftover:  # 兜底再清一轮，保证下次启动不撞锁
+    # 兜底再清一轮：只清本脚本 profile 的实例，保证下次启动不撞单实例锁
+    def _own() -> set[int]:
+        return pids_of_profile(image, profile) if profile is not None else pids_of(image)
+
+    for pid in _own():
         kill_tree(pid)
     time.sleep(1.5)
-    return len(pids_of(image))
+    return len(_own())
 
 
 def _finish(report_path: Path, started: float, target: str) -> int:

@@ -109,6 +109,16 @@ class DatasetSnapshotStore:
             manifest["quality_issue_count"] = len(issues)
             if quality_state in ("complete", "match"):
                 quality_state = "provisional"
+        # ★ 空批次**绝不允许**标成 complete/final。
+        #   实测（2026-09-20）：批次号传错时回查为 0 行，快照却照旧写着
+        #   ``quality_state=complete``、``row_count=0`` —— 一份自称「完整」、
+        #   实际不含任何行的数据集元数据。下游研究/回测据此放行等于消费空气。
+        if not rows:
+            manifest["empty_batch"] = (
+                f"批次 {batch_id or '(空)'} 在 local_bars 中回查为 0 行 —— "
+                "批次号与落库批次不匹配，或本次同步未写入任何数据；"
+                "该快照不代表任何真实数据集，请勿据此判断数据完整性。")
+            quality_state = "empty"
         record = {
             "dataset_id": dataset_id,
             "version": version,
@@ -137,15 +147,38 @@ class DatasetSnapshotStore:
                            manifest: dict | None = None,
                            calendar_version: str = "",
                            adjustment_version: str = "") -> dict:
+        # ★ 只按 **batch_id** 回查，不再要求 provider_id 同时匹配。
+        #
+        # ``local_bars.provider_id`` 写的是**每一行的真实命中来源**（broker / tencent /
+        # sina…，见 ``app/sync/bars.py::_resolve_provider_id``）—— 一次全市场同步里
+        # 不同标的可能落到不同源，所以「一个 provider_id」根本不是这批数据的身份。
+        # 批次号 ``bars-<hex>`` 才是。
+        #
+        # 此前用 ``(provider_id='auto', batch_id=<ISO 时间戳>)`` 查询，两个条件都不成立
+        # （落库用的是真实源名 + 内部生成的批次号）⇒ **永远命中 0 行**，于是每个快照的
+        # ``row_count`` 恒为 0、``coverage_start/end`` 恒为空，却还标着 ``complete``。
+        # 参数里的 ``provider_id`` 现仅作为「本次**请求**的数据源」写入元数据。
         rows = self.db.query(
             "SELECT code,period,adjust,dt,open,high,low,close,volume,amount,"
             "provider_id,batch_id,checksum,schema_version,quality_state "
-            "FROM local_bars WHERE provider_id=? AND batch_id=? ORDER BY code,dt",
-            (provider_id, batch_id))
+            "FROM local_bars WHERE batch_id=? ORDER BY code,dt",
+            (batch_id,))
         return self.publish(dataset_id, version, provider_id, batch_id, rows,
                             quality_state=quality_state, manifest=manifest,
                             calendar_version=calendar_version,
                             adjustment_version=adjustment_version)
+
+    def latest_batch_id(self) -> str:
+        """最近一次写入 ``local_bars`` 的批次号（未显式给批次时的回退值）。
+
+        判据用 ``MAX(rowid)`` 而不是 ``MAX(dt)``：``dt`` 是**行情日期**，全量回补
+        时同一个批次里也会出现很老的日期，按它排序会挑错批次；``rowid`` 才是
+        「这一行是什么时候写进来的」。
+        """
+        rows = self.db.query(
+            "SELECT batch_id FROM local_bars GROUP BY batch_id "
+            "ORDER BY MAX(rowid) DESC LIMIT 1")
+        return str(rows[0]["batch_id"]) if rows else ""
 
     def get(self, snapshot_id: str) -> dict | None:
         return self.db.query_one("SELECT * FROM dataset_snapshots WHERE id=?",

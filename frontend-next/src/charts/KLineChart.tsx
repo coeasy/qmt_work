@@ -65,6 +65,14 @@ const DEFAULT_SUB_INDICATORS: readonly string[] = ["VOL"];
 
 export { DEFAULT_INDICATORS, DEFAULT_SUB_INDICATORS };
 
+/**
+ * 主图所在 pane 的 id（klinecharts 常量 `PaneIdConstants.CANDLE`）。
+ *
+ * 这里写成字面量是因为 `PaneIdConstants` 未从包入口导出，而「主图 / 副图」的判定
+ * 在指标增删里是硬需求 —— 删副图指标时若不带 paneId，会把主图同名指标一起删掉。
+ */
+const CANDLE_PANE = "candle_pane";
+
 /** 图表主题样式：令牌驱动，主题切换时重建 */
 function chartStyles(): Record<string, unknown> {
   const css = getComputedStyle(document.documentElement);
@@ -226,13 +234,9 @@ export function KLineChart({
       },
     });
 
-    // 从 key 还原数组：与依赖解耦（数组引用不再参与依赖判断）
-    for (const ind of indicatorsKey ? indicatorsKey.split(",").filter(Boolean) : []) {
-      chart.createIndicator(ind, false);
-    }
-    for (const ind of subIndicatorsKey ? subIndicatorsKey.split(",").filter(Boolean) : []) {
-      chart.createIndicator(ind, false);
-    }
+    // ★ 指标**不在**这个 effect 里创建：见下方「指标叠加」effect。
+    //   （早先在这里创建，导致用户每勾选一个指标就 dispose + init 整张图，
+    //     K 线闪断、缩放与十字光标全部复位。）
 
     const ro = new ResizeObserver(() => chart.resize());
     ro.observe(el);
@@ -272,6 +276,47 @@ export function KLineChart({
       dispose(el);
       chartRef.current = null;
     };
+  }, [code, period, count, adj, linkGroupName]);
+
+  /**
+   * 指标叠加 —— **独立 effect**，与主 effect 解耦。
+   *
+   * ★ 为什么必须拆出来：指标是用户高频切换的东西（看 MACD 两秒又切回 VOL）。
+   *   若放在建图那个 effect 的依赖里，切一次指标就 `dispose` + `init` 整张图并
+   *   重新请求一遍 K 线 —— 表现为「图闪一下、缩放被重置、十字光标跑到最左边」。
+   *   现在只做增量：按名字 diff，缺的 `createIndicator`、多的 `removeIndicator`。
+   *
+   * ★ 主图指 `paneId === 'candle_pane'`（`createIndicator(name, isStack=true)`），
+   *   副图各自占一个 pane。删除时**必须带 paneId**，否则主副图同名指标会互相误删。
+   *
+   * ★ 依赖里带 code/period 等：换标的时主 effect 建了**新的** chart 对象，
+   *   指标要在新对象上重建一遍（否则新图一个指标都没有）。
+   */
+  useEffect(() => {
+    const chart = chartRef.current;
+    if (!chart) return;
+    const wantMain = indicatorsKey.split(",").map((x) => x.trim()).filter(Boolean);
+    const wantSub = subIndicatorsKey.split(",").map((x) => x.trim()).filter(Boolean);
+
+    const mainNow = chart.getIndicators({ paneId: CANDLE_PANE });
+    for (const ind of mainNow) {
+      if (!wantMain.includes(ind.name)) {
+        chart.removeIndicator({ paneId: CANDLE_PANE, name: ind.name });
+      }
+    }
+    for (const name of wantMain) {
+      if (!mainNow.some((i) => i.name === name)) chart.createIndicator(name, true);
+    }
+
+    const subNow = chart.getIndicators().filter((i) => i.paneId !== CANDLE_PANE);
+    for (const ind of subNow) {
+      if (!wantSub.includes(ind.name)) {
+        chart.removeIndicator({ paneId: ind.paneId, name: ind.name });
+      }
+    }
+    for (const name of wantSub) {
+      if (!subNow.some((i) => i.name === name)) chart.createIndicator(name, false);
+    }
   }, [code, period, count, adj, linkGroupName, indicatorsKey, subIndicatorsKey]);
 
   const price = quote?.price;
@@ -319,7 +364,7 @@ export function KLineChart({
       )}
       {showReadout && quote && (
         <div className={s.readout}>
-          <span className={s.readoutName}>{quote.name ?? code}</span>
+          <span className={s.readoutName}>{quote.name || code}</span>
           <span className={s.readoutPrice} style={{ color: toneColor(changePct) }}>
             {fmtPrice(price)}
           </span>

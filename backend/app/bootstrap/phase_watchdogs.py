@@ -98,19 +98,12 @@ async def _broker_auto_connect_guard() -> None:
 
 
 async def setup(app: FastAPI) -> dict:
-    # DB 备份
-    db_backup = None
-    if settings.db_backup_enabled:
-        from gateway.db_backup import DBBackup
-        db_backup = DBBackup(
-            settings.db_path, keep=settings.db_backup_keep,
-            interval=settings.db_backup_interval, db=state.db)
-        db_backup.backup_once("startup")
-        await db_backup.start()
-        log.info("db backup enabled: interval=%.0fs keep=%d",
-                 settings.db_backup_interval, settings.db_backup_keep)
-    # 把 db_backup 暴露给停机阶段
-    app.state._db_backup = db_backup
+    # ★ 主库备份**不在这里**装配（2026-09-20 迁走）。
+    #   本阶段之后还有 replay / misc 两个阶段在写库，而启动备份要记录「源库指纹」
+    #   用于「没变化就跳过」—— 指纹一记下来就已经过期，于是「客户端反复启停不重复
+    #   整库复制」永远不成立（实测：每次启动都白复制一份 1GB+ 的主库）。
+    #   备份装配已移到最后一个阶段 phase_misc（库静止之后指纹才准）。
+    #   停机阶段与 /config/paths 读的都是 state.db_backup，位置不变。
 
     # 系统状态广播
     async def _system_broadcast_loop():

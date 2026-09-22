@@ -68,11 +68,26 @@ class FakeStore:
         """
         return {c: list(self._bars.get(c, [])[-limit:]) for c in codes}
 
+    def codes_with_bars(self, *, since="", period="1d", adjust=""):
+        """**有日线**的标的代码（``universe`` 的最后一层兜底要用）。"""
+        out = []
+        for code, bars in self._bars.items():
+            if not bars:
+                continue
+            if since and max((getattr(b, "time", "") for b in bars), default="") < since:
+                continue
+            out.append(code)
+        return sorted(out)
+
     def get_boards(self, kind):
         return self._boards.get(kind, [])
 
     def latest_bar_dt(self):
-        return self._as_of
+        """全市场 K 线最近一根日期；未显式给 ``as_of`` 时从 ``bars`` 推导。"""
+        if self._as_of:
+            return self._as_of
+        ds = [getattr(b, "time", "") for bars in self._bars.values() for b in bars]
+        return max([d for d in ds if d], default="")
 
     def set_meta(self, k, v):
         pass

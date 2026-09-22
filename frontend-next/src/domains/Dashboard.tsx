@@ -96,9 +96,10 @@ export function Dashboard() {
         ) : (
           <div className={s.cardBody}>
             <AssetSummaryCards grid={grid} loading={gridLoading} />
-            <div className={s.sub}>
-              数据源：GET /account/grid（跨账户汇总，与「多账户网格」页同源）
-            </div>
+            {/* ★ 这行说明**不写接口路径**：``GET /account/grid`` 是内部契约，
+                用户不需要它；他要知道的只是「这些数字跨账户汇总过、与多账户页同源」，
+                否则对不上账时不知道该拿哪一页去核。 */}
+            <div className={s.sub}>跨账户汇总口径，与「多账户网格」页同源</div>
           </div>
         )}
       </Panel>
@@ -167,6 +168,7 @@ export function Dashboard() {
             <CrossAccountPositions
               positions={grid.positions}
               emptyText="当前无持仓（或账户未连接）"
+              asOf={grid.generated_at}
             />
           ) : (
             <div className={s.cardBody}>
@@ -187,7 +189,11 @@ export function Dashboard() {
             ["quote", "K 线分析"],
             ["trade", "手动交易"],
             ["watchlist", "自选股"],
-            ["screen", "条件选股"],
+            // ★ 原先这里是 ["screen", "条件选股"] —— 但 `screen` 已并入「选股」
+            //   工作台并设为 menu:false，从快捷入口打开它只会进到一个**只有条件
+            //   面板、没有其它页签**的旧独立页。合并页面必须同步所有入口，
+            //   否则用户会以为「条件选股还是单独一页」。
+            ["screen_workbench", "选股"],
             ["algo", "算法交易"],
             ["limitup", "涨停监控"],
             ["reconcile", "对账核销"],

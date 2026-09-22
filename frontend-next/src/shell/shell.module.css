@@ -12,7 +12,7 @@
 }
 
 /* ---------- 自绘标题栏（窗口 frame:false） ---------- */
-/* 这一行同时承担「标题栏 + 菜单栏」两个职责（对标同花顺/大智慧的顶部条）：
+/* 这一行同时承担「标题栏 + 菜单栏」两个职责（对标主流 A 股终端的顶部条）：
    左边品牌、中间业务域菜单、右边全局搜索与窗口按钮。
    拖拽：-webkit-app-region: drag 只放在容器上，可点击元素（菜单项/输入框/下拉/
    窗口按钮）必须显式 no-drag —— 否则点它们会变成拖窗口，看起来像"按钮点不动"。 */
@@ -160,6 +160,30 @@
 
 .menuSpacer {
   flex: 1;
+}
+
+/* 应用内「退出」入口（桌面壳专用）。
+   必须 -webkit-app-region: no-drag —— 菜单栏整体在可拖动区里，
+   不加这行按钮会变成「拖动窗口」而不是被点击。 */
+.menuExit {
+  -webkit-app-region: no-drag;
+  flex: 0 0 auto;
+  margin-left: 8px;
+  padding: 3px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: var(--font-xs);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.menuExit:hover {
+  background: var(--bg-hover);
+  color: var(--danger, #e5534b);
+  border-color: var(--danger, #e5534b);
 }
 
 /* 全局搜索 / 代码直达 */

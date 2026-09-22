@@ -207,6 +207,43 @@ def main() -> int:
                     f"connections={len(d.get('connections') or [])}")
         else:
             rep.add("FAIL", "GET /brokers/diagnostics", f"status={cd_} body={str(dr)[:120]}")
+
+        # ── 问题 8：个股基本信息在打包态的**缺口补齐** ────────────────
+        # 为什么必须在这一层测：打包版自带 eltdx，详情源是**本地 TDX**，
+        # 而「市值/PE/PB/换手/振幅/量比/均价/今开/最高/最低」只有公开行情源（腾讯）才有
+        # ⇒ 若 `/market/stock-info` 不按缺口补一次行情，界面就是一整列 `--`（功能等于没做）。
+        # 源码实例上详情源是券商/腾讯，走不到这条路径 ⇒ 只有打包态能证伪。
+        METRIC_KEYS = ("open", "high", "low", "avg_price", "amplitude",
+                       "turnover_rate", "volume_ratio", "pe_ttm", "pb",
+                       "circ_mv", "total_mv", "amount")
+        ci_, ir = call("GET", f"{base}/market/stock-info?code=600519.SH&source=eltdx",
+                       timeout=40.0)
+        if ci_ == 200 and isinstance(ir, dict):
+            d = ir.get("data", ir) or {}
+            missing_keys = [k for k in METRIC_KEYS if k not in d]
+            rep.add("PASS" if not missing_keys else "FAIL",
+                    "stock-info 暴露 12 个扩展字段键",
+                    f"source={d.get('source')!r} metrics_source={d.get('metrics_source')!r} "
+                    f"缺失键={missing_keys}")
+            filled = [k for k in METRIC_KEYS if d.get(k) is not None]
+            ms = d.get("metrics_source")
+            if ms:
+                rep.add("PASS" if len(filled) == len(METRIC_KEYS) else "FAIL",
+                        "缺口已从行情源补齐（打包态关键项）",
+                        f"metrics_source={ms!r} 已填 {len(filled)}/{len(METRIC_KEYS)}；"
+                        f"pe_ttm={d.get('pe_ttm')} circ_mv={d.get('circ_mv')} "
+                        f"open={d.get('open')} avg_price={d.get('avg_price')}")
+                # 哨兵值：指数涨跌停腾讯返 -1、市净率返 0.00 ⇒ 必须落成 null 而不是原样透出
+                hl, pb = d.get("high_limit"), d.get("pb")
+                rep.add("PASS" if hl != -1 and pb != 0 else "FAIL",
+                        "哨兵值未原样透出（-1 / 0.00）",
+                        f"high_limit={hl!r} pb={pb!r}")
+            else:
+                # 离线 / 行情源不可达时补齐不可能成功 —— 这**不是**产品缺陷，别报 FAIL 冤枉它
+                rep.add("WARN", "缺口已从行情源补齐（打包态关键项）",
+                        f"metrics_source 为空 ⇒ 本机可能拿不到公开行情；已填 {len(filled)}/{len(METRIC_KEYS)}")
+        else:
+            rep.add("FAIL", "GET /market/stock-info", f"status={ci_} body={str(ir)[:160]}")
     finally:
         try:
             proc.terminate()

@@ -137,6 +137,103 @@
   font-size: var(--font-sm);
 }
 
+/*
+ * 快捷下单（闪电下单）：工作台右栏底部。
+ * 右栏只有 300~360px，且高度宝贵 —— 因此价格/数量各占一行，取价与配仓用
+ * chip 快捷键而不是再堆输入框。买入/卖出是**两个并列按钮**（不用先选方向再提交），
+ * 少一次点击就少一次「按了卖出却提交成买入」的机会。
+ */
+.quick {
+  padding: var(--sp-2);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.quickHead {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: var(--font-sm);
+}
+
+.quickName {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.quickCode {
+  font-family: var(--font-mono);
+  font-size: var(--font-xs);
+  color: var(--text-faint);
+}
+
+.quickHead .mono {
+  margin-left: auto;
+}
+
+.quickRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.quickLabel {
+  flex: 0 0 30px;
+  font-size: var(--font-xs);
+  color: var(--text-dim);
+}
+
+.quickChips {
+  display: flex;
+  gap: 3px;
+  flex: 1 1 auto;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.quickChip {
+  padding: 1px 5px;
+  font-size: var(--font-xs);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-3);
+  color: var(--text-dim);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.quickChip:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.quickChip:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.quickChipOn {
+  background: var(--accent-dim);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.quickMeta {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  font-size: var(--font-xs);
+  color: var(--text-dim);
+}
+
+.quickActions {
+  display: flex;
+  gap: 6px;
+}
+
 .checkRow {
   display: flex;
   align-items: center;

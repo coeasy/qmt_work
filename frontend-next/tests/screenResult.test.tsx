@@ -64,3 +64,61 @@ describe("ScreenResult · 选股结果区优化", () => {
     expect(getByText("移出自选")).toBeTruthy();
   });
 });
+
+describe("ScreenResult · 名称缺失必须显式占位（2026-09-20）", () => {
+  /**
+   * 缺陷：后端在**无名称数据**时返回的是 `name: ""`，而空串既不是 null 也不是
+   * undefined ⇒ 原来的 `r.name ?? "--"` 不生效，单元格渲染成**一片空白**，
+   * 用户分不清「这只票没有名称数据」和「界面坏了」。
+   * 铁律：缺失一律显示 `—`，绝不静默空白。
+   */
+  const nameCol = () => resultCols({}, () => {}, []).find((c) => c.key === "name")!;
+
+  it("空字符串渲染成 —（不是空白）", () => {
+    const col = nameCol();
+    const { container } = render(<>{col.render({ code: "000333.SZ", name: "" } as ScreenRow, 0)}</>);
+    expect(container.textContent).toBe("—");
+  });
+
+  it("undefined / 纯空白同样渲染成 —", () => {
+    const col = nameCol();
+    for (const bad of [undefined, "   "]) {
+      const { container } = render(
+        <>{col.render({ code: "000333.SZ", name: bad } as ScreenRow, 0)}</>,
+      );
+      expect(container.textContent).toBe("—");
+    }
+  });
+
+  it("正常名称原样渲染", () => {
+    const col = nameCol();
+    const { container } = render(
+      <>{col.render({ code: "000333.SZ", name: "美的集团" } as ScreenRow, 0)}</>,
+    );
+    expect(container.textContent).toBe("美的集团");
+  });
+
+  it("整列都无名称时给出成因说明（而非只留一片空白）", () => {
+    render(
+      <ScreenResult
+        res={{ ...res, count: 1, results: [{ code: "000333.SZ", name: "", close: 84.4 }] }}
+        busy={false}
+        idleText="idle"
+        emptyText="empty"
+      />,
+    );
+    expect(screen.getByText(/未取到股票名称/)).toBeTruthy();
+  });
+
+  it("有名称时不显示该说明（避免无谓打扰）", () => {
+    render(
+      <ScreenResult
+        res={{ ...res, count: 1, results: [{ code: "000333.SZ", name: "美的集团", close: 84.4 }] }}
+        busy={false}
+        idleText="idle"
+        emptyText="empty"
+      />,
+    );
+    expect(screen.queryByText(/未取到股票名称/)).toBeNull();
+  });
+});

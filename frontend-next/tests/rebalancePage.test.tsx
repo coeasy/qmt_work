@@ -113,10 +113,12 @@ describe("Rebalance · 分仓再平衡", () => {
   it("⑥ 「未生成」与「无需调仓」文案不同", async () => {
     mock.mockResolvedValue({ orders: [], generated: 0 });
     render(<Rebalance />);
-    expect(screen.getByText("尚未生成调仓计划")).toBeTruthy();
+    // 空态文案带了「下一步」引导（见 Rebalance.tsx），这里用前缀匹配，
+    // 免得每次改文案都要动断言 —— 真正要守的是「未生成 ≠ 无需调仓」这个区分。
+    expect(screen.getByText(/^尚未生成调仓计划/)).toBeTruthy();
 
     fireEvent.click(screen.getByText("生成调仓计划"));
     await waitFor(() => expect(screen.getByText("无需调仓（所有标的差额均低于阈值）")).toBeTruthy());
-    expect(screen.queryByText("尚未生成调仓计划")).toBeNull();
+    expect(screen.queryByText(/^尚未生成调仓计划/)).toBeNull();
   });
 });

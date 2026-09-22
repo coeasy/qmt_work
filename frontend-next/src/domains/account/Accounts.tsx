@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Button, EmptyState, Panel, Spinner, type Column, DataTable, Badge } from "@/design/primitives";
 import { accountApi } from "@/services/api";
 import { useAsync } from "@/hooks/useAsync";
+import { useWorkspaceStore } from "@/stores/workspace";
 import { fmtMoney } from "@/shared/format";
 import type { AccountGrid, AccountGridPosition, AccountGridRow } from "@/shared/types";
 import {
@@ -25,6 +26,7 @@ import s from "../domain.module.css";
  *   两页各自 `reduce` 求和曾导致「同一时刻两个总资产」。
  */
 export function Accounts() {
+  const open = useWorkspaceStore((st) => st.open);
   const grid = useAsync<AccountGrid>(() => accountApi.grid(), []);
   const [selected, setSelected] = useState<AccountGridPosition | null>(null);
   const [busy, setBusy] = useState(false);
@@ -86,6 +88,16 @@ export function Accounts() {
         <Button size="sm" variant="ghost" disabled={busy} onClick={() => void reconnectAll()}>
           批量重连（active）
         </Button>
+        {/*
+          routes.tsx 里 rebalance 声明了 `entryFrom: "accounts"`，但**本页原先并没有
+          这个入口** —— 门禁只校验「menu:false 的页面有没有声明 entryFrom」，不校验
+          「声明的那页上真有按钮」。结果是：声明看起来合规，用户却找不到调仓入口
+          （只能靠命令面板）。这里把声明坐实。
+          语义上也顺：看完跨账户持仓分布，下一步就是按目标比例调仓。
+        */}
+        <Button size="sm" variant="ghost" onClick={() => open("rebalance", {}, { title: "分仓再平衡" })}>
+          分仓再平衡
+        </Button>
         <span className={s.spacer} />
         {data && (
           <span className={s.muted}>
@@ -114,7 +126,13 @@ export function Accounts() {
           <Panel flush title="逐账户指标" className={s.grow}>
             <div className={s.tableArea}>
               {data.accounts.length === 0 ? (
-                <EmptyState text="无账户" />
+                // 「无账户」不是故障：账户来自连接管理里添加的券商连接，
+                // 光秃秃三个字会让人以为接口坏了 —— 给出下一步。
+                <EmptyState
+                  text="尚无账户 —— 账户来自「连接管理」中添加并连接的券商"
+                  actionText="去连接管理"
+                  onAction={() => open("brokers", {}, { title: "连接管理" })}
+                />
               ) : (
                 <DataTable
                   columns={accountCols}
@@ -136,7 +154,11 @@ export function Accounts() {
             extra={<Badge tone="neutral">按标的合并</Badge>}
           >
             <div className={s.tableArea}>
-              <CrossAccountPositions positions={data.positions} onInspect={setSelected} />
+              <CrossAccountPositions
+                positions={data.positions}
+                onInspect={setSelected}
+                asOf={data.generated_at}
+              />
             </div>
           </Panel>
         </>

@@ -152,6 +152,21 @@ class KlineCache:
     def cold_path(self) -> str:
         return str(getattr(self._cold, "path", "") or "")
 
+    def attach_cold(self, cold) -> None:
+        """运行期换冷仓（用户在设置里改了冷库目录后调用）。
+
+        ★ 必须经这个方法换，不要直接改 ``self._cold``：这里顺带把**旧冷仓**关掉，
+        否则换目录后旧文件仍被一个已打开的连接持有（Windows 上无法删除/移动），
+        而界面上已经看不到它了 —— 一个「看不见但删不掉」的孤儿文件。
+        """
+        old = self._cold
+        self._cold = cold
+        if old is not None and old is not cold:
+            try:
+                old.close()
+            except Exception:  # noqa: BLE001 关闭失败不该中断切换
+                pass
+
     def hot_cutoff(self) -> str:
         """热窗口起点（**含**）：``今天 - hot_days`` 的 ``"YYYY-MM-DD"``。
 

@@ -5,6 +5,7 @@ import { useAsync } from "@/hooks/useAsync";
 import { useQuotesStore } from "@/stores/quotes";
 import { useQuoteSubscription } from "@/hooks/useQuoteSubscription";
 import { fmtAmount, fmtPct, fmtPrice, toneColor } from "@/shared/format";
+import { useOpenWorkbench } from "@/hooks/useOpenWorkbench";
 import s from "../domain.module.css";
 
 type EtfRow = EtfResponse["items"][number];
@@ -25,6 +26,8 @@ export function Etfs() {
   const [limit, setLimit] = useState("200");
   const [withQuote, setWithQuote] = useState("0");
   const [filter, setFilter] = useState("");
+  // ETF 列表点一行 ⇒ 直接进行情工作台看这只标的（唯一出口，勿各写一遍）
+  const openWorkbench = useOpenWorkbench();
 
   const res = useAsync(
     () => marketApi.etfs(Number(limit) || 0, withQuote === "1"),
@@ -113,27 +116,26 @@ export function Etfs() {
 
       {res.error && <div className={`${s.note} ${s.noteWarn}`}>{res.error}</div>}
 
+      {/* 项数是动态的（ETF 总数 + 最多 3 个代码段 + 订阅数）⇒ 用一行条：
+          卡片网格在项数变化时会重排成「3+2」这种参差的两行。 */}
       {res.data && (
-        <div className={s.stats}>
-          <div className={s.stat}>
-            <span className={s.statLabel}>ETF 总数</span>
-            <span className={s.statValue}>{res.data.count}</span>
-            <span className={s.statSub}>当前显示 {filtered.length}</span>
+        <div className={`${s.statRow} ${s.statRowDense}`}>
+          <div className={s.statRowItem} title={`当前显示 ${filtered.length} 只`}>
+            <span className={s.statRowLabel}>ETF 总数</span>
+            <span className={s.statRowValue}>{res.data.count}</span>
           </div>
           {Object.entries(res.data.groups)
             .sort((a, b) => b[1] - a[1])
             .slice(0, 3)
             .map(([g, n]) => (
-              <div className={s.stat} key={g}>
-                <span className={s.statLabel}>代码段 {g}xx</span>
-                <span className={s.statValue}>{n}</span>
-                <span className={s.statSub}>只</span>
+              <div className={s.statRowItem} key={g} title={`代码段 ${g}xx 共 ${n} 只`}>
+                <span className={s.statRowLabel}>{g}xx</span>
+                <span className={s.statRowValue}>{n}</span>
               </div>
             ))}
-          <div className={s.stat}>
-            <span className={s.statLabel}>实时订阅</span>
-            <span className={s.statValue}>{subCodes.length}</span>
-            <span className={s.statSub}>前 80 只（WS）</span>
+          <div className={s.statRowItem} title="实时订阅上限 80 只（WS）">
+            <span className={s.statRowLabel}>实时订阅</span>
+            <span className={s.statRowValue}>{subCodes.length}</span>
           </div>
         </div>
       )}
@@ -150,9 +152,28 @@ export function Etfs() {
           {res.loading && !res.data ? (
             <Spinner label="加载 ETF 清单…" />
           ) : filtered.length === 0 ? (
-            <EmptyState text="无匹配的 ETF" />
+            // ★ 空列表有**两种**成因，文案不能一刀切：
+            //   ① 有筛选 ⇒ 筛窄了，给「清除筛选」；
+            //   ② 没筛选还空 ⇒ 是清单本身没数据（行情源按代码段 51/56/58/15/16 枚举，
+            //      源不可用/未同步时为空）。若 ② 也显示 ① 的文案，等于把「没数据」
+            //      说成「你筛错了」—— 正是本项目反复禁止的错误归因。
+            filter.trim() ? (
+              <EmptyState
+                text="无匹配的 ETF —— 当前筛选按代码或名称子串匹配，可清除筛选看全部"
+                actionText="清除筛选"
+                onAction={() => setFilter("")}
+              />
+            ) : (
+              <EmptyState text="暂无 ETF 清单 —— 清单由行情源按代码段（51/56/58/15/16）枚举，行情源不可用或未同步时为空" />
+            )
           ) : (
-            <DataTable columns={cols} rows={filtered} rowKey={(r) => r.code} rowHeight={24} />
+            <DataTable
+              columns={cols}
+              rows={filtered}
+              rowKey={(r) => r.code}
+              rowHeight={24}
+              onRowClick={(r) => openWorkbench(r.code, r.name ?? "")}
+            />
           )}
         </div>
       </Panel>

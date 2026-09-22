@@ -6,6 +6,7 @@ import { marketApi, type OverviewResponse } from "@/services/api";
 import { useAsync } from "@/hooks/useAsync";
 import { useLiveQuotes } from "@/hooks/useLiveQuotes";
 import { fmtAmount, fmtPct, fmtPrice, toneColor } from "@/shared/format";
+import { isLivePrice } from "@/shared/freshness";
 import s from "../domain.module.css";
 
 type BreadthRow = OverviewResponse["breadth"][number];
@@ -78,8 +79,8 @@ export function MarketStructure() {
   const indexQuotes = useLiveQuotes(indexCodes);
   const indexLast = (r: IndexRow): number | undefined => {
     const q = indexQuotes[r.code]?.price;
-    if (q !== undefined && q > 0) return q;
-    return r.last !== undefined && r.last > 0 ? r.last : undefined;
+    if (isLivePrice(q)) return q;
+    return isLivePrice(r.last) ? r.last : undefined;
   };
 
   const indexCols: Column<IndexRow>[] = [
@@ -126,39 +127,48 @@ export function MarketStructure() {
 
       {res.error && <div className={`${s.note} ${s.noteError}`}>{res.error}</div>}
 
+      {/* ★ 后端已给出「为什么三块都空」（数据源能力/连接问题），必须原样转述。
+          没有这句时，页面只剩一排「—」和三个「无X」，用户只能猜是软件坏了。 */}
+      {d?.unavailable && (
+        <div className={`${s.note} ${s.noteWarn}`}>
+          {d.unavailable}
+          <span className={s.muted}>
+            （指数 / 涨跌家数 / 统计板块均依赖行情源，离线日线数据不参与本页统计）
+          </span>
+        </div>
+      )}
+
       {res.loading && !d ? (
         <Spinner label="加载市场概览…" />
       ) : d ? (
         <>
-          <div className={s.stats}>
-            <div className={s.stat}>
-              <span className={s.statLabel}>涨跌家数差</span>
-              <span className={s.statValue} style={{ color: toneColor(bs?.breadth_net) }}>
+          <div className={s.statRow}>
+            <div
+              className={s.statRowItem}
+              title={`前值 ${bs?.breadth_net_prev === null || bs?.breadth_net_prev === undefined ? "—" : String(bs.breadth_net_prev)}`}
+            >
+              <span className={s.statRowLabel}>涨跌家数差</span>
+              <span className={s.statRowValue} style={{ color: toneColor(bs?.breadth_net) }}>
                 {bs?.breadth_net === null || bs?.breadth_net === undefined ? "—" : String(bs.breadth_net)}
               </span>
-              <span className={s.statSub}>
-                前值 {bs?.breadth_net_prev === null || bs?.breadth_net_prev === undefined ? "—" : String(bs.breadth_net_prev)}
-              </span>
             </div>
-            <div className={s.stat}>
-              <span className={s.statLabel}>停板家数</span>
-              <span className={s.statValue}>
+            <div className={s.statRowItem} title="涨停 + 跌停（合并口径）">
+              <span className={s.statRowLabel}>停板家数</span>
+              <span className={s.statRowValue}>
                 {bs?.stopped_count === null || bs?.stopped_count === undefined ? "—" : String(bs.stopped_count)}
               </span>
-              <span className={s.statSub}>涨停 + 跌停（合并口径）</span>
             </div>
-            <div className={s.stat}>
-              <span className={s.statLabel}>成交均价</span>
-              <span className={s.statValue}>
+            <div className={s.statRowItem}>
+              <span className={s.statRowLabel}>成交均价</span>
+              <span className={s.statRowValue}>
                 {bs?.avg_price === null || bs?.avg_price === undefined ? "—" : String(bs.avg_price)}
               </span>
             </div>
-            <div className={s.stat}>
-              <span className={s.statLabel}>两市成交额</span>
-              <span className={s.statValue}>
+            <div className={s.statRowItem} title="上证 + 深证指数成交额求和；任一缺失则为 —">
+              <span className={s.statRowLabel}>两市成交额</span>
+              <span className={s.statRowValue}>
                 {d.two_city_turnover === null ? "—" : fmtAmount(d.two_city_turnover)}
               </span>
-              <span className={s.statSub}>上证 + 深证</span>
             </div>
           </div>
 
@@ -168,7 +178,13 @@ export function MarketStructure() {
             <Panel flush title={`主要指数（${d.indices.length}）`} className={s.grow}>
               <div className={s.tableArea} style={{ maxHeight: 260 }}>
                 {d.indices.length === 0 ? (
-                  <EmptyState text="无指数快照" />
+                  <EmptyState
+                    text={
+                      d.unavailable
+                        ? "无指数快照 —— 成因见上方提示条"
+                        : "无指数快照 —— 指数快照来自行情源，取不到时为空；可点「刷新」重试"
+                    }
+                  />
                 ) : (
                   <DataTable
                     columns={indexCols}
@@ -188,7 +204,13 @@ export function MarketStructure() {
             <Panel title="宽度趋势（涨跌家数）" className={s.grow}>
               <div className={s.chart}>
                 {trend.length === 0 ? (
-                  <EmptyState text="无宽度趋势数据" />
+                  <EmptyState
+                    text={
+                      d.unavailable
+                        ? "无宽度趋势数据 —— 成因见上方提示条"
+                        : "无宽度趋势数据 —— 涨跌家数日线来自行情源板块接口，取不到时为空"
+                    }
+                  />
                 ) : (
                   <EChart option={trendOption} />
                 )}
@@ -209,7 +231,13 @@ export function MarketStructure() {
           >
             <div className={s.tableArea} style={{ maxHeight: 260 }}>
               {d.breadth.length === 0 ? (
-                <EmptyState text="无统计数据" />
+                <EmptyState
+                  text={
+                    d.unavailable
+                      ? "无统计数据 —— 成因见上方提示条"
+                      : "无统计数据 —— 统计板块（涨跌家数/停板家数/成交均价）来自行情源，取不到时为空"
+                  }
+                />
               ) : (
                 <DataTable columns={breadthCols} rows={breadthRows} rowKey={(r) => r.code} rowHeight={22} />
               )}
@@ -219,7 +247,13 @@ export function MarketStructure() {
           <div className={s.note}>{d.two_city_note}</div>
         </>
       ) : (
-        <EmptyState text="无市场概览数据" />
+        // 只写「无数据」会让人以为程序坏了；这里给出可执行动作，并把
+        // 「后端若给了原因会显示在顶部」讲明，避免替用户瞎猜原因。
+        <EmptyState
+          text="无市场概览数据 —— 可先刷新重试；若后端给出了具体原因，会显示在顶部提示条里"
+          actionText="刷新"
+          onAction={() => void res.reload()}
+        />
       )}
     </div>
   );

@@ -2,10 +2,12 @@ import { useMemo, useState } from "react";
 import {
   Badge,
   Button,
+  ConfirmButton,
   ConfirmModal,
   DataTable,
   EmptyState,
   FormRow,
+  Input,
   Panel,
   Select,
   Spinner,
@@ -61,6 +63,73 @@ export function TargetPortfolio() {
   const [banner, setBanner] = useState<{ tone: "ok" | "error"; text: string } | null>(null);
   /** 批量删除是破坏性动作 ⇒ 模态确认，不用 window.confirm */
   const [confirmBatch, setConfirmBatch] = useState(false);
+
+  /* ---------- 新建 / 编辑 / 单条删除 ---------- */
+  /**
+   * 此前这一页**只有列表和批量删除**：既不能新建、也不能改、更不能单删一条 ——
+   * 于是唯一能改计划的方式是「删了重建」，而重建会把 status 打回 draft，
+   * 让「正在按这个计划调仓」的事实悄悄消失。
+   */
+  const [editingId, setEditingId] = useState<number | null>(null);
+  const [planName, setPlanName] = useState("");
+  const [planWeights, setPlanWeights] = useState('{\n  "600519.SH": 0.3\n}');
+
+  const resetPlanForm = () => {
+    setEditingId(null);
+    setPlanName("");
+    setPlanWeights('{\n  "600519.SH": 0.3\n}');
+  };
+
+  const startEdit = (r: PlanRow) => {
+    setEditingId(r.id);
+    setPlanName(r.name ?? "");
+    const w = typeof r.weights === "object" && r.weights ? r.weights : {};
+    setPlanWeights(JSON.stringify(w, null, 2));
+    setBanner(null);
+  };
+
+  const savePlan = async () => {
+    let weights: Record<string, number>;
+    try {
+      weights = JSON.parse(planWeights) as Record<string, number>;
+    } catch {
+      setBanner({ tone: "error", text: "权重不是合法 JSON" });
+      return;
+    }
+    setBusy(true);
+    setBanner(null);
+    try {
+      const res = await portfolioApi.createPlan({
+        ...(editingId ? { id: editingId } : {}),
+        name: planName.trim() || "未命名计划",
+        weights,
+      });
+      // ★ 更新不存在的 id 时后端返回 404；成功返回 id
+      setBanner({ tone: "ok", text: editingId ? `已保存计划 #${res.id}` : `已创建计划 #${res.id}` });
+      resetPlanForm();
+      await plans.reload();
+    } catch (e) {
+      setBanner({ tone: "error", text: e instanceof Error ? e.message : String(e) });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const removeOne = async (pid: number) => {
+    setBusy(true);
+    setBanner(null);
+    try {
+      await portfolioApi.deletePlan(pid);
+      setSelected((prev) => prev.filter((x) => x !== pid));
+      if (editingId === pid) resetPlanForm();
+      setBanner({ tone: "ok", text: `已删除计划 #${pid}` });
+      await plans.reload();
+    } catch (e) {
+      setBanner({ tone: "error", text: e instanceof Error ? e.message : String(e) });
+    } finally {
+      setBusy(false);
+    }
+  };
 
   /* ---------- 计划批量删除 ---------- */
   const batchRemove = async () => {
@@ -140,6 +209,21 @@ export function TargetPortfolio() {
       ),
     },
     { key: "created", header: "创建", width: 150, mono: true, render: (r) => r.created_at ?? "--" },
+    {
+      key: "act",
+      header: "操作",
+      width: 150,
+      render: (r) => (
+        <div className={s.actions}>
+          <Button size="sm" variant="ghost" disabled={busy} onClick={() => startEdit(r)}>
+            编辑
+          </Button>
+          <ConfirmButton disabled={busy} onConfirm={() => void removeOne(r.id)}>
+            删除
+          </ConfirmButton>
+        </div>
+      ),
+    },
   ];
 
   /* ---------- 差量同步 ---------- */
@@ -192,11 +276,51 @@ export function TargetPortfolio() {
           {plans.loading && <Spinner label="加载中…" />}
           {!plans.loading && plans.error && <div className={s.err}>{plans.error}</div>}
           {!plans.loading && !plans.error && (plans.data?.length ?? 0) === 0 && (
-            <EmptyState text="暂无目标持仓计划" />
+            // 新建面板在列表**下方**，指错方向会让人白找一圈
+            <EmptyState text="暂无目标持仓计划 —— 在下方「新建目标持仓计划」添加标的与目标比例" />
           )}
           {!plans.loading && !plans.error && (plans.data?.length ?? 0) > 0 && (
             <DataTable columns={planCols} rows={plans.data ?? []} rowKey={(r) => String(r.id)} />
           )}
+        </div>
+      </Panel>
+
+      <Panel
+        title={editingId ? `编辑计划 #${editingId}` : "新建目标持仓计划"}
+        extra={
+          editingId ? (
+            <Button size="sm" variant="ghost" onClick={resetPlanForm}>
+              取消编辑
+            </Button>
+          ) : null
+        }
+      >
+        <div className={s.form}>
+          <FormRow label="名称">
+            <Input
+              value={planName}
+              onChange={(e) => setPlanName(e.target.value)}
+              placeholder="未命名计划"
+            />
+          </FormRow>
+          <FormRow label="目标权重（JSON）">
+            <textarea
+              className={s.json}
+              value={planWeights}
+              onChange={(e) => setPlanWeights(e.target.value)}
+              rows={6}
+              spellCheck={false}
+            />
+          </FormRow>
+          <div className={s.actions}>
+            <Button size="sm" variant="primary" disabled={busy} onClick={() => void savePlan()}>
+              {editingId ? "保存修改" : "创建计划"}
+            </Button>
+          </div>
+          <div className={s.warnBar}>
+            保存只改名称与权重，不会改动计划状态（draft / active）——
+            否则一次改名就会让「正在按这个计划调仓」的事实悄悄消失。
+          </div>
         </div>
       </Panel>
 

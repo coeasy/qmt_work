@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { MENU, PAGES, pageLabel, visibleMenuItems } from "@/app/routes";
+import { ConfirmModal } from "@/design/primitives";
 import { useWorkspaceStore } from "@/stores/workspace";
+import { useOpenWorkbench } from "@/hooks/useOpenWorkbench";
 import { marketApi } from "@/services/api";
-import { normalizeCode } from "@/shared/format";
 import type { Instrument } from "@/shared/types";
 import s from "./shell.module.css";
 
@@ -79,7 +80,57 @@ export function MenuBar() {
 
       <span className={s.menuSpacer} />
       <GlobalSearch />
+      <AppExitButton />
     </div>
+  );
+}
+
+/**
+ * 桌面壳内的「退出」入口。
+ *
+ * ★ 为什么必须有（2026-09-22 实测，用户报「右下角没有图标、无法真实退出」）：
+ * 此前应用内**没有任何退出入口** —— 标题栏的「关闭」语义是「隐藏到托盘」，
+ * 唯一的「真退出」藏在托盘右键菜单里。而 **Windows 11 默认把新出现的托盘图标
+ * 收进「隐藏的图标」溢出层**，用户根本看不见它 ⇒ 一旦托盘不可见（或托盘因图标
+ * 未打包而根本没建起来），用户就彻底退不出去，只能进任务管理器。
+ * 结论：**退出入口不能依赖托盘的可见性**，应用内必须有明确可见的「退出」。
+ *
+ * 浏览器里（没有 electronAPI）不渲染；退出会中断后台任务，故走二次确认。
+ */
+function AppExitButton() {
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const api = typeof window !== "undefined" ? window.electronAPI : undefined;
+  if (typeof api?.quitApp !== "function") return null;
+  const doQuit = () => {
+    setBusy(true);
+    // 正常路径下进程会随即退出，这个 Promise 往往不会 resolve；
+    // 真失败（极少）时回到可点状态，而不是把按钮永久卡在 loading。
+    void api?.quitApp?.()?.catch(() => {}).finally(() => setBusy(false));
+  };
+  return (
+    <>
+      <button
+        type="button"
+        className={s.menuExit}
+        title="退出 qmt_work（会同时停止后台服务）"
+        aria-label="退出"
+        onClick={() => setOpen(true)}
+      >
+        退出
+      </button>
+      <ConfirmModal
+        open={open}
+        title="退出 qmt_work"
+        message="将结束客户端并停止后台服务（行情同步、任务调度一并停止）。下次启动需重新连接券商。"
+        warn="若只是想收起窗口，请点标题栏右上角的「关闭」——那会最小化到系统托盘，程序继续运行。"
+        confirmText="退出"
+        danger
+        loading={busy}
+        onConfirm={doQuit}
+        onCancel={() => setOpen(false)}
+      />
+    </>
   );
 }
 
@@ -92,7 +143,7 @@ function GlobalSearch() {
   const [items, setItems] = useState<Instrument[]>([]);
   const [active, setActive] = useState(0);
   const [focused, setFocused] = useState(false);
-  const open = useWorkspaceStore((st) => st.open);
+  const openWorkbench = useOpenWorkbench();
   const timer = useRef<number | null>(null);
 
   useEffect(() => {
@@ -117,8 +168,9 @@ function GlobalSearch() {
   }, [q]);
 
   const openCode = (code: string, name?: string) => {
-    const c = normalizeCode(code);
-    open("quote", { code: c, name: name ?? "" }, { title: name ? `${name} ${c}` : c });
+    // ★ 顶部搜索框敲代码/选搜索结果 ⇒ 进「行情工作台」（看盘 + 交易同屏），
+    //   而不是只开一个 K 线页。唯一出口 `useOpenWorkbench`（自带 normalizeCode）。
+    openWorkbench(code, name);
     setQ("");
     setItems([]);
   };

@@ -56,6 +56,7 @@ from datasource.eltdx_utils import (  # noqa: F401
     _save_json_cache,
     _to_eltdx,
     _to_qmt,
+    is_index_code,
 )
 from datasource.periods import to_eltdx_period
 
@@ -435,9 +436,12 @@ class EltdxSource(DataSource):
         ec = _to_eltdx(code)
         p = _map_period(period)
         adj = _map_adjust(adjust)
+        # ★★ `kind` 决定「取到谁的数据」，猜错**不是返回空而是抛异常**（见下）。
+        kind = "index" if is_index_code(code) else "stock"
+
         def _run():
             def _inner(cl):
-                bars = cl.bars.get(ec, period=p, count=count, adjust=adj)
+                bars = self._bars_any_kind(cl, ec, p, count, adj, kind)
                 bl = getattr(bars, "bars", bars) or []
                 out = []
                 for b in bl:
@@ -457,6 +461,41 @@ class EltdxSource(DataSource):
                 return out
             return self._use_client(_inner)
         return await asyncio.to_thread(_run)
+
+    @staticmethod
+    def _bars_any_kind(cl, ec: str, period: str, count: int,
+                       adjust: Optional[str], kind: str):
+        """按 ``kind`` 取 K 线；kind 猜错时自动换另一边重试一次。
+
+        ★★ 为什么必须有这一层（2026-09-21 实测，用户报「从行情工作台打开时 K 线图
+        无法正常展示」的**直接根因**）：
+
+        1. 指数与个股在 eltdx 侧走的是**两条不同的数据通道**（``kind="index"`` /
+           ``kind="stock"``），本模块只在 ``get_board_kline``（/market/indices 用）
+           里传过 ``kind="index"``，**通用 get_kline 从来没传** ⇒ 指数一律按个股取。
+        2. 猜错的表现**不是「返回空」而是抛**
+           ``ProtocolError: invalid kline date: 30869201``（实测），
+           因为个股通道拿到的字节流按个股布局解析，日期字段是垃圾。
+        3. 更糟的是这个异常会一路冒到 ``registry._first_supported`` 被计成
+           **数据源故障**，连续 3 次即**熔断 30s** ⇒ **一个指数的请求会把整个 eltdx
+           源打成不可用**，连个股 K 线、分时、资金流一起遭殃
+           （实测日志 2026-09-21 22:11:18 「数据源 eltdx 熔断（连续 3 次失败），冷却 30s」）。
+        4. 工作台默认标的正是 ``000001.SH``（上证指数）⇒ 一打开就是空图。
+
+        在**这里**就地重试另一个 kind，既拿到正确数据，又不会把「kind 猜错」这种
+        自身可修复的错误上报成数据源故障（异常不逃出 ``_inner`` ⇒ 不计入熔断）。
+
+        ``is_index_code`` 的前缀判定已用 eltdx 权威清单（``codes.all_indices()``）
+        核对过：1678 个指数**漏判 0 条**，5574 只个股**误判 0 条**（2026-09-21 实测）。
+        重试只是给「前缀表未覆盖的冷门指数段」兜底，正常路径不会触发。
+        """
+        try:
+            return cl.bars.get(ec, period=period, count=count, adjust=adjust, kind=kind)
+        except Exception as exc:  # noqa: BLE001
+            other = "stock" if kind == "index" else "index"
+            log.debug("eltdx K 线 kind=%s 失败（%s），改用 kind=%s 重试：%s",
+                      kind, ec, other, exc)
+            return cl.bars.get(ec, period=period, count=count, adjust=adjust, kind=other)
 
     async def get_minutes(self, code: str, trading_date: Optional[str] = None) -> Optional[dict]:
         """当日分时（1 分钟曲线）：价格线 + 均价线 + 分钟量，含昨收基准。

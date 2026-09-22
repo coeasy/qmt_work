@@ -494,12 +494,28 @@ async def overview(source: str = "auto", ttl: int = 10) -> dict:
                 "count": b.get("last"), "metric": b.get("metric"), "unit": b.get("unit")}
                for b in (stat or [])]
     # 主要指数快照（B4：跟随 runtime_config 配置的指数清单）
-    async def _iq(c):
-        try:
-            return c, await asyncio.wait_for(get_hub().get_quote(c, source=source), timeout=6)
-        except Exception:  # noqa: BLE001
-            return c, None
-    ires = await asyncio.gather(*[_iq(c) for c in configured_indices(state)])
+    #
+    # ★★ 走**批量**接口，不要逐只 get_quote（2026-09-20 实测修正）。
+    #
+    # 改成批量前，这里是 `asyncio.gather(get_quote(c) for c in 8 个指数)`：
+    # 8 只看似并发，但公开源有**全局 0.3s 节流锁**（`_PublicSource._MIN_INTERVAL`，
+    # 跨请求共享一把锁），而单只 `get_quote` 又是 **2 次** HTTP（行情 + 详情）
+    # ⇒ 实际串行 16 次请求 ≈ 9.2s。后果不只是慢：每只 6s 超时，于是
+    # **8 个指数只有 2 个活下来**（实测 `indices: 2`），而且因为 breadth 非空，
+    # 连 `unavailable` 都不会置 —— 页面安静地少显示 6 个指数，谁都不知道。
+    #
+    # 批量接口 1 次 HTTP 拿全部（见 `DataSourceManager.get_quotes`），
+    # 8 只 ≈ 1.4s 且**全部拿到**。
+    codes = configured_indices(state)
+    try:
+        qmap = await asyncio.wait_for(
+            get_hub().get_quotes(codes, source=source), timeout=OVERVIEW_BUDGET_SECONDS)
+    except Exception:  # noqa: BLE001  批量整体失败不撑爆整页，退化为「无指数快照」
+        qmap = {}
+    if not isinstance(qmap, dict):
+        qmap = {}
+    # 与旧代码保持同形状，下面的两市成交额聚合继续用
+    ires = [(c, qmap.get(c)) for c in codes]
     indices = []
     for c, q in ires:
         if q:
@@ -536,5 +552,33 @@ async def overview(source: str = "auto", ttl: int = 10) -> dict:
            "two_city_note": ("上证+深证指数快照成交额求和（真实口径）" if two_city is not None
                              else "指数快照缺成交额，无法聚合两市成交额"),
            "source": source, "ts": _now()}
+    # ★ 三块数据全空时必须给出**成因**，不能让界面自己猜。
+    #
+    # 此前这里无论拿到什么都返回 code=0：未连接券商时 `get_boards` / `get_quote`
+    # 静默返回空，于是页面上一排「—」加三个「无指数快照 / 无统计数据 / 无宽度趋势」
+    # —— 用户看到的是「软件坏了」，而真实原因是「当前无数据源声明该能力」。
+    # 这与项目里「绝不把『不支持』说成『网络坏了』」是同一条纪律：原因只有一个出口
+    # （_unavailable），界面只负责转述。
+    if not breadth and not indices and not trend:
+        out["unavailable"] = _unavailable("市场概览", source)
+    else:
+        # ★ **部分缺失也要说**，不能只判「全空」。
+        #
+        # 改成批量前的实测：8 个指数因 6s 超时只剩 2 个，而这里只判「三块全空」，
+        # 于是页面**安静地少显示 6 个指数、一句提示都没有** —— 比全空更危险，
+        # 因为「少了一半」看不出来，全空反而一眼就知道坏了。
+        #
+        # 成因仍然只走 `_unavailable`（唯一出口），不在别处另编一套说法。
+        missing = []
+        if not breadth:
+            missing.append("涨跌家数统计")
+        if not indices:
+            missing.append("主要指数快照")
+        if not trend:
+            missing.append("宽度趋势")
+        if missing:
+            out["unavailable"] = (
+                f"市场概览部分缺失：{'、'.join(missing)}未取到"
+                f"（其余为真实数据）——{_unavailable('市场概览', source)}")
     _store(ck, ttl, out)
     return out

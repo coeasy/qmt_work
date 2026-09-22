@@ -135,7 +135,7 @@ describe("预设皮肤自洽性", () => {
 
   it("提供通达信 / 大智慧 / 同花顺 风格的经典黑底", () => {
     const ids = PRESETS.map((p) => p.id);
-    expect(ids).toContain("tongdaxin"); // 通达信黑：默认
+    expect(ids).toContain("tongdaxin"); // 极夜黑
     expect(ids).toContain("dazhihui"); // 大智慧黑
     expect(ids).toContain("light"); // 浅色：明暗另一端
   });

@@ -8,6 +8,7 @@
 行情等补充源获取行情与基础数据，而不伪造任何数据（遵循项目「零 mock」铁律）。
 """
 from abc import ABC, abstractmethod
+import asyncio
 from typing import ClassVar, List, Optional
 
 from datasource.models import (
@@ -15,6 +16,25 @@ from datasource.models import (
     InstrumentInfo,
     Quote,
     StockInfo,
+)
+
+
+#: 「快照派生字段」—— 一条行情快照请求里**顺带就有**的个股画像字段。
+#:
+#: 2026-09-21：市值 / 市盈率 / 市净率 / 换手率 / 振幅 / 量比 / 均价 / 涨跌停 全都
+#: 躺在腾讯那条快照响应里（以前只解析了 7 个字段，其余全丢）。解析出来透出即可，
+#: **零额外请求**。取不到时是 ``None``（前端渲染 ``--``），绝不用 0 冒充。
+#:
+#: ⚠️⚠️ **两处必须共用这一份常量**：
+#:   ① 插件层（`_PublicSource._DETAIL_KEYS`）决定「从快照里取哪些」；
+#:   ② `datasource/registry.py` 的 manager 层决定「往上层透出哪些」。
+#: 两边各写一份迟早漂移 —— 实测（2026-09-21）就是插件加了字段而 manager 的白名单
+#: 没加，于是端点恒返回 ``null``：改了插件、改了测试，界面却还是一片 ``--``，
+#: 而**单测全绿**（单测直接调插件，绕过了 manager）。
+EXT_DETAIL_KEYS = (
+    "open", "high", "low", "avg_price", "amplitude", "turnover_rate",
+    "volume_ratio", "pe_ttm", "pb", "circ_mv", "total_mv", "amount",
+    "high_limit", "low_limit",
 )
 
 
@@ -49,6 +69,61 @@ class DataSource(ABC):
         {code, last, open, high, low, lastClose, volume, amount,
          bid, ask, bid_vol, ask_vol, bids:[{price,volume}], asks:[{price,volume}], ts}
         """
+
+    async def get_quotes(self, codes: List[str]) -> dict:
+        """批量盘口快照 —— 默认实现为并发调单只 ``get_quote``。
+
+        ⚠️ 默认实现**未走节流优化**：N 只 = N 次 HTTP + N 次节流锁等待。
+        支持批量的源（tencent / sina）**必须**重写本方法为真正的单次 HTTP，
+        否则报价牌 N 只标的会被全局节流锁串成 N 次请求（实测冷启动时
+        4 只都拿不到数据 —— 因为 SyncEngine 同步任务在前面占着锁）。
+
+        返回 ``{code: dict | None}`` —— None 表示该 code 拉取失败，调用方应
+        **保留其它 code 的成功数据**，不要让单只失败抹掉整批。
+        """
+        results = await asyncio.gather(
+            *[self.get_quote(c) for c in codes],
+            return_exceptions=True,
+        )
+        out: dict = {}
+        for code, r in zip(codes, results):
+            if isinstance(r, Exception) or r is None:
+                out[code] = None
+            else:
+                out[code] = r
+        return out
+
+    def derive_detail(self, raw: dict) -> Optional[dict]:
+        """从**已取到的**盘口快照派生合约画像（**零额外请求**）。
+
+        默认返回 ``None`` = 本源不支持派生，调用方需另走 ``get_instrument_detail`` /
+        ``get_details``。公开源（``_PublicSource``）的 ``get_instrument_detail``
+        本来就只是 ``get_quote`` 的字段子集，批量场景若再逐只/整批回源，等于把
+        批量省下的 HTTP 原样加回去（实测 4 只 → 多 1 次 0.3s 节流等待）。
+
+        ⚠️ 只派生**确定可从行情快照得出**的字段；涨跌停、行业、概念这类
+        快照里没有的字段一律**不猜**，保持为空，交由富化链路补齐。
+        """
+        return None
+
+    async def get_details(self, codes: List[str]) -> dict:
+        """批量合约画像 —— 默认实现为并发调单只 ``get_instrument_detail``。
+
+        ⚠️ 与 ``get_quotes`` 同理：默认实现是 N 次调用，批量场景的真正收益依赖子类重写。
+        公开源（见 ``_PublicSource``）的 ``get_instrument_detail`` **本身就是从
+        ``get_quote`` 派生的**，若不重写，批量拉 N 只就会把批量省下的 HTTP 原样加回去
+        （实测 4 只 → 多 4 次 0.3s 节流等待），批量等于白做。
+
+        返回 ``{code: dict | None}``。
+        """
+        results = await asyncio.gather(
+            *[self.get_instrument_detail(c) for c in codes],
+            return_exceptions=True,
+        )
+        out: dict = {}
+        for code, r in zip(codes, results):
+            out[code] = None if (isinstance(r, Exception) or not r) else r
+        return out
 
     @abstractmethod
     async def get_kline(self, code: str, period: str = "1d", count: int = 250,

@@ -101,8 +101,54 @@ def test_resource_group_covers_all_local_bars_writers():
     assert RESOURCE_GROUP["system.eod"] == "local_bars"
     for kind in ("system.sync_bars", "system.rolling_repair", "system.reconcile_bars", "sync"):
         assert RESOURCE_GROUP.get(kind) == "local_bars", f"{kind} 会写 local_bars 却未登记资源组"
-    # 选股不写日线库，不应被塞进该组（否则白白串行化）
+    # 手动选股不写日线库，不应被塞进该组（否则白白串行化，用户会以为卡死）
     assert RESOURCE_GROUP.get("screen") is None
+
+
+def test_scheduled_screen_registered_in_local_bars_group():
+    """★ 定时选股必须在互斥组里 —— 只靠「默认时间错开」是不够的。
+
+    cron 用户可以改。一旦改到与日线同步同一时刻，选股会读到**半更新**的日线
+    （部分标的已是今天、部分还是昨天），选出的票无法复现；而这是无人值守的定时
+    作业，结果直接落进 ``screen_runs``，没人会去复核它是不是跑在正确的数据上。
+    """
+    assert RESOURCE_GROUP.get("system.classic_screen") == "local_bars"
+
+
+def test_scheduled_screen_waits_for_running_bars_sync():
+    """行为验证：sync_bars 跑着时，定时选股必须排队，绝不能同时开工。"""
+
+    async def main():
+        rt = JobRuntime(db=None)
+        gate = asyncio.Event()
+        order: list[str] = []
+
+        async def sync_runner(_job):
+            order.append("sync:start")
+            await gate.wait()
+            order.append("sync:end")
+            return {"ok": True}
+
+        async def screen_runner(_job):
+            order.append("screen:start")
+            return {"picks": []}
+
+        sync_id = rt.submit(_spec("system.sync_bars", sync_runner))
+        assert await _wait_status(rt, sync_id, "running"), "sync_bars 未被派发"
+
+        screen_id = rt.submit(_spec("system.classic_screen", screen_runner))
+        for _ in range(30):
+            await asyncio.sleep(0.01)
+        assert rt._jobs[screen_id]["status"] != "running", (
+            "定时选股与日线同步并发：选股会读到半更新的日线，且没人会发现"
+        )
+        assert "screen:start" not in order
+
+        gate.set()
+        assert await _wait_status(rt, screen_id, "done"), "sync 结束后选股未被派发"
+        assert order == ["sync:start", "sync:end", "screen:start"], order
+
+    asyncio.run(main())
 
 
 def test_failure_hook_fires_on_runner_exception():

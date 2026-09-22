@@ -25,8 +25,26 @@ router = APIRouter()
 @router.post("/trade/order")
 async def trade_order(body: dict, ctx: AppContext = Depends(get_ctx)):
     """创建/提交trade / order（POST /trade/order）。"""
-    b = _need()
-    if b is None:
+    if ctx.signal_router is None:
+        return err(503, "统一信号入口未初始化")
+    # ★★ 券商前置门必须按**执行模式**分流（2026-09-20 实测修复）。
+    #
+    # 此前此处是**无条件**的 `b = _need(); if b is None: return no_broker()`，
+    # 于是「信号模式 = 模拟盘 / 预演」时，交易页下单**仍被「未连接券商」挡死**。
+    # 但这两个模式**根本不需要券商**：
+    #   - paper   ：成交由 PaperEngine 本地撮合（现金/持仓/T+1/涨跌停全在本地维护）；
+    #   - dry_run ：只返回计划，`_route_inner` 在碰券商之前就 return 了。
+    # 实测（本机真实库、`/signal/mode` = paper、未连券商）：
+    #   POST /trade/order → 503「未连接任何券商客户端：请到「券商连接」页添加并连接券商。」
+    # 即 **模拟盘这条链路从界面完全不可达** —— 用户被告知去连券商，而其实模拟盘
+    # 本来就能成交。这与 `/trade/precheck`（已按 `require_account=_live` 分流）自相
+    # 矛盾：预检说「可以下单」，下单却说「没连券商」。
+    #
+    # 现在只有 live 模式才要求券商。live 无券商时不再由这里拦，而是交给
+    # `SignalRouter._live()` 返回 `broker_unavailable=True`，下面照旧映射成
+    # 503 + 「券商连接」引导 —— **归因不变**，只是不再误伤 paper/dry_run。
+    _mode = str(getattr(ctx.signal_router, "mode", "") or "")
+    if _mode == "live" and _need() is None:
         return no_broker()
     code = str(body.get("code", "")).strip().upper()
     direction = (body.get("direction") or "buy").lower()
@@ -38,8 +56,6 @@ async def trade_order(body: dict, ctx: AppContext = Depends(get_ctx)):
         return err(400, "code 必填")
     if direction not in ("buy", "sell"):
         return err(400, "direction 须为 buy/sell")
-    if ctx.signal_router is None:
-        return err(503, "统一信号入口未初始化")
     # V9 Execution Unification：手动单同样经 SignalRouter 统一链路
     # （ExecutionMode live/paper/dry_run + 风控 + 幂等 + WAL + 审计），
     # 不再直连 ExecutionService 绕过信号模式。
@@ -96,17 +112,47 @@ async def trade_cancel(body: dict, ctx: AppContext = Depends(get_ctx)):
 
     ★ 指定了 ``conn_id`` 却取不到该连接时**报错，绝不静默回退到 active** ——
     静默回退正是「撤错账户」的成因。
+
+    ★ 参数校验在券商门**之前**，且券商门按**执行模式**分流（2026-09-20 实测修复）。
+    此前顺序相反，导致两个错误归因：``{}`` 被券商门拦成「未连接任何券商客户端」
+    （把「参数没传」说成「环境不可用」）；``paper`` 模式下撤模拟盘委托也被告知
+    「请去连接券商」——而模拟盘委托即时撮合、本来就不存在可撤的挂单。
     """
+    oid = str(body.get("order_id", ""))
+    if not oid:
+        return err(400, "order_id 必填")
     conn_id = str(body.get("conn_id") or "")
+    _mode = str(getattr(ctx.signal_router, "mode", "") or "")
+    # ★ 模拟盘委托号递给券商柜台 ⇒ 必须在此拦下并**如实归因**（2026-09-20 实测修复）。
+    #
+    #   实测（本机、QMT 已连接、signal mode=paper）：把模拟盘委托号 ``PAPER-1``
+    #   传给 /trade/cancel，请求会一路走到券商适配器 ``int(order_id)`` ⇒
+    #   ``ValueError: invalid literal for int()`` ⇒ 全局兜底 500「服务器内部错误」。
+    #   用户看到的是「服务坏了」，真相是「模拟盘的委托根本不在券商那儿」。
+    #
+    #   ⚠️ 只拦**模拟盘前缀**的委托号，不按模式一刀切：用户可能刚从 live 切到 paper，
+    #   此时券商那边还有真实挂单需要撤 —— 硬拦会让真实委托被搁死。
+    from engines.paper_engine import PAPER_ORDER_PREFIX
+
+    if oid.upper().startswith(PAPER_ORDER_PREFIX):
+        return err(503, "该委托号属于「模拟盘」（本地撮合），券商柜台不存在这笔委托，"
+                        "无可撤销的挂单。撤单只对券商实盘委托有效。"
+                        + ("" if _mode == "live" else f"（当前信号模式：{_mode}）"))
     b = _need(conn_id or None)
     if b is None:
         if conn_id:
             return err(404, f"指定的连接不可用或未连接：{conn_id}（已阻止回退到其他账户）")
+        if _mode and _mode != "live":
+            return err(503, "当前信号模式为「模拟盘 / 预演」：模拟盘委托即时撮合、"
+                            "预演只生成计划，不存在可撤销的挂单。"
+                            "撤单只对券商实盘委托有效。")
         return no_broker()
-    oid = str(body.get("order_id", ""))
-    if not oid:
-        return err(400, "order_id 必填")
-    res = await get_execution_service().cancel_order(b, oid)
+    try:
+        res = await get_execution_service().cancel_order(b, oid)
+    except ValueError as exc:
+        # ★ 委托号形态被柜台拒绝（非数字、长度不对…）是**参数问题**，不是服务故障。
+        #   此前直接冒泡 ⇒ 500「服务器内部错误」，把「你传错了」说成「后端挂了」。
+        return err(400, f"撤单被拒绝（委托号不被柜台接受）：{exc}")
     return ok(res)
 
 @router.get("/trade/positions")

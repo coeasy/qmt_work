@@ -319,9 +319,22 @@ class SignalRouter:
         sig = Signal(**entry["sig"])
         # 阶段 0-B（F13）：确认前**重跑风控**——挂起期间风控参数/熔断可能已变化，
         # 不得直接放行。
+        #
+        # ★★ 重跑必须与**下单时**用同一组参数（2026-09-20 实测修复）：此前这里漏传
+        #   `price_type`，于是 `check_order` 取默认值 "limit"，**市价单被当成限价单**
+        #   评估。两个后果：
+        #   ① 市价单的价格闸门失效/错判 —— `_validate_order` 里
+        #      `if not is_market and price <= 0` 会以「限价单必须提供 >0 的委托价」
+        #      拒掉一笔**市价单**（实测：市价单挂起后确认，返回 400
+        #      「限价单必须提供 >0 的委托价，当前 price=0.0」）；而「取不到最新价」
+        #      恰恰正是市价单进入挂起分支的原因 ⇒ **这类单永远确认不了**。
+        #   ② 价格偏离拒单（`price_deviation_pct`）本应只作用于限价单，却会拿
+        #      est_price（最新价）当委托价去比对，等于对市价单做了一次无意义的偏离校验。
+        #   现在透传 sig.price_type，与 `_route_inner` 的口径完全一致。
         est_price = await self._est_price_async(sig)
         if self._risk is not None:
             ok, reason = self._risk.check_order(sig.code, est_price, sig.volume, sig.side,
+                                                price_type=sig.price_type,
                                                 require_account=(self.mode == "live"))
             if not ok:
                 self._audit("signal.rejected", sig.code, sig.__dict__, reason)
@@ -350,6 +363,17 @@ class SignalRouter:
             return {"ok": False, "reason": reason, "mode": "paper"}
         # 限价单用委托价；市价单用路由层估好的最新价（PaperEngine 拒绝 price<=0）。
         price = float(sig.price or 0) or float(est_price or 0)
+        # ★ 市价单取不到行情时的**归因**必须准确（2026-09-20 实测修复）：此前直接把
+        #   price=0 交给 PaperEngine，用户收到的是「模拟盘拒单：price 必须大于 0」——
+        #   对一笔**市价单**来说这句话既没解释为什么、也没指出下一步。真实成因是
+        #   「市价单需要最新行情来定价，而当前取不到该标的行情」（未连券商 / 标的无
+        #   行情）。零 mock 契约：拿不到价就如实拒绝，绝不臆造一个价去成交。
+        if price <= 0:
+            reason = ("模拟盘无法以未知价成交：市价单需要最新行情来定价，"
+                      "当前取不到该标的行情（未连接券商，或该标的暂无行情）。"
+                      "可改用限价单，或先连接券商行情源。")
+            self._audit("signal.rejected", sig.code, sig.__dict__, reason)
+            return {"ok": False, "reason": reason, "mode": "paper"}
         try:
             # submit_order 内含同步 SQLite 写（现金/持仓/成交落库），移出事件循环，
             # 避免高频信号下单时阻塞其他请求（与 strategy_runtime 同口径）。

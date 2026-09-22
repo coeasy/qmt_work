@@ -382,6 +382,39 @@ class LocalStore:
         return self._db.query(
             "SELECT code, name, category FROM local_stock_list ORDER BY code")
 
+    def codes_with_bars(self, *, since: str = "", period: str = "1d",
+                        adjust: str = "") -> List[str]:
+        """**有本地日线**的标的代码（按需限定「最近 N 天内有数据」）。
+
+        ★ 存在的理由：``local_stock_list`` 在**纯券商环境**下永远是空的 ——
+        券商适配器没有 ``get_stock_list`` 能力（只有 ``get_sector_stocks``），
+        所以「股票列表」这张表没有任何东西会去写它。于是选股解析股票池时
+        ``all`` 池判空，**哪怕 ``local_bars`` 里躺着 5209 只、62 万根日线**，
+        界面也只回一句「股票池为空」（实测 2026-09-20 真实库）。
+
+        而「有日线的标的集合」本身就是一份合法且**更可靠**的股票池：选股要算的
+        就是这些日线，没有日线的标的根本进不了计算。这里只补「有日线」这一层，
+        不伪造名称（``names`` 由调用方决定留空）。
+
+        ``since``（``YYYYMMDD``）：只要该日之后仍有数据的标的。留空 = 不限。
+        为什么需要它：全量回补会把**早已退市**的标的留在 ``local_bars`` 里，
+        不加时间窗就会把它们当成当前股票池。
+        """
+        sql = "SELECT DISTINCT code FROM local_bars WHERE period=?"
+        args: list = [period or "1d"]
+        if adjust:
+            sql += " AND adjust=?"
+            args.append(adjust)
+        if since:
+            sql += " AND dt>=?"
+            args.append(since)
+        sql += " ORDER BY code"
+        try:
+            rows = self._db.query(sql, tuple(args))
+        except Exception:  # noqa: BLE001 表不存在（未迁移的库）→ 空池，由调用方兜底
+            return []
+        return [str(r["code"]) for r in rows if r.get("code")]
+
     # ------------------------------------------------------------------
     # 板块榜（kind = industry/concept/stat…）
     # ------------------------------------------------------------------

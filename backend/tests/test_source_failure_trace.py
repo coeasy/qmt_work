@@ -133,3 +133,32 @@ def test_trace_is_reset_between_calls():
     mgr._sup_chain = lambda *a, **k: []  # 下一次：空链
     _run(mgr._first_supported("get_boards", "industry", "pct", 10, source="broker"))
     assert mgr.last_failure_trace()["tried"] == [], "溯源未重置，会拿上次原因解释这次"
+
+
+# --------------------------------------------------------------------------- #
+# /data/source/diagnostics 端点（V11 R3）：把 trace 暴露给前端
+# --------------------------------------------------------------------------- #
+
+def test_diagnostics_endpoint_reports_probed_trace(app_client):
+    """``probe=1`` ⇒ 主动触发一次已知失败，trace 必须更新到前端可见。"""
+    r = app_client.get("/api/v1/data/source/diagnostics?capability=sector&probe=1")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["code"] == 0
+    data = body["data"]
+    assert data["probed"] is True
+    assert data["capability"] == "sector"
+    # 不在断言具体 chain 形状（依赖环境是否有券商），但 interpretation 必含
+    assert "interpretation" in data and data["interpretation"]
+    # 锁：未触发 probe 时，probed 必为 False，不应悄悄跑
+    r2 = app_client.get("/api/v1/data/source/diagnostics")
+    assert r2.json()["data"]["probed"] is False
+
+
+def test_diagnostics_response_shape_locked(app_client):
+    """前端会按字段渲染 ⇒ 字段名/形状必须稳定。"""
+    body = app_client.get("/api/v1/data/source/diagnostics").json()["data"]
+    assert isinstance(body["chain"], list)
+    assert isinstance(body["tried"], list)
+    assert isinstance(body["capability"], str)
+    assert isinstance(body["probed"], bool)

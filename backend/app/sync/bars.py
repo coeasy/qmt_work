@@ -190,6 +190,15 @@ class SyncSummary:
     #: 全量模式下因「本地历史已覆盖到目标起点」而**跳过**的标的数。
     #: 这就是断点续传的可见证据：中断后重跑，这个数会明显变大。
     skipped_complete: int = 0
+    #: ★ 本批**真正写进** ``local_bars.batch_id`` 的批次号（``bars-<hex>``）。
+    #:
+    #: 为什么必须暴露出来：数据集快照（``dataset_snapshots``）要按批次回查
+    #: ``local_bars`` 才能算出真实的 ``row_count`` / 覆盖区间。此前调用方只能
+    #: 拿 ``finished``（ISO 时间戳）当批次号传进去，而落库用的是内部生成的
+    #: ``bars-<hex>`` ⇒ 回查**永远命中 0 行**，于是每个快照都写着
+    #: 「row_count=0、覆盖为空」却标着 ``complete``（实测 2026-09-20）。
+    #: 批次号是「这批数据到底写了什么」的唯一钥匙，必须随汇总一起返回。
+    batch_id: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -200,6 +209,7 @@ class SyncSummary:
             "as_of_max": self.as_of_max, "as_of_min": self.as_of_min,
             "mode": self.mode, "paged": self.paged,
             "skipped_complete": self.skipped_complete,
+            "batch_id": self.batch_id,
         }
 
 
@@ -457,6 +467,9 @@ class BarsSyncer:
             #   历史**并未**补齐 —— 界面与报告必须如实说出来。
             paged=(self._mode == "full" and any(o.paged for o in ok)),
             skipped_complete=int(skipped_complete or 0),
+            # 批次号随汇总返回：调用方（EOD / 同步任务）发布数据集快照时要用它
+            # 回查 local_bars，否则算出来的 row_count 恒为 0。
+            batch_id=self._batch_id,
         )
         self._store.set_meta("last_sync_at", summary.finished)
         if summary.failed:

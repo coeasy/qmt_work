@@ -159,9 +159,17 @@ export const signalApi = {
 
   /**
    * 大额单二次确认。
-   * 后端 signal_router 的复检依赖完整参数，故提交时必须回传 price_type，
-   * 否则市价单会被当作限价单评估（既有缺陷 P0-2 的前端侧配合项）。
+   *
+   * ★ 字段名是 `totp_code`，**不是** `totp`（2026-09-20 修复）。
+   * 此前这里发 `totp`、后端 `routes/signal.py` 只读 `totp_code`，两侧各用一个
+   * 名字且中间无归一化 ⇒ **一旦启用 TOTP，大额单二次确认永远失败**，还报
+   * 「TOTP 校验失败，请重新发起信号」把责任推给用户（重试多少次都没用）。
+   * 后端现已同时接受两种写法（兼容已分发的客户端），此处统一发规范名。
+   *
+   * ★ 不需要回传 price_type：挂起时整份 signal（含 price_type）已存在后端
+   * `_pending` 里，`confirm()` 用 `Signal(**entry["sig"])` 原样恢复。
+   * （此处旧注释声称「必须回传 price_type」是过时的，且 confirm 路由根本不读它。）
    */
   confirm: (token: string, totp?: string) =>
-    http.post<OrderResult>("/signal/confirm", { confirm_token: token, totp: totp ?? "" }),
+    http.post<OrderResult>("/signal/confirm", { confirm_token: token, totp_code: totp ?? "" }),
 };

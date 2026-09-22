@@ -41,7 +41,7 @@ async def shutdown(app: FastAPI) -> None:
             log.debug("system broadcast task 关停异常（已忽略）：%s", exc)
 
     # 3. DB 备份
-    db_backup = getattr(app.state, "_db_backup", None)
+    db_backup = state.db_backup
     if db_backup is not None and settings.db_backup_enabled:
         await db_backup.stop()
 

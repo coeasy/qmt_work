@@ -78,3 +78,53 @@
 .metaStale {
   color: var(--warning);
 }
+
+/* ==========================================================================
+   指标选择条（主图叠加 / 副图）
+   ========================================================================== */
+
+.indBar {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  padding: 0 0 var(--sp-1);
+}
+
+.indGroup {
+  font-size: var(--font-xs);
+  color: var(--text-faint);
+  padding-right: 2px;
+}
+
+.indSep {
+  flex: 0 0 auto;
+  width: 1px;
+  height: 12px;
+  background: var(--border);
+  margin: 0 6px;
+}
+
+.indChip {
+  padding: 1px 6px;
+  font-size: var(--font-xs);
+  color: var(--text-dim);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.indChip:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.indChipOn {
+  background: var(--accent-dim);
+  border-color: var(--accent);
+  color: var(--accent);
+  font-weight: 600;
+}

@@ -14,10 +14,63 @@ const http = require("http");
 //   QMT_CLIENT_TEST_MODE=1 → 自动化测试：安全模式 + 免模态框 + 失败以 exit 2 退出 + 错误落盘
 //   QMT_CLIENT_SAFE_MODE=1 或命令行 --disable-gpu/--safe → 仅启用降级开关
 const TEST_MODE = process.env.QMT_CLIENT_TEST_MODE === "1";
+// ---- 免模态框（**不等于**安全模式）----
+//
+// 为什么要把这两件事拆开（2026-09-21）：
+//   GPU 崩溃自愈的收尾会弹一个 ``showMessageBoxSync`` 提示框。``showMessageBoxSync``
+//   是**同步阻塞**的，在非交互会话（自动化 / 远程 / 无桌面）里无人可点 ⇒ 进程
+//   一直挂在对话框上，「崩溃后到底写了什么判定」变得不可观测。
+//   而 ``QMT_CLIENT_TEST_MODE`` 会**顺带强制安全模式**，于是想复现「正常模式崩一次」
+//   这条路径就没有开关可用了。
+//   拆出这个独立开关后，可以在正常模式下跑崩溃路径并观察判定文件的演化
+//   —— 见 ``scripts/verify_gpu_safe_mode_persistence.py``（隔次启动失败的回归用例）。
+const NO_MODAL = TEST_MODE || process.env.QMT_CLIENT_NO_MODAL === "1";
+
+// ---- GPU 可用性判定（持久化）----
+//
+// 为什么不再用「崩溃后重新拉起子进程」：实测（2026-09-19）``app.relaunch()``、
+// ``spawn(detached, stdio:"ignore")``、``cmd /c start`` 三条路**全部失败** ——
+// spawn 都成功（有 pid、bat 也执行了），但父进程 ``app.exit(0)`` 后子进程随即消失，
+// 最终零进程、零输出，客户端永远起不来。根因是父进程退出会带走子进程。
+//
+// 改为**跨次启动自愈**：本进程崩溃前把判定写盘，下次启动读到「GPU 不可用」就直接
+// 进安全模式。代价是用户需要再点一次，但**一定会起来**，远好于永远起不来。
+const GPU_VERDICT_FILE = "gpu-verdict.json";
+const GPU_VERDICT_MAX_AGE_MS = 30 * 24 * 3600 * 1000; // 30 天后重新探测（驱动可能已修好）
+let _gpuVerdictPathCache = null;
+function gpuVerdictPath() {
+  if (_gpuVerdictPathCache) return _gpuVerdictPathCache;
+  try {
+    _gpuVerdictPathCache = path.join(app.getPath("userData"), GPU_VERDICT_FILE);
+  } catch {
+    _gpuVerdictPathCache = path.join(require("os").tmpdir(), `qmt-${GPU_VERDICT_FILE}`);
+  }
+  return _gpuVerdictPathCache;
+}
+function readGpuVerdict() {
+  try {
+    const raw = fs.readFileSync(gpuVerdictPath(), "utf8");
+    const v = JSON.parse(raw);
+    if (v && typeof v.ok === "boolean") {
+      const age = Date.now() - Number(v.ts || 0);
+      if (Number.isFinite(age) && age < GPU_VERDICT_MAX_AGE_MS) return v.ok;
+      if (!Number.isFinite(age)) return v.ok;
+    }
+  } catch { /* 无判定 / 坏文件 ⇒ 正常模式探测一次 */ }
+  return null; // null = 未知
+}
+function writeGpuVerdict(ok) {
+  try {
+    fs.writeFileSync(gpuVerdictPath(), JSON.stringify({ ok, ts: Date.now() }), "utf8");
+  } catch { /* 写不进就算了，退化为每次都探测 */ }
+}
+const GPU_VERDICT_BAD = readGpuVerdict() === false;
+
 const SAFE_MODE = TEST_MODE
   || process.env.QMT_CLIENT_SAFE_MODE === "1"
   || process.argv.includes("--disable-gpu")
-  || process.argv.includes("--safe");
+  || process.argv.includes("--safe")
+  || GPU_VERDICT_BAD; // 上次判定 GPU 不可用 ⇒ 本次直接进入软件渲染
 if (SAFE_MODE) {
   app.disableHardwareAcceleration(); // 必须在 app ready 之前调用
   app.commandLine.appendSwitch("no-sandbox");
@@ -63,16 +116,52 @@ function installGpuCrashGuard() {
                  details.reason || "", details.exitCode ?? "");
     if (gpuCrashes < GPU_CRASH_LIMIT) return;
     gpuRestarted = true;
-    console.warn("[desktop] GPU 不可用 —— 自动以软件渲染（--disable-gpu）重启客户端");
-    try {
-      // 关掉已拉起的后端，避免重启后端口被残留进程占着
-      killBackendTree();
-    } catch { /* 忽略：端口发现会自动 +1 */ }
-    app.relaunch({ args: process.argv.slice(1).concat(["--disable-gpu"]) });
+    console.warn("[desktop] GPU 不可用 —— 写入判定 + 软件渲染，下次自动进入安全模式");
+    // 关掉已拉起的后端，避免残留端口占着
+    try { killBackendTree(); } catch { /* 忽略 */ }
+    // 把「GPU 不可用」写盘：下次启动读到 ``readGpuVerdict() === false`` ⇒ SAFE_MODE
+    writeGpuVerdict(false);
+    // 交互模式：弹个简短提示，告知用户再点一次即可
+    // （``showMessageBoxSync`` 是阻塞的 —— 非交互会话下必须跳过，见 NO_MODAL 说明）
+    if (!NO_MODAL) {
+      try {
+        const { dialog } = require("electron");
+        dialog.showMessageBoxSync({
+          type: "warning",
+          buttons: ["知道了"],
+          defaultId: 0,
+          title: "GPU 不可用",
+          message: "检测到本机 GPU 不可用，自动切换到软件渲染模式。",
+          detail: "请重新启动客户端以进入安全模式。若问题持续，请更新显卡驱动或联系技术支持。",
+        });
+      } catch { /* headless 时忽略 */ }
+    }
     app.exit(0);
   });
 }
 installGpuCrashGuard();
+
+// ---- GPU 可用性确认：跨过崩溃窗口后写 ok=true，避免下次再探测 ----
+//
+// ⚠️★ 必须先排除 SAFE_MODE —— 这里曾经漏判，导致**隔次启动失败**（实测 2026-09-21）：
+//   安全模式下**压根没用过 GPU**（已 disableHardwareAcceleration + swiftshader），
+//   跑满崩溃窗口当然是「不崩」，于是被这里误判成「GPU 好了」并写回 ok=true；
+//   下一次启动读回 true ⇒ 回到正常模式 ⇒ 再崩一次。用户的体感是
+//   「这客户端有一半概率打不开，而且能打开的那次一重启又坏」。
+//   实测三次连续启动的日志证据：
+//     第 1 次 repro_a —— 正常模式，GPU 崩 2/2 ⇒ 写 {"ok":false}
+//     第 2 次 repro_b —— 读到 false ⇒ 安全模式，**0 条 GPU 崩溃行**，backend ready on 21118
+//                        ⇒ 被这段改写成 {"ok":true}
+//     第 3 次 repro_c —— 读到 true ⇒ 正常模式 ⇒ 又崩 2/2
+//   正确做法：安全模式不写盘，让判定**保持 false**；30 天后自然过期再重探一次，
+//   才是「装好驱动后能自己恢复」的闭环。
+app.on("ready", () => {
+  if (SAFE_MODE) return; // 安全模式没用过 GPU，无权宣称 GPU 可用
+  setTimeout(() => {
+    if (gpuRestarted) return; // 已判定为坏
+    try { writeGpuVerdict(true); } catch { /* 忽略 */ }
+  }, GPU_CRASH_WINDOW_MS + 500);
+});
 
 const DEFAULT_PORT = 21118; // 与 backend/run.py 的默认起始端口保持一致
 // 就绪探针优先用轻量存活端点（/api/v1/live 不做依赖检查、不生成 Swagger 页面），
@@ -81,6 +170,17 @@ const HEALTH_PATHS = ["/api/v1/live", "/api/docs"];
 let backend = null;
 let win = null;
 let tray = null;
+//: 托盘是否**真的**创建成功。
+//:
+//: ★★ 为什么必须单独记这个标志（2026-09-22 实测踩到，用户报「右下角没有图标、
+//: 无法真实退出」）：`win.on("close")` 的语义是「未退出则隐藏到托盘」，而
+//: `quitting` 只由**托盘菜单的「退出」**或 `app.on("quit")` 置位。于是只要托盘没建
+//: 起来，「关闭」就变成**单向隐藏**：窗口消失、托盘没有、**再也没有任何退出入口**
+//: —— 用户只能去任务管理器杀进程。实测根因就是托盘图标没进 asar（见 trayIcon()）。
+//: 因此「关闭即隐藏」**必须以托盘存在为前提**：托盘不可用时，关闭必须是真退出。
+let trayAvailable = false;
+//: 是否已经提示过「已最小化到托盘」。只提示一次，避免每次关闭都弹。
+let trayHintShown = false;
 let quitting = false;
 let shuttingDown = false; // 异步停机中标志（防止 before-quit 重入）
 let activePort = DEFAULT_PORT;
@@ -205,7 +305,7 @@ function writeStartupError(reason) {
   const lines = [
     `[${new Date().toISOString()}] ${reason}`,
     `  execPath=${process.execPath}`,
-    `  isPackaged=${app.isPackaged} testMode=${TEST_MODE} safeMode=${SAFE_MODE}`,
+    `  isPackaged=${app.isPackaged} testMode=${TEST_MODE} noModal=${NO_MODAL} safeMode=${SAFE_MODE}`,
     `  userData=${app.getPath("userData")}`,
     "  --- backend tail (last 40 lines) ---",
     ...(BACKEND_TAIL.length ? BACKEND_TAIL : ["  (无输出)"]),
@@ -340,6 +440,7 @@ function waitReady(retries = 90) {
         const p = HEALTH_PATHS[idx];
         const req = http.get({ host: "127.0.0.1", port, path: p, timeout: 1000 }, (res) => {
           res.resume(); activePort = port;
+          refreshTrayTooltip(); // 端口此刻才定下来（可能不是默认值）
           console.log("[desktop] backend ready on", port, "via", p);
           resolve(true);
         });
@@ -637,35 +738,153 @@ function createWindow() {
   });
   win.on("close", (e) => {
     saveWindowState(); // 关闭前落盘尺寸/位置（此刻窗口仍有效）
-    if (!quitting) { e.preventDefault(); win.hide(); }
+    if (quitting) return; // 已在退出流程中，放行
+    // ★★ 「关闭即隐藏到托盘」**必须以托盘真的存在为前提**（2026-09-22 修）。
+    // 托盘不在时，隐藏 = 窗口消失且**再没有任何入口**能打开或退出 ⇒ 客户端变成
+    // 退不掉的僵尸进程（用户只能进任务管理器）。这正是用户报的「无法真实退出」。
+    // 所以托盘不可用时，「关闭」直接当「退出」处理 —— 宁可少一个后台常驻，
+    // 也绝不能让用户退不出去。
+    e.preventDefault();
+    if (!trayAvailable) { requestQuit(); return; }
+    win.hide();
+    hintTrayOnce();
+  });
+  // Ctrl+Q / Cmd+Q 退出：本地快捷键（窗口聚焦即生效），不占用系统级 globalShortcut，
+  // 也不会与其他应用的同名快捷键冲突。存在的理由同托盘兜底 —— 退出入口必须有多条。
+  win.webContents.on("before-input-event", (_e, input) => {
+    if (input.type !== "keyDown") return;
+    if (String(input.key || "").toLowerCase() !== "q") return;
+    if (input.control || input.meta) requestQuit();
   });
 }
 
+//: 内嵌兜底托盘图标（16×16 / 32×32，RGBA PNG 的 base64）。
+//:
+//: ★★ 为什么必须有内嵌兜底（2026-09-22 实测，用户报「右下角没有图标、无法真实退出」）：
+//: 旧 `trayIcon()` 只找 ``__dirname/../build/icon.png``，而 ``electron-builder.yml``
+//: 的 ``files`` 只打了 ``electron/**/*`` + ``package.json`` ⇒ **build/icon.png 没进 asar**
+//: （实测 ``asar list`` 共 1531 条，``build/`` 与 ``icon.*`` 命中 **0** 条）。
+//: 打包态于是 ``existsSync`` 恒 false ⇒ ``createEmpty()`` ⇒ ``isEmpty()`` 为真 ⇒
+//: ``createTray()`` 直接 return ⇒ **托盘不存在**。而「关闭」的语义是「隐藏到托盘」、
+//: ``quitting`` 只由托盘菜单置位 ⇒ 窗口一关就**再也退不出去**（自锁死，只能进任务管理器）。
+//: 内嵌图标保证「任何环境下托盘都建得起来」；同时 electron-builder.yml 已把
+//: ``build/icon.png`` 打进 asar 作为首选（内嵌只在候选全失败时用）。
+const TRAY_ICON_PNG_B64 = {
+  16: "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAOElEQVR42mNggAL9xu//ScEMyIBUzSiGkKsZbgjVDMAH6OMCmnoBnzeGgBfo54KBM4DizERpdgYAVxKiZezE+pIAAAAASUVORK5CYII=",
+  32: "iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAVElEQVR42mNgQAP6jd//0xIz4AK0thivQ+htOYYjBtQBA2U53BGjDhiUDiAHjDpgNBGO5gJy08OoA0YT4dDPBaMOGE2Eow4Y+g4Y7RkNis7pQHbPARgq5Cdj0ifuAAAAAElFTkSuQmCC",
+};
+
 function trayIcon() {
-  // 优先 build/icon.png；其次内嵌 1x1 占位，避免托盘缺失
-  const iconPath = path.join(__dirname, "..", "build", "icon.png");
-  if (fs.existsSync(iconPath)) return nativeImage.createFromPath(iconPath);
+  // 依次尝试真实图标文件；**任何一步失败都继续往下**，最后用内嵌图兜底。
+  const candidates = [
+    path.join(__dirname, "..", "build", "icon.png"),              // asar 内（files 已包含）
+    path.join(process.resourcesPath || "", "build", "icon.png"),  // extraResources（若将来加）
+    path.join(__dirname, "..", "build", "icon.ico"),
+  ];
+  for (const p of candidates) {
+    try {
+      if (p && fs.existsSync(p)) {
+        const img = nativeImage.createFromPath(p);
+        if (!img.isEmpty()) return img;
+      }
+    } catch { /* 单条候选失败不影响其余候选 */ }
+  }
+  for (const size of [32, 16]) {
+    try {
+      const img = nativeImage.createFromDataURL(
+        `data:image/png;base64,${TRAY_ICON_PNG_B64[size]}`);
+      if (!img.isEmpty()) return img;
+    } catch { /* 继续 */ }
+  }
+  // 理论上到不了这里；真到了也不能让托盘静默消失（见 trayAvailable 的注释）
   return nativeImage.createEmpty();
+}
+
+/** 显示并聚焦主窗口（托盘点击 / 第二实例 / 「显示」菜单共用）。 */
+function showMainWindow() {
+  if (!win || win.isDestroyed()) return;
+  try {
+    if (win.isMinimized()) win.restore();
+    win.show();
+    win.focus();
+  } catch { /* 窗口正在销毁时忽略 */ }
+}
+
+/** **唯一**的「真退出」入口：置 ``quitting`` 后交给 before-quit → fullShutdown 优雅停机。 */
+function requestQuit() {
+  quitting = true;
+  app.quit();
+}
+
+/** 首次隐藏到托盘时提示一次（Windows 用托盘气泡；其余平台跳过，不阻塞）。 */
+function hintTrayOnce() {
+  if (trayHintShown || !trayAvailable) return;
+  trayHintShown = true;
+  try {
+    if (process.platform === "win32" && tray && typeof tray.displayBalloon === "function") {
+      tray.displayBalloon({
+        title: "qmt_work 仍在后台运行",
+        content: "已最小化到系统托盘。右键托盘图标可选「退出」真正结束程序；"
+               + "也可在应用内「菜单栏 → 退出」结束。",
+      });
+    }
+  } catch { /* 气泡失败只影响提示，不影响运行 */ }
+}
+
+/** 刷新托盘提示文字。
+ *
+ * ★ 为什么需要单独一个函数（2026-09-22）：托盘是在 `createTray()` 里建的，而
+ * `activePort` 要等 `waitReady()` 健康检查成功才知道（后端端口被占用时会自动 +1）。
+ * 旧实现只在建托盘时 `setToolTip` 一次 ⇒ 端口一旦不是默认值，**托盘提示永远是错的**，
+ * 用户按提示去开浏览器会打不开。所以端口一变就刷新。
+ */
+function refreshTrayTooltip() {
+  if (!tray || !trayAvailable) return;
+  try {
+    tray.setToolTip(`qmt_work 量化平台（端口 ${activePort}）`);
+  } catch { /* 托盘正在销毁时忽略 */ }
 }
 
 function createTray() {
   const icon = trayIcon();
-  if (icon.isEmpty()) return; // 无图标则不创建托盘
-  tray = new Tray(icon.resize({ width: 16, height: 16 }));
+  if (icon.isEmpty()) {
+    // 极端兜底：连内嵌图都建不出来 ⇒ 明确放弃托盘，并**保持「关闭=退出」**，
+    // 绝不留下「窗口能关、程序退不掉」的状态。
+    trayAvailable = false;
+    console.log("[desktop] 托盘图标不可用：已禁用「关闭隐藏到托盘」（关闭将直接退出）");
+    return;
+  }
+  try {
+    tray = new Tray(icon.resize({ width: 16, height: 16 }));
+  } catch (err) {
+    trayAvailable = false;
+    console.log(`[desktop] 托盘创建失败：${err && err.message}；关闭将直接退出`);
+    return;
+  }
   const ctx = Menu.buildFromTemplate([
-    { label: "显示", click: () => win.show() },
+    { label: "显示主窗口", click: () => showMainWindow() },
     { label: "打开浏览器", click: () => shell.openExternal(`http://127.0.0.1:${activePort}/`) },
     { type: "separator" },
     { label: "检查更新", click: () => updater.check() },
     { type: "separator" },
-    { label: "退出", click: () => { quitting = true; app.quit(); } },
+    { label: "退出", click: () => requestQuit() },
   ]);
-  tray.setToolTip("qmt_work 量化平台");
+  refreshTrayTooltip();
   tray.setContextMenu(ctx);
-  tray.on("click", () => win.show());
+  // 左键单击 = 显示主窗口（Windows 上左键单击默认无行为，必须显式绑）
+  tray.on("click", () => showMainWindow());
+  tray.on("double-click", () => showMainWindow());
+  trayAvailable = true;
+  console.log("[desktop] 托盘已创建");
 }
 
 app.whenReady().then(async () => {
+  // ★ 没拿到单实例锁 ⇒ 本进程只是「用户又点了一次图标」的空壳，**绝不能继续**。
+  // 为什么这个 return 是必需的：`app.quit()` 在 ready **之前**调用只是「预约退出」，
+  // `whenReady()` 依然会 resolve —— 于是第二个实例照样会 startBackend() +
+  // createWindow()，起出第二个后端（端口自动 +1、抢同一份 SQLite）再被退出流程杀掉。
+  // 症状是「双击图标后闪一下、日志里多一次后端冷启动、偶尔端口错乱」，很难归因。
+  if (!gotLock) return;
   applySecurityPolicy(); // CSP 必须在首次建窗前挂上
   // 去掉 Electron 默认应用菜单（File/Edit/View/Window/Help 一串英文），
   // 一是它与自绘标题栏重复且语言不符，二是深色终端里原生菜单栏观感割裂。
@@ -686,7 +905,12 @@ app.whenReady().then(async () => {
   setTimeout(() => updater.checkSilent(), 5000);
 });
 
-app.on("second-instance", () => win && win.show());
+app.on("second-instance", () => showMainWindow());
+// 窗口全关：托盘可用时正常走不到这里（关闭只是隐藏，窗口并未销毁）；
+// 托盘不可用时**必须退出**，否则会以「无窗口」形态残留 —— 那正是「关不掉」。
+app.on("window-all-closed", () => {
+  if (!trayAvailable) requestQuit();
+});
 // 退出：先优雅停机后端再强杀兜底，保证桌面壳关闭后零残留进程
 app.on("before-quit", (e) => {
   if (shuttingDown) return; // 正在停机中，放行本次退出
@@ -735,9 +959,36 @@ ipcMain.handle("window-close", () => {
   if (win && !win.isDestroyed()) win.close();
   return true;
 });
+// ---- 真退出（页面「退出」按钮走这里）----
+// ⚠️ 与 window-close 语义**不同**：window-close = 「隐藏到托盘」（托盘可用时），
+// 本接口 = **结束进程**（含后端优雅停机）。
+// 为什么页面必须有一个「真退出」：Windows 11 默认把新出现的托盘图标收进
+// 「隐藏的图标」溢出层，用户**看不见**它 ⇒ 只靠托盘菜单退出是不可靠的。
+// 退出入口必须「不依赖托盘可见性」。
+ipcMain.handle("app-quit", () => { requestQuit(); return true; });
 ipcMain.handle("window-is-maximized", () => Boolean(win && !win.isDestroyed() && win.isMaximized()));
 
 // ---- 启动失败页的「重新启动后端」----
 // 加载页是 data: URL，不能直接驱动主进程重启后端，只能经 IPC 请求。
 // 只重跑启动流程，不涉及任何业务数据；bootSequence 内的 booting 标志防连点。
 ipcMain.handle("boot-retry", () => { void bootSequence(true); return true; });
+
+// ---- 数据目录设置：系统「选择文件夹」对话框 ----
+// 只返回一个路径字符串，**不写任何东西**（真正的落盘由后端 /config/paths 做，
+// 并且后端还会再校验一次 —— 这里不做校验，免得两处规则各写一套）。
+// canceled ⇒ 返回 null（不是错误）；异常 ⇒ 返回 null 并记日志，让渲染层降级到手输。
+ipcMain.handle("select-directory", async (_e, opts) => {
+  try {
+    if (!win || win.isDestroyed()) return null;
+    const res = await dialog.showOpenDialog(win, {
+      title: (opts && opts.title) || "选择数据目录",
+      defaultPath: (opts && opts.defaultPath) || undefined,
+      properties: ["openDirectory", "createDirectory", "dontAddToRecent"],
+    });
+    if (res.canceled || !res.filePaths || !res.filePaths.length) return null;
+    return res.filePaths[0];
+  } catch (err) {
+    console.error("[select-directory] 打开目录选择框失败：", err);
+    return null;
+  }
+});

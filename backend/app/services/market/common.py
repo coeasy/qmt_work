@@ -30,6 +30,47 @@ def quote_error(code: str, source: str) -> tuple:
     return 503, f"行情获取失败：{code} 券商不可用且 TDX 行情源亦无数据，请连接券商或检查网络。"
 
 
+#: 行情快照的**派生字段**（市值 / PE / PB / 换手 / 振幅 / 量比 / 均价 / 今开 / 最高 / 最低）。
+#:
+#: ★ 单一真源（2026-09-21 提上来）：券商与本地 TDX 都**不提供**这些字段，只有公开行情源
+#:   （腾讯）有。此前这份清单只存在于 ``routes/market.py``，于是
+#:   `/market/stock-info` 会去补、`/market/analysis` 的估值维度却只会说「无数据」——
+#:   同一份 PE/PB，一个端点有、另一个说没有（假空缺，界面在撒谎）。
+#:   两处必须按同一份清单判断「哪个源能给」，否则还会再分叉。
+METRIC_KEYS = ("open", "high", "low", "avg_price", "amplitude", "turnover_rate",
+               "volume_ratio", "pe_ttm", "pb", "circ_mv", "total_mv", "amount")
+
+#: 估值维度真正需要的行情派生字段 → **估值载荷字段名**。
+#:
+#: ⚠️⚠️ 两边**名字不一样**，这是本表存在的唯一理由：行情快照给的是 ``pe_ttm``
+#:   （TTM 口径），而 `/market/analysis` 的估值载荷用 ``pe``。若按同名直接填，
+#:   结果是「填进去了 ``pe_ttm``、而 ``pe`` 仍然是 null」—— 实测就这么错过一次：
+#:   ``pb`` 因为同名碰巧填上了（界面显示 PB 6.23），``pe`` 却一直空着，
+#:   于是「估值」看着仍然像只有一半数据。
+VALUATION_METRIC_MAP = {"pe_ttm": "pe", "pb": "pb"}
+
+#: 估值兜底要问行情源要的字段（= 上表的键）。
+VALUATION_METRIC_KEYS = tuple(VALUATION_METRIC_MAP)
+
+
+def metric_sources() -> list:
+    """列出**声明了全部行情派生字段**的源名（按注册顺序）。
+
+    ★ 为什么要动态找、不写死 ``"tencent"``：源是可插拔的（插件目录 / 可选依赖），
+      写死会在没有腾讯源的部署里变成一句永远失败的请求；而按「声明的字段键集」
+      判断，换源、加源都自动跟随，也不会去问一个根本不提供这些字段的源。
+    """
+    from datasource.registry import get_hub
+    hub = get_hub()
+    plugins = getattr(hub, "_plugins", {}) or {}
+    out = []
+    for name, src in plugins.items():
+        keys = getattr(src, "_DETAIL_KEYS", ())
+        if all(k in keys for k in METRIC_KEYS):
+            out.append(name)
+    return out
+
+
 class TTLCache:
     """轻量 TTL 缓存：多窗口同时打开指数条/板块榜时不重复打源。
 

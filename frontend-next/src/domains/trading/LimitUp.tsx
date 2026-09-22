@@ -18,7 +18,9 @@ import { limitupApi, marketApi, type LimitUpRow, type LimitUpScanResponse } from
 import { useAsync } from "@/hooks/useAsync";
 import { useLiveQuotes } from "@/hooks/useLiveQuotes";
 import { fmtAmount, fmtPct, fmtPrice, normalizeCode, toneColor } from "@/shared/format";
+import { isLivePrice } from "@/shared/freshness";
 import type { LimitUpStatus } from "@/shared/types";
+import { useOpenWorkbench } from "@/hooks/useOpenWorkbench";
 import s from "../domain.module.css";
 
 /**
@@ -32,8 +34,26 @@ import s from "../domain.module.css";
  *   - do_trade=true 时触发会真实下单（默认 false，仅监控），本页对该开关做显式二次确认提示
  *   - 另有 /market/limitup 做「板块内涨停扫描」，与本页的「自选池监控」是两件事
  */
+
+/**
+ * 名称占位：空串必须显式渲染成 `—`（2026-09-20 修复）。
+ *
+ * 后端此前用 `name or code` 兜底 ⇒ 接口返回的 `name` **恒非空**（等于代码），
+ * 于是既看不出「名称缺失」，也把代码当名称显示。后端改成「查不到就留空」之后，
+ * 空串必须在这里显式占位 —— `?? "--"` 对 `""` **不生效**（本项目反复踩到的坑）。
+ *
+ * 导出以便单测（与 `ScreenPanels::resultCols`、`Rebalance::orderCols` 同一套路：
+ * `DataTable` 在 jsdom 下不渲染行，只能直接测渲染函数）。
+ */
+export function nameText(name?: string | null): string {
+  const v = String(name ?? "").trim();
+  return v || "—";
+}
+
 export function LimitUp() {
   const [tab, setTab] = useState<"pool" | "scan">("pool");
+  // 涨停池 / 扫描结果点一行 ⇒ 直接进行情工作台看这只票（唯一出口，勿各写一遍）
+  const openWorkbench = useOpenWorkbench();
 
   const st = useAsync<LimitUpStatus>(() => limitupApi.status(), []);
   const status = st.data;
@@ -53,6 +73,8 @@ export function LimitUp() {
   const [doTrade, setDoTrade] = useState(false);
   /** 真实下单模式的启动确认 */
   const [confirmStart, setConfirmStart] = useState(false);
+  /** 重置触发记录的确认（见下方 ★，它不只是清计数） */
+  const [confirmReset, setConfirmReset] = useState(false);
   const [interval, setIntervalSec] = useState("2");
 
   // 扫描参数
@@ -116,7 +138,7 @@ export function LimitUp() {
 
   const scanCols: Column<LimitUpRow>[] = [
     { key: "code", header: "代码", width: 100, mono: true, render: (r) => r.code },
-    { key: "name", header: "名称", width: 100, render: (r) => r.name ?? "--" },
+    { key: "name", header: "名称", width: 100, render: (r) => nameText(r.name) },
     {
       key: "last",
       header: "最新价",
@@ -124,10 +146,22 @@ export function LimitUp() {
       align: "right",
       mono: true,
       // 扫描结果是**发起扫描那一刻**的快照；叠加实时行情后数字才会继续走。
+      // ★ 没叠加到行情时这里显示的仍是扫描那一刻的价格，却在「最新价」表头下 ——
+      //   打板是秒级决策，把几分钟前的价当现价看会误判封板强度，故标出来。
       render: (r) => {
         const q = scanQuotes[r.code]?.price;
-        const last = q !== undefined && q > 0 ? q : r.last;
-        return <span style={{ color: toneColor(r.change_pct) }}>{fmtPrice(last)}</span>;
+        const last = isLivePrice(q) ? q : r.last;
+        return isLivePrice(q) ? (
+          <span style={{ color: toneColor(r.change_pct) }}>{fmtPrice(last)}</span>
+        ) : (
+          <span
+            className={s.stalePrice}
+            style={{ color: toneColor(r.change_pct) }}
+            title="非实时：未订阅到该标的的实时行情，这是发起扫描那一刻的快照价"
+          >
+            {fmtPrice(last)}
+          </span>
+        );
       },
     },
     {
@@ -221,7 +255,7 @@ export function LimitUp() {
 
               {doTrade && (
                 <div className={`${s.note} ${s.noteWarn}`}>
-                  ⚠ do_trade=true：命中条件时会**真实下单**，且买入量取自「买入量」字段。
+                  ⚠ do_trade=true：命中条件时会真实下单，且买入量取自「买入量」字段。
                   建议先在仅监控模式验证阈值。
                 </div>
               )}
@@ -238,11 +272,22 @@ export function LimitUp() {
                 >
                   停止
                 </Button>
+                {/*
+                  ★ 这里必须有确认，而且确认框要说清后果，不能只写「确定要重置吗」。
+
+                  后端 `engines/limitup.py::reset_triggered` 清的是 `_triggered` ——
+                  它是「同一只票当天只触发一次」的**去重集合**（`_maybe_trigger` 里
+                  `if code in self._triggered: return`）。把它清空，池中已经触发过的
+                  标的就会**再次触发**；若 do_trade=true，那就是**重复真实下单**。
+
+                  也就是说这个按钮不是「把计数器归零」这种无害操作，而是会解除
+                  一层**防重复下单的保险**。误点一次 = 多一批委托。
+                */}
                 <Button
                   size="sm"
-                  variant="ghost"
+                  variant="danger"
                   disabled={busy}
-                  onClick={() => void wrap(() => limitupApi.reset(), "已重置触发记录")}
+                  onClick={() => setConfirmReset(true)}
                 >
                   重置触发
                 </Button>
@@ -290,7 +335,7 @@ export function LimitUp() {
                       }}
                     >
                       <span className={s.mono}>{p.code}</span>
-                      <span className={s.muted}>{p.name}</span>
+                      <span className={s.muted}>{nameText(p.name)}</span>
                       {/* 叠加实时行情：池里这些票本来只有代码和名字，看不出当前价位 */}
                       <span
                         className={s.mono}
@@ -375,7 +420,13 @@ export function LimitUp() {
             ) : (scan.data?.rows.length ?? 0) === 0 ? (
               <EmptyState text="无符合条件的涨停标的" />
             ) : (
-              <DataTable columns={scanCols} rows={scan.data?.rows ?? []} rowKey={(r) => r.code} rowHeight={24} />
+              <DataTable
+                columns={scanCols}
+                rows={scan.data?.rows ?? []}
+                rowKey={(r) => r.code}
+                rowHeight={24}
+                onRowClick={(r) => openWorkbench(r.code, r.name ?? "")}
+              />
             )}
           </div>
         </Panel>
@@ -400,6 +451,36 @@ export function LimitUp() {
           void doStart();
         }}
         onCancel={() => setConfirmStart(false)}
+      />
+
+      <ConfirmModal
+        open={confirmReset}
+        title="重置涨停触发记录"
+        danger
+        confirmText="确认重置"
+        message={
+          <>
+            将清空「今日已触发」记录（当前 {status?.total_triggered ?? 0} 条），
+            顶部「累计触发」归零；下方事件流不受影响，仍可回看。
+            <br />
+            这份记录是<b>同一只票当天只触发一次</b>的去重依据 —— 清空后，池中已经触发过的标的
+            <b>会再次触发</b>。
+            <br />
+            {status?.do_trade ? (
+              <>
+                当前是<b>触发即下单</b>模式，再次触发<b>会对这些标的重复下单</b>。
+              </>
+            ) : (
+              <>当前是仅监控模式，重复触发只会重复推送通知，不会下单。</>
+            )}
+          </>
+        }
+        warn="解除防重复触发的保险，清空后不可恢复"
+        onConfirm={() => {
+          setConfirmReset(false);
+          void wrap(() => limitupApi.reset(), "已重置触发记录");
+        }}
+        onCancel={() => setConfirmReset(false)}
       />
     </div>
   );

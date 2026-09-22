@@ -137,3 +137,116 @@ def test_nonnumeric_values_do_not_crash():
     out = _Adapter(frame).get_financial(_CODE)
     assert out["EPS"] is None
     assert out["report_time"] == "2025-03-31"
+
+
+# =====================================================================
+# 2026-09-21 复发（A9）：真实形态是 {代码: {指标: 表}}，不是 {报告期: {指标: 值}}
+# =====================================================================
+#
+# 实测：本机 QMT **只有旧接口 `get_financial_data`**（无 `get_stock_financial`），
+# 它返回的**不是** DataFrame，而是：
+#
+#     {"600519.SH": {"EPS": DataFrame(0,0), "BPS": DataFrame(0,0), ...共 10 个指标}}
+#
+# 即**键是指标名、每个指标各自一张表**。旧实现把 `items[-1]` 当「最新一期」，
+# 于是报告期取到最后一个指标名被截断的结果，10 个指标全 null：
+#
+#     GET /api/v1/reference/financial?code=600519.SH
+#     → {"report_time": "PARENT_NET", "EPS": null, "BPS": null, ...}
+#
+# 而 `PARENT_NET` = `PARENT_NETPROFIT_YOY`[:10] —— 界面「报告期」栏就会显示这串
+# 莫名其妙的字母，用户完全无从判断这是解析错了还是真没数据。
+#
+# 注意上面 `test_*_frame_*` 三条只覆盖 DataFrame 与「{报告期:{指标:值}}」两种形态，
+# **都没覆盖这一种** ⇒ 这就是它能在修复之后再次复发的空隙。本组测试补上这个空隙。
+
+
+def _field_keyed(tables: dict) -> dict:
+    """构造实测形态。
+
+    ⚠️ 只返回**内层** ``{指标: 表/标量}``：``_Adapter`` 自己会把它包成
+    ``{代码: frame}``（与真实 SDK 一致）。这里再包一层就会多出一级，
+    让 frame 变成 ``{代码: {...}}`` ⇒ 键集与指标名不相交 ⇒ 走错分支。
+    """
+    return dict(tables)
+
+
+def test_field_keyed_dict_with_empty_tables_reports_no_data():
+    """★ 实测形态 + 本机真实返回（10 张 0×0 空表）。
+
+    改动前的输出（就是缺陷现场）：
+        {"report_time": "PARENT_NET", "EPS": null, "BPS": null, ... 共 10 个 null}
+    改动后必须是**可操作文案**：`report_time` 不再出现（无从得知，不编造），
+    且给出去哪里解决的指引。
+    """
+    empty = pd.DataFrame()
+    out = _Adapter(_field_keyed({f: empty for f in _FIELDS})).get_financial(_CODE)
+    assert out["code"] == _CODE
+    # ① 不再透出「看起来像值、实际是字段名」的伪报告期
+    assert not out.get("report_time")
+    assert out.get("report_time") != "PARENT_NET"
+    assert not any(out.get("report_time") == f[:10] for f in _FIELDS)
+    # ② 不再返回「一个乱码报告期 + 10 个 null」这种无从判断的载荷
+    assert not any(f in out for f in _FIELDS)
+    # ③ 文案必须能指导动作
+    assert "无财务数据" in out["detail"]
+    assert "QMT" in out["detail"] and "权限" in out["detail"]
+
+
+def test_field_keyed_dict_with_dated_index_is_parsed():
+    """指标表的**索引**是报告期（非空表）⇒ 取最新一期与日期。"""
+    tables = {
+        "EPS": pd.DataFrame({"v": [2.0, 3.5]}, index=["2024-12-31", "2025-03-31"]),
+        "BPS": pd.DataFrame({"v": [10.0, 11.0]}, index=["2024-12-31", "2025-03-31"]),
+        "ROE": pd.DataFrame({"v": [5.0, 6.0]}, index=["2024-12-31", "2025-03-31"]),
+    }
+    out = _Adapter(_field_keyed(tables)).get_financial(_CODE)
+    assert out["report_time"] == "2025-03-31"
+    assert out["EPS"] == 3.5
+    assert out["BPS"] == 11.0
+    assert out["ROE"] == 6.0
+
+
+def test_field_keyed_dict_with_dated_columns_is_parsed():
+    """指标表的**列**是报告期（另一种版本朝向）也必须解析出来。"""
+    tables = {
+        "EPS": pd.DataFrame([[2.0, 3.5]], index=["v"], columns=["2024-12-31", "2025-03-31"]),
+        "BPS": pd.DataFrame([[10.0, 11.0]], index=["v"], columns=["2024-12-31", "2025-03-31"]),
+    }
+    out = _Adapter(_field_keyed(tables)).get_financial(_CODE)
+    assert out["report_time"] == "2025-03-31"
+    assert out["EPS"] == 3.5
+    assert out["BPS"] == 11.0
+
+
+def test_field_keyed_dict_with_scalars_is_parsed():
+    """最朴素的形态：``{指标: 标量}``。报告期无从得知 ⇒ 留空，绝不编造。"""
+    out = _Adapter(_field_keyed({"EPS": 1.23, "BPS": 8.0})).get_financial(_CODE)
+    assert out["EPS"] == 1.23
+    assert out["BPS"] == 8.0
+    assert out["report_time"] == ""
+
+
+def test_nan_never_leaks_as_json_nan():
+    """NaN 必须转 None。
+
+    ``round(float("nan"), 4)`` 得到 ``nan``，json 编码成裸 ``NaN`` 是**非法 JSON**，
+    浏览器 ``JSON.parse`` 直接抛错 ⇒ 整页数据全废。此前 ``float(v)`` 不抛异常，
+    所以这条 NaN 从 ``except`` 旁边溜了过去。
+    """
+    frame = pd.DataFrame({"2025-03-31": [float("nan")] * len(_FIELDS)}, index=_FIELDS)
+    out = _Adapter(frame).get_financial(_CODE)
+    assert out["EPS"] is None
+    assert all(out[f] is None for f in _FIELDS)
+
+
+def test_report_time_rejects_non_date_labels():
+    """报告期只认真日期：``2025-13-45`` 这类假日期一律留空。"""
+    from xtquant_client.xtp.instrument import _as_report_date
+    assert _as_report_date("2025-03-31") == "2025-03-31"
+    assert _as_report_date("20250331") == "2025-03-31"
+    assert _as_report_date("PARENT_NETPROFIT_YOY") == ""
+    assert _as_report_date("PARENT_NET") == ""
+    assert _as_report_date("2025-13-45") == ""
+    assert _as_report_date(None) == ""
+    assert _as_report_date("") == ""

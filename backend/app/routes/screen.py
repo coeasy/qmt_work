@@ -7,7 +7,7 @@
   ★ ``classic``：改走**经典形态策略**（app/screener/classic.py），此时 ``conditions``
   可不传（传了也只回显、不参与求值）。
 - ``GET /market/screen/strategies``：列举可用的经典策略（id/名称/说明/默认参数）。
-- ``POST /market/screen/expr``：公式 DSL 选股（类通达信公式 → conditions JSON，再走同一引擎）。
+- ``POST /market/screen/expr``：公式 DSL 选股（类终端公式 → conditions JSON，再走同一引擎）。
 - ``POST /market/screen/classic``：经典策略选股（多策略批量，与定时任务同一内核）。
 - ``POST /market/screen/boards`` / ``GET /market/screen/boards``：动态板块保存与列举。
 
@@ -211,7 +211,8 @@ async def market_screen_classic(body: Dict[str, Any]):
             if isinstance(inner, dict):
                 one.update(inner)
             results[sid] = await asyncio.to_thread(
-                run_classic, bars_map, sid, one or None, limit)
+                run_classic, bars_map, sid, one or None, limit,
+                uni.get("names") or {})
     except (ValueError, RuntimeError) as exc:
         return err(400 if isinstance(exc, ValueError) else 503, str(exc))
     # ★ 落库：手动选股的结果也必须留下（关掉页面就没了 ⇒ 第二天想看「昨天选出来什么」
@@ -221,6 +222,8 @@ async def market_screen_classic(body: Dict[str, Any]):
         bar_date=bars_last_date(bars_map),
         degraded=bool(report.degraded),
         degraded_reason=report.degraded_reason or "",
+        # 名称兜底：即使某策略行没带 name，也按股票池的名称表补上
+        names=uni.get("names") or {},
     )
     return ok({
         "strategies": strategies,
@@ -259,7 +262,7 @@ async def market_screen_classic_picks(run_id: str = "", strategy: str = "",
 
 @router.post("/market/screen/expr")
 async def market_screen_expr(body: Dict[str, Any]):
-    """公式 DSL 选股（类通达信公式 → 条件树 → 同引擎）。
+    """公式 DSL 选股（类终端公式 → 条件树 → 同引擎）。
 
     请求：{expr, limit?, sort_by?, adjust?, source_policy?, universe?, ...}。
     公式示例：``"C > MA(20) AND RSI(14) < 30"``。

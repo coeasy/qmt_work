@@ -81,6 +81,22 @@ class RuntimeConfig:
         "market.moneyflow.watchlist": ("", str, "",
                                        "资金流自动采集观测池（逗号分隔 QMT 代码；"
                                        "留空用内置 15 只蓝筹）"),
+        # ---- 数据目录（P0-3 II：目录可配置）----
+        # ⚠️ 这两项只覆盖**可以运行期改**的两类目录；主库 db_path 在 Settings 构造期
+        # 就固化了，改它必须写 qmt_work_config.json 并重启，故不在这里。
+        "offline.export_dir": ("", str, "",
+                               "离线数据导出目录（CSV/JSON/Feather 落盘位置）；"
+                               "留空 = <运行目录>/export。改后立即生效"),
+        "offline.cold_dir": ("", str, "",
+                             "冷 K 线仓目录（bars_cold.db 所在文件夹）；"
+                             "留空 = 跟随主库目录。⚠️ 改后**已有冷数据不会自动搬迁**，"
+                             "需用「迁移冷库」把旧库内容复制过来，否则图表历史会静默变短"),
+        # ---- 外观（P1-G：服务器这份是权威，换机器/清缓存能拉回来）----
+        # 存 JSON 文本而不是拆成 4 个键：外观是一个整体，拆开后
+        # 「导入了皮肤但没导入主色」这种半截状态会很难解释。
+        "ui.appearance": ("", str, "",
+                          "界面外观（JSON：skin_id / accent / density / wallpaper）；"
+                          "留空 = 用内置默认皮肤。字段校验见 app/routes/config.py"),
     }
 
     def __init__(self, db=None):

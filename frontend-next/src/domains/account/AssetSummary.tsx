@@ -8,6 +8,7 @@ import {
 } from "@/design/primitives";
 import { useLiveQuotes } from "@/hooks/useLiveQuotes";
 import { fmtMoney, fmtPct, fmtPrice, toneColor } from "@/shared/format";
+import { isLivePrice, staleQuoteNote } from "@/shared/freshness";
 import type { AccountGrid, AccountGridPosition } from "@/shared/types";
 import s from "../domain.module.css";
 
@@ -34,8 +35,10 @@ export function positionPrice(
   p: AccountGridPosition,
   live: number | undefined,
 ): number | undefined {
-  if (live !== undefined && live > 0) return live;
-  if (typeof p.price === "number" && p.price > 0) return p.price;
+  // 「价格可用」的判据统一走 shared/freshness.ts::isLivePrice：0 与缺失同等对待
+  // （停牌会推 price: 0，不能当成真价格）。
+  if (isLivePrice(live)) return live;
+  if (isLivePrice(p.price)) return p.price;
   return p.total_volume > 0 ? p.total_market_value / p.total_volume : undefined;
 }
 
@@ -50,7 +53,7 @@ export function positionProfit(
   p: AccountGridPosition,
   price: number | undefined,
 ): number | undefined {
-  if (typeof p.total_cost === "number" && p.total_cost > 0 && price !== undefined && price > 0) {
+  if (typeof p.total_cost === "number" && p.total_cost > 0 && isLivePrice(price)) {
     return price * p.total_volume - p.total_cost;
   }
   return typeof p.profit === "number" ? p.profit : undefined;
@@ -61,7 +64,7 @@ export function positionProfitPct(
   p: AccountGridPosition,
   price: number | undefined,
 ): number | undefined {
-  if (typeof p.total_cost === "number" && p.total_cost > 0 && price !== undefined && price > 0) {
+  if (typeof p.total_cost === "number" && p.total_cost > 0 && isLivePrice(price)) {
     return ((price * p.total_volume - p.total_cost) / p.total_cost) * 100;
   }
   return typeof p.profit_pct === "number" ? p.profit_pct : undefined;
@@ -80,7 +83,15 @@ export interface AssetSummaryCardsProps {
 }
 
 /**
- * 资产汇总卡：总资产 / 可用资金 / 持仓市值 / 浮动盈亏。
+ * 资产汇总**一行条**：总资产 / 可用资金 / 持仓市值 / 浮动盈亏。
+ *
+ * ★ 为什么改成一行（而不是卡片网格）：原先是 `repeat(auto-fit, minmax(140px,1fr))`
+ *   的四宫格，窗口一窄就**退化成一列四行** —— 看总资产要往下翻，而仪表盘上面
+ *   这几项本来就是「扫一眼」的信息。现在用 flex 单行 + 窄屏横向滚动，永远只有一行。
+ *
+ * ★ 副标题（账户连接数 / 按标的合并 N 只 / 需成本价才可计算）从「第三行文字」
+ *   改成 `title` 悬浮提示：占位的常驻说明会挤掉数值的横向空间，而这几项只在
+ *   「对不上账」时才需要看。
  *
  * ★ 数值一律 `fmtMoney`（2 位小数）。`fmtAmount` 是给成交额/成交量做「万/亿」
  * 缩写的，`<1 万` 时会 `toFixed(0)` 丢掉角分 —— 总资产与券商对账单永远差几元，
@@ -92,32 +103,36 @@ export function AssetSummaryCards({ grid, loading, footer }: AssetSummaryCardsPr
   const money = (v: number | null | undefined) =>
     grid === null ? (loading ? "…" : "—") : v === null || v === undefined ? "—" : fmtMoney(v);
   return (
-    <div className={s.stats}>
-      <div className={s.stat}>
-        <span className={s.statLabel}>总资产</span>
-        <span className={s.statValue}>{money(grid?.total_assets)}</span>
-        <span className={s.statSub}>
-          {grid ? `已连接 ${grid.connected_count} / ${grid.account_count} 个账户` : "无数据"}
-        </span>
+    <div className={s.statRow}>
+      <div
+        className={s.statRowItem}
+        title={
+          grid
+            ? `已连接 ${grid.connected_count} / ${grid.account_count} 个账户 · 跨账户去重汇总`
+            : "尚未取到账户数据"
+        }
+      >
+        <span className={s.statRowLabel}>总资产</span>
+        <span className={s.statRowValue}>{money(grid?.total_assets)}</span>
       </div>
-      <div className={s.stat}>
-        <span className={s.statLabel}>可用资金合计</span>
-        <span className={s.statValue}>{money(grid?.total_cash)}</span>
-        <span className={s.statSub}>全部账户现金</span>
+      <div className={s.statRowItem} title="全部账户现金合计">
+        <span className={s.statRowLabel}>可用资金</span>
+        <span className={s.statRowValue}>{money(grid?.total_cash)}</span>
       </div>
-      <div className={s.stat}>
-        <span className={s.statLabel}>持仓市值合计</span>
-        <span className={s.statValue}>{money(grid?.total_market_value)}</span>
-        <span className={s.statSub}>{grid ? `按标的合并 ${posCount} 只` : "无数据"}</span>
+      <div
+        className={s.statRowItem}
+        title={grid ? `按标的合并 ${posCount} 只持仓` : "尚未取到账户数据"}
+      >
+        <span className={s.statRowLabel}>持仓市值</span>
+        <span className={s.statRowValue}>{money(grid?.total_market_value)}</span>
       </div>
-      <div className={s.stat}>
-        <span className={s.statLabel}>浮动盈亏合计</span>
-        <span className={s.statValue} style={{ color: toneColor(grid?.total_profit) }}>
+      <div className={s.statRowItem} title="浮动盈亏需券商给出成本价才可计算，否则显示 —">
+        <span className={s.statRowLabel}>浮动盈亏</span>
+        <span className={s.statRowValue} style={{ color: toneColor(grid?.total_profit) }}>
           {money(grid?.total_profit)}
         </span>
-        <span className={s.statSub}>需成本价才可计算</span>
       </div>
-      {footer && <div className={s.stat}>{footer}</div>}
+      {footer && <div className={s.statRowItem}>{footer}</div>}
     </div>
   );
 }
@@ -129,6 +144,12 @@ export interface CrossAccountPositionsProps {
   /** 「查看分布」回调；不传则不渲染该列 */
   onInspect?: (p: AccountGridPosition) => void;
   emptyText?: string;
+  /**
+   * 后端快照时间（如 `/account/grid.generated_at`）。
+   * 拿不到实时行情时用它向用户说明「这个价截止到什么时候」—— 只写「最新价」
+   * 却给一个快照值，等于把上一交易日收盘价说成现价。
+   */
+  asOf?: string;
 }
 
 /**
@@ -142,6 +163,7 @@ export function CrossAccountPositions({
   live = true,
   onInspect,
   emptyText = "无跨账户持仓",
+  asOf,
 }: CrossAccountPositionsProps) {
   // 依赖用逗号拼接字符串，避免每次渲染重新订阅（useLiveQuotes 内部已做，这里
   // 只需保证 positions 引用稳定即可）。
@@ -157,7 +179,23 @@ export function CrossAccountPositions({
       width: 84,
       align: "right",
       mono: true,
-      render: (r) => fmtPrice(positionPrice(r, quotes[r.code]?.price)),
+      render: (r) => {
+        const live = quotes[r.code]?.price;
+        const p = positionPrice(r, live);
+        // ★ 「最新价」未必是现价：拿不到实时行情时会退回后端快照价，甚至
+        //   市值/股数反推。不标出来的话，用户会把快照价（可能是上一交易日收盘）
+        //   当成现价做加减仓决策 —— 这正是「非空 ≠ 够新」要防的事。
+        //   用虚线下划线 + 悬浮说明，既不抢眼也一眼可辨。
+        if (isLivePrice(live)) return fmtPrice(p);
+        return (
+          <span
+            className={s.stalePrice}
+            title={`非实时：未取到实时行情，显示的是后端快照价${asOf ? `（生成于 ${asOf}）` : ""}`}
+          >
+            {fmtPrice(p)}
+          </span>
+        );
+      },
     },
     {
       key: "chg",
@@ -187,7 +225,7 @@ export function CrossAccountPositions({
       // 有实时价就按最新价重算（市值是价格的即时函数），否则用后端快照
       render: (r) => {
         const p = positionPrice(r, quotes[r.code]?.price);
-        return fmtMoney(p !== undefined && p > 0 ? p * r.total_volume : r.total_market_value);
+        return fmtMoney(isLivePrice(p) ? p * r.total_volume : r.total_market_value);
       },
     },
     {
@@ -234,9 +272,26 @@ export function CrossAccountPositions({
     });
   }
 
+  // ★ 只标「最新价」一格还不够：合计市值 / 浮动盈亏 / 盈亏比都由同一个价格派生，
+  //   一行里三格金额同时是快照值，光看数字分辨不出来。这里给一句总说明，
+  //   并带上快照生成时间（后端 grid.generated_at），让用户知道「截止到什么时候」。
+  const staleCount = positions.filter((r) => !isLivePrice(quotes[r.code]?.price)).length;
+
   if (!positions.length) return <EmptyState text={emptyText} />;
   return (
-    <DataTable columns={cols} rows={positions} rowKey={(r) => r.code} rowHeight={24} />
+    <>
+      {staleCount > 0 && (
+        <div className={s.note} style={{ marginBottom: 6 }}>
+          {staleQuoteNote(
+            staleCount,
+            positions.length,
+            "「最新价」（带虚线下划线者）与由其派生的合计市值、浮动盈亏都不是实时值。",
+            asOf,
+          )}
+        </div>
+      )}
+      <DataTable columns={cols} rows={positions} rowKey={(r) => r.code} rowHeight={24} />
+    </>
   );
 }
 

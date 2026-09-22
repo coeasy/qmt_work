@@ -3,7 +3,7 @@ import { lazy, type ComponentType, type LazyExoticComponent } from "react";
 /**
  * 页面注册表 · 顶部菜单 / 命令面板 / 工作区的单一真源。
  *
- * 设计要点（对标通达信）：
+ * 设计要点（对标主流 A 股终端）：
  * - MENU 即顶部菜单栏的一级项（6 大业务域），二级为域内页面
  * - 点击二级项 → 在工作区新开/聚焦 Tab，而不是在左栏展开
  * - 所有后端可达能力都必须在此有入口（修复旧前端「12 个页面不可达」问题）
@@ -146,11 +146,16 @@ export const PAGES: Record<string, PageDef> = {
     status: "done",
   },
 
-  /* ---------- 研究 ---------- */
+  /* ---------- 研究 ----------
+     ★ 选股只保留**一个**菜单入口「选股」（screen_workbench）：条件 / 公式 /
+       经典策略 / 自动选股四个页签都在里面。此前菜单里并排挂着「选股工作台 /
+       自动选股 / 条件选股 / 公式选股」四项，其中三项互相重复 —— 用户要找
+       「按规则筛票」时看到四个长得像的入口，只能逐个点开试。 */
   screen_workbench: {
     key: "screen_workbench",
-    label: "选股工作台",
+    label: "选股",
     comp: P(() => import("@/domains/research/ScreenWorkbench")),
+    fullBleed: true,
     status: "done",
   },
   auto_picks: {
@@ -159,6 +164,8 @@ export const PAGES: Record<string, PageDef> = {
     comp: P(() => import("@/domains/research/screen/AutoPicks")),
     fullBleed: true,
     status: "done",
+    menu: false,
+    entryFrom: "screen_workbench",
   },
   screen: {
     key: "screen",
@@ -166,6 +173,8 @@ export const PAGES: Record<string, PageDef> = {
     comp: P(() => import("@/domains/research/Screen")),
     fullBleed: true,
     status: "done",
+    menu: false,
+    entryFrom: "screen_workbench",
   },
   formula: {
     key: "formula",
@@ -173,6 +182,8 @@ export const PAGES: Record<string, PageDef> = {
     comp: P(() => import("@/domains/research/Formula")),
     fullBleed: true,
     status: "done",
+    menu: false,
+    entryFrom: "screen_workbench",
   },
   factor_hub: {
     key: "factor_hub",
@@ -184,6 +195,18 @@ export const PAGES: Record<string, PageDef> = {
     key: "search",
     label: "标的检索",
     comp: P(() => import("@/domains/research/Search")),
+    status: "done",
+  },
+  backtest: {
+    key: "backtest",
+    label: "策略回测",
+    comp: P(() => import("@/domains/research/Backtest")),
+    status: "done",
+  },
+  strategy_market: {
+    key: "strategy_market",
+    label: "策略市场",
+    comp: P(() => import("@/domains/research/StrategyMarket")),
     status: "done",
   },
 
@@ -213,11 +236,22 @@ export const PAGES: Record<string, PageDef> = {
     comp: P(() => import("@/domains/trading/TargetPortfolio")),
     status: "done",
   },
+  /**
+   * 分仓再平衡 —— **已下线**（2026-09-19 裁定：先去掉）。
+   *
+   * ⚠️ 用 `menu: false` 而不是从 `MENU` 里删掉：
+   * ① 页面**仍然注册**，命令面板 / 快捷键仍能到达（不会变成「注册了但没人能到」）；
+   * ② `entryFrom` 让「它现在从哪进」成为**可断言的事实**（门禁会校验），
+   *    而不是靠人记得去读代码。
+   * 直接删 MENU 条目的话，这个页面就彻底不可达了 —— 旧前端 12 个页面正是这么丢的。
+   */
   rebalance: {
     key: "rebalance",
     label: "分仓再平衡",
     comp: P(() => import("@/domains/trading/Rebalance")),
     status: "done",
+    menu: false,
+    entryFrom: "accounts",
   },
 
   /* ---------- 账户 ---------- */
@@ -264,6 +298,19 @@ export const PAGES: Record<string, PageDef> = {
     key: "signals",
     label: "外部信号",
     comp: P(() => import("@/domains/automation/Signals")),
+    status: "done",
+  },
+  /**
+   * 通知渠道（P1-H 新建）。
+   *
+   * 后端 ``/notifications`` 的增删改查 / 批量删除 / 测试发送 / 发送记录**早已齐备**，
+   * 但此前界面没有入口 ⇒ 「告警到底发出去了没有」只能翻数据库。通知是任务失败、
+   * 风控熔断、冷仓切换失败的**最后一道可感知性**，没有入口等于整条链路失效。
+   */
+  notifications: {
+    key: "notifications",
+    label: "通知渠道",
+    comp: P(() => import("@/domains/automation/Notifications")),
     status: "done",
   },
   runtime_jobs: {
@@ -352,7 +399,9 @@ export const MENU: MenuGroup[] = [
   {
     key: "research",
     label: "研究",
-    items: ["screen_workbench", "auto_picks", "screen", "formula", "factor_hub", "search"],
+    // ★ 选股四项收敛成一个入口：auto_picks / screen / formula 仍在 MENU 列表里
+    //   （命令面板分组、快捷键序号依赖它），但 menu:false 让 MenuBar 跳过渲染。
+    items: ["screen_workbench", "auto_picks", "screen", "formula", "factor_hub", "search", "backtest", "strategy_market"],
   },
   {
     key: "trading",
@@ -360,7 +409,11 @@ export const MENU: MenuGroup[] = [
     items: ["trade", "algo", "conditions", "limitup", "target_portfolio", "rebalance"],
   },
   { key: "account", label: "账户", items: ["accounts", "positions", "reconcile", "paper"] },
-  { key: "automation", label: "自动化", items: ["alerts", "webhooks", "signals", "runtime_jobs"] },
+  {
+    key: "automation",
+    label: "自动化",
+    items: ["alerts", "webhooks", "signals", "notifications", "runtime_jobs"],
+  },
   {
     key: "system",
     label: "系统",

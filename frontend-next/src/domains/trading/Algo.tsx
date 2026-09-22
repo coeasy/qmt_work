@@ -205,7 +205,7 @@ export function Algo() {
 
             {quote && (
               <div className={s.note}>
-                {quote.name ?? normCode} · 最新 <span className={s.mono}>{fmtPrice(quote.price)}</span>
+                {quote.name || normCode} · 最新 <span className={s.mono}>{fmtPrice(quote.price)}</span>
               </div>
             )}
 
@@ -313,7 +313,7 @@ export function Algo() {
                 {jobs.error}
               </div>
             ) : (jobs.data?.length ?? 0) === 0 ? (
-              <EmptyState text="暂无算法单" />
+              <EmptyState text="暂无算法单 —— 在上方「新建算法单」选择算法与标的后提交" />
             ) : (
               <DataTable columns={cols} rows={jobs.data ?? []} rowKey={(r) => r.algo_id} rowHeight={24} />
             )}

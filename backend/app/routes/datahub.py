@@ -54,6 +54,43 @@ async def data_providers_health():
     return ok({"providers": out})
 
 
+@router.get("/data/source/diagnostics")
+async def data_source_diagnostics(capability: str = "sector", probe: int = 0):
+    """最近一次数据源失败溯源（``last_failure_trace``，``probe=1`` 时主动触发一次）。
+
+    ``chain`` —— 本应被尝试的源序列（受 ``_sup_chain`` 过滤）。
+    ``tried`` —— 实际尝试的过程（含每步原因），空列表 ≠ 网络坏，而是「链本就空」。
+
+    用户典型误区：「数据源不可用，请检查网络或连接券商」⇒ 实际上是
+    ``_sup_chain("broker","sector")`` 刻意返空（券商不提供 sector 能力），
+    把「不支持」说成「网络坏了」会带偏排查方向。
+    """
+    from datasource.registry import get_manager
+
+    probed = False
+    if probe:
+        # 触发一次已知失败路径：`broker` 源 + `sector` 能力 ⇒ _sup_chain 刻意返空。
+        # 结果是 (None, None) + trace.chain=[] —— 演示「链空」与「都试了失败」是两种语义。
+        try:
+            await get_manager().get_boards("industry", "pct", 50, source="broker")
+        except Exception:
+            pass
+        probed = True
+
+    trace = get_manager().last_failure_trace()
+    return ok({
+        "capability": capability,
+        "probed": probed,
+        "chain": trace.get("chain") or [],
+        "tried": trace.get("tried") or [],
+        "interpretation": (
+            "链空：请求的能力被该源刻意排除（不是网络问题）"
+            if probed and not trace.get("chain") else
+            "已记录上一次失败溯源；带 probe=1 可主动刷新"
+        ),
+    })
+
+
 @router.post("/data/chain")
 async def data_chain_set(body: Dict[str, Any]):
     """运行时覆盖能力降级链（内存态，不持久化；默认契约链不可改，仅覆盖生效）。

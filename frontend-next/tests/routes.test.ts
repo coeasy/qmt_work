@@ -147,17 +147,30 @@ describe("页面注册表", () => {
     expect(planned).toEqual([]);
   });
 
-  it("回测页仍未开放，但因子研究已按退役决策移植回来", () => {
-    // 历史决策曾把「回测」从前端移除（后端 /backtest 端点仍在，但不做页面）。
-    // 2026-09 旧 frontend 退役：为达成零功能回退，因子研究（factor_hub）已从
-    // 旧 frontend/hubs/FactorHub.jsx 移植到 frontend-next，故此处不再断言其缺席。
+  it("回测页已开放（2026-09-19 补建），因子研究也早已移植回来", () => {
+    // ★ 决策翻转（此前这里断言「回测页不开放」）：
+    //   后端 `/backtest/jobs` 的提交/列表/查询/取消/批量取消 + 参数扫描**早就齐了**，
+    //   但 `src/` 里零调用、`PAGES` 里无页面 ⇒ 回测是**存在但不可达**的能力，
+    //   「跑完没有、结果好不好」只能靠 curl 或翻库——与通知渠道同一类缺陷。
+    //   本轮补建页面（domains/research/Backtest.tsx），并把旧断言改成正向断言。
+    //
+    //   旧 frontend 退役时因子研究（factor_hub）已从
+    //   frontend/hubs/FactorHub.jsx 移植过来，故这里不断言其缺席。
     const keys = Object.keys(PAGES);
-    expect(keys).not.toContain("backtest");
+    expect(keys).toContain("backtest");
     expect(keys).not.toContain("factors");
     expect(keys).not.toContain("research_factor");
-    // 移植后的因子研究页必须是真实实现，而非占位
+    // ★ 开放就必须是真的能用 —— 挂个占位页等于把「不可达」伪装成「已支持」
+    expect(PAGES.backtest?.status).toBe("done");
     expect(PAGES.factor_hub).toBeDefined();
     expect(PAGES.factor_hub?.status).toBe("done");
+  });
+
+  it("每个注册页都必须在 MENU 里能找到（命令面板 / 快捷键依赖它）", () => {
+    // ★ 补建的回测页若忘了加进 MENU，页面能注册但**菜单里找不到** ⇒ 又一种不可达。
+    const inMenu = new Set(MENU.flatMap((g) => g.items));
+    const missing = Object.keys(PAGES).filter((k) => !inMenu.has(k));
+    expect(missing).toEqual([]);
   });
 });
 
@@ -213,12 +226,43 @@ describe("菜单隐藏项（menu: false）", () => {
     }
   });
 
-  it("当前隐藏项恰好是已合并进行情工作台的 5 个行情子页", () => {
+  /**
+   * 隐藏项清单**逐条点名**：新增/取消一个隐藏页必须显式改这里。
+   *
+   * 写成「断言隐藏项个数」的话，误隐藏一个正常页面也能通过 —— 而那正是
+   * 「页面从菜单消失但谁也到不了」的复现路径。点名能逼着改动者想清楚
+   * 这个页面现在从哪进。
+   */
+  it("当前隐藏项恰好是：5 个行情子页 + 已下线的分仓再平衡 + 3 个已并入「选股」的选股子页", () => {
     expect(hiddenMenuPages().sort()).toEqual(
-      ["deal_feed", "minutes", "orderbook", "quote", "quoteboard"].sort(),
+      [
+        "auto_picks",
+        "deal_feed",
+        "formula",
+        "minutes",
+        "orderbook",
+        "quote",
+        "quoteboard",
+        "rebalance",
+        "screen",
+      ].sort(),
     );
+  });
+
+  it("每个隐藏页的入口页与其归属一致（行情子页→工作台，选股子页→选股，分仓再平衡→多账户网格）", () => {
+    const expected: Record<string, string> = {
+      auto_picks: "screen_workbench",
+      deal_feed: "workbench",
+      formula: "screen_workbench",
+      minutes: "workbench",
+      orderbook: "workbench",
+      quote: "workbench",
+      quoteboard: "workbench",
+      rebalance: "accounts",
+      screen: "screen_workbench",
+    };
     for (const key of hiddenMenuPages()) {
-      expect(PAGES[key]?.entryFrom).toBe("workbench");
+      expect(PAGES[key]?.entryFrom).toBe(expected[key]);
     }
   });
 });

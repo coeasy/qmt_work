@@ -2,6 +2,7 @@ import { useCallback, useMemo, useState } from "react";
 import {
   Badge,
   Button,
+  ConfirmModal,
   DataTable,
   EmptyState,
   Panel,
@@ -13,6 +14,7 @@ import { paperApi, type PaperPosition, type PaperTrade } from "@/services/api";
 import { useAsync } from "@/hooks/useAsync";
 import { useLiveQuotes } from "@/hooks/useLiveQuotes";
 import { fmtMoney, fmtPct, fmtPrice, tone, toneColor } from "@/shared/format";
+import { isLivePrice } from "@/shared/freshness";
 import s from "../domain.module.css";
 
 type Tab = "positions" | "trades" | "metrics";
@@ -110,9 +112,18 @@ export function Paper() {
   /** 实时价优先，取不到才回退后端快照（绝不用 0 冒充价格） */
   const lastPrice = (r: PaperPosition): number | undefined => {
     const q = quotes[r.code]?.price;
-    if (q !== undefined && q > 0) return q;
-    return r.last_price !== undefined && r.last_price > 0 ? r.last_price : undefined;
+    if (isLivePrice(q)) return q;
+    return isLivePrice(r.last_price) ? r.last_price : undefined;
   };
+  /**
+   * ★ 「现价」这一格是不是实时价。
+   *
+   * 后端 `marking_source=frozen` 时 `last_price` 会**退化成成本价**，而这里照样
+   * 显示在「现价」列下 —— 用户会拿成本价当现价看，浮亏也因此恒为 0。
+   * 「盯市」列虽然已经用徽标区分了实时/成本价，但只盯数字看的用户仍会被误导，
+   * 故价格本身也要标出来（虚线下划线 + hover 说明），与持仓页同口径。
+   */
+  const isLive = (r: PaperPosition): boolean => isLivePrice(quotes[r.code]?.price);
   const lastPct = (r: PaperPosition): number | undefined => quotes[r.code]?.change_pct;
 
   const positionCols: Column<PaperPosition>[] = [
@@ -120,7 +131,24 @@ export function Paper() {
     { key: "name", header: "名称", width: 92, render: (r) => r.name || "--" },
     { key: "vol", header: "持仓", width: 76, align: "right", mono: true, render: (r) => String(r.volume) },
     { key: "cost", header: "成本价", width: 78, align: "right", mono: true, render: (r) => fmtPrice(r.avg_cost) },
-    { key: "last", header: "现价", width: 78, align: "right", mono: true, render: (r) => fmtPrice(lastPrice(r)) },
+    {
+      key: "last",
+      header: "现价",
+      width: 78,
+      align: "right",
+      mono: true,
+      render: (r) =>
+        isLive(r) ? (
+          fmtPrice(lastPrice(r))
+        ) : (
+          <span
+            className={s.stalePrice}
+            title="非实时：未取到实时行情，这是后端盯市快照价（行情冻结时会退化成成本价），市值与浮亏由同一价格派生"
+          >
+            {fmtPrice(lastPrice(r))}
+          </span>
+        ),
+    },
     {
       key: "chg",
       header: "涨跌",
@@ -137,7 +165,7 @@ export function Paper() {
       mono: true,
       render: (r) => {
         const p = lastPrice(r);
-        const mv = p !== undefined && p > 0 ? p * r.volume : r.market_value;
+        const mv = isLivePrice(p) ? p * r.volume : r.market_value;
         return fmtMoney(mv);
       },
     },
@@ -153,7 +181,7 @@ export function Paper() {
         // 这里若兜底成 0，界面会显示「浮亏 0.00」——用户会以为持仓不盈不亏，
         // 与「没数据」是完全不同的两件事。
         const v =
-          p !== undefined && p > 0 && r.avg_cost !== undefined
+          isLivePrice(p) && r.avg_cost !== undefined
             ? (p - r.avg_cost) * r.volume
             : r.unrealized_pnl;
         return <span style={{ color: toneColor(v) }}>{fmtMoney(v)}</span>;
@@ -219,21 +247,18 @@ export function Paper() {
           模拟盘：虚拟资金 + 真实行情盯市，用于策略演练与联调，不产生真实委托。
         </span>
         <span className={s.spacer} />
-        {confirmReset ? (
-          <>
-            <span className={s.muted}>确认清空全部模拟持仓与成交？</span>
-            <Button size="sm" variant="danger" onClick={() => void doReset()}>
-              确认重置
-            </Button>
-            <Button size="sm" variant="ghost" onClick={() => setConfirmReset(false)}>
-              取消
-            </Button>
-          </>
-        ) : (
-          <Button size="sm" variant="ghost" onClick={() => setConfirmReset(true)}>
-            重置账户
-          </Button>
-        )}
+        {/*
+          ★ 这里原先是**自写的内联二次确认**（confirmReset + 确认/取消两个按钮）。
+          它看着像 ConfirmButton，但少了两条关键保险：超时自动复原、失焦/Esc 复原
+          ⇒ 停在待确认态时「确认重置」就那么挂着，下一次误点直接清空。
+
+          更重要的是**选型**：项目纪律是「行内删除走 ConfirmButton（两段式 3 秒复原），
+          资金/不可逆走 ConfirmModal」。重置账户是 `DELETE FROM paper_positions /
+          paper_trades` + 资金复位 —— 不可逆，且要让人读一遍会失去什么，故用模态。
+        */}
+        <Button size="sm" variant="ghost" onClick={() => setConfirmReset(true)}>
+          重置账户
+        </Button>
         <Button size="sm" onClick={reloadAll}>
           刷新
         </Button>
@@ -247,37 +272,38 @@ export function Paper() {
 
       {acc && (
         <>
-          <div className={s.stats}>
-            <div className={s.stat}>
-              <span className={s.statLabel}>总资产</span>
-              <span className={s.statValue}>{fmtMoney(acc.total_assets)}</span>
-              <span className={s.statSub}>初始 {fmtMoney(acc.initial)}</span>
+          {/* ★ 一行条（与仪表盘资产汇总同源）：6 个指标用卡片网格会塌成一列，
+              看总资产要往下翻；dense 变体把每格收窄到 104px 以便一行放下。
+              副标题（初始资金 / 持仓只数）改悬浮提示，不占横向空间。 */}
+          <div className={`${s.statRow} ${s.statRowDense}`}>
+            <div className={s.statRowItem} title={`初始资金 ${fmtMoney(acc.initial)}`}>
+              <span className={s.statRowLabel}>总资产</span>
+              <span className={s.statRowValue}>{fmtMoney(acc.total_assets)}</span>
             </div>
-            <div className={s.stat}>
-              <span className={s.statLabel}>可用资金</span>
-              <span className={s.statValue}>{fmtMoney(acc.cash)}</span>
+            <div className={s.statRowItem}>
+              <span className={s.statRowLabel}>可用</span>
+              <span className={s.statRowValue}>{fmtMoney(acc.cash)}</span>
             </div>
-            <div className={s.stat}>
-              <span className={s.statLabel}>持仓市值</span>
-              <span className={s.statValue}>{fmtMoney(acc.market_value)}</span>
-              <span className={s.statSub}>{acc.position_count} 只</span>
+            <div className={s.statRowItem} title={`持仓 ${acc.position_count} 只`}>
+              <span className={s.statRowLabel}>市值</span>
+              <span className={s.statRowValue}>{fmtMoney(acc.market_value)}</span>
             </div>
-            <div className={s.stat}>
-              <span className={s.statLabel}>总收益率</span>
-              <span className={s.statValue} style={{ color: toneColor(retPct) }}>
+            <div className={s.statRowItem}>
+              <span className={s.statRowLabel}>收益率</span>
+              <span className={s.statRowValue} style={{ color: toneColor(retPct) }}>
                 {retPct >= 0 ? "+" : ""}
                 {retPct.toFixed(2)}%
               </span>
             </div>
-            <div className={s.stat}>
-              <span className={s.statLabel}>浮动盈亏</span>
-              <span className={s.statValue} style={{ color: toneColor(acc.unrealized_pnl) }}>
+            <div className={s.statRowItem}>
+              <span className={s.statRowLabel}>浮动盈亏</span>
+              <span className={s.statRowValue} style={{ color: toneColor(acc.unrealized_pnl) }}>
                 {fmtMoney(acc.unrealized_pnl)}
               </span>
             </div>
-            <div className={s.stat}>
-              <span className={s.statLabel}>已实现盈亏</span>
-              <span className={s.statValue} style={{ color: toneColor(acc.realized_pnl) }}>
+            <div className={s.statRowItem}>
+              <span className={s.statRowLabel}>已实现</span>
+              <span className={s.statRowValue} style={{ color: toneColor(acc.realized_pnl) }}>
                 {fmtMoney(acc.realized_pnl)}
               </span>
             </div>
@@ -352,7 +378,7 @@ export function Paper() {
             <Spinner label="加载中…" />
           ) : tab === "positions" ? (
             (positions.data ?? []).length === 0 ? (
-              <EmptyState text={engineDown ? "引擎未就绪" : "暂无模拟持仓"} />
+              <EmptyState text={engineDown ? "引擎未就绪 —— 原因见上方提示条" : "暂无模拟持仓"} />
             ) : (
               <DataTable
                 columns={positionCols}
@@ -364,7 +390,7 @@ export function Paper() {
             )
           ) : tab === "trades" ? (
             (trades.data ?? []).length === 0 ? (
-              <EmptyState text={engineDown ? "引擎未就绪" : "暂无模拟成交"} />
+              <EmptyState text={engineDown ? "引擎未就绪 —— 原因见上方提示条" : "暂无模拟成交"} />
             ) : (
               <DataTable
                 columns={tradeCols}
@@ -374,28 +400,28 @@ export function Paper() {
               />
             )
           ) : metrics.data === null ? (
-            <EmptyState text={engineDown ? "引擎未就绪" : "暂无绩效数据"} />
+            <EmptyState text={engineDown ? "引擎未就绪 —— 原因见上方提示条" : "暂无绩效数据"} />
           ) : (
-            <div className={s.stats}>
-              <div className={s.stat}>
-                <span className={s.statLabel}>成交笔数</span>
-                <span className={s.statValue}>{metrics.data.trade_count}</span>
-                <span className={s.statSub}>平仓 {metrics.data.close_count} 笔</span>
+            <div className={s.statRow}>
+              <div className={s.statRowItem} title={`其中平仓 ${metrics.data.close_count} 笔`}>
+                <span className={s.statRowLabel}>成交</span>
+                <span className={s.statRowValue}>{metrics.data.trade_count}</span>
               </div>
-              <div className={s.stat}>
-                <span className={s.statLabel}>胜率</span>
-                <span className={s.statValue}>{(metrics.data.win_rate * 100).toFixed(1)}%</span>
-                <span className={s.statSub}>盈利 {metrics.data.win_count} 笔</span>
+              <div className={s.statRowItem} title={`盈利 ${metrics.data.win_count} 笔`}>
+                <span className={s.statRowLabel}>胜率</span>
+                <span className={s.statRowValue}>
+                  {(metrics.data.win_rate * 100).toFixed(1)}%
+                </span>
               </div>
-              <div className={s.stat}>
-                <span className={s.statLabel}>平均盈亏</span>
-                <span className={s.statValue} style={{ color: toneColor(metrics.data.avg_pnl) }}>
+              <div className={s.statRowItem}>
+                <span className={s.statRowLabel}>平均盈亏</span>
+                <span className={s.statRowValue} style={{ color: toneColor(metrics.data.avg_pnl) }}>
                   {fmtMoney(metrics.data.avg_pnl)}
                 </span>
               </div>
-              <div className={s.stat}>
-                <span className={s.statLabel}>最好 / 最差</span>
-                <span className={s.statValue}>
+              <div className={s.statRowItem} title="单笔最好 / 最差">
+                <span className={s.statRowLabel}>最好 / 最差</span>
+                <span className={s.statRowValue}>
                   {fmtMoney(metrics.data.best_pnl)} / {fmtMoney(metrics.data.worst_pnl)}
                 </span>
               </div>
@@ -406,6 +432,28 @@ export function Paper() {
           )}
         </div>
       </Panel>
+
+      <ConfirmModal
+        open={confirmReset}
+        title="重置模拟账户"
+        danger
+        confirmText="确认重置"
+        message={
+          <>
+            将<b>清空全部模拟持仓与成交记录</b>，并把资金复位为初始值
+            {acc ? `（当前初始资金 ${fmtMoney(acc.initial)}）` : ""}。
+            <br />
+            模拟盘不产生真实委托，因此不会影响实盘资金与真实持仓；但历史成交与绩效
+            曲线会一并清空，无法找回。
+          </>
+        }
+        warn="清空后不可恢复"
+        onConfirm={() => {
+          setConfirmReset(false);
+          void doReset();
+        }}
+        onCancel={() => setConfirmReset(false)}
+      />
     </div>
   );
 }

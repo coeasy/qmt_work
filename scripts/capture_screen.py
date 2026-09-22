@@ -32,7 +32,7 @@ def _png(path: str, width: int, height: int, rgb_rows: list[bytes]) -> None:
 # 最近一次抓屏的统计信息（供调用方判定「是否真的渲染了内容」）：
 #   distinct_colors = 采样到的不同 RGB 值个数。纯色画面（白屏/黑屏）该值极小，
 #   可据此识别「窗口在、页面没渲染出来」这类故障。
-LAST_STATS: dict = {"distinct_colors": 0, "width": 0, "height": 0}
+LAST_STATS: dict = {"distinct_colors": 0, "width": 0, "height": 0, "dominant_share": 0.0}
 
 
 class BITMAPINFOHEADER(ctypes.Structure):
@@ -124,8 +124,20 @@ def _rows_from_dc(gdi32, mem, bmp, width: int, height: int) -> list:
 def _save(path: str, width: int, height: int, rows) -> tuple[int, int]:
     _png(path, width, height, rows)
     # 采样统计（每隔 16 像素取一点）：不同颜色数太少即为纯色画面 → 页面未渲染
-    sampled = {rows[y][i:i + 3] for y in range(0, height, 16) for i in range(0, width * 3, 48)}
-    LAST_STATS.update(distinct_colors=len(sampled), width=width, height=height)
+    sampled = [rows[y][i:i + 3] for y in range(0, height, 16) for i in range(0, width * 3, 48)]
+    counts: dict = {}
+    for px in sampled:
+        counts[px] = counts.get(px, 0) + 1
+    top = max(counts.values()) if counts else 0
+    total = len(sampled) or 1
+    LAST_STATS.update(distinct_colors=len(set(sampled)), width=width, height=height,
+                      # 主色占比：纯色空窗 ≈ 1.0；真渲染出来的界面远低于它。
+                      # ★ 只作**诊断**输出（2026-09-21 R18）：色数阈值是「是否渲染」的代理指标，
+                      #   冷启动时懒加载分片还挂在 Suspense 占位上（实测 40 色 / 23235 字节，
+                      #   而截图里顶部导航、左侧自选股、页签、状态栏全都在）⇒ 主色占比能一眼
+                      #   区分「真·纯色空窗」与「渲染了但某块还没到」。暂不拿它当判据，
+                      #   免得在没标定过纯色样本占比的情况下削弱断言。
+                      dominant_share=round(top / total, 4))
     return width, height
 
 

@@ -93,14 +93,33 @@ class TargetPortfolioEngine:
         result["executed"] = executed
         return result
 
-    def save_plan(self, name: str, weights: dict) -> int:
+    def save_plan(self, name: str, weights: dict, pid: int = 0) -> int:
+        """新建或更新计划；``pid`` 非空即更新（与 notifications / alerts / webhooks
+        同一套「带 id 即更新」约定 —— 不新增路由就不会动到契约基线）。
+
+        ⚠️ 更新时**绝不**覆盖 ``status``：计划可能是 ``active``（已启用/已下发），
+        一次改名把它打回 ``draft`` 会让「正在按这个计划调仓」的事实悄悄消失。
+        """
         if self._db is None:
             return 0
-        nid = self._db.insert("target_portfolios", {
-            "name": name, "weights_json": json.dumps(weights, ensure_ascii=False),
-            "status": "draft", "created_at": now_iso(),
-            "updated_at": now_iso()})
-        return nid
+        payload = {
+            "name": name,
+            "weights_json": json.dumps(weights, ensure_ascii=False),
+            "updated_at": now_iso(),
+        }
+        pid = int(pid or 0)
+        if pid:
+            row = self._db.query_one("SELECT id FROM target_portfolios WHERE id=?", (pid,))
+            if row is None:
+                return 0        # 更新不存在的计划 ⇒ 返回 0，不静默新建
+            fields = [f"{k}=?" for k in payload]
+            self._db.execute(
+                f"UPDATE target_portfolios SET {','.join(fields)} WHERE id=?",
+                (*payload.values(), pid))
+            return pid
+        payload["status"] = "draft"
+        payload["created_at"] = now_iso()
+        return self._db.insert("target_portfolios", payload)
 
     def list_plans(self) -> list[dict]:
         if self._db is None:

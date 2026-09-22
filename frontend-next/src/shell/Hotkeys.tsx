@@ -14,7 +14,7 @@ function findLeaf(node: PaneNode | undefined, leafId: string): PaneNode | undefi
 /**
  * 全局快捷键。
  *
- * 对标通达信的关键效率来源：
+ * 对标主流 A 股终端的关键效率来源：
  *   ⌘/Ctrl+K  命令面板（任意位置唤起）
  *   Alt+1..6  直达第 N 个业务域的首个页面
  *   F5        循环切换当前图表周期

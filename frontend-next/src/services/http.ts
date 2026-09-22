@@ -37,6 +37,13 @@ export function setApiKey(key: string): void {
 export class ApiError extends Error {
   readonly status: number;
   readonly code: number;
+  /**
+   * ⚠️ 别拿它去断言「原因 = 没连券商」。
+   * HTTP 503 也可能来自「后端仍在启动」「数据源未就绪」「上游拒绝」—— 与券商连接
+   * 无关。真要判断券商可用性，用后端**业务返回**里的 `broker_unavailable` 字段
+   * （trade.py 那种），而不是这个由 HTTP 状态码推导的位。
+   * 目前全站无人读取它；保留只为兼容，新增代码请勿依赖。
+   */
   readonly brokerUnavailable: boolean;
 
   constructor(message: string, status: number, code: number) {
@@ -108,8 +115,12 @@ async function request<T>(
       if (!res.ok) {
         const msg =
           env?.message ??
+          // ★ 别替后端猜原因。HTTP 503 **不等于**「没连券商」—— 也可能是后端仍在
+          //   启动、数据源未就绪、被上游拒绝。猜错会把排查方向彻底带偏（与后端
+          //   `services/market/aggregates._unavailable` 是同一条纪律：
+          //   绝不把「不支持」说成「网络坏了」）。这里只陈述事实 + 给下一步。
           (res.status === 503
-            ? "未连接券商客户端，请先在「连接管理」中添加并连接券商"
+            ? "服务暂不可用（HTTP 503）—— 后端可能仍在启动或数据源未就绪，请稍后重试"
             : `请求失败（HTTP ${res.status}）`);
         throw new ApiError(msg, res.status, env?.code ?? res.status);
       }
@@ -131,11 +142,16 @@ async function request<T>(
       clearTimeout(timer);
     }
   }
-  throw new ApiError(
-    lastErr instanceof Error ? lastErr.message : "网络请求失败",
-    0,
-    0,
-  );
+  // ★ 网络层失败必须换成中文，并且**区分超时与连不上**。
+  //   直接抛 `lastErr.message` 的话，用户在最常见的一类故障（后端没起来 / 端口被占 /
+  //   刚启动还没监听）上会看到浏览器英文原文 `Failed to fetch`，既看不懂也无从下手。
+  //   同样不能笼统说「网络坏了」—— 本机客户端连本机后端，问题多半是后端进程。
+  const netMsg = opts.signal?.aborted
+    ? "请求已取消"
+    : lastErr instanceof Error && lastErr.name === "AbortError"
+      ? `请求超时（${Math.round(timeout / 1000)}s）—— 后端可能正忙或数据源较慢，可稍后重试`
+      : "无法连接后端服务 —— 请确认客户端已启动；若持续出现，到「系统状态」查看后端健康";
+  throw new ApiError(netMsg, 0, 0);
 }
 
 export const http = {

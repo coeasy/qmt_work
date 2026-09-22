@@ -22,6 +22,7 @@ import { useBrokerStore } from "@/stores/broker";
 import { useWatchlistStore } from "@/stores/watchlist";
 import { fmtDateTime } from "@/shared/time";
 import { fmtPct, fmtPrice, fmtVolume, toneColor } from "@/shared/format";
+import { isLivePrice } from "@/shared/freshness";
 import type { Quote } from "@/shared/types";
 import s from "../../domain.module.css";
 
@@ -179,21 +180,43 @@ export function resultCols(
   classicMode = false,
 ): Column<ScreenRow>[] {
   const last = (r: ScreenRow): number | undefined => {
-    const q = quotes[r.code];
-    return q !== undefined && q.price > 0 ? q.price : r.close;
+    const q = quotes[r.code]?.price;
+    // ★ 选股结果的回退值就是**那根 K 线的收盘价**，它本身没错 —— 错的是表头。
+    //   写「最新」会让用户以为这是此刻的价，而选股本来就是按收盘价算的，
+    //   所以表头改成「最新/收盘」，单元格再标一句来源。
+    return isLivePrice(q) ? q : r.close;
   };
   const pct = (r: ScreenRow): number | undefined => quotes[r.code]?.change_pct ?? r.change_pct;
   const inWatch = (r: ScreenRow) => watchCodes.includes(r.code);
   return [
     { key: "code", header: "代码", width: 100, mono: true, render: (r) => r.code },
-    { key: "name", header: "名称", width: 110, render: (r) => r.name ?? "--" },
+    {
+      key: "name",
+      header: "名称",
+      width: 110,
+      // ★ 空串必须显式渲染成占位符（2026-09-20 实测修复）。
+      //   后端在**无名称数据**时返回的是 `name: ""`，而空串既不是 null 也不是
+      //   undefined ⇒ 原来的 `r.name ?? "--"` 不生效，单元格渲染成**一片空白**：
+      //   用户无法分辨「这只票没有名称数据」和「界面坏了」。
+      //   项目铁律：缺失一律显示 `—`，绝不静默空白。
+      //   （同一根因还有功能性后果：名称全空时 `exclude_st` 预过滤恒不命中，
+      //   已在后端 universe.py 用本地名称表修好。）
+      render: (r) => (r.name && String(r.name).trim() ? r.name : "—"),
+    },
     {
       key: "close",
-      header: "最新",
+      header: "最新/收盘",
       width: 84,
       align: "right",
       mono: true,
-      render: (r) => <span style={{ color: toneColor(pct(r)) }}>{fmtPrice(last(r))}</span>,
+      render: (r) => (
+        <span
+          style={{ color: toneColor(pct(r)) }}
+          title={isLivePrice(quotes[r.code]?.price) ? undefined : "收盘价（选股就是按这根 K 线的收盘价算的，非实时）"}
+        >
+          {fmtPrice(last(r))}
+        </span>
+      ),
     },
     {
       key: "pct",
@@ -257,28 +280,51 @@ export function resultCols(
 }
 
 /** 命中/扫描/耗时/数据源 统计条 */
+/**
+ * 选股结果统计条 —— 命中 / 扫描 / 耗时 / 数据源，一行展示。
+ *
+ * ★ 为什么从卡片网格改成一行条：这四个数是「这次扫描到底靠不靠谱」的判断依据，
+ *   要**一眼扫完**（尤其「扫描」—— 扫了 0 只 vs 扫了 5000 只是完全不同两件事）。
+ *   卡片网格在窄屏会塌成一列四行，把结论割裂开。
+ *
+ * ★ 降级标记用**值后面的小徽标**而不是第三行小字：一行条里没有第三行的位置，
+ *   而「数据源已降级」属于必须可见的警示（不可见的降级 = 用户以为结果是权威的）。
+ */
 export function ScreenStats({ res }: { res: ScreenResponse }) {
   return (
-    <div className={s.stats}>
-      <div className={s.stat}>
-        <span className={s.statLabel}>命中</span>
-        <span className={s.statValue}>{res.count}</span>
+    <div className={s.statRow}>
+      <div className={s.statRowItem} title="满足条件的标的数">
+        <span className={s.statRowLabel}>命中</span>
+        <span className={s.statRowValue}>{res.count}</span>
       </div>
-      <div className={s.stat}>
-        <span className={s.statLabel}>扫描</span>
-        <span className={s.statValue}>{res.total_scanned}</span>
-      </div>
-      <div className={s.stat}>
-        <span className={s.statLabel}>耗时</span>
-        <span className={s.statValue}>{res.elapsed_ms}ms</span>
-      </div>
-      <div className={s.stat}>
-        <span className={s.statLabel}>数据源</span>
-        <span className={s.statValue} style={{ fontSize: "var(--font-sm)" }}>
-          {String(res.provenance?.provider_used ?? "--")}
+      <div
+        className={s.statRowItem}
+        title={
+          res.total_scanned === 0
+            ? "扫描 0 只 = 根本没拿到 K 线（不是「没选中票」）"
+            : "实际取到 K 线并参与求值的标的数"
+        }
+      >
+        <span className={s.statRowLabel}>扫描</span>
+        <span
+          className={s.statRowValue}
+          style={res.total_scanned === 0 ? { color: "var(--danger)" } : undefined}
+        >
+          {res.total_scanned}
         </span>
-        <span className={s.statSub}>
-          {res.degraded ? `已降级：${res.degraded_reason ?? "未给出原因"}` : "未降级"}
+      </div>
+      <div className={s.statRowItem}>
+        <span className={s.statRowLabel}>耗时</span>
+        <span className={s.statRowValue}>{res.elapsed_ms}ms</span>
+      </div>
+      <div
+        className={s.statRowItem}
+        title={res.degraded ? `已降级：${res.degraded_reason ?? "未给出原因"}` : "未降级"}
+      >
+        <span className={s.statRowLabel}>数据源</span>
+        <span className={s.statRowValue} style={{ fontSize: "var(--font-sm)" }}>
+          {String(res.provenance?.provider_used ?? "--")}
+          {res.degraded && <span className={s.statRowTag}>已降级</span>}
         </span>
       </div>
     </div>
@@ -342,6 +388,16 @@ export function ScreenResult({
       {res && toolbar}
 
       <Panel flush className={s.grow} title={`选股结果（${res?.count ?? 0}）`}>
+        {/* ★ 整列名称都缺失时说明成因（2026-09-20）。此前只是「名称」列一片空白，
+            用户无从判断是数据没取到还是界面坏了。放在 tableArea 之外，
+            避免影响表格的 flex 尺寸计算。 */}
+        {res && res.results.length > 0
+          && res.results.every((r) => !r.name || !String(r.name).trim()) && (
+          <div className={s.note} style={{ margin: "0 0 6px" }}>
+            本次结果未取到股票名称（「名称」列显示为 —）。名称来自本地名称表或券商行情源；
+            可在「数据源」页确认名称表是否已同步，或连接券商后重跑。代码与行情数据不受影响。
+          </div>
+        )}
         <div className={s.tableArea}>
           {busy && !res ? (
             <Spinner label="扫描中…" />
@@ -911,7 +967,7 @@ const EXAMPLES = [
   "MACD > 0 AND KDJ < 30",
 ];
 
-/** 公式选股面板：类通达信公式 DSL */
+/** 公式选股面板：类终端公式 DSL */
 export function FormulaPanel() {
   const [expr, setExpr] = useState("C > MA(20) AND RSI(14) < 30");
   const [q, setQ] = useState<ScreenQuery>(DEFAULT_QUERY);

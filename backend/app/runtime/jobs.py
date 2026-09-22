@@ -42,6 +42,14 @@ RESOURCE_GROUP: Dict[str, str] = {
     "system.rolling_repair": "local_bars",
     "system.reconcile_bars": "local_bars",
     "sync": "local_bars",
+    # ★ 定时选股**读**日线，也进组。此前只靠默认调度把两者「错开 15 分钟」，
+    #   而 cron 用户可以改 —— 一旦改到同一时刻，选股会读到**半更新**的日线
+    #   （部分标的已是今天、部分还是昨天），选出的票无法复现，且因为是无人值守
+    #   的定时作业，结果直接落进 screen_runs 没人会复核。时间错开只能当**双保险**，
+    #   真正的保证必须落在资源组上。
+    "system.classic_screen": "local_bars",
+    # ⚠️ 手动选股（kind="screen"）**刻意不进组**：它是用户发起、结果当场可见、
+    #   可以立刻重跑；而把它挡在一次 7 分钟的全市场同步后面，用户只会以为卡死了。
 }
 LEASE_SECONDS = 90.0
 #: 进度落库的最小间隔（秒）。见 JobRuntime._make_report 的说明：
@@ -340,11 +348,29 @@ class JobRuntime:
             lease_until = job.get("lease_until")
             if lease_until is None or float(lease_until) > now:
                 continue
+            task = job.get("task")
+            if task is not None and not task.done():
+                # ★★ 本进程内任务**还活着** ⇒ 这不是「执行者失联」，只是**心跳稀疏**。
+                #
+                # 租约靠 ``report`` / ``checkpoint`` 续期，而真实的长任务会长时间不报进度：
+                # 全市场取数（5000+ 只）、全池形态识别都是几十秒到几分钟的纯 CPU/IO 段，
+                # 中间没有任何 ``report`` 调用点。此前 reaper 照杀不误 —— 实测
+                # （2026-09-20 真实库）经典策略选股跑到 110s 被自己的收割器 cancel，
+                # 报「lease expired（执行者失联，任务被判死）」，而它其实一直在正常干活。
+                # 后果是**越重的任务越必然失败**：全市场同步、全量回补、EOD 全部中招，
+                # 定时选股链路因此永远出不了结果。
+                #
+                # reaper 的职责是回收**崩溃残留**（上一个进程留下的 running 记录），
+                # 不是给慢任务设超时。所以：活任务续租并跳过，只收割真正没有本地执行者
+                # 的 job（``task is None`` 或已结束）—— 那种才可能是进程崩溃的残留。
+                job["lease_until"] = now + LEASE_SECONDS
+                log.info("任务 %s 心跳稀疏（超过 %ss 未报进度）但执行者仍在运行，已续租",
+                         job["id"], int(LEASE_SECONDS))
+                continue
             job["status"] = "failed"
             job["error"] = "lease expired（租约过期：执行者失联，任务被判死）"
             job["message"] = "租约过期"
             job["finished_at"] = self._now()
-            task = job.get("task")
             if task is not None and not task.done():
                 task.cancel()
             self._running.pop(job["id"], None)
@@ -487,10 +513,14 @@ def sync_runner(params: dict) -> Runner:
             from datasource.snapshots import DatasetSnapshotStore
             quality = ("complete" if not summary.failed and summary.bars_written > 0
                        else "partial" if summary.bars_written > 0 else "empty")
+            # ★ 批次号必须用**同步器实际写库用的那个**（``bars-<hex>``）。
+            #   此前传 ``summary.finished``（ISO 时间戳）当批次号 ⇒ 快照回查
+            #   ``local_bars`` 永远 0 行，于是每份快照都写着 row_count=0 却标 complete。
             snap = DatasetSnapshotStore(get_db()).publish_local_bars(
-                "cn_equity_daily", str(params.get("batch_id") or summary.finished),
+                "cn_equity_daily",
+                str(params.get("batch_id") or summary.batch_id or summary.finished),
                 str(params.get("provider_id") or "auto"),
-                str(params.get("batch_id") or summary.finished),
+                str(params.get("batch_id") or summary.batch_id or summary.finished),
                 quality_state=quality,
                 calendar_version=str(params.get("calendar_version") or ""),
                 adjustment_version=str(params.get("adjust") or "qfq"),

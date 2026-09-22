@@ -2,7 +2,7 @@ import { create } from "zustand";
 
 /**
  * 自选股 store。
- * 分组能力（对标通达信的自选股分类）留作后续扩展，当前为单组。
+ * 分组能力（对标主流 A 股终端的自选股分类）留作后续扩展，当前为单组。
  */
 
 const STORAGE_KEY = "qmt.watchlist.v1";
