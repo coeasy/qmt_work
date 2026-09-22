@@ -377,6 +377,93 @@ def test_overview_fetches_all_indices_in_one_batch():
     assert len(out["indices"]) == len(CODES), f"指数缺失: {len(out['indices'])}/{len(CODES)}"
 
 
+def test_overview_fetches_three_blocks_concurrently():
+    """市场概览的三块取数必须**并发**（2026-09-22 修的真问题）。
+
+    此前是顺序 await：``get_boards``（预算 10s）→ ``get_quotes``（10s）→
+    ``get_board_kline``（8s），三段相加就是冷延迟 —— curl 实测 **7.988s**。
+    而前端传的 ``ttl=10`` 单位是**秒**（``TTLCache.get`` 判 ``time.time() - ts < ttl``）
+    ⇒ 10 秒后必过期 ⇒ 基本上**每次**进「市场结构」页都要重付这 8 秒。
+
+    可证伪判据：三段各睡 0.30s，
+      - 并发 ⇒ 总耗时 ≈ 0.30s（断言 < 0.60s 通过）；
+      - 退回顺序 await ⇒ 总耗时 ≈ 0.90s（**断言必然失败**）。
+    没有这个下界，「并发」就只是注释里的一句自夸。
+    """
+    import time
+
+    from app.services.market import aggregates as agg
+
+    DELAY = 0.30
+    CODES = ["000001.SH", "399001.SZ"]
+
+    class _Hub:
+        async def get_boards(self, *a, **k):
+            await asyncio.sleep(DELAY)
+            return [], None
+
+        async def get_board_kline(self, *a, **k):
+            await asyncio.sleep(DELAY)
+            return [], None
+
+        async def get_quotes(self, codes, source="auto", conn_id=None):
+            await asyncio.sleep(DELAY)
+            return {c: {"code": c, "name": "X", "last": 1.0,
+                        "change_pct": 0.5, "amount": 1.0} for c in codes}
+
+    orig_hub, orig_idx = agg.get_hub, agg.configured_indices
+    agg.get_hub = lambda: _Hub()
+    agg.configured_indices = lambda _st: CODES
+    try:
+        t0 = time.perf_counter()
+        out = asyncio.run(agg.overview(source="auto", ttl=0))
+        elapsed = time.perf_counter() - t0
+    finally:
+        agg.get_hub = orig_hub
+        agg.configured_indices = orig_idx
+
+    assert elapsed < DELAY * 2, (
+        f"三块取数应并发（期望 < {DELAY * 2:.2f}s），实测 {elapsed:.3f}s —— "
+        f"退化成顺序 await 了")
+    # 并发不得改变结果形状：指数照旧全拿到
+    assert len(out["indices"]) == len(CODES), f"并发后指数缺失: {out['indices']}"
+
+
+def test_overview_stat_failure_still_raises_503():
+    """并发改造**不得**把 ``get_boards`` 的失败吞成空数据（错误语义必须原样保留）。
+
+    若吞掉，「行情源挂了」会被说成「本来就没有市场概览」——
+    与项目「绝不把『不支持』说成『网络坏了』」是同一条纪律的反面。
+    """
+    from app.services.market import aggregates as agg
+    from app.services.market.common import ServiceError
+
+    class _Hub:
+        async def get_boards(self, *a, **k):
+            raise RuntimeError("TDX 挂了")
+
+        async def get_board_kline(self, *a, **k):
+            return [], None
+
+        async def get_quotes(self, codes, source="auto", conn_id=None):
+            return {}
+
+    orig_hub, orig_idx = agg.get_hub, agg.configured_indices
+    agg.get_hub = lambda: _Hub()
+    agg.configured_indices = lambda _st: []
+    try:
+        try:
+            asyncio.run(agg.overview(source="auto", ttl=0))
+        except ServiceError as exc:
+            assert exc.code == 503, f"应为 503，实际 {exc.code}"
+            assert "TDX 挂了" in exc.message, f"应带上真实成因：{exc.message}"
+        else:
+            raise AssertionError("get_boards 失败必须抛 ServiceError(503)，不得静默返回空概览")
+    finally:
+        agg.get_hub = orig_hub
+        agg.configured_indices = orig_idx
+
+
 def test_merge_quote_keeps_source_pre_close_when_detail_has_none():
     """昨收三级回退：详情层没有时**不许**把源层已解析好的昨收抹成 None。
 

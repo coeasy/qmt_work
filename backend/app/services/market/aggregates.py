@@ -469,8 +469,13 @@ def _stat_named(rows: list, name: str):
     return row.get("last") if row else None
 
 
-async def overview(source: str = "auto", ttl: int = 10) -> dict:
+async def overview(source: str = "auto", ttl: int = 60) -> dict:
     """市场概览（E3）：统计类板块真实家数（涨跌/停板/各市场）+ 主要指数快照 + 宽度趋势。
+
+    ttl 默认 60s（2026-09-22 由 10s 上调）：本函数冷启动可达数秒、稳态 2.4~4s，
+    而返回值里唯一会过期的是指数最新价 —— 它在前端由 `useLiveQuotes` 实时叠加，
+    不依赖本快照。短 ttl 的净效果只是让「切走页签再切回」反复付这笔打源开销。
+    调用方传 `ttl=0` 仍可完全绕过缓存。
 
     两市成交额（C4）：上证+深证指数快照 amount 求和（真实口径，零额外打源）；
     任一市场缺失则 two_city_turnover=null 由前端显式标注「—」，不伪造。
@@ -481,15 +486,55 @@ async def overview(source: str = "auto", ttl: int = 10) -> dict:
     hit = _cached(ck, ttl)
     if hit is not None:
         return hit
-    try:
-        stat, _ = await asyncio.wait_for(
+    # ★★ 三块数据**互不依赖**，必须并发取（2026-09-22 改）。
+    #
+    # 此前是顺序 await：`get_boards`（预算 10s）→ `get_quotes`（10s）→
+    # `get_board_kline`（8s），三段相加才是冷延迟。
+    #
+    # ⚠️ **诚实记录实测，别被这段注释骗了**：改并发后冷缓存 **7.974s**，
+    #    与改前的 **7.988s** 几乎无差 —— 因为分段计时显示耗时**几乎全在指数批量
+    #    行情那一段**（curl 实测，同一后端进程）：
+    #      GET  /market/boards?kind=stat   → 0.007s
+    #      POST /market/quotes（8 指数）   → **7.365s**（进程内首次；之后 2.4~4s）
+    #      GET  /market/board/kline        → 0.008s
+    #    所以这次并发改的是**结构正确性**（将来某一段变慢时不再线性叠加），
+    #    **不是**当前这条链路的性能。瓶颈是「首次打源的冷启动」，与串行无关。
+    #
+    # ⚠️ 并发**不得改变各自的错误语义**：
+    #   ① `get_boards` 超时/失败 ⇒ 仍抛 `ServiceError(503)`（路由层转 err 信封）。
+    #      绝不能因为「并发」把它的失败吞成空数据 —— 那会把「源挂了」说成「本来就没有」；
+    #   ② `get_quotes` / `get_board_kline` 失败 ⇒ 静默退化（保持原行为），
+    #      由下面的「部分缺失」分支如实声明缺了哪一块。
+    codes = configured_indices(state)
+
+    async def _fetch_stat():
+        return await asyncio.wait_for(
             get_hub().get_boards("stat", "pct", 60, source=source),
             timeout=OVERVIEW_BUDGET_SECONDS,
         )
-    except asyncio.TimeoutError as exc:
-        raise ServiceError(503, "市场概览获取超时：TDX 行情源响应慢。") from exc
-    except Exception as exc:  # noqa: BLE001
-        raise ServiceError(503, f"市场概览获取失败：{exc}") from exc
+
+    async def _fetch_quotes():
+        try:
+            return await asyncio.wait_for(
+                get_hub().get_quotes(codes, source=source), timeout=OVERVIEW_BUDGET_SECONDS)
+        except Exception:  # noqa: BLE001  批量整体失败不撑爆整页，退化为「无指数快照」
+            return {}
+
+    async def _fetch_trend():
+        try:
+            bars, _ = await asyncio.wait_for(
+                get_hub().get_board_kline(_BREADTH_TREND_CODE, "1d", 30, source=source), timeout=8)
+        except Exception:  # noqa: BLE001
+            return None
+        return bars or None
+
+    stat_res, qmap_res, trend_bars = await asyncio.gather(
+        _fetch_stat(), _fetch_quotes(), _fetch_trend(), return_exceptions=True)
+    if isinstance(stat_res, BaseException):
+        if isinstance(stat_res, asyncio.TimeoutError):
+            raise ServiceError(503, "市场概览获取超时：TDX 行情源响应慢。") from stat_res
+        raise ServiceError(503, f"市场概览获取失败：{stat_res}") from stat_res
+    stat, _ = stat_res
     breadth = [{"code": b["code"], "name": b.get("name", ""),
                 "count": b.get("last"), "metric": b.get("metric"), "unit": b.get("unit")}
                for b in (stat or [])]
@@ -506,14 +551,7 @@ async def overview(source: str = "auto", ttl: int = 10) -> dict:
     #
     # 批量接口 1 次 HTTP 拿全部（见 `DataSourceManager.get_quotes`），
     # 8 只 ≈ 1.4s 且**全部拿到**。
-    codes = configured_indices(state)
-    try:
-        qmap = await asyncio.wait_for(
-            get_hub().get_quotes(codes, source=source), timeout=OVERVIEW_BUDGET_SECONDS)
-    except Exception:  # noqa: BLE001  批量整体失败不撑爆整页，退化为「无指数快照」
-        qmap = {}
-    if not isinstance(qmap, dict):
-        qmap = {}
+    qmap = qmap_res if isinstance(qmap_res, dict) else {}
     # 与旧代码保持同形状，下面的两市成交额聚合继续用
     ires = [(c, qmap.get(c)) for c in codes]
     indices = []
@@ -523,14 +561,9 @@ async def overview(source: str = "auto", ttl: int = 10) -> dict:
                             "change_pct": q.get("change_pct"), "amount": q.get("amount")})
     # 宽度趋势：涨跌家数日K（真实家数时间序列）
     trend = None
-    try:
-        bars, _ = await asyncio.wait_for(
-            get_hub().get_board_kline(_BREADTH_TREND_CODE, "1d", 30, source=source), timeout=8)
-        if bars:
-            trend = {"code": _BREADTH_TREND_CODE, "name": "涨跌家数",
-                     "series": [{"date": b.get("time"), "value": b.get("close")} for b in bars]}
-    except Exception:  # noqa: BLE001
-        trend = None
+    if isinstance(trend_bars, list) and trend_bars:
+        trend = {"code": _BREADTH_TREND_CODE, "name": "涨跌家数",
+                 "series": [{"date": b.get("time"), "value": b.get("close")} for b in trend_bars]}
     # C4 两市成交额：真实聚合 —— TDX 指数快照的 amount 即该市场成交总额，
     # 上证(000001.SH) + 深证(399001.SZ) 求和即为两市成交额（零额外打源，非估算口径）。
     # 任一市场缺 amount 则整体置 None（显「—」），绝不编数。

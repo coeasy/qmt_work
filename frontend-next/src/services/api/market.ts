@@ -578,8 +578,18 @@ export const marketApi = {
       query: { days, kind, top_n: topN, source },
     }),
 
-  /** 市场概览：广度 + 指数 + 宽度趋势 + 两市成交额 */
-  overview: (source = "auto", ttl = 10) =>
+  /**
+   * 市场概览：广度 + 指数 + 宽度趋势 + 两市成交额。
+   *
+   * ★ ttl 用 60（秒）而不是 10，理由是本页**唯一**新鲜度敏感的项是「指数最新价 /
+   *   涨跌幅」，而它由 `MarketStructure` 用 `useLiveQuotes` 实时叠加（WS 推送），
+   *   **不依赖**这个快照；其余各项（涨跌家数 / 停板家数 / 成交均价 / 宽度趋势 /
+   *   两市成交额）都是慢变量。
+   *   反过来，ttl=10 会让「切走页签再切回」几乎每次都重新打源 —— 实测本链路稳态
+   *   2.4~4s、冷启动更久（见 `aggregates.overview` 的实测注释），等于每 10 秒让
+   *   用户白等一次。页面另有「刷新」按钮可强制取新。
+   */
+  overview: (source = "auto", ttl = 60) =>
     http.get<OverviewResponse>("/market/overview", { query: { source, ttl } }),
 
   /** 批量流通股本 + 涨跌停价（换手率/涨跌停展示的真实口径来源） */

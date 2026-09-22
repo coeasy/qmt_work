@@ -40,6 +40,8 @@ vi.mock("@/services/api", async (orig) => {
 import { Backtest } from "@/domains/research/Backtest";
 // eslint-disable-next-line import/first
 import { backtestApi } from "@/services/api";
+// eslint-disable-next-line import/first
+import { useBrokerStore } from "@/stores/broker";
 
 const api = backtestApi as unknown as {
   jobs: ReturnType<typeof vi.fn>;
@@ -96,11 +98,14 @@ async function clickText(label: string, nth = 0) {
 
 beforeEach(() => {
   api.jobs.mockResolvedValue([memJob, dbJob]);
+  // 券商连接态是全局 store ⇒ 每个用例都必须显式给定，否则会串味
+  useBrokerStore.setState({ connections: [] });
 });
 
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+  useBrokerStore.setState({ connections: [] });
 });
 
 describe("策略回测页", () => {
@@ -144,5 +149,32 @@ describe("策略回测页", () => {
     api.jobs.mockRejectedValue(new Error("后端未启动"));
     render(<Backtest />);
     await waitFor(() => expect(screen.getByText(/回测作业加载失败：后端未启动/)).toBeTruthy());
+  });
+
+  /**
+   * ★ 2026-09-22 修的真缺陷的护栏：空列表**不能**把成因说成「需先连接券商」。
+   *
+   * 实测现场（打包态 0.3.0）：状态栏显示「券商 1/1 · 迅投XTQuant(bridge)」已连接，
+   * 回测页的空态却写着「还没有回测作业。回测基于券商真实历史 K 线，需先连接券商。」
+   * —— 列表接口读的是本地作业表，与券商无关；空列表只有一个成因：还没提交过。
+   * 把「没提交」说成「没连券商」，用户会去连接管理页白跑一趟。
+   */
+  it("空列表 · 已连券商：不得再说「需先连接券商」（错误归因）", async () => {
+    api.jobs.mockResolvedValue([]);
+    useBrokerStore.setState({ connections: [{ connected: true } as never] });
+    render(<Backtest />);
+    await waitFor(() => expect(screen.getByText(/还没有回测作业/)).toBeTruthy());
+    expect(screen.queryByText(/需先连接券商/)).toBeNull();
+    expect(screen.queryByText(/当前未连接券商/)).toBeNull();
+    // 连上了就不该再挂「未连接券商…」的常驻告示（与 OrderForm 同类缺陷）
+    expect(screen.queryByText(/未连接券商：回测依赖/)).toBeNull();
+  });
+
+  it("空列表 · 未连券商：如实说明成因并给出路（不能只报问题不给处置）", async () => {
+    api.jobs.mockResolvedValue([]);
+    useBrokerStore.setState({ connections: [] });
+    render(<Backtest />);
+    await waitFor(() => expect(screen.getByText(/当前未连接券商/)).toBeTruthy());
+    expect(screen.getByText("去连接")).toBeTruthy();
   });
 });

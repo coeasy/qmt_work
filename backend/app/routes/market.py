@@ -770,8 +770,14 @@ async def market_rotation(days: int = 5, kind: str = "industry",
 
 
 @router.get("/market/overview")
-async def market_overview(source: str = "auto", ttl: int = 10, ctx: AppContext = Depends(get_ctx)):
-    """市场概览（E3）：统计类板块真实家数 + 主要指数快照 + 宽度趋势 + 两市成交额。"""
+async def market_overview(source: str = "auto", ttl: int = 60, ctx: AppContext = Depends(get_ctx)):
+    """市场概览（E3）：统计类板块真实家数 + 主要指数快照 + 宽度趋势 + 两市成交额。
+
+    ttl 默认 60s（原 10s）：本端点三块取数合计冷启动可达数秒、稳态 2.4~4s（实测见
+    `services/market/aggregates.py::overview`），而返回内容里唯一会「过期」的指数
+    最新价由前端 `useLiveQuotes` 实时叠加，不依赖本快照 ⇒ 短 ttl 只是让用户反复白等。
+    调用方仍可显式传 `ttl=0` 强制不走缓存。
+    """
     try:
         return ok(await msvc.overview(source=source, ttl=ttl))
     except ServiceError as exc:

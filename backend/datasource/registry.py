@@ -719,6 +719,22 @@ class DataSourceManager:
             return res
 
         async def _broker_batch(todo: list) -> dict:
+            # ⚠️ 这里是「一批标的」的**假并发**：`asyncio.gather` 只并发了等待，
+            #    每次 `self.get_quote(...)` 都会各发一条 `get_quote` RPC
+            #    （`bridge_client.py::BridgeAdapter.get_quote` → `_rpc("get_quote", [code])`）
+            #    ⇒ **N 只标的 = N 次跨进程 RPC**。取 8 个指数就是 8 次。
+            #
+            # ★ 桥接侧其实**已有批量接口**：`BridgeAdapter.get_full_tick(codes)`
+            #   （`_rpc("get_full_tick", [list(codes)])`）一次就能拿全。
+            #
+            # ⚠️ 但**不能**把这里直接换成批量 RPC：`self.get_quote()` 除取价之外还做了
+            #    名称兜底 / 板块分类 / 详情合并（见上面 `_merge_quote` 那段），
+            #    直接批量取原始 tick 会**静默丢掉这些字段**（指数名会退化成代码）。
+            #    正确做法是「批量只用于取原始 tick，逐只归一化照旧」。
+            #
+            # ⚠️ 归属**尚未定论**，别当结论用：隔离实例实测 `source=broker` 冷 8.140s、
+            #    `source=tencent` 冷 0.688s（同一后端进程，8 只指数）。8 次 RPC 是不是
+            #    那 8 秒的**主因**，需要真券商环境再测一次才能确认。
             results = await asyncio.gather(
                 *[self.get_quote(c, "broker", conn_id) for c in todo],
                 return_exceptions=True)

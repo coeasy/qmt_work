@@ -13,6 +13,8 @@ import {
 } from "@/design/primitives";
 import { backtestApi, type BacktestJob, type BacktestMetrics, type BacktestResult } from "@/services/api";
 import { useAsync } from "@/hooks/useAsync";
+import { useBrokerStore } from "@/stores/broker";
+import { useWorkspaceStore } from "@/stores/workspace";
 import { EChart } from "@/charts/EChart";
 import type { EChartsOption } from "@/charts/echartsSetup";
 import s from "../domain.module.css";
@@ -112,6 +114,17 @@ export function Backtest() {
   const [selected, setSelected] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [banner, setBanner] = useState<{ tone: "ok" | "error" | "warn"; text: string } | null>(null);
+
+  /**
+   * ★ 空列表必须先问「是查不了，还是真的空」（与 `Trade.tsx` / `Positions.tsx` 同口径）。
+   *
+   * `GET /backtest/jobs` 读的是**本地作业表**，与券商无关 —— 它不会因为没连券商就返空。
+   * 所以这个列表为空**只有一个成因**：还没提交过作业。
+   * 券商只决定「提交能不能成功」，属于**前置条件**，不能拿来解释「列表为什么是空的」。
+   */
+  const connections = useBrokerStore((st) => st.connections);
+  const open = useWorkspaceStore((st) => st.open);
+  const connected = connections.some((c) => c.connected);
 
   /* ---------- 提交表单 ---------- */
   const [kind, setKind] = useState("backtest");
@@ -309,8 +322,14 @@ export function Backtest() {
             <Button variant="primary" size="sm" disabled={busy} onClick={() => void submit()}>
               提交
             </Button>
-            {/* ★ 回测依赖券商真实历史 K 线；没连券商时提交必失败，这句提示能省一次排错 */}
-            <span className={s.muted}>未连接券商时回测会失败（K 线取不到）</span>
+            {/* ★ 只在**确实未连接**时才提示（2026-09-22 修）。
+                此前这句常驻：连上券商后旁边仍挂着「未连接券商时回测会失败」，
+                用户会怀疑自己连错了对象，或以为提示没刷新 ——
+                与 R21 的 `OrderForm.tsx::orderExecutionNote` 是同一类缺陷：
+                **提示必须由已核实的状态决定，不能常驻断言一个可能不成立的成因**。 */}
+            {!connected && (
+              <span className={s.muted}>未连接券商：回测依赖券商真实历史 K 线，现在提交会失败</span>
+            )}
           </div>
         </div>
       </Panel>
@@ -331,7 +350,25 @@ export function Backtest() {
         {list.error ? (
           <EmptyState text={`回测作业加载失败：${list.error}`} />
         ) : rows.length === 0 ? (
-          <EmptyState text="还没有回测作业。回测基于券商真实历史 K 线，需先连接券商。" />
+          /*
+           * ★ 2026-09-22 修的真缺陷：这里原先硬写
+           *   「还没有回测作业。回测基于券商真实历史 K 线，需先连接券商。」
+           *   —— 把「没提交过作业」错误归因成「需先连接券商」。
+           *
+           * 实测现场（打包态 0.3.0）：状态栏同一时刻显示「券商 1/1 · 迅投XTQuant(bridge)」，
+           * 而这句仍说「需先连接券商」⇒ 用户会去「连接管理」白跑一趟，
+           * 而真正该做的是「填参数 → 提交」。这与「503 ≠ 没连券商」是同一条纪律：
+           * **原因必须来自已核实的状态，不能由文案猜。**
+           */
+          connected ? (
+            <EmptyState text="还没有回测作业。填好上方参数点「提交」即可创建。" />
+          ) : (
+            <EmptyState
+              text="还没有回测作业。当前未连接券商 —— 回测依赖券商真实历史 K 线，现在提交会失败。"
+              actionText="去连接"
+              onAction={() => open("brokers", {}, { title: "连接管理" })}
+            />
+          )
         ) : (
           <div className={s.tableArea}>
             <DataTable columns={cols} rows={rows} rowKey={(r) => String(r.id)} />

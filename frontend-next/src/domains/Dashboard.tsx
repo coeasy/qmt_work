@@ -167,15 +167,26 @@ export function Dashboard() {
           {grid ? (
             <CrossAccountPositions
               positions={grid.positions}
-              emptyText="当前无持仓（或账户未连接）"
+              /* ★ 2026-09-22：原先写死「当前无持仓（或账户未连接）」——
+                 括号里的「或」把两个成因糊在一起。已有 `connected` 可用，
+                 就该如实分叉：连上了就是「无持仓」，没连上才是「查不到」。 */
+              emptyText={connected.length > 0
+                ? "当前账户无持仓"
+                : "未连接券商：无法确认持仓，此处可能不完整"}
               asOf={grid.generated_at}
             />
           ) : (
             <div className={s.cardBody}>
               <EmptyState
-                text={gridLoading ? "读取持仓中…" : gridErr || "未连接券商，无法读取持仓"}
-                actionText={gridLoading ? undefined : "去连接"}
-                onAction={gridLoading ? undefined : () => open("brokers", {}, { title: "连接管理" })}
+                text={gridLoading
+                  ? "读取持仓中…"
+                  : gridErr || (connected.length > 0 ? "持仓汇总返回为空" : "未连接券商，无法读取持仓")}
+                /* 出口也要跟着成因走：已经连上了还把人送去「连接管理」是白跑一趟。
+                   连上但没数据时面板头部本就有「多账户网格」入口，不必再给假出口。 */
+                actionText={gridLoading || connected.length > 0 ? undefined : "去连接"}
+                onAction={gridLoading || connected.length > 0
+                  ? undefined
+                  : () => open("brokers", {}, { title: "连接管理" })}
               />
             </div>
           )}
