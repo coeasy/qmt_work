@@ -53,6 +53,8 @@ import s from "./offline.module.css";
 export function OfflineData() {
   const [sync, setSync] = useState<KlineSyncStatus | null>(null);
   const [cache, setCache] = useState<KlineCacheStats | null>(null);
+  /** ★ 缓存统计读取失败原因（R23）：失败时不得显示成「尚无请求」——那是在断言我们并不知道的事实 */
+  const [cacheErr, setCacheErr] = useState("");
   const [cov, setCov] = useState<MarketCoverage | null>(null);
   const [session, setSession] = useState<SessionSnapshot | null>(null);
   const [lookback, setLookback] = useState(30);
@@ -78,8 +80,14 @@ export function OfflineData() {
       });
     void marketApi
       .klineCacheStats()
-      .then(setCache)
-      .catch(() => setCache(null));
+      .then((r) => {
+        setCache(r);
+        setCacheErr("");
+      })
+      .catch((e: unknown) => {
+        setCache(null);
+        setCacheErr(e instanceof Error ? e.message : String(e));
+      });
     void marketApi
       .coverage({ lookbackDays: lookback })
       .then((r) => {
@@ -308,9 +316,20 @@ export function OfflineData() {
           }
         >
           <div className={s.body}>
-            {!sync || sync.initialized === false ? (
+            {!sync && !err ? (
+              <EmptyState text="正在读取同步状态…" />
+            ) : !sync || sync.initialized === false ? (
               <>
-                <EmptyState text="同步器未初始化（后端未装配 market_sync，或接口不可达）" />
+                {/* ★ 「接口不可达」与「后端未装配 market_sync」是两回事（R23）：
+                    /market/kline/sync-status 在未装配时是 200 + {initialized:false}，接口可达。
+                    用「或」把两者糊在一起，用户就得在「查网络」和「查装配」之间猜。 */}
+                <EmptyState
+                  text={
+                    err
+                      ? `同步状态读取失败：${err} —— 这是接口不可达，与后端是否装配 market_sync 无关`
+                      : "同步器未初始化 —— 后端未装配 market_sync（接口可达，已如实返回该状态）"
+                  }
+                />
                 {/* ★ 「调度器没启动」≠「从来没有同步过」：落库历史与调度器无关，
                     在出故障的这一刻丢掉它，用户恰好失去唯一线索。 */}
                 {barsRec || hotRec ? (
@@ -457,13 +476,18 @@ export function OfflineData() {
               <span>缓存序列数</span>
               <span className={s.mono}>{cache?.series ?? "—"}</span>
             </div>
-            {/* hit_rate 为 null = 还没有任何请求；显示 0% 会被读成「全部未命中」 */}
+            {/* hit_rate 为 null = 还没有任何请求；显示 0% 会被读成「全部未命中」。
+                读取失败同理不能说「尚无请求」—— 那是把「读不到」冒充成「没有」。 */}
             <div className={s.kv}>
               <span>缓存命中率</span>
               <span className={s.mono}>
-                {cache?.hit_rate === null || cache?.hit_rate === undefined
-                  ? "尚无请求"
-                  : `${(cache.hit_rate * 100).toFixed(1)}%`}
+                {cacheErr
+                  ? `统计不可用（${cacheErr}）`
+                  : !cache
+                    ? "—"
+                    : cache.hit_rate === null || cache.hit_rate === undefined
+                      ? "尚无请求"
+                      : `${(cache.hit_rate * 100).toFixed(1)}%`}
               </span>
             </div>
             <div className={s.kv}>

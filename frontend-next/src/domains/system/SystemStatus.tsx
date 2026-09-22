@@ -44,13 +44,31 @@ export function SystemStatus() {
   const [capErr, setCapErr] = useState("");
   const [sync, setSync] = useState<KlineSyncStatus | null>(null);
   const [cache, setCache] = useState<KlineCacheStats | null>(null);
+  /**
+   * ★ 同步状态读取失败的原因（R23）。
+   * 不能吞掉：`/market/kline/sync-status` 在「后端未装配 market_sync」时是
+   * **200 + {initialized:false}**，接口明明可达；而请求失败时同样是 `sync === null`。
+   * 两者落进同一个 `!sync` 分支 ⇒ 若不记住原因，只能写成「未装配**或**接口不可达」，
+   * 用户被迫在「查后端装配」和「查网络」之间猜。
+   */
+  const [syncErr, setSyncErr] = useState("");
+  /** ★ 缓存统计读取失败原因：失败时不得显示成「尚无请求」（那是在断言一个我们并不知道的事实） */
+  const [cacheErr, setCacheErr] = useState("");
   /** 数据源矩阵（/data/providers）—— 未接界面前「哪个源挂了」只能翻 API */
   const [providers, setProviders] = useState<DataProvidersResponse | null>(null);
   const [providersErr, setProvidersErr] = useState("");
+  /**
+   * ★ 是否已收到过数据源矩阵的响应（R23）。
+   * `providers` 初值是 null，而请求失败时也是 null ⇒ 只看 `!providers` 的话，
+   * **请求还没回来就已经在断言「不可用」**（假警报），且与「真失败」长得一样。
+   */
+  const [providersLoaded, setProvidersLoaded] = useState(false);
   /** 限流策略（/datahub/policies）：行情多久算过期、多久合并一次请求 */
   const [policies, setPolicies] = useState<DatahubPolicies | null>(null);
   /** 最近一次数据源失败溯源（/data/source/diagnostics）—— 把「不支持」从「网络坏了」里捞出来 */
   const [diag, setDiag] = useState<SourceDiagnostics | null>(null);
+  /** ★ 溯源读取失败原因：本面板的全部意义就是给原因，读不到时必须直说，不能只留一排「—」 */
+  const [diagErr, setDiagErr] = useState("");
   const [probeBusy, setProbeBusy] = useState(false);
   const [err, setErr] = useState("");
   const socketState = useQuotesStore((st) => st.socketState);
@@ -80,22 +98,38 @@ export function SystemStatus() {
       });
     void marketApi
       .klineSyncStatus()
-      .then(setSync)
-      .catch(() => setSync(null));
+      .then((r) => {
+        setSync(r);
+        setSyncErr("");
+      })
+      // ★ 失败必须可见（与上面 capabilities / dataProviders 同一纪律）：
+      //   静默置空会让「接口挂了」和「后端没装配同步器」长得一样。
+      .catch((e: unknown) => {
+        setSync(null);
+        setSyncErr(e instanceof Error ? e.message : String(e));
+      });
     void marketApi
       .klineCacheStats()
-      .then(setCache)
-      .catch(() => setCache(null));
+      .then((r) => {
+        setCache(r);
+        setCacheErr("");
+      })
+      .catch((e: unknown) => {
+        setCache(null);
+        setCacheErr(e instanceof Error ? e.message : String(e));
+      });
     void systemApi
       .dataProviders()
       .then((r) => {
         setProviders(r ?? null);
         setProvidersErr("");
+        setProvidersLoaded(true);
       })
       // ★ 失败必须可见：置空会让「接口挂了」和「没有数据源」长得一样
       .catch((e: unknown) => {
         setProviders(null);
         setProvidersErr(e instanceof Error ? e.message : String(e));
+        setProvidersLoaded(true);
       });
     void systemApi
       .datahubPolicies()
@@ -103,8 +137,14 @@ export function SystemStatus() {
       .catch(() => setPolicies(null));
     void systemApi
       .sourceDiagnostics()
-      .then((d) => setDiag(d ?? null))
-      .catch(() => setDiag(null));
+      .then((d) => {
+        setDiag(d ?? null);
+        setDiagErr("");
+      })
+      .catch((e: unknown) => {
+        setDiag(null);
+        setDiagErr(e instanceof Error ? e.message : String(e));
+      });
   };
 
   useEffect(load, []);
@@ -242,8 +282,16 @@ export function SystemStatus() {
         }
       >
         <div className={s.infoBody}>
-          {!sync || sync.initialized === false ? (
-            <EmptyState text="同步器未初始化（后端未装配 market_sync，或接口不可达）" />
+          {!sync && !syncErr ? (
+            <EmptyState text="正在读取同步状态…" />
+          ) : !sync || sync.initialized === false ? (
+            <EmptyState
+              text={
+                syncErr
+                  ? `同步状态读取失败：${syncErr}（点上方「刷新」重试）`
+                  : "同步器未初始化 —— 后端未装配 market_sync（接口可达，已如实返回该状态）"
+              }
+            />
           ) : (
             <>
               <div className={s.kv}>
@@ -273,20 +321,25 @@ export function SystemStatus() {
                 <span>冷仓</span>
                 <span className={s.mono}>{coldText}</span>
               </div>
-              {/* 缓存命中率：hit_rate 为 null 表示「还没有任何请求」，
-                  不能显示成 0%（那会被读成「全部未命中」） */}
-              <div className={s.kv}>
-                <span>缓存序列数</span>
-                <span className={s.mono}>{cache?.series ?? "—"}</span>
-              </div>
-              <div className={s.kv}>
-                <span>缓存命中率</span>
-                <span className={s.mono}>
-                  {cache?.hit_rate === null || cache?.hit_rate === undefined
-                    ? "尚无请求"
-                    : `${(cache.hit_rate * 100).toFixed(1)}%（命中 ${cache.hits ?? 0} / 未命中 ${cache.misses ?? 0}）`}
-                </span>
-              </div>
+            {/* 缓存命中率：hit_rate 为 null 表示「还没有任何请求」，
+                不能显示成 0%（那会被读成「全部未命中」）；
+                读取失败也不能说「尚无请求」—— 那是在断言一个我们并不知道的事实 */}
+            <div className={s.kv}>
+              <span>缓存序列数</span>
+              <span className={s.mono}>{cache?.series ?? "—"}</span>
+            </div>
+            <div className={s.kv}>
+              <span>缓存命中率</span>
+              <span className={s.mono}>
+                {cacheErr
+                  ? `统计不可用（${cacheErr}）`
+                  : !cache
+                    ? "—"
+                    : cache.hit_rate === null || cache.hit_rate === undefined
+                      ? "尚无请求"
+                      : `${(cache.hit_rate * 100).toFixed(1)}%（命中 ${cache.hits ?? 0} / 未命中 ${cache.misses ?? 0}）`}
+              </span>
+            </div>
             </>
           )}
         </div>
@@ -295,8 +348,10 @@ export function SystemStatus() {
       <Panel title="数据源与限流">
         {providersErr ? (
           <EmptyState text={`数据源矩阵加载失败：${providersErr}`} />
+        ) : !providersLoaded ? (
+          <EmptyState text="正在读取数据源矩阵…" />
         ) : !providers ? (
-          <EmptyState text="数据源矩阵不可用" />
+          <EmptyState text="数据源矩阵接口可达，但未返回矩阵内容（契约异常，非网络问题）" />
         ) : (
           <>
             <div className={s.kv}>
@@ -362,26 +417,34 @@ export function SystemStatus() {
       </Panel>
 
       <Panel title="数据源失败溯源">
+        {diagErr ? (
+          <EmptyState text={`溯源信息读取失败：${diagErr}（点上方「刷新」重试）`} />
+        ) : null}
         <div className={s.kv}>
           <span>能力</span>
-          <span className={s.mono}>{diag?.capability ?? "sector"}</span>
+          {/* ★ 未就绪时不得默认成 "sector"：那会把「还没读到」显示成「查的就是板块能力」 */}
+          <span className={s.mono}>{diag?.capability ?? "—"}</span>
         </div>
         <div className={s.kv}>
           <span>本应被尝试</span>
           <span className={s.mono}>
-            {diag?.chain?.length
-              ? diag.chain.join(" → ")
-              : "（空 ⇒ 该源不提供该能力，不是网络问题）"}
+            {!diag
+              ? "—"
+              : diag.chain?.length
+                ? diag.chain.join(" → ")
+                : "（空 ⇒ 该源不提供该能力，不是网络问题）"}
           </span>
         </div>
         <div className={s.kv}>
           <span>实际尝试</span>
           <span className={s.mono}>
-            {diag?.tried?.length
-              ? diag.tried.join("；")
-              : diag?.chain?.length === 0
-                ? "（无源可试）"
-                : "（暂无最近失败记录，点右侧「触发探测」可主动跑一次）"}
+            {!diag
+              ? "—"
+              : diag.tried?.length
+                ? diag.tried.join("；")
+                : diag.chain?.length === 0
+                  ? "（无源可试）"
+                  : "（暂无最近失败记录，点下方「触发探测」可主动跑一次）"}
           </span>
         </div>
         {diag?.interpretation ? (
@@ -399,6 +462,10 @@ export function SystemStatus() {
               try {
                 const d = await systemApi.sourceDiagnostics({ probe: 1 });
                 setDiag(d ?? null);
+                setDiagErr("");
+              } catch (e: unknown) {
+                setDiag(null);
+                setDiagErr(e instanceof Error ? e.message : String(e));
               } finally {
                 setProbeBusy(false);
               }
