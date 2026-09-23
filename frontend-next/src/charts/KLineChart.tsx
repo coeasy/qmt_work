@@ -170,6 +170,14 @@ export function KLineChart({
   }>({});
   /** 空数据状态：`callback([], false)` 之后画布全空且此前**没有任何提示** */
   const [empty, setEmpty] = useState(false);
+  /**
+   * ★ 加载失败原因（R23c）。此前「请求失败」与「真的没数据」共用 `setEmpty(true)`
+   *   一条路，于是失败时 overlay 会断言「暂无 K 线数据（可能停牌或该周期无成交）」
+   *   —— 成因指错，用户会以为标的停牌了。更隐蔽的是 `meta` 在失败分支**没被清空**：
+   *   上一轮成功时的 `note` 会被拿来解释这一轮的失败，头部还会继续显示旧的
+   *   「数据源 / 数据截至」。故失败必须独立记录原因，并清掉陈旧元数据。
+   */
+  const [loadErr, setLoadErr] = useState<string | null>(null);
 
   // ★ 依赖稳定化（V11 R14）：用**序列化后的 key** 而非数组引用作为 effect 依赖。
   // 否则调用方每次传入新数组（或使用默认值）都会导致图表被销毁重建。
@@ -206,6 +214,8 @@ export function KLineChart({
               data = data.filter((d) => d.timestamp < timestamp);
             }
             const lastBar = data.length ? data[data.length - 1] : undefined;
+            // ★ 成功即清除上一轮的失败原因（否则一次失败会永久污染后续成功）
+            setLoadErr(null);
             setMeta({
               stale: res.stale,
               source: typeof res.source === "string" ? res.source : undefined,
@@ -227,7 +237,11 @@ export function KLineChart({
             // 后端不支持日期分页，向前翻页不继续请求，避免重复拉取同一窗口
             callback(data, false);
           })
-          .catch(() => {
+          .catch((e: unknown) => {
+            // ★ 失败 ≠ 没数据：分开呈现，并清掉上一轮 meta，
+            //   否则 overlay 会用旧 note 解释新失败、头部继续显示旧「数据源/截至日」。
+            setLoadErr(e instanceof Error ? e.message : String(e));
+            setMeta({});
             setEmpty(true);
             callback([], false);
           });
@@ -374,7 +388,11 @@ export function KLineChart({
       <div className={s.canvas} ref={elRef} />
       {empty && (
         <div className={s.overlay}>
-          {meta.note ? `暂无 K 线数据：${meta.note}` : "暂无 K 线数据（可能停牌或该周期无成交）"}
+          {loadErr
+            ? `K 线加载失败：${loadErr}（切换周期或标的可重试）`
+            : meta.note
+              ? `暂无 K 线数据：${meta.note}`
+              : "暂无 K 线数据（可能停牌或该周期无成交）"}
         </div>
       )}
     </div>

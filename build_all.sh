@@ -5,7 +5,7 @@
 #
 # 用法:
 #   bash build_all.sh                 全流程（zip 便携版）+ 构建后自检
-#   bash build_all.sh --nsis          同时产出 NSIS 安装包（需 NSIS，否则退回 zip）
+#   bash build_all.sh --nsis          同时产出 NSIS 安装包 + 自动更新清单 latest.yml（需 NSIS，否则退回 zip）
 #   bash build_all.sh --portable      等价于默认：仅 zip 便携版
 #   bash build_all.sh --backend-only  仅后端 EXE（Step 1 前端 + Step 2 PyInstaller，跳过 Electron）
 #   bash build_all.sh --desktop-only  仅 Electron（需 backend/dist 已存在）
@@ -233,6 +233,7 @@ run_electron_builder() {
     if [[ -f "$FRONTEND/dist-electron/win-unpacked/qmt_work.exe" ]]; then
         warn "electron-builder 退出码非 0，但 win-unpacked/qmt_work.exe 已生成 —— 视为打包成功"
         warn "（多为收尾清理中间文件被环境安全删除护栏拦下；中间 *.nsis.7z 可手动清理）"
+        warn "  ⚠️ 这一步被拦会【连带跳过 latest.yml 的写出】（见下方「自动更新清单核对」）"
         return 0
     fi
     return 1
@@ -370,6 +371,39 @@ if [[ -d "$PACKED_STATIC" ]]; then
     fi
 else
     warn "未在包内找到 static 目录，跳过完整性核对"
+fi
+
+# ---- 自动更新清单核对 ----
+# latest.yml 只由 NSIS target 写出：electron-builder 源码 NsisTarget 收尾时传
+# `isWriteUpdateInfo: !this.isPortable`，而 zip 便携版 target 根本不写。
+# 曾出现「安装包已生成、latest.yml 缺失」的半成品发布（R23 §14.5）：客户端「检查更新」
+# 会静默失效、界面上毫无提示，事后极难归因 —— 故这里纳入构建后硬核对。
+LATEST_YML="$FRONTEND/dist-electron/latest.yml"
+if [[ "$USE_NSIS" == true ]]; then
+    if [[ ! -f "$LATEST_YML" ]]; then
+        fail "NSIS 构建完成但自动更新清单缺失: $LATEST_YML
+  客户端「检查更新」会静默失效（下载不到清单且无任何提示）。
+  最常见原因：收尾删除 nsis 中间包被本机安全删除护栏拦下（见上方 warn），
+  导致 PublishManager 未走到 writeUpdateInfoFiles()。
+  修法：新开一个用户回合（护栏计数按回合累计）后重跑：
+      mv frontend-next/dist-electron <唯一备份名>
+      bash build_all.sh --desktop-only --nsis"
+    fi
+    repo_ver="$(tr -d ' \t\r\n' < "$ROOT/VERSION" 2>/dev/null || true)"
+    yml_ver="$(sed -n 's/^version:[[:space:]]*//p' "$LATEST_YML" | head -n1 | tr -d ' \r')"
+    yml_path="$(sed -n 's/^path:[[:space:]]*//p' "$LATEST_YML" | head -n1 | tr -d ' \r')"
+    info "  自动更新清单 latest.yml: version=$yml_ver path=$yml_path"
+    if [[ -z "$repo_ver" ]]; then
+        warn "读不到 $ROOT/VERSION，跳过 latest.yml 版本号核对"
+    elif [[ "$yml_ver" != "$repo_ver" ]]; then
+        fail "latest.yml 版本号($yml_ver) ≠ 仓库根 VERSION($repo_ver)：客户端会拒绝或错误更新"
+    fi
+    if [[ -n "$yml_path" && ! -f "$FRONTEND/dist-electron/$yml_path" ]]; then
+        fail "latest.yml 指向的安装包不在产物目录: $FRONTEND/dist-electron/$yml_path"
+    fi
+    info "  latest.yml 与 VERSION 一致，安装包在位"
+else
+    info "  （zip 便携版不产出 latest.yml；自动更新需加 --nsis，本次跳过该核对）"
 fi
 
 # ---- Step 4: 构建后自检 ----
