@@ -140,6 +140,11 @@ STARTUP_CONNECT_BUDGET = 8.0
 #: （30s）对齐并留 2s 余量，使「后台继续跑」的行为与改动前完全一致。
 CONNECT_HARD_TIMEOUT = 32.0
 
+#: 交易日历拉取的超时（秒）。券商 ``bridge.call`` 内部**没有** wait_for，
+#: 接口卡住时这里会**无限等待**，把启动与「连接晚到后的重刷」一起堵死（R25 补齐）。
+#: 超时即退回「工作日」规则 —— 日历只影响会话判定，不值得为它拖住任何东西。
+CALENDAR_FETCH_TIMEOUT = 5.0
+
 #: 启动预算内没跑完、仍在后台拉起的任务。**必须持强引用**：asyncio 只保留任务的
 #: 弱引用，fire-and-forget 的任务可能在跑完之前就被 GC 掉（经典陷阱），
 #: 表现为「连接永远停在半路」。
@@ -173,9 +178,16 @@ async def _refresh_trading_calendar() -> None:
     from gateway.trading_session import default_session
     try:
         if state.bridge is not None:
-            cal = await state.bridge.call(state.bridge.gateway.get_trading_calendar)
+            # ★ 必须带超时（R25）：券商 `call` 内部没有 wait_for，接口卡住时
+            #   这里会无限等待 —— 既堵启动，也堵「连接晚到后重刷日历」那条路。
+            cal = await asyncio.wait_for(
+                state.bridge.call(state.bridge.gateway.get_trading_calendar),
+                timeout=CALENDAR_FETCH_TIMEOUT)
             if not default_session.refresh_from_calendar(cal or []):
                 default_session.use_fallback()
+    except asyncio.TimeoutError:
+        default_session.use_fallback()
+        log.warning("交易日历获取超时（%.0fs），改用工作日规则", CALENDAR_FETCH_TIMEOUT)
     except Exception as exc:  # noqa: BLE001
         default_session.use_fallback()
         log.warning("trading calendar unavailable, fallback weekday rule: %s", exc)
@@ -227,7 +239,11 @@ def _hand_off_to_background(task: asyncio.Task, conn) -> None:
             return
         _sync_active_bridge()
         try:
-            asyncio.get_running_loop().create_task(_refresh_trading_calendar())
+            _cal = asyncio.get_running_loop().create_task(_refresh_trading_calendar())
+            # 同样必须持**强引用**：这是 fire-and-forget，asyncio 只保留弱引用，
+            # 任务可能在跑完前被 GC（R25 补齐 —— 与 _bg_start_tasks 的用法一致）。
+            _bg_start_tasks.add(_cal)
+            _cal.add_done_callback(_bg_start_tasks.discard)
         except RuntimeError as exc:
             # 停机中：事件循环已关闭，没有可调度的地方，也没有人再需要这份日历。
             # 用 swallow 而不是 `pass` —— 静默失败是本项目最难排查的一类问题。
@@ -336,7 +352,18 @@ async def setup(app: FastAPI) -> dict:
         for c in state.broker_manager.all_connections()
     )
     if settings.broker_auto_connect and not has_intent:
-        auto_conn_id = await _auto_connect_active()
+        # ★ 自动连接同样受启动预算约束（R25 补齐）：`_auto_connect_active` 内部的
+        #   客户端探测最长 60s，此前**在预算之外** await ⇒ optional 相位照样能堵住
+        #   启动 60s（R24 只包住了 start_persisted_connections，这里是漏网的那条）。
+        #   超时不影响最终结果：`_broker_auto_connect_guard` 每 30s 复探一次，
+        #   接上后会重同步 state.bridge。
+        try:
+            auto_conn_id = await asyncio.wait_for(
+                _auto_connect_active(), timeout=STARTUP_CONNECT_BUDGET)
+        except asyncio.TimeoutError:
+            log.warning("启动期 %.0fs 内未完成本机客户端探测 —— 已交给后台自动连接守卫，"
+                        "不阻断启动", STARTUP_CONNECT_BUDGET)
+            auto_conn_id = ""
         if auto_conn_id:
             _sync_active_bridge()
             stats["started"] += 1

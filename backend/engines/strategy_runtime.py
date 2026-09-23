@@ -337,6 +337,12 @@ class StrategyRuntime:
             return
 
         held = await self._held_volume(run, code, bridge)
+        if held is None:
+            # ★ 持仓状态**未知**（查询异常 / 无桥接 / 模拟盘引擎未就绪）⇒ 跳过本轮：
+            #   既不下单，也**不写 _prev_held** —— 把「查不到」写成 0 会污染基线，
+            #   下一轮 `held > prev` 的比较就失去意义（进而误判在途单已成交）。
+            self._log(run_id, "warn", f"{code} 持仓状态未知，本轮跳过（不据此下单）", "")
+            return
         # P0-2：持仓增加 → 在途买入已成交，清除对应在途登记，允许后续方向信号重新下单。
         prev = self._prev_held.get(run_id, {}).get(code, 0.0)
         if held > prev:
@@ -520,27 +526,34 @@ class StrategyRuntime:
         # 「无行情绝不回填 0」不同 —— 展示侧不得走到这里）。
         return float(fallback) if fallback else 0.0
 
-    async def _held_volume(self, run, code, bridge) -> float:
+    async def _held_volume(self, run, code, bridge) -> float | None:
+        """返回该标的的持仓量；**``None`` 表示「查不到」**（≠ ``0`` 表示「确实没有」）。
+
+        ⚠️ 为什么必须区分（R25 实测缺陷）：本函数此前把「查询异常」也返回 ``0.0``，
+        而调用方是 ``if signal == "buy" and held <= 0: 下单`` ⇒ 券商查询一旦抖动，
+        **已持仓的标的会被判定成「无持仓」而再次买入**（超额建仓）；反向地，
+        卖出信号又会被 ``held > 0`` 挡掉。异常被降级成了一条业务事实。
+        """
         mode = run["mode"]
         try:
             if mode == "paper":
                 pe = self.state.paper_engine
                 if pe is None:
-                    return 0.0
+                    return None          # 模拟盘引擎没起来 ⇒ 状态未知，不能当 0
                 for p in pe.get_positions():
                     if (p.get("code") or "").upper() == code.upper():
                         return float(p.get("volume") or 0.0)
-                return 0.0
+                return 0.0               # 引擎在、查遍了、确实没有
             if bridge is None:
-                return 0.0
+                return None              # 实盘但无桥接 ⇒ 状态未知
             positions = await bridge.call(bridge.gateway.get_positions) or []
             for p in positions:
                 if (p.get("code") or p.get("stock_code") or "").upper() == code.upper():
                     return float(p.get("volume") or p.get("avail") or 0.0)
-            return 0.0
+            return 0.0                   # 拿到持仓列表、确实没有
         except Exception as exc:  # noqa: BLE001
-            self._log(run["id"], "warn", f"查询持仓失败：{exc}", "")
-            return 0.0
+            self._log(run["id"], "warn", f"查询持仓失败（本轮跳过，不据此下单）：{exc}", "")
+            return None
 
     # ---------------- DB 辅助 ----------------
     def _set(self, run_id: int, **fields) -> None:

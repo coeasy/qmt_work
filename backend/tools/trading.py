@@ -60,6 +60,12 @@ def register_trading_tools(mcp, risk):
     @mcp.tool()
     async def cancel_order(order_id: str, broker_id: str = "") -> dict:
         """撤单。"""
+        # ★ 模拟盘委托号不得递给券商（R25 补齐）：与 /trade/cancel 同一道闸，
+        #   否则适配器 int("PAPER-x") 抛 ValueError ⇒ 全局 500。
+        from engines.paper_engine import is_paper_order_id
+        if is_paper_order_id(order_id):
+            return {"ok": False, "reason": "该委托号属于「模拟盘」（本地撮合），"
+                                           "券商柜台不存在这笔委托，无可撤销的挂单。"}
         b = get_bridge(broker_id or None)
         return await execution.cancel_order(b, order_id)
 
@@ -67,6 +73,10 @@ def register_trading_tools(mcp, risk):
     async def cancel_order_price(order_id: str, deviation: float = 0.01,
                                  broker_id: str = "") -> dict:
         """超价撤单（偏离最新价超过 deviation 撤）。"""
+        from engines.paper_engine import is_paper_order_id
+        if is_paper_order_id(order_id):
+            return {"ok": False, "reason": "该委托号属于「模拟盘」（本地撮合），"
+                                           "券商柜台不存在这笔委托，无可撤销的挂单。"}
         b = get_bridge(broker_id or None)
         return await execution.cancel_order_price(b, order_id, deviation)
 

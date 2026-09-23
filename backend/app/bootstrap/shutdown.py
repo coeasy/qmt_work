@@ -105,6 +105,27 @@ async def shutdown(app: FastAPI) -> None:
     if state.sync_engine:
         await state.sync_engine.stop()
 
+    # 15b. 后台券商任务（R24/R25）——必须在 bridge.stop() **之前**取消。
+    #      两类任务都会「自己把连接拉起来」：
+    #        · `phase_broker._bg_start_tasks`：启动预算到点后交还后台继续拉起的连接；
+    #        · `app.state._broker_acg`：每 30s 复探本机客户端的自动连接守卫。
+    #      不取消的话，它们可能在 `conn.bridge.stop()` 之后重新建连 —— 停机后
+    #      留下残留连接与子进程（本项目实测过「只杀主进程会留孤儿」的同类问题）。
+    _bg_tasks: list[asyncio.Task] = []
+    try:
+        from app.bootstrap import phase_broker
+        _bg_tasks.extend(t for t in list(phase_broker._bg_start_tasks) if not t.done())
+    except Exception as exc:  # noqa: BLE001
+        log.debug("读取启动期后台任务失败（已忽略）：%s", exc)
+    _acg = getattr(app.state, "_broker_acg", None)
+    if _acg is not None and not _acg.done():
+        _bg_tasks.append(_acg)
+    for _t in _bg_tasks:
+        _t.cancel()
+    if _bg_tasks:
+        await asyncio.gather(*_bg_tasks, return_exceptions=True)
+        log.info("已取消 %d 个后台券商任务（防止停机后重连）", len(_bg_tasks))
+
     # 16. 所有连接 bridge
     for conn in state.broker_manager.all_connections():
         try:

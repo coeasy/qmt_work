@@ -22,7 +22,20 @@ async def target_portfolio_sync(body: dict, ctx: AppContext = Depends(get_ctx)):
         bool(body.get("dry_run", False)))
     if isinstance(res, dict) and res.get("ok"):
         return ok(res)
-    return err(503, res.get("reason", "同步失败") if isinstance(res, dict) else "同步失败")
+    # ★★ 失败原因必须按 `broker_unavailable` 分流，**不能一律 503**（2026-09-23 R25）。
+    #
+    # 旧实现对**所有**失败返 503「服务不可用」。而 `engine.sync()` 的失败原因绝大多数是
+    # **业务性**的：`未知 mode：'ratio'`（参数写错）、targets 为空、总资金为 0……
+    # 全被报成「服务不可用」⇒ 用户去查后端，而真正原因（参数错）永不出现。
+    # 尤其致命的是：R25 刚把「未知 mode」从「静默按股数处理（⇒ 全仓清仓）」改成
+    # **显式报错**，如果出口仍是 503，这条修复的提示就会被归因错埋掉。
+    #
+    # 语义边界（与 `signal.py` / `signal_router.py` 完全一致，唯一真源）：
+    #   - `broker_unavailable=True` ⇒ **503**：券商客户端没连上，给「去连接」引导；
+    #   - 其余（未知 mode / 参数错 / 计划不存在）⇒ **400**：请求被业务规则拒绝。
+    if isinstance(res, dict) and res.get("broker_unavailable"):
+        return err(503, res.get("reason", "未连接券商客户端"), res)
+    return err(400, res.get("reason", "同步失败") if isinstance(res, dict) else "同步失败")
 
 @router.get("/target-portfolio/plans")
 async def target_portfolio_list(ctx: AppContext = Depends(get_ctx)):

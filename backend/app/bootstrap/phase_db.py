@@ -25,7 +25,11 @@ async def setup(app: FastAPI) -> dict:
     # Durable JobRuntime 在 DB 阶段挂载；若进程曾在任务执行中退出，运行时会
     # 把可恢复任务重新放入队列，并保留 lease/heartbeat/checkpoint 证据。
     from app.runtime.jobs import get_runtime
-    get_runtime().attach_db(state.db)
+    # ★ defer_unknown=True：此刻 `system.*` 的 runner 工厂**还没注册**
+    #   （`register_all()` 在 phase_misc 才调用）。若不延后判定，崩溃前正在执行的
+    #   `system.*` 任务会被误标成「无法恢复未知任务类型」，且此后不再处于
+    #   queued/running ⇒ 永不恢复。phase_misc 注册工厂后会再 catch-up 一次。
+    get_runtime().attach_db(state.db, defer_unknown=True)
 
     # 券商档案注册表挂接 DB（热插拔档案落库 + 加载已持久化档案）
     from xtquant_client.registry import registry as broker_registry

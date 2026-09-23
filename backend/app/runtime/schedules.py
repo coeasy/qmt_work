@@ -335,7 +335,16 @@ class ScheduleRunner:
 
 
 async def _noop_runner(job) -> dict:
-    await job.report(100, "noop")
+    """未知 kind 的兜底 runner：直接报完成，不做任何事。
+
+    ⚠️ 两处都容易写错，且都会让这条兜底路径**必然失败**：
+    ① ``job`` 是 **dict**（见 `jobs.py`：``await job["runner"](job)``），不是对象
+       —— 写成 ``job.report(...)`` 会 ``AttributeError``；
+    ② ``report`` 是**同步**函数（`jobs.py::_make_report` 内定义的是
+       ``def _report(pct, msg) -> None``），**不能 await** —— 写成
+       ``await job["report"](...)`` 会 ``TypeError: object NoneType can't be awaited``。
+    """
+    job["report"](100, "noop")
     return {"ok": True, "noop": True}
 
 

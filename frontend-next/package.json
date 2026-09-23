@@ -1,7 +1,7 @@
 {
   "name": "qmt-work-frontend-next",
   "private": true,
-  "version": "0.3.3",
+  "version": "0.3.4",
   "type": "module",
   "description": "qmt_work 量化平台 · 专业交易终端前端（全新工程）",
   "main": "electron/main.cjs",

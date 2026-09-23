@@ -17,40 +17,15 @@
 阶段顺序（停机）：shutdown.shutdown() 逆序关闭。
 
 零功能回退：所有外部行为完全等价，仅内部代码组织。
+
+⚠️ 本包只作**阶段模块的命名空间 + 文档载体**：``from app.bootstrap import
+phase_broker`` 导入的是子模块，不经过这里定义的任何符号。
+
+R25 清理说明：这里曾定义 ``PhaseFn`` / ``_ordered()`` / ``run_all()`` 三个符号，
+是 R1 重构的中间产物。实际编排早已收敛到
+``app/bootstrap/lifecycle.py::run_phases``（由 ``main.py`` 调用），这三个符号
+**全仓零调用**（只在 ``__all__`` 里自我声明，属典型孤儿逻辑）。删掉它们，
+免得读代码的人以为「启动走 run_all」而实际走的是 ``run_phases``。
+``PhaseFn`` 的唯一真源现在是 ``lifecycle.py``。
 """
 from __future__ import annotations
-
-import asyncio
-import logging
-from typing import Awaitable, Callable
-
-from fastapi import FastAPI
-
-log = logging.getLogger("qmt_work.bootstrap")
-
-# 阶段函数签名：async def fn(app) -> dict  返回 dict 暴露给后续阶段
-PhaseFn = Callable[[FastAPI], Awaitable[dict]]
-
-
-def _ordered(phases: list[tuple[str, PhaseFn]]) -> list[tuple[str, PhaseFn]]:
-    """返回阶段列表（顺序由调用方决定）。"""
-    return phases
-
-
-async def run_all(app: FastAPI, phases: list[tuple[str, PhaseFn]]) -> dict:
-    """按顺序执行所有阶段，记录耗时和错误。"""
-    results: dict = {}
-    for name, fn in phases:
-        t0 = asyncio.get_event_loop().time()
-        try:
-            results[name] = await fn(app)
-            dt = (asyncio.get_event_loop().time() - t0) * 1000
-            log.info("bootstrap phase %s done in %.0fms", name, dt)
-        except Exception as exc:  # noqa: BLE001
-            dt = (asyncio.get_event_loop().time() - t0) * 1000
-            log.exception("bootstrap phase %s failed in %.0fms: %s", name, dt, exc)
-            results[name] = {"error": str(exc)}
-    return results
-
-
-__all__ = ["PhaseFn", "run_all", "_ordered"]

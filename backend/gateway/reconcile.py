@@ -192,7 +192,9 @@ class OrderReconciler:
                 except Exception:  # noqa: BLE001
                     pass
             summary["details"].append(detail)
-            self._write_off(oid, detail)
+            # ★ 核销失败必须计数上报（R25）：静默吞掉会让「痕迹丢失」不可观测。
+            if not self._write_off(oid, detail):
+                summary["writeoff_failed"] = int(summary.get("writeoff_failed", 0)) + 1
         if summary["details"]:
             self._emit({"type": "reconcile", "data": summary})
         if summary["mismatched"] and self._notifier:
@@ -206,19 +208,30 @@ class OrderReconciler:
         self.last_result = summary
         return summary
 
-    def _write_off(self, order_id: str, detail: dict) -> None:
+    def _write_off(self, order_id: str, detail: dict) -> bool:
+        """写核销痕迹（WAL + 审计）。返回是否**两处都写成功**。
+
+        ⚠️ 此前两处失败都被 `except: pass` 静默吞掉，而 `reconcile()` 照旧返回
+        一份「成功」的 summary ⇒「核销痕迹丢了」完全不可观测，下一轮巡检会
+        **再次核销同一笔委托**（R25）。这里把结果交回调用方汇总，至少让它
+        出现在 summary 与日志里，而不是凭空消失。
+        """
+        ok = True
         if self._wal is not None:
             try:
                 self._wal.append("reconciled", "order", order_id,
                                  {**detail, "at": now_iso()})
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                ok = False
+                log.warning("核销 WAL 写入失败（order=%s）：%s", order_id, exc)
         if self._db is not None:
             try:
                 self._db.audit("reconcile", "order.writeoff", order_id, detail,
                                detail.get("status", ""))
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                ok = False
+                log.warning("核销审计写入失败（order=%s）：%s", order_id, exc)
+        return ok
 
     def _emit(self, event: dict) -> None:
         # 唯一实现见 core/emit.py：on_event 常为 `ws_manager.broadcast`（async），

@@ -193,7 +193,9 @@ export const useBrokerStore = create<BrokerState>((set, get) => ({
         account_id: acc,
         account_type: candidate.accounts?.[0]?.account_type || "STOCK",
         client_mode: candidate.client_mode || "auto",
-        label: candidate.broker_name || candidate.name || undefined,
+        // ★ 键名是 `name` 不是 `label`（后端 `body.get("name")`）——写错会被静默忽略，
+        //   用户看到的客户端名字直接丢失（R25 修复）。
+        name: candidate.broker_name || candidate.name || undefined,
         autoconnect: true,
       });
       // 活跃连接全局唯一：一键连接即把下单通道切到它，避免「连上了但没生效」

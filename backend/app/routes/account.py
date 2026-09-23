@@ -382,6 +382,14 @@ async def account_batch_cancel(body: dict, ctx: AppContext = Depends(get_ctx)):
             rec["detail"] = "order_id 为空"
             results.append(rec)
             continue
+        # ★ 模拟盘委托号不得递给券商（R25 补齐）：与 /trade/cancel 同一道闸。
+        #   漏了这一步时，批量撤单里的 PAPER- 单号会走到适配器 int() ⇒ 全局 500。
+        from engines.paper_engine import is_paper_order_id
+        if is_paper_order_id(t["order_id"]):
+            rec["detail"] = ("该委托号属于「模拟盘」（本地撮合），"
+                             "券商柜台不存在这笔委托，无可撤销的挂单")
+            results.append(rec)
+            continue
         b = ctx.broker_manager.bridge(t["conn_id"] or None)
         if b is None:
             rec["detail"] = "连接不存在或未连接"

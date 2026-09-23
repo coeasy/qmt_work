@@ -165,10 +165,14 @@ def create_app() -> FastAPI:
             ("misc",      phase_misc.setup),
         ]
         try:
-            await run_phases(app, phases, state.mark_phase)
+            phase_results = await run_phases(app, phases, state.mark_phase)
         except RuntimeError as exc:
             log.error("startup aborted: %s", exc)
             raise
+        # ★ 保留相位明细（耗时 / 降级原因）供 /health 展示（R25）：此前返回值被
+        #   直接丢弃，于是「broker 相位为什么是 degraded」只能去翻日志 —— 而
+        #   optional 相位降级恰恰最需要自证面（客户端没开 / 没登录 / 连不上）。
+        app.state.phase_results = phase_results
         # V10 Phase A：启动完成后显式注册 AppContext（core 不反向 import 任何外层模块）。
         # 此处是 app 层装配出口，允许 import 全栈；所有依赖显式注入。
         # V11 R5 容器合一：`state` 本身就是 AppContext（AppState 继承之），故直接注册

@@ -52,7 +52,24 @@ async def signal_submit(body: dict, ctx: AppContext = Depends(get_ctx)):
         remark=sig.remark, idempotency_key=idem, payload=sig.payload)
     if isinstance(res, dict) and res.get("ok"):
         return ok(res)
-    return err(503, res.get("reason", "信号路由失败") if isinstance(res, dict) else "信号路由失败")
+    # ★★ 失败原因必须按 `broker_unavailable` 分流，**不能一律 503**（2026-09-23 R25）。
+    #
+    # `gateway/signal_router.py` 在两处**刻意**设置了 `broker_unavailable` 标志
+    # （`_live()` 无券商会话 / 异常里 isinstance BrokerNotConnectedError|BrokerSDKError），
+    # 注释也写明「路由据此返回 503 + 券商连接引导（而非 400）」—— 但路由层**从未读过它**，
+    # 于是这个标志成了**孤儿**，并被「一律 503」吞掉。后果：
+    #   ① 风控熔断 / 超出单笔限额 / 可用资金不足 / 参数非法，全都被报成
+    #      「服务不可用」，用户被引导去查后端，而真正原因（风控拒绝）永远不出现；
+    #   ② 该标志一旦被其它调用方（MCP / 前端）依赖，行为与注释不一致 ⇒ 说谎的契约。
+    #
+    # 语义边界（唯一真源就在这一处）：
+    #   - `broker_unavailable=True`  ⇒ **503**：券商客户端没连上 / SDK 缺失 / 桥接不可用，
+    #     这是「服务能力缺失」，给「去连接券商」的引导是对的；
+    #   - 其余（风控拒绝 / 柜台拒单 / 参数错）⇒ **400**：请求本身被业务规则拒绝。
+    # 真正的 503 还有一处：上面 `ctx.signal_router is None`（信号路由没起来）。
+    if isinstance(res, dict) and res.get("broker_unavailable"):
+        return err(503, res.get("reason", "未连接券商客户端"), res)
+    return err(400, res.get("reason", "信号路由失败") if isinstance(res, dict) else "信号路由失败")
 
 @router.post("/signal/confirm")
 async def signal_confirm(body: dict, ctx: AppContext = Depends(get_ctx)):

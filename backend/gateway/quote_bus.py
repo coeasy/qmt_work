@@ -7,6 +7,19 @@ Redis 模式（QMT_QUOTE_BUS=redis）：
 - 跨进程共享：多个 qmt_work 实例订阅同一 Redis channel，行情只向券商订阅一次
 - 引用计数存 Redis（key: qmt:quote:ref:<code>），过期自动清理
 - 需要 redis-py 或 fakeredis（开发期）
+
+⚠️ **当前消费情况**（R25 核实，避免误判为「总线在分发行情」）：
+
+- ``add_ref`` / ``dec_ref`` **确实在用** —— ``sync/__init__.py`` 据此决定
+  何时向券商退订（零引用退订），这是本模块目前唯一的真实功能。
+- ``publish`` / ``subscribe`` 这条**事件分发**路径当前**没有订阅者**：
+  内存模式下 ``publish`` 遍历空的 ``_subs``（无效果），Redis 模式下发到
+  channel 但无人订阅。**行情分发实际走 ``sync/__init__.py`` 的
+  ``WSManager.broadcast``**（WS 单一路径），前端不从这里拿行情。
+
+  保留 ``publish`` / ``subscribe`` 是**有意的预留**（多实例共享场景），
+  不是漏接。改动行情链路时请以 ``WSManager.broadcast`` 为准，别以为改了
+  这里就会影响前端。
 """
 from __future__ import annotations
 

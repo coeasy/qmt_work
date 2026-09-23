@@ -127,7 +127,10 @@ async def run_eod_pipeline(params: dict) -> dict:
         quality = "provisional"
         if isinstance(steps.get("bars_sync"), dict):
             written = int(steps["bars_sync"].get("bars_written") or 0)
-            failed = int(steps["bars_sync"].get("failed_count") or 0)
+            # ★ 键名必须是 `failed`（= `SyncSummary.to_dict()` 的真实键），不是
+            #   `failed_count`。读错键 ⇒ 恒为 0 ⇒ 「全市场同步大面积失败」也算
+            #   failed==0 ⇒ 快照 quality 被标成假 `final`，下游选股/回测都信它。
+            failed = int(steps["bars_sync"].get("failed") or 0)
             quality = "final" if (failed == 0 and written > 0 and not degraded) else (
                 "provisional" if written > 0 else "invalid")
         # ★ 批次号取**同步汇总里的真实批次号**：EOD 的 params 里通常没有 batch_id，

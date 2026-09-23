@@ -132,9 +132,16 @@ async def trade_cancel(body: dict, ctx: AppContext = Depends(get_ctx)):
     #
     #   ⚠️ 只拦**模拟盘前缀**的委托号，不按模式一刀切：用户可能刚从 live 切到 paper，
     #   此时券商那边还有真实挂单需要撤 —— 硬拦会让真实委托被搁死。
-    from engines.paper_engine import PAPER_ORDER_PREFIX
+    from engines.paper_engine import is_paper_order_id
 
-    if oid.upper().startswith(PAPER_ORDER_PREFIX):
+    if is_paper_order_id(oid):
+        # ⚠️ 这里**刻意**保持 503（2026-09-23 R25 复核后维持原判，未改）：
+        #   本文件的归因规则是「**参数错 ⇒ 400**；**模式 / 券商不适用 ⇒ 503**」，
+        #   而「模拟盘委托不在券商柜台」属后者（该路径在当前模式下不适用），
+        #   且文案已如实点明成因、不引导去连券商（见
+        #   `test_cancel_paper_without_broker_explains_mode_not_broker`）。
+        #   与之相对，`signal.py` / `target_portfolio.py` 的「一律 503」覆盖的是
+        #   风控熔断 / 限额 / 资金不足 / **未知 mode（参数错）** ⇒ 那才是真归因错误。
         return err(503, "该委托号属于「模拟盘」（本地撮合），券商柜台不存在这笔委托，"
                         "无可撤销的挂单。撤单只对券商实盘委托有效。"
                         + ("" if _mode == "live" else f"（当前信号模式：{_mode}）"))
@@ -143,6 +150,7 @@ async def trade_cancel(body: dict, ctx: AppContext = Depends(get_ctx)):
         if conn_id:
             return err(404, f"指定的连接不可用或未连接：{conn_id}（已阻止回退到其他账户）")
         if _mode and _mode != "live":
+            # ⚠️ 同上：模式不适用 ⇒ 维持 503（文案已点明「预演/模拟盘」）。
             return err(503, "当前信号模式为「模拟盘 / 预演」：模拟盘委托即时撮合、"
                             "预演只生成计划，不存在可撤销的挂单。"
                             "撤单只对券商实盘委托有效。")

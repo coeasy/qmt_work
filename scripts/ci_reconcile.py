@@ -34,7 +34,7 @@ PAGES_REGISTRY = os.path.join(SRC, "app", "routes.tsx")
 README = os.path.join(ROOT, "README.md")
 
 # ── 计数契约（与 README「核心能力」「项目结构」章节同步）─────────────────────
-EXPECTED_TESTS = 1613          # 后端用例收集数
+EXPECTED_TESTS = 1635          # 后端用例收集数
 EXPECTED_COMPONENTS = 72     # 前端 .tsx 组件数（components + shell + charts + domains）
 EXPECTED_PAGES = 43          # 注册页数量（routes.tsx PAGES 键；含占位）
 

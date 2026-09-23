@@ -116,8 +116,20 @@ class JobRuntime:
                                            ensure_ascii=False, default=str),
         })
 
-    def attach_db(self, db) -> None:
-        """挂载持久账本并执行 startup catch-up。"""
+    def attach_db(self, db, *, defer_unknown: bool = False) -> None:
+        """挂载持久账本并执行 startup catch-up。
+
+        ``defer_unknown=True``：遇到「此刻还没有 runner 工厂」的 kind 时**先不判定**，
+        保持其 ``queued``/``running`` 原状，等工厂注册齐全后再 catch-up 一次。
+
+        ⚠️ 为什么需要这个开关（R25 实测缺陷）：启动顺序是
+        ``phase_db``（第一次 ``attach_db``）→ … → ``phase_misc``（``register_all()``
+        才注册 ``system.*`` 工厂）。第一次 catch-up 时 ``system.*`` 工厂**尚不存在**，
+        于是崩溃前正在执行的 ``system.*`` 任务被直接标成
+        ``failed / 无法恢复未知任务类型``；等 phase_misc 再 catch-up 时，这些行
+        已不在 ``queued|running`` 里 ⇒ **永不恢复**。
+        「现在还不知道」≠「永远不知道」。
+        """
         self._db = db
         rows = db.query(
             "SELECT * FROM runtime_jobs WHERE status IN ('queued','running') "
@@ -131,7 +143,10 @@ class JobRuntime:
                 params = {}
             runner_factory = runner_factory_for(row["kind"])
             if runner_factory is None:
-                # 未知 runner 不伪造恢复：保留明确失败状态供运维处理。
+                if defer_unknown:
+                    # 工厂可能稍后才注册 ⇒ 本轮不判定，保持原状态等下一次 catch-up。
+                    continue
+                # 工厂已注册齐全仍未知 ⇒ 不伪造恢复：保留明确失败状态供运维处理。
                 db.execute("UPDATE runtime_jobs SET status=?, error=? WHERE id=?",
                            ("failed", "无法恢复未知任务类型", row["id"]))
                 continue

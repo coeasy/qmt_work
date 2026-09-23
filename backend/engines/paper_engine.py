@@ -30,6 +30,21 @@ MIN_LOT = 100  # A 股 1 手 = 100 股
 PAPER_ORDER_PREFIX = "PAPER-"
 
 
+def is_paper_order_id(order_id: object) -> bool:
+    """该委托号是否属于模拟盘（本地撮合、券商柜台不存在这笔委托）。
+
+    ★ 唯一入口：``PAPER-`` 前缀的委托号一旦递给券商适配器，会被 ``int()`` 解析
+    ⇒ ``ValueError`` ⇒ 全局兜底 500「服务器内部错误」——用户看到的是「服务坏了」，
+    真相是「这笔委托根本不在券商那儿」。
+
+    此前只有 ``/trade/cancel`` 做了拦截，**批量撤单**（``/account/batch/cancel``）
+    与 **MCP 撤单**（``cancel_order`` / ``cancel_order_price``）直接进
+    ``ExecutionService`` ⇒ 同样 500（R25 补齐）。三条路径统一走本函数，
+    避免第三次手抄同一段判断。
+    """
+    return str(order_id or "").upper().startswith(PAPER_ORDER_PREFIX)
+
+
 def _today_date() -> str:
     return today_str()
 
@@ -318,7 +333,11 @@ class PaperEngine:
         try:
             up = limit_price(ref, "up", None, code, False)
             down = limit_price(ref, "down", None, code, False)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            # 涨跌停价算不出来 ⇒ 无法校验。此处**仍然放行**（宁可放过也不误拦），
+            # 但必须留痕：否则「涨跌停校验静默失效」永远无人知晓 —— 调用方把
+            # "skipped" 与 "ok" 同等对待，异常被降级成了一条业务事实（R25）。
+            log.warning("涨跌停校验跳过（涨跌停价计算失败）：%s %s", code, exc)
             return "skipped"
         if price > up + 1e-6:
             return f"委托价 {price:.2f} 超过涨停价 {up:.2f}，模拟盘拒绝（P1-7）"

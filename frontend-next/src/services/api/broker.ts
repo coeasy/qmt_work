@@ -131,7 +131,13 @@ export const brokerApi = {
     /** 客户端模式：mini（极速版，程序化通道更稳）/ full / auto */
     client_mode?: string;
     session_id?: number;
-    label?: string;
+    /**
+     * ★ 连接名。后端读的是 **`name`**（`routes/broker.py` 的 `body.get("name", "")`）。
+     *
+     * ⚠️ 此处曾写作 `label` —— 后端从不读它，于是用户在「一键连接」里看到的
+     * 客户端名字被**静默丢弃**，连接列表退化成后端推断名（R25 修复）。
+     */
+    name?: string;
     /** ★ 显式带 conn_id = **编辑**既有连接（后端会跳过「同身份去重」，按 id 更新） */
     conn_id?: string;
     /** 后端默认 true：建连即拉起子进程握手（routes/broker.py 的 add_broker） */

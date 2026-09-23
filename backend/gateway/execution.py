@@ -114,22 +114,42 @@ class ExecutionService:
 
     async def cancel_order(self, bridge, order_id: str, *, action: str = "order.cancel") -> dict:
         result = await bridge.call_locked(bridge.gateway.cancel_order, order_id)
-        self._audit(action, order_id, {}, "ok")
         if isinstance(result, dict):
             # 关键正确性修复（P0-12）：以网关返回的 ok 为准。旧实现读取不存在的
             # `code` 键（cancel_order 根本不返回 code），导致撤单永远被判成功。
             # 仅在网关未显式给出 ok 时，才回退到 code==0 的兼容判定。
             if "ok" not in result:
                 result["ok"] = result.get("code", 0) == 0
+        # ★ 审计必须写在**判定之后**（R25）：此前先 `_audit(action, ..., "ok")` 再判结果，
+        #   撤单失败时 audit_log 里仍留一条「成功」记录 —— 合规/追溯直接失真。
+        if isinstance(result, dict) and result.get("ok"):
+            self._audit(action, order_id, {}, "ok")
+        else:
+            self._audit(f"{action}.failed", order_id, {}, str(result)[:200])
         return result
 
     async def cancel_order_price(self, bridge, order_id: str, deviation: float = 0.01,
                                  *, action: str = "order.cancel_price") -> dict:
-        result = await bridge.call_locked(
-            bridge.gateway.cancel_order_price, order_id, deviation)
-        self._audit(action, order_id, {"deviation": deviation}, "ok")
+        # ★ 能力探测（R25）：`XTQuantGateway` 与 `BridgeAdapter` 都**没有**实现
+        #   `cancel_order_price`（只有 `xtquant_client/base.py` 抽象层声明过）。
+        #   直接调用会 `AttributeError` ⇒ 全局兜底 500「服务器内部错误」，
+        #   真相却是「当前适配器不支持超价撤单」。这里给出明确出路。
+        gw = getattr(bridge, "gateway", None)
+        if gw is None or not hasattr(gw, "cancel_order_price"):
+            return {"ok": False,
+                    "reason": "当前券商适配器不支持超价撤单（cancel_order_price 未实现）"}
+        result = await bridge.call_locked(gw.cancel_order_price, order_id, deviation)
         if isinstance(result, dict):
-            result["ok"] = result.get("code", 0) == 0
+            # 与 cancel_order 同一套判定（R25 修复）：优先用网关显式给出的 `ok`。
+            # 旧实现写 `result.get("code", 0) == 0`，而撤单类网关**不返回 code**
+            # ⇒ 恒为 True ⇒ 撤单失败也被覆写成成功。
+            if "ok" not in result:
+                result["ok"] = result.get("code", 0) == 0
+        if isinstance(result, dict) and result.get("ok"):
+            self._audit(action, order_id, {"deviation": deviation}, "ok")
+        else:
+            self._audit(f"{action}.failed", order_id, {"deviation": deviation},
+                        str(result)[:200])
         return result
 
 

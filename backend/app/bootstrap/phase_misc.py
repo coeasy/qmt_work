@@ -16,6 +16,11 @@ from core.state import state
 
 log = logging.getLogger("qmt_work.bootstrap.misc")
 
+#: 后台预热任务的**强引用**。asyncio 只保留任务的弱引用 ⇒ fire-and-forget 的
+#: ``create_task(...)`` 可能在跑完之前就被 GC 掉（经典陷阱，与 ``phase_broker``
+#: 的 ``_bg_start_tasks`` 同源）。这里显式持引用，跑完即释放（R25 修正）。
+_bg_tasks: set[asyncio.Task] = set()
+
 
 def _job_failure_alert(job: dict) -> None:
     """定时任务失败的告警出口（由 JobRuntime 回调）。
@@ -84,7 +89,9 @@ async def setup(app: FastAPI) -> dict:
         import asyncio
 
         from datasource.registry import get_hub
-        asyncio.create_task(get_hub().warmup_all())
+        _t = asyncio.create_task(get_hub().warmup_all())
+        _bg_tasks.add(_t)
+        _t.add_done_callback(_bg_tasks.discard)   # 跑完即释放强引用
         log.info("行情数据源预热任务已提交（后台）")
     except Exception as exc:  # noqa: BLE001
         log.warning("行情数据源预热任务提交失败：%s", exc)
@@ -101,14 +108,19 @@ async def setup(app: FastAPI) -> dict:
         from app.runtime.schedules import ScheduleRunner, ScheduleStore
         from app.runtime.system_jobs import register_all
         runtime = get_runtime()
+        # ★★ 先把 system.* 工厂注册齐，**再** catch-up —— 顺序不可颠倒：
+        #    attach_db 要为每个 queued/running 任务解析 runner 工厂，工厂还没注册
+        #    就会把它判成「无法恢复未知任务类型」（R25 实测：崩溃残留的 system.*
+        #    任务因此永不恢复）。register_all 只写 _RUNTIME_FACTORY 并可选播种调度
+        #    （用 state.db，phase_db 早已挂好），提前调用是安全的。
+        # 9 个 system.* JobKind（含 system.classic_screen）+ 播种默认调度
+        # （15:30 日线更新 → 16:00 经典选股 → 18:30 EOD，见 ensure_default_schedules）
+        register_all()
         runtime.attach_db(state.db)          # 启动补跑（catch-up）+ durable ledger
         # 任务失败接入告警：否则「日线同步每天失败」这种事只会躺在日志里，
         # 用户看到的是「数据停在三天前」却不知道为什么。
         runtime.set_failure_hook(_job_failure_alert)
         runtime.start_reaper(interval=30.0)  # P1-20 租约收割
-        # 9 个 system.* JobKind（含 system.classic_screen）+ 播种默认调度
-        # （15:30 日线更新 → 16:00 经典选股 → 18:30 EOD，见 ensure_default_schedules）
-        register_all()
         store = ScheduleStore(state.db)
         from app.runtime.eod import ensure_default_schedule
         ensure_default_schedule(state.db)    # F9 修复：默认 18:30 EOD，enabled

@@ -12,6 +12,7 @@ import {
   type Column,
 } from "@/design/primitives";
 import { tradeApi, signalApi } from "@/services/api";
+import { quoteSocket } from "@/services/ws";
 import { useBrokerStore } from "@/stores/broker";
 import { useWorkspaceStore } from "@/stores/workspace";
 import { useOpenWorkbench } from "@/hooks/useOpenWorkbench";
@@ -124,6 +125,31 @@ export function Trade() {
   // 触发，导致首次打开页面三个页签恒为空（阶段 3 本地实测发现的 UX 缺陷）。
   useEffect(() => {
     void refresh();
+  }, [refresh]);
+
+  /**
+   * ★ 委托 / 成交回报到达时自动刷新三个页签（R25 补齐）。
+   *
+   * 此前「回报 → WS → 前端刷新」这条链的**最后一跳是断的**：只有本页自己发起的
+   * 请求会刷新，别的来源（算法单、条件单、券商侧状态变化、模拟盘撮合、别的终端）
+   * 产生的委托/成交变化都不会反映到列表上 —— 用户只能手动点「刷新」。
+   *
+   * 300ms 去抖：一次成交常伴随 `order` + `deal` 两条事件，连续到达时只刷一次。
+   * 组件卸载时同时清定时器与取消订阅（否则会往已卸载的 setState 写数据）。
+   */
+  useEffect(() => {
+    let timer: number | null = null;
+    const off = quoteSocket.onMessage((msg) => {
+      const t = typeof msg.type === "string" ? msg.type : "";
+      // 只认委托/成交类事件；行情（quotes/snapshot）不走这条刷新。
+      if (!/^(order|deal)(_event)?$/.test(t)) return;
+      if (timer !== null) window.clearTimeout(timer);
+      timer = window.setTimeout(() => { void refresh(); }, 300);
+    });
+    return () => {
+      if (timer !== null) window.clearTimeout(timer);
+      off();
+    };
   }, [refresh]);
 
   /**

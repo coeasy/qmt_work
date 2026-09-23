@@ -4,7 +4,7 @@
 
 所有行情 / 交易 / 账户接口均通过真实券商 SDK 调用，**零 mock**：未连接券商时端点返回 HTTP 503 + 可操作引导，绝不返回假数据、绝不用空列表冒充。
 
-- 版本：`0.3.3`（单一真源为仓库根 `VERSION`，构建时随包分发并由 `build_exe.py` 校验）
+- 版本：`0.3.4`（单一真源为仓库根 `VERSION`，构建时随包分发并由 `build_exe.py` 校验）
 - 许可证：Apache 2.0
 - 平台：Windows 10 / 11（迅投系券商依赖 xtquant 的 Windows 二进制，须与券商客户端**同机**运行）
 
@@ -422,7 +422,7 @@ print(httpx.get(f"{BASE}/paper/positions", headers=HEAD).json())
 
 | 层级 | 命令 | 覆盖范围 |
 |------|------|----------|
-| 后端单测 | `cd backend && for f in tests/test_*.py; do python -m pytest "$f" -q -p no:cacheprovider; done` | 150 个 `test_*.py`，1613 个用例 |
+| 后端单测 | `cd backend && for f in tests/test_*.py; do python -m pytest "$f" -q -p no:cacheprovider; done` | 151 个 `test_*.py`，1635 个用例 |
 | 后端冒烟 | `python backend/tests/smoke2.py` | REST 主要端点 + 错误语义（**需先起后端**；默认连 `data/app.db`，检测到真实券商连接时自动跳过 3 条「未连接券商 → 503」断言并提示改用下方客户端测试做权威验证） |
 | 前端类型检查 | `cd frontend-next && npm run typecheck` | TypeScript strict 零错误 |
 | 前端单测 | `cd frontend-next && npm test` | vitest |
@@ -490,7 +490,7 @@ qmt_work/
 │  ├─ connectors/ plugins/ sync/   # 外部连接器 / 插件内核 / WebSocket 同步引擎
 │  ├─ tools/ runtimes/  # 因子策略工具 / 捆绑 Python 运行时（cp311）
 │  ├─ data/ static/ dist/   # SQLite / 前端构建产物 / PyInstaller 产物
-│  ├─ tests/            # 150 个 test_*.py（1613 用例）+ 冒烟测试 smoke2.py
+│  ├─ tests/            # 151 个 test_*.py（1635 用例）+ 冒烟测试 smoke2.py
 │  ├─ scripts/          # 门禁脚本（许可 / 能力漂移 / 契约生成 / 架构校验）
 │  └─ build_exe.py      # EXE 打包脚本（含 static 闸门）
 ├─ frontend-next/         # 主前端：React 18 + Vite 5 + TS 5 strict（已退役旧 frontend/）

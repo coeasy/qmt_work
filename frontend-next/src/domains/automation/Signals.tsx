@@ -30,7 +30,10 @@ const MODE_LABEL: Record<SignalMode, string> = {
  *   - 模式只有三种：live / paper / dry_run（**没有 paused**），非法值后端返回 400
  *   - /signal/submit 的 body 用 side（不是 direction）；成功后返回订单结果
  *   - 大额单会返回 pending_confirmation + confirm_token，需调 /signal/confirm 二次确认
- *   - 提交失败统一返回 503 并携带 reason（含风控拦截原因），本页原样展示不粉饰
+ *   - 提交失败分两种：**业务拒绝 400**（风控熔断/额度/资金/参数，带真实 reason）
+ *     与**券商不可用 503**（没连上客户端 / SDK 缺失）。两者都原样展示不粉饰，
+ *     但归因不同 —— 400 是「请求被规则拒绝」，503 才需要引导去「连接管理」。
+ *     （判据是后端 `broker_unavailable`，见 backend/app/routes/signal.py）
  *   - 非 live 模式不会触达柜台，这是验证策略的安全档位
  */
 export function Signals() {

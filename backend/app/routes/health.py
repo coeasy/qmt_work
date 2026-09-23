@@ -1,7 +1,7 @@
 from core.context import AppContext, get_ctx
 import logging
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 
 from app.routes._common import err, ok
@@ -19,9 +19,12 @@ router = APIRouter()
 REQUIRED_PHASES = ("db", "engines", "watchdogs", "replay", "misc")
 
 @router.get("/health")
-async def health_check(ctx: AppContext = Depends(get_ctx)):
+async def health_check(request: Request, ctx: AppContext = Depends(get_ctx)):
     """获取health（GET /health）。"""
     import time as _t
+    # ★ 各相位明细（耗时 / 降级原因，R25）：`phases` 只给状态字，看不出「为什么是
+    #   degraded」—— 而 optional 相位降级（客户端没开 / 没登录）恰恰最需要自证面。
+    phase_details = dict(getattr(request.app.state, "phase_results", None) or {})
     db_ok = ctx.db is not None
     brokers = []
     try:
@@ -64,7 +67,9 @@ async def health_check(ctx: AppContext = Depends(get_ctx)):
         "trading_session": trading, "checks": checks,
         "lifecycle": {"ready": ctx.lifecycle_ready,
                        "stopping": ctx.lifecycle_stopping,
-                       "phases": dict(ctx.phase_status)},
+                       "phases": dict(ctx.phase_status),
+                       # 每个相位的耗时(ms)/错误原因；启动期没跑到的相位不出现
+                       "phase_details": phase_details},
     })
 
 

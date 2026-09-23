@@ -11,8 +11,22 @@ import json
 import logging
 from typing import Any
 from core.clock import now_iso
+from core.quote_fields import pick_last_price
 
 log = logging.getLogger("qmt_work.target")
+
+#: mode 别名归一化表。
+#:
+#: 前端界面提供「股数 / 金额 / 比例」三个选项，实际发出的是
+#: ``shares`` / ``amount`` / ``ratio``；而 MCP 工具与历史调用用 ``volume`` / ``weight``。
+#: ⚠️ 不做归一化的后果（R25 实测缺陷）：``ratio`` 会掉进「按股数」分支 ——
+#: 权重 0.3 被当作 **0.3 股**，``int(0.3) == 0`` ⇒ 对全部现有持仓生成
+#: **卖出清仓**信号；``amount`` 则把「金额」当「股数」，下单量级直接错几个数量级。
+_MODE_ALIASES: dict[str, str] = {
+    "volume": "volume", "shares": "volume",
+    "weight": "weight", "ratio": "weight",
+    "amount": "amount",
+}
 
 
 class TargetPortfolioEngine:
@@ -26,13 +40,33 @@ class TargetPortfolioEngine:
                    dry_run: bool = False) -> dict:
         """差量同步。
 
-        targets: {code: target_volume} 或 {code: weight(0~1)}
-        mode: volume（按目标股数）/ weight（按权重+总资产计算股数）
+        targets: {code: target_volume} / {code: weight(0~1)} / {code: 目标金额}
+        mode: 三种语义（含别名，见 ``_MODE_ALIASES``）
+
+            - 股数：``shares`` / ``volume`` —— targets 的值是目标**股数**
+            - 比例：``ratio``  / ``weight`` —— targets 的值是**权重**（0~1），
+              按 ``total_capital``（缺省取账户总资产）折算目标股数
+            - 金额：``amount``              —— targets 的值是目标**金额**，按最新价折算
+
         dry_run: True 时只返回计划，不触发信号
+
+        ⚠️ 未知 mode **直接报错**，不再静默按股数处理 —— 静默兜底正是
+        「比例被当成股数 ⇒ 权重 0.3 → 0 股 → 全仓清仓」这类事故的成因。
         """
+        norm = _MODE_ALIASES.get(str(mode or "").strip().lower())
+        if norm is None:
+            return {"ok": False,
+                    "reason": f"未知 mode：{mode!r}（可选 shares/amount/ratio，"
+                              f"或 volume/weight）"}
+        mode = norm
+
         b = self._manager.bridge(broker_id or None)
         if b is None:
-            return {"ok": False, "reason": "未连接券商客户端"}
+            # ★ broker_unavailable：路由据此返 **503 + 「去连接券商」引导**（而不是 400）。
+            #   与 `gateway/signal_router.py` 同一套约定 —— 归因边界只认这一个标志。
+            #   缺了它，路由只能「一律 400 或一律 503」，两者都会把用户带偏。
+            return {"ok": False, "reason": "未连接券商客户端",
+                    "broker_unavailable": True}
         # 当前持仓
         positions = await b.call(b.gateway.get_positions)
         cur: dict[str, int] = {}
@@ -41,10 +75,10 @@ class TargetPortfolioEngine:
             vol = int(p.get("volume", 0) or 0)
             if code:
                 cur[code] = vol
-        # 权重模式：按总资产 + 最新价计算目标股数
         resolved = dict(targets)
         if mode == "weight":
-            cash = await b.call(b.gateway.get_cash)
+            # 权重模式：按总资产 + 最新价折算目标股数
+            cash = await b.call(b.gateway.get_cash) or {}
             assets = float(cash.get("assets", 0) or 0)
             capital = total_capital or assets
             for code, w in list(resolved.items()):
@@ -52,12 +86,25 @@ class TargetPortfolioEngine:
                 if w <= 0:
                     resolved[code] = 0
                     continue
-                q = await b.call(b.gateway.get_quote, code)
-                price = float(q.get("last") or 0)
-                if price <= 0:
+                # ★ 取价必须走唯一入口（core.quote_fields）：此前内联
+                #   `q.get("last")` 在只给 lastPrice 的源上恒取不到价 ⇒ 静默
+                #   `continue` ⇒ 该标的**被悄悄跳过**（表现为「有些票根本没调仓」）。
+                price = pick_last_price(await b.call(b.gateway.get_quote, code) or {})
+                if not price:
                     continue
                 target_vol = int(capital * w / price / 100) * 100
                 resolved[code] = max(0, target_vol)
+        elif mode == "amount":
+            # 金额模式：targets 的值是目标金额，按最新价折算股数
+            for code, amt in list(resolved.items()):
+                amt = float(amt)
+                if amt <= 0:
+                    resolved[code] = 0
+                    continue
+                price = pick_last_price(await b.call(b.gateway.get_quote, code) or {})
+                if not price:
+                    continue
+                resolved[code] = max(0, int(amt / price / 100) * 100)
         # 生成差量
         all_codes = set(resolved) | set(cur)
         plan = []

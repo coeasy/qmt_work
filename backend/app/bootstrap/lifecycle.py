@@ -51,20 +51,27 @@ async def run_phases(app: FastAPI,
         mark_phase(name, "starting")
         t0 = loop.time()
         try:
-            results[name] = await fn(app)
+            payload = await fn(app)
+            ms = (loop.time() - t0) * 1000
             mark_phase(name, "ready")
-            log.info("bootstrap phase %s (%s) done in %.0fms",
-                     name, level, (loop.time() - t0) * 1000)
+            log.info("bootstrap phase %s (%s) done in %.0fms", name, level, ms)
+            # ★ 结构对齐本函数 docstring（R25）：此前直接存 fn 的返回值，于是
+            #   `status` / `ms` / `error` 三个键**根本不存在**，谁按文档读谁拿到
+            #   KeyError；相位的耗时与降级原因也因此无法上报到 /health。
+            results[name] = {"status": "ready", "ms": round(ms, 1),
+                             "level": level, "detail": payload}
         except Exception as exc:  # noqa: BLE001
+            ms = (loop.time() - t0) * 1000
             mark_phase(name, "error")
             log.exception("bootstrap phase %s (%s) failed in %.0fms: %s",
-                          name, level, (loop.time() - t0) * 1000, exc)
+                          name, level, ms, exc)
             if level == "required":
                 # P1-22：Required 失败阻断启动 —— 让 lifespan 抛错，
                 # uvicorn 退出（等效 sys.exit），绝不带病服务。
                 raise RuntimeError(
                     f"required bootstrap phase '{name}' failed: {exc}") from exc
-            results[name] = {"error": str(exc)}
+            results[name] = {"status": "error", "ms": round(ms, 1),
+                             "level": level, "error": str(exc)}
     return results
 
 

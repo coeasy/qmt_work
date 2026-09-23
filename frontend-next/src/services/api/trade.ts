@@ -154,7 +154,8 @@ export const signalApi = {
   /** ★ 仅支持 live / paper / dry_run（无 paused） */
   setMode: (mode: SignalMode) => http.post<{ mode: SignalMode }>("/signal/mode", { mode }),
 
-  /** ★ body 用 side；成功走 ok()，失败统一 503 并带 reason */
+  /** ★ body 用 side；成功走 ok()；失败按 `broker_unavailable` 分流：
+   *  业务拒绝 ⇒ 400（带真实 reason），券商没连上/SDK 缺失 ⇒ 503（引导去连接）。 */
   submit: (body: SignalSubmitPayload) => http.post<OrderResult>("/signal/submit", body),
 
   /**

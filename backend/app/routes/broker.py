@@ -324,7 +324,15 @@ async def connect_broker(conn_id: str, ctx: AppContext = Depends(get_ctx)):
     try:
         # 阶段 0-D（C7）：connect 同步 start() + test_connection()（最坏 90s），放线程池。
         res = await asyncio.to_thread(ctx.broker_manager.connect, conn_id)
-    except (KeyError, BrokerError) as exc:
+    except KeyError as exc:
+        # ★★ `KeyError` 是 `未知连接：<conn_id>`（manager.connect 里显式 raise），
+        #   属**请求指向了不存在的对象** ⇒ 404，**不是「服务不可用」**（2026-09-23 R25）。
+        #   旧实现把它和 `BrokerError` 合在一个 except 里统一报 503 ⇒
+        #   用户传错 conn_id 时被告知「服务不可用」，方向彻底被带偏。
+        ctx.db.audit("broker", "broker.connect_failed", conn_id, {}, str(exc))
+        return err(404, f"连接不存在：{conn_id}")
+    except BrokerError as exc:
+        # 券商层不可用（未连接 / SDK 缺失 / 桥接不可用）⇒ 503 才是如实的。
         ctx.db.audit("broker", "broker.connect_failed", conn_id, {}, str(exc))
         return err(503, str(exc))
     except Exception as exc:  # noqa: BLE001  探测抛 RuntimeError 等也记录

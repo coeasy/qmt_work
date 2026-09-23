@@ -25,6 +25,18 @@ export function getApiKey(): string {
   return apiKey;
 }
 
+/**
+ * 手动设置 API Key（写入内存 + localStorage）。
+ *
+ * ★ 前端**通常不需要**调用它：后端对 loopback 请求免鉴权
+ *   （见 `capabilities.py`：「admin scope 或主密钥（X-API-Key / Bearer）；loopback 免鉴权」），
+ *   而桌面客户端的前端与后端同机 ⇒ 全程不带 Key 也能正常用。
+ *
+ * 保留本函数（且**故意**不做 UI 入口）是为两种场景：
+ *   ① 非 loopback 部署（前端与后端不同机）；
+ *   ② 排障时在控制台临时写入 Key。
+ * 它是「零调用但合法」的导出，**不是漏接的孤儿逻辑**（R25 已核实并在此留档）。
+ */
 export function setApiKey(key: string): void {
   apiKey = key;
   try {
