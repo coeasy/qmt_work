@@ -16,6 +16,7 @@ import time
 from fastapi import FastAPI
 
 from core.config import settings
+from core.errors import swallow
 from core.state import state
 from core.state import init_broker_manager
 from xtquant_client.manager import ConnectionConfig
@@ -116,24 +117,158 @@ async def _auto_connect_active() -> str:
     return conn.cfg.conn_id
 
 
-async def start_persisted_connections(mgr) -> dict:
-    """拉起所有「应保持连接」的持久连接，返回 ``{started, failed, skipped}``。
+#: 启动期给「持久连接」的**总**等待预算（秒）。
+#:
+#: ★ 为什么必须有：``broker`` 相位在 ``lifecycle.PHASE_LEVELS`` 里是 **optional**，
+#:   但「optional」只保证「**失败**不阻断 READY」—— ``run_phases`` 对每个相位是
+#:   顺序 ``await`` 的，**「慢」照样阻断**。实测（2026-09-23 ``client.log``，本机
+#:   「客户端已安装但未启动」这一最常见情形）：
+#:
+#:       ERROR  bridge 握手失败: _ping 调用超时 30.0s
+#:       INFO   bootstrap phase broker (optional) done in 32011ms
+#:       INFO   Application startup complete      <-- 这之后 uvicorn 才开始收请求
+#:
+#:   也就是说这 32s 里**整个 HTTP 服务一个字都不回**，用户看到的是「软件打不开」。
+#:
+#: 取值依据（来自 ``bridge_client`` 的设计注释）：客户端**已登录**时 ``_ping``
+#: 5s 内返回；**未登录**时 SDK 要 10~30s 才阻塞/异常。8s 因此能干净切开
+#: 「能连上」与「连不上」两类，既不误杀慢机器冷启动，也不再陪跑满 30s。
+STARTUP_CONNECT_BUDGET = 8.0
+
+#: 单条连接的**硬**上限（秒）。它不是启动预算：预算到点就把连接交还后台继续跑，
+#: 这里只是兜底，防止某条连接的启动永久挂起。与 ``bridge_client._HANDSHAKE_TIMEOUT``
+#: （30s）对齐并留 2s 余量，使「后台继续跑」的行为与改动前完全一致。
+CONNECT_HARD_TIMEOUT = 32.0
+
+#: 启动预算内没跑完、仍在后台拉起的任务。**必须持强引用**：asyncio 只保留任务的
+#: 弱引用，fire-and-forget 的任务可能在跑完之前就被 GC 掉（经典陷阱），
+#: 表现为「连接永远停在半路」。
+_bg_start_tasks: set[asyncio.Task] = set()
+
+
+def _sync_active_bridge() -> None:
+    """把进程级活跃指针同步为 manager 当前活跃连接（幂等，任何时刻可调用）。
+
+    ★ 为什么不能只在 ``setup`` 末尾同步一次：预算内没连上的连接是在**之后**才连上的，
+    而 ``state.bridge`` / ``state.gateway`` 只在装配期赋值 —— 不同步的话，
+    「先开软件、后开 QMT 客户端」（最常见路径）会变成「连上了但活跃指针是空的」。
+
+    注：业务侧取行情走 ``broker_manager.active_bridge()``（动态），不受影响；
+    真正读 ``state.bridge`` 的是本模块的交易日历刷新。
+    """
+    mgr = state.broker_manager
+    if mgr is None:
+        return
+    state.bridge = mgr.active_bridge()
+    state.gateway = state.bridge.gateway if state.bridge else None
+
+
+async def _refresh_trading_calendar() -> None:
+    """用活跃券商拉交易日历刷新会话判定；不可用则退回「工作日」规则（永不抛）。
+
+    抽成函数是为了能在**连接晚到**时再刷一次：启动预算内没连上时先按 fallback
+    运行，等后台把连接拉起来后再校正 —— 否则整个进程生命周期都停在 fallback
+    （工作日规则会把节假日当交易日）。
+    """
+    from gateway.trading_session import default_session
+    try:
+        if state.bridge is not None:
+            cal = await state.bridge.call(state.bridge.gateway.get_trading_calendar)
+            if not default_session.refresh_from_calendar(cal or []):
+                default_session.use_fallback()
+    except Exception as exc:  # noqa: BLE001
+        default_session.use_fallback()
+        log.warning("trading calendar unavailable, fallback weekday rule: %s", exc)
+    log.info("trading session: %s", default_session.stats())
+
+
+async def _start_one(conn) -> str:
+    """拉起一条连接，返回 ``"started"`` / ``"failed"``（**绝不抛异常**）。"""
+    try:
+        await asyncio.wait_for(conn.bridge.start(), timeout=CONNECT_HARD_TIMEOUT)
+    except asyncio.TimeoutError:
+        conn.connected = False
+        conn.last_error = f"连接超时（{CONNECT_HARD_TIMEOUT:.0f}s）：券商客户端未就绪"
+        log.warning("broker start timed out (%.0fs) for %s: 券商客户端未就绪，已跳过自动连接",
+                    CONNECT_HARD_TIMEOUT, conn.cfg.conn_id)
+        return "failed"
+    except Exception as exc:  # noqa: BLE001
+        conn.connected = False
+        conn.last_error = str(exc)[:500]
+        log.warning("broker start failed %s: %s", conn.cfg.conn_id, exc)
+        return "failed"
+    conn.connected = conn.adapter.is_connected()
+    log.info("broker connection started: %s (%s) connected=%s",
+             conn.cfg.name, conn.cfg.conn_id, conn.connected)
+    return "started"
+
+
+def _hand_off_to_background(task: asyncio.Task, conn) -> None:
+    """把「预算内没跑完」的连接交给后台：它结束时同步活跃指针 + 校正交易日历。
+
+    交接而非取消：``bridge.start()`` 的真实工作在 ``run_in_executor`` 的线程里跑，
+    取消协程**停不掉那个线程**，只会让状态停在半路；让它自然跑完（``_start_one``
+    内部仍有 32s 硬上限）反而是确定的行为，与改动前一致。
+    """
+    _bg_start_tasks.add(task)
+
+    def _on_done(t: asyncio.Task) -> None:
+        _bg_start_tasks.discard(t)
+        try:
+            outcome = t.result()
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:  # noqa: BLE001
+            log.warning("后台拉起连接 %s 异常：%s", conn.cfg.conn_id, exc)
+            return
+        log.info("后台拉起连接 %s 结束：%s（connected=%s）",
+                 conn.cfg.conn_id, outcome, conn.connected)
+        if outcome != "started":
+            return
+        _sync_active_bridge()
+        try:
+            asyncio.get_running_loop().create_task(_refresh_trading_calendar())
+        except RuntimeError as exc:
+            # 停机中：事件循环已关闭，没有可调度的地方，也没有人再需要这份日历。
+            # 用 swallow 而不是 `pass` —— 静默失败是本项目最难排查的一类问题。
+            swallow(exc, why="停机中事件循环已关闭，交易日历无需再校正", logger=log)
+
+    task.add_done_callback(_on_done)
+
+
+async def start_persisted_connections(mgr, *,
+                                      budget: float = STARTUP_CONNECT_BUDGET) -> dict:
+    """拉起所有「应保持连接」的持久连接，返回
+    ``{started, failed, skipped, deferred}``。
 
     ★ 单独抽成函数（而非内联在 ``setup`` 里）是为了**可测**：启动期逻辑最难验证，
     内联就只能用真库真适配器跑，而真适配器在 CI 里根本不存在。抽出来后可用
-    桩 manager 断言「无效路径被跳过、且不占用 32s 超时预算」。
+    桩 manager 断言「无效路径被跳过」「慢连接不占满启动预算」。
 
-    ``skipped`` = 客户端路径不存在的连接（直接跳过，不尝试连接）。
+    计数语义（四类**互不混淆**，尤其别把「慢」算成「失败」）：
+
+    - ``started``  : 预算内连上；
+    - ``failed``   : 预算内**确定失败**（超时 / 异常），已写 ``last_error``；
+    - ``skipped``  : 客户端路径不存在 ⇒ 直接跳过，不尝试连接（历史/测试残留）；
+    - ``deferred`` : 预算内还没跑完 —— **不是失败**，已交给后台自愈
+      （``gateway.health.BrokerHealthMonitor`` 的指数退避重连 +
+      ``phase_watchdogs`` 的 30s 自动连接守护），启动流程不再等它。
+
+    ``budget`` 是**总预算**（不是每条）：所有连接**并发**拉起、共享同一份预算，
+    因此 N 条连接的启动耗时与 1 条相当。顺序 ``await`` 会让耗时随 N 线性增长
+    —— 「十几条残留连接把启动拖到 ~90s」就是这么来的。
     """
     started = 0
     failed = 0
     skipped = 0
+    deferred = 0
+    eligible = []
     for conn in mgr.all_connections():
         if not conn.cfg.active:
             continue
-        # 路径不存在 ⇒ 不可能连上，**立刻跳过**而不是烧掉 32s 超时。
+        # 路径不存在 ⇒ 不可能连上，**立刻跳过**而不是烧掉超时预算。
         # 这类条目是历史/测试残留（界面已标「路径无效」），等待它们只会拖慢启动：
-        # 每条 32s，十几条就把「打开软件」变成一件要等几分钟的事。
+        # 每条 30s+，十几条就把「打开软件」变成一件要等几分钟的事。
         if not path_usable(conn.cfg.client_path):
             conn.connected = False
             conn.last_error = f"客户端路径不存在：{conn.cfg.client_path}"
@@ -141,21 +276,30 @@ async def start_persisted_connections(mgr) -> dict:
             log.warning("跳过无效连接 %s（%s）：客户端路径不存在 %s —— 请在「连接管理」中修正或删除",
                         conn.cfg.name, conn.cfg.conn_id, conn.cfg.client_path)
             continue
-        try:
-            await asyncio.wait_for(conn.bridge.start(), timeout=32.0)
-            conn.connected = conn.adapter.is_connected()
-            log.info("broker connection started: %s (%s) connected=%s",
-                     conn.cfg.name, conn.cfg.conn_id, conn.connected)
-            started += 1
-        except asyncio.TimeoutError:
-            log.warning("broker start timed out (32s) for %s: 券商客户端未就绪，已跳过自动连接",
-                        conn.cfg.conn_id)
+        eligible.append(conn)
+
+    if eligible:
+        tasks = {asyncio.ensure_future(_start_one(c)): c for c in eligible}
+        done, pending = await asyncio.wait(set(tasks), timeout=budget)
+        for t in done:
+            if t.result() == "started":
+                started += 1
+            else:
+                failed += 1
+        for t in pending:
+            conn = tasks[t]
             conn.connected = False
-            failed += 1
-        except Exception as exc:  # noqa: BLE001
-            log.warning("broker start failed %s: %s", conn.cfg.conn_id, exc)
-            failed += 1
-    return {"started": started, "failed": failed, "skipped": skipped}
+            # 「慢」与「失败」必须分开归因：这里给的是**出路**（后台会继续连），
+            # 不是判决。若写成「连接失败」，用户会跑去改配置 —— 而其实什么都不用做。
+            conn.last_error = (f"启动期 {budget:.0f}s 内未连上（券商客户端可能未启动或未登录），"
+                               f"已转入后台自动重连")
+            log.warning("启动期 %s（%s）未在 %.0fs 内连上 —— 已转入后台自动重连，不阻断启动",
+                        conn.cfg.conn_id, conn.cfg.name, budget)
+            _hand_off_to_background(t, conn)
+            deferred += 1
+
+    return {"started": started, "failed": failed,
+            "skipped": skipped, "deferred": deferred}
 
 
 async def setup(app: FastAPI) -> dict:
@@ -172,8 +316,7 @@ async def setup(app: FastAPI) -> dict:
 
     stats = await start_persisted_connections(state.broker_manager)
 
-    state.bridge = state.broker_manager.active_bridge()
-    state.gateway = state.bridge.gateway if state.bridge else None
+    _sync_active_bridge()
 
     # 启动自动连接：**没有任何「应保持连接」的连接**时才探测并接入本机运行中的客户端。
     #
@@ -195,25 +338,16 @@ async def setup(app: FastAPI) -> dict:
     if settings.broker_auto_connect and not has_intent:
         auto_conn_id = await _auto_connect_active()
         if auto_conn_id:
-            state.bridge = state.broker_manager.active_bridge()
-            state.gateway = state.bridge.gateway if state.bridge else None
+            _sync_active_bridge()
             stats["started"] += 1
 
     # 交易日历感知调度
-    from gateway.trading_session import default_session
-    try:
-        if state.bridge is not None:
-            cal = await state.bridge.call(state.bridge.gateway.get_trading_calendar)
-            if not default_session.refresh_from_calendar(cal or []):
-                default_session.use_fallback()
-    except Exception as exc:  # noqa: BLE001
-        default_session.use_fallback()
-        log.warning("trading calendar unavailable, fallback weekday rule: %s", exc)
-    log.info("trading session: %s", default_session.stats())
+    await _refresh_trading_calendar()
 
     state.started_at = time.time()
     return {**stats, "auto_connected": auto_conn_id}
 
 
-__all__ = ["setup", "path_usable", "start_persisted_connections"]
+__all__ = ["setup", "path_usable", "start_persisted_connections",
+           "STARTUP_CONNECT_BUDGET"]
 
