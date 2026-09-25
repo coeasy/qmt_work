@@ -247,8 +247,14 @@ class _ActiveMgr(_Mgr):
 def test_late_connection_syncs_active_bridge():
     """★ 出路闭环：后台补连成功之后，进程级活跃指针必须被同步。
 
-    不变量：``state.bridge`` 不能在「连接晚到」时永远停在 None —— 交易日历刷新
-    读的就是它（否则整个进程生命周期都停在「工作日」fallback）。
+    不变量：``state.bridge`` 不能在「连接晚到」时永远停在 None。
+
+    ★ P1-4 后语义已变：``state.bridge`` / ``state.gateway`` 是**只写槽位**，
+    业务读活跃连接一律走 ``broker_manager.active_bridge()``（动态求值），
+    交易日历刷新也已改走 manager。因此本用例守的不再是「日历能不能刷新」，
+    而是**只写槽位本身的写入契约**：晚到连接必须被写进去，
+    否则任何按 ``hasattr`` / 属性存在性判断「有没有连接」的旧调用点会拿到陈旧值。
+    读点不变量由 ``tests/test_state_writeonly_guard.py`` 另行守。
     """
     import asyncio
 

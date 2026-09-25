@@ -2,6 +2,7 @@ from core.context import AppContext, get_ctx
 from fastapi import APIRouter, Depends
 
 from app.routes._common import err, ok
+from app.services import audit_store
 
 # --- stdlib imports injected by fix_route_imports ---
 
@@ -12,14 +13,10 @@ router = APIRouter()
 @router.get("/audit")
 async def list_audit(action: str = "", limit: int = 50, ctx: AppContext = Depends(get_ctx)):
     """查询审计日志（含 hash 链字段，敏感参数已脱敏）。"""
+    if ctx.db is None:
+        return err(503, "数据库未初始化")
     limit = max(1, min(int(limit), 500))
-    cols = ("SELECT id, actor, action, target, params_json, result, ip, created_at, "
-            "prev_hash, hash FROM audit_log ")
-    if action:
-        rows = ctx.db.query(cols + "WHERE action=? ORDER BY id DESC LIMIT ?",
-                              (action, limit))
-    else:
-        rows = ctx.db.query(cols + "ORDER BY id DESC LIMIT ?", (limit,))
+    rows = audit_store.list_entries(ctx.db, action, limit)
     return ok(rows)
 
 @router.get("/audit/verify")

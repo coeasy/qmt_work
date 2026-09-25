@@ -12,6 +12,7 @@ from .backtest import _build_cfg, _signals_vectorized, run_param_sweep
 from .factor_stats import _mean, _stdev
 from .matching import simulate as match_simulate
 from .metrics import compute_metrics
+from .portfolio_engine import align_panel
 
 # ============================================================================
 # 4. 多标的组合回测（N 标的 × 权重矩阵）
@@ -51,15 +52,27 @@ def run_portfolio_backtest(symbols: List[str], klines: Dict[str, list],
         raise ValueError("至少需 1 个标的")
     w = _normalize_weights(weights, n)
 
+    # ★ 先按交易日**交集**对齐，再跑各标的袖套。
+    # 旧实现直接按**索引**把各标的净值相加：标的日期范围不一致时（次新股上市晚、
+    # 长期停牌、取数根数不同）会把不同日期混在同一个下标上，得到一条在真实日历上
+    # **不存在**的组合净值曲线，而指标、回撤区间、月度分布全部建立在它上面。
+    missing = [s for s in symbols if not (klines.get(s) or [])]
+    if missing:
+        raise BrokerNotConnectedError(f"以下标的没有历史 K 线：{missing}")
+    try:
+        panel = align_panel({s: klines[s] for s in symbols}, min_overlap=30)
+    except ValueError as exc:
+        # 共同交易日不足 = 取数区间不匹配 / 数据太少，与既有「K 线不足」同类，仍走 503
+        raise BrokerNotConnectedError(str(exc)) from exc
+    aligned = panel["bars"]
+
     per_symbol_equity: Dict[str, list] = {}
     per_symbol_metrics: Dict[str, dict] = {}
     per_symbol_signal: Dict[str, list] = {}
     last_prices: Dict[str, float] = {}
     for i, sym in enumerate(symbols):
-        kline = klines.get(sym) or []
-        closes = [b["close"] for b in kline if b.get("close") is not None]
-        if len(closes) < 30:
-            raise BrokerNotConnectedError(f"{sym} K 线不足（需≥30 根），请确认券商已返回历史数据。")
+        kline = aligned[sym]
+        closes = [b["close"] for b in kline]
         sig = _signals_vectorized(strategy, closes, params)
         cfg = _build_cfg(sym, commission_rate, stamp_tax, slippage_bps,
                          execution_timing=execution_timing, enforce_limit=enforce_limit,
@@ -72,15 +85,15 @@ def run_portfolio_backtest(symbols: List[str], klines: Dict[str, list],
         per_symbol_signal[sym] = sig
         last_prices[sym] = closes[-1]
 
-    # 组合净值
-    T = max(len(v) for v in per_symbol_equity.values())
-    portfolio_equity: List[float] = []
-    for t in range(T):
-        tot = 0.0
-        for sym in symbols:
-            eq = per_symbol_equity[sym]
-            tot += eq[t] if t < len(eq) else eq[-1]
-        portfolio_equity.append(tot)
+    # 组合净值：对齐后各袖套等长，同一个下标即同一个交易日
+    lens = {s: len(per_symbol_equity[s]) for s in symbols}
+    if len(set(lens.values())) != 1:
+        # 撮合内核本应「每根 bar 记一个净值点」；长度不一致意味着净值与 K 线错帧，
+        # 此时按索引相加会静默错位 —— 宁可报错也不给一条错的曲线。
+        raise RuntimeError(f"各标的净值序列长度不一致（撮合内核异常）：{lens}")
+    T = len(panel["dates"])
+    portfolio_equity: List[float] = [
+        sum(per_symbol_equity[sym][t] for sym in symbols) for t in range(T)]
     portfolio_metrics = compute_metrics(portfolio_equity, None, period=period, rf=rf)
 
     # 末态目标持仓（回测→实盘同一份目标持仓闭环）
@@ -108,6 +121,7 @@ def run_portfolio_backtest(symbols: List[str], klines: Dict[str, list],
         "per_symbol_metrics": per_symbol_metrics,
         "target_portfolio": target_portfolio,
         "target_weights": target_weights,
+        "alignment": panel["alignment"],
         "source": "real_kline",
         "note": "target_portfolio 可直接喂入 target_portfolio_sync（volume 模式）实现回测→实盘同一份目标持仓",
     }

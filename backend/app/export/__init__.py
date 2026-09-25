@@ -41,7 +41,11 @@ def to_json(rows: List[dict], path: Optional[str] = None) -> str:
 
 
 def to_excel(rows: List[dict], columns: _COL_TYPE, path: str) -> str:
-    """写 .xlsx（pandas 可用）；不可用时回退 CSV 并返回其内容。"""
+    """写 .xlsx（pandas 可用）；不可用时回退 CSV 并返回其内容。
+
+    调用方（routes/analysis.py）以「产物文件是否真的存在」判定是否降级，
+    故降级时**不落盘**（绝不把 CSV 内容写进 .xlsx 路径造成伪 xlsx）。
+    """
     try:
         import pandas as pd  # noqa: WPS433
     except ImportError:
@@ -51,8 +55,15 @@ def to_excel(rows: List[dict], columns: _COL_TYPE, path: str) -> str:
         [{c["key"]: r.get(c["key"], "") for c in cols} for r in rows],
         columns=[c["key"] for c in cols],
     )
-    df.to_excel(path, index=False, engine="openpyxl") if path.endswith(".xlsx") \
-        else df.to_csv(path, index=False, encoding="utf-8-sig")
+    try:
+        if path.endswith(".xlsx"):
+            df.to_excel(path, index=False, engine="openpyxl")
+        else:
+            df.to_csv(path, index=False, encoding="utf-8-sig")
+    except ImportError:
+        # 写引擎缺失（openpyxl / et-xmlfile 未安装）：pandas 在**写入阶段**抛 ImportError，
+        # 原实现只 try 了 pandas 导入，异常直接冒泡 → 与本文档承诺的「回退 CSV」不符。
+        return to_csv(rows, columns)
     return to_csv(rows, columns)
 
 

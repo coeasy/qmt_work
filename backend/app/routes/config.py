@@ -2,7 +2,6 @@ import asyncio
 import json
 import logging
 import re
-import sqlite3
 from pathlib import Path
 
 from core.clock import now_iso
@@ -11,7 +10,8 @@ from core.config import (cold_bars_path, config_file, exe_dir, export_dir,
 from core.errors import swallow
 from core.context import AppContext, get_ctx
 from core.paths import PathError, describe_dir, validate_dir
-from datasource.cold_store import get_cold_store, init_cold_store, reset_cold_store
+from datasource.cold_store import (count_rows_readonly, get_cold_store,
+                                   init_cold_store, reset_cold_store)
 from fastapi import APIRouter, Depends
 
 from app.routes._common import err, ok
@@ -165,21 +165,12 @@ def _stat_fields(p: Path) -> dict:
 
 
 def _count_cold_rows(p: Path) -> int:
-    """只读地数一下某个冷仓文件有多少行（用于告诉用户「那边还有多少历史」）。"""
-    try:
-        conn = sqlite3.connect(f"file:{p}?mode=ro", uri=True, timeout=5.0)
-    except sqlite3.Error:
-        return -1
-    try:
-        row = conn.execute("SELECT COUNT(1) FROM kline_archive").fetchone()
-        return int(row[0]) if row else 0
-    except sqlite3.Error:
-        return -1
-    finally:
-        try:
-            conn.close()
-        except sqlite3.Error as exc:
-            swallow(exc, why="只读连接关闭失败：进程退出时会回收，且本次已拿到行数")
+    """只读地数一下某个冷仓文件有多少行（用于告诉用户「那边还有多少历史」）。
+
+    实现收敛在 ``datasource.cold_store.count_rows_readonly``（路由层不得直连 DB）：
+    语义是「只读打开、不建文件、失败返 -1」，详见该函数 docstring。
+    """
+    return count_rows_readonly(p)
 
 
 def _cold_candidates(ctx: AppContext, current: Path) -> list[dict]:

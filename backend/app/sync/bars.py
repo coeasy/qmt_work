@@ -11,7 +11,8 @@
   供跨源对账按质量序选主（QMT>eltdx>baostock>akshare）；拿不到来源时记空而非伪造。
 - **并发闸门**：信号量限并发（默认 8），G6 JobRuntime 落地前先本地收敛。
 - **交易日历**：``weekday_calendar`` 已升级为真实 A 股日历（app/sync/calendar.py，
-  内置 2024-2027 节假日表 + runtime_config 扩展，G1-5b 落地）。
+  内置 2024-2026 沪深北交易所休市安排 + runtime_config 扩展，G1-5b 落地；
+  R26 起周末一律休市，调休补班日不再判为交易日）。
 
 用法（手动 CLI）：
     python -m app.sync.bars --limit 20 --concurrency 4 --lookback 320
@@ -127,7 +128,7 @@ def weekday_calendar(end: date, count: int) -> List[str]:
     """交易日历：最近 ``count`` 个交易日（升序 "YYYY-MM-DD"）。
 
     G1-5b：已由「周一至周五启发式」升级为真实 A 股节假日日历
-    （app/sync/calendar.py：内置 2024-2027 法定节假日 + 调休补班，
+    （app/sync/calendar.py：内置 2024-2026 交易所休市安排，
     runtime_config `market.calendar.holidays/workdays` 可热扩展；
     超出覆盖年份回退工作日启发式并显式打日志）。函数名保留兼容既有调用。
     """

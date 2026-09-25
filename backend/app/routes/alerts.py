@@ -4,6 +4,7 @@ from core.context import AppContext, get_ctx
 from fastapi import APIRouter, Depends
 
 from app.routes._common import audit_log, err, ok
+from app.services import alerts_store
 from core.clock import now_iso
 
 router = APIRouter()
@@ -13,7 +14,7 @@ async def list_alert_rules(ctx: AppContext = Depends(get_ctx)):
     """获取alerts / rules（GET /alerts/rules）。"""
     if ctx.db is None:
         return err(503, "数据库未初始化")
-    rows = ctx.db.query("SELECT * FROM alert_rules ORDER BY id")
+    rows = alerts_store.list_rules(ctx.db)
     return ok(rows)
 
 @router.post("/alerts/rules")
@@ -32,13 +33,8 @@ async def save_alert_rule(body: dict, ctx: AppContext = Depends(get_ctx)):
         "cooldown_seconds": int(body.get("cooldown_seconds", 300)),
         "created_at": now_iso(),
     }
-    if body.get("id"):
-        fields = [f"{k}=?" for k in payload]
-        ctx.db.execute(f"UPDATE alert_rules SET {','.join(fields)} WHERE id=?",
-                         (*payload.values(), int(body["id"])))
-        rid = int(body["id"])
-    else:
-        rid = ctx.db.insert("alert_rules", payload)
+    rid = alerts_store.save_rule(
+        ctx.db, payload, int(body["id"]) if body.get("id") else None)
     audit_log("api", "save_alert_rule", body.get('name',''), body)
 
     return ok({"id": rid})
@@ -46,7 +42,9 @@ async def save_alert_rule(body: dict, ctx: AppContext = Depends(get_ctx)):
 @router.delete("/alerts/rules/{rid}")
 async def delete_alert_rule(rid: int, ctx: AppContext = Depends(get_ctx)):
     """删除alerts / rules（DELETE /alerts/rules/{rid}）。"""
-    ctx.db.execute("DELETE FROM alert_rules WHERE id=?", (rid,))
+    if ctx.db is None:
+        return err(503, "数据库未初始化")
+    alerts_store.delete_rule(ctx.db, rid)
     return ok({"deleted": True})
 
 @router.post("/alerts/rules/batch-delete")
@@ -57,8 +55,7 @@ async def batch_delete_alert_rules(body: dict, ctx: AppContext = Depends(get_ctx
     ids = [int(x) for x in (body.get("ids") or []) if str(x).isdigit()]
     if not ids:
         return err(400, "ids 不能为空")
-    ctx.db.execute(
-        "DELETE FROM alert_rules WHERE id IN ({})".format(",".join("?" * len(ids))), ids)
+    alerts_store.delete_rules(ctx.db, ids)
     return ok({"deleted": len(ids)})
 
 @router.post("/alerts/test")
@@ -96,7 +93,7 @@ async def alert_history(limit: int = 50, ctx: AppContext = Depends(get_ctx)):
     """获取alerts / history（GET /alerts/history）。"""
     if ctx.db is None:
         return err(503, "数据库未初始化")
-    rows = ctx.db.query("SELECT * FROM alerts_history ORDER BY id DESC LIMIT ?", (limit,))
+    rows = alerts_store.list_history(ctx.db, limit)
     return ok(rows)
 
 

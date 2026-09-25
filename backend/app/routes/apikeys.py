@@ -6,6 +6,7 @@ import uuid
 from fastapi import APIRouter, Depends
 
 from app.routes._common import err, ok
+from app.services import apikeys_store
 from core.clock import local_now, now_iso, to_iso
 
 router = APIRouter()
@@ -13,11 +14,10 @@ router = APIRouter()
 @router.get("/api-keys")
 async def list_api_keys(ctx: AppContext = Depends(get_ctx)):
     """获取api-keys（GET /api-keys）。"""
+    if ctx.db is None:
+        return err(503, "数据库未初始化")
     from gateway.apikey import ApiKeyStore
-    rows = ctx.db.query(
-        "SELECT id, name, scopes, rate_limit, status, created_at, "
-        "ip_allow, expires_at, grace_until, last_used_at, use_count, "
-        "substr(key_hash,1,8) AS key_prefix FROM api_keys ORDER BY id")
+    rows = apikeys_store.list_keys(ctx.db)
     for r in rows:
         if ApiKeyStore._is_expired(r):
             r["status"] = "expired"
@@ -26,8 +26,10 @@ async def list_api_keys(ctx: AppContext = Depends(get_ctx)):
 @router.post("/api-keys")
 async def create_api_key(body: dict, ctx: AppContext = Depends(get_ctx)):
     """创建/提交api-keys（POST /api-keys）。"""
+    if ctx.db is None:
+        return err(503, "数据库未初始化")
     raw = f"qmt-{uuid.uuid4().hex[:24]}"
-    kid = ctx.db.insert("api_keys", {
+    kid = apikeys_store.insert_key(ctx.db, {
         "key_hash": hashlib.sha256(raw.encode()).hexdigest(),
         "user_id": 1, "name": body.get("name", "default"),
         "scopes": body.get("scopes", "market,trade,account,backtest"),
@@ -50,18 +52,18 @@ async def create_api_key(body: dict, ctx: AppContext = Depends(get_ctx)):
 @router.patch("/api-keys/{kid}")
 async def update_api_key(kid: int, body: dict, ctx: AppContext = Depends(get_ctx)):
     """更新api-keys（PATCH /api-keys/{kid}）。"""
-    row = ctx.db.query_one("SELECT id FROM api_keys WHERE id=?", (kid,))
+    if ctx.db is None:
+        return err(503, "数据库未初始化")
+    row = apikeys_store.get_id(ctx.db, kid)
     if not row:
         return err(404, "密钥不存在")
-    fields, vals = [], []
-    for k in ("name", "scopes", "rate_limit", "status", "ip_allow", "expires_at"):
+    fields = {}
+    for k in apikeys_store.UPDATABLE_FIELDS:
         if k in body:
-            fields.append(f"{k}=?")
-            vals.append(int(body[k]) if k == "rate_limit" else body[k])
+            fields[k] = int(body[k]) if k == "rate_limit" else body[k]
     if not fields:
         return err(400, "无更新字段")
-    vals.append(kid)
-    ctx.db.execute(f"UPDATE api_keys SET {','.join(fields)} WHERE id=?", tuple(vals))
+    apikeys_store.update_fields(ctx.db, kid, fields)
     if ctx.apikey_store:
         ctx.apikey_store.invalidate()
     ctx.db.audit("admin", "api_key.update", f"#{kid}", body, "ok")
@@ -70,7 +72,9 @@ async def update_api_key(kid: int, body: dict, ctx: AppContext = Depends(get_ctx
 @router.delete("/api-keys/{kid}")
 async def delete_api_key(kid: int, ctx: AppContext = Depends(get_ctx)):
     """删除api-keys（DELETE /api-keys/{kid}）。"""
-    ctx.db.execute("DELETE FROM api_keys WHERE id=?", (kid,))
+    if ctx.db is None:
+        return err(503, "数据库未初始化")
+    apikeys_store.delete_key(ctx.db, kid)
     if ctx.apikey_store:
         ctx.apikey_store.invalidate()
     ctx.db.audit("admin", "api_key.delete", f"#{kid}", {}, "ok")
@@ -79,11 +83,12 @@ async def delete_api_key(kid: int, ctx: AppContext = Depends(get_ctx)):
 @router.post("/api-keys/batch-delete")
 async def batch_delete_api_keys(body: dict, ctx: AppContext = Depends(get_ctx)):
     """创建/提交api-keys / batch-delete（POST /api-keys/batch-delete）。"""
+    if ctx.db is None:
+        return err(503, "数据库未初始化")
     ids = [int(x) for x in (body.get("ids") or []) if str(x).isdigit()]
     if not ids:
         return err(400, "ids 不能为空")
-    for kid in ids:
-        ctx.db.execute("DELETE FROM api_keys WHERE id=?", (kid,))
+    apikeys_store.delete_keys(ctx.db, ids)
     if ctx.apikey_store:
         ctx.apikey_store.invalidate()
     ctx.db.audit("admin", "api_key.batch_delete", f"#{len(ids)}", {"ids": ids}, "ok")
@@ -93,15 +98,15 @@ async def batch_delete_api_keys(body: dict, ctx: AppContext = Depends(get_ctx)):
 async def rotate_api_key(kid: int, ctx: AppContext = Depends(get_ctx)):
     """轮换密钥：生成新密钥立即生效，旧密钥立即失效；grace_until 记录宽限标记（7天）。"""
     from datetime import timedelta
-    row = ctx.db.query_one("SELECT id FROM api_keys WHERE id=?", (kid,))
+    if ctx.db is None:
+        return err(503, "数据库未初始化")
+    row = apikeys_store.get_id(ctx.db, kid)
     if not row:
         return err(404, "密钥不存在")
     raw = f"qmt-{uuid.uuid4().hex[:24]}"
     grace = to_iso(local_now() + timedelta(days=7))
-    ctx.db.execute(
-        "UPDATE api_keys SET key_hash=?, grace_until=?, created_at=? WHERE id=?",
-        (hashlib.sha256(raw.encode()).hexdigest(), grace,
-         now_iso(), kid))
+    apikeys_store.set_key_hash(
+        ctx.db, kid, hashlib.sha256(raw.encode()).hexdigest(), grace, now_iso())
     if ctx.apikey_store:
         ctx.apikey_store.invalidate()
     ctx.db.audit("admin", "api_key.rotate", f"#{kid}", {"grace_until": grace}, "ok")
@@ -111,32 +116,22 @@ async def rotate_api_key(kid: int, ctx: AppContext = Depends(get_ctx)):
 
 @router.post("/api-keys/clean-unused")
 async def clean_unused_api_keys(body: dict, ctx: AppContext = Depends(get_ctx)):
-    """清理无效密钥：删除超过 X 天未使用的密钥，默认 30 天。"""
+    """清理无效密钥：删除超过 X 天未使用的密钥，默认 30 天。
+
+    ★ 「从未使用」这一支**必须同时满足 created_at < cutoff**，该不变量由
+    ``apikeys_store.find_stale_ids`` 唯一承担（回归测试 ``tests/test_apikeys_clean.py``）。
+    旧写法 ``(last_used_at < ? OR last_used_at = '' OR last_used_at IS NULL)`` 少了创建
+    时间条件 ⇒ 刚创建、还没配到客户端的密钥会在第一次清理时就被删掉，且无痕迹可查。
+    """
+    if ctx.db is None:
+        return err(503, "数据库未初始化")
     days = int(body.get("days") or 30)
     if days < 1:
         return err(400, "days 至少为 1")
     from datetime import timedelta
     cutoff = to_iso(local_now() - timedelta(days=days))
-    # 注意：last_used_at 为空视为"从未使用"，也满足"从未使用>days天"条件
-    # 保留 active 且：(last_used_at 为空且 created_at < cutoff) OR last_used_at < cutoff
-    deleted = 0
-    # ★ 「从未使用」这一支**必须同时满足 created_at < cutoff**。
-    #   旧写法 `(last_used_at < ? OR last_used_at = '' OR last_used_at IS NULL)` 少了
-    #   创建时间条件 ⇒ 一个刚创建、还没被用过的密钥会在**第一次清理时就被删掉**，
-    #   与本函数 docstring 声明的保留条件（「从未使用且 created_at < cutoff」）相反。
-    #   典型后果：新建密钥 → 忘了配到客户端 → 跑一次清理 → 密钥消失且无痕迹可查。
-    rows = ctx.db.query(
-        "SELECT id, last_used_at, created_at FROM api_keys "
-        "WHERE status='active' AND ("
-        "  (last_used_at IS NOT NULL AND last_used_at <> '' AND last_used_at < ?)"
-        "  OR ((last_used_at IS NULL OR last_used_at = '') AND created_at < ?)"
-        ")",
-        (cutoff, cutoff))
-    ids_to_del = [r["id"] for r in rows]
-    if ids_to_del:
-        place = ",".join("?" * len(ids_to_del))
-        deleted = len(ids_to_del)
-        ctx.db.execute(f"DELETE FROM api_keys WHERE id IN ({place})", tuple(ids_to_del))
+    ids_to_del = apikeys_store.find_stale_ids(ctx.db, cutoff)
+    deleted = apikeys_store.delete_keys(ctx.db, ids_to_del)
     if ctx.apikey_store:
         ctx.apikey_store.invalidate()
     ctx.db.audit("admin", "api_key.clean", "", {"days": days, "deleted": deleted}, "ok")

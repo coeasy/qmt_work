@@ -15,11 +15,14 @@
 #   bash build_all.sh --force         跳过运行中实例检测（不推荐）
 #
 # 环境变量（可选）:
-#   QMT_UPDATE_URL   自动更新服务器地址（默认 GitHub Releases 占位）
 #   CSC_LINK         Windows 代码签名证书路径（*.p12，配合 signtool）
 #   CSC_KEY_PASSWORD 证书密码（设置后自动签名，消除 SmartScreen 告警）
 #   QMT_PYTHON       指定后端构建解释器（默认见 resolve_python）
 #   QMT_NODE         指定前端构建解释器（默认见 resolve_node）
+#
+# 注：自动更新源**不是环境变量** —— 由 frontend-next/electron-builder.yml 的
+#     publish 段决定（electron-builder 据此生成 resources/app-update.yml）。
+#     历史遗留的 QMT_UPDATE_URL 无任何消费者，已删除。
 #
 # 本脚本只删除【构建产物】（backend/dist/qmt_work 与 backend/dist/qmt_work.exe，
 # Electron 自身会重建 dist-electron/）。前端产物 backend/static 由 vite emptyOutDir
@@ -240,10 +243,8 @@ run_electron_builder() {
 }
 
 # ────────────────────────── 开始 ──────────────────────────
-if [[ -z "${QMT_UPDATE_URL:-}" ]]; then
-    export QMT_UPDATE_URL="https://github.com/coeasy/qmt_work/releases/download"
-    warn "QMT_UPDATE_URL 未设置，使用默认: $QMT_UPDATE_URL"
-    warn "请按实际仓库地址设置环境变量后重新构建。"
+if [[ ! -f "$FRONTEND/electron-builder.yml" ]]; then
+    warn "$FRONTEND/electron-builder.yml 不存在：无法确定自动更新源（publish 段）"
 fi
 
 echo "========================================="
@@ -251,7 +252,7 @@ echo " qmt_work 一键构建"
 echo " 工作目录: $ROOT"
 echo " python  : $PY (v$PY_VER)"
 echo " node    : $NODE (v$NODE_VER)"
-echo " 更新源  : $QMT_UPDATE_URL"
+echo " 更新源  : frontend-next/electron-builder.yml (publish)"
 echo "========================================="
 echo ""
 
@@ -321,17 +322,26 @@ fi
 # 那两条 script 会串跑 `npm run build` 与 `backend:build`，即重复一次前端构建
 # 和一次 PyInstaller 打包（本次已各自执行过），纯浪费时间且可能引入竞态。
 # 注：前端不进 asar（extraResources: ../backend/dist 已含 static），故无需重建。
+#
+# ★ 必须显式 --publish never：
+#   electron-builder 在【CI 环境变量为真】且当前提交无 git tag 时，会自行把发布策略推断成
+#   onTagOrDraft（app-builder-lib/out/publish/PublishManager.js L56~L58），于是【产物已全部
+#   生成之后】去创建 GitHubPublisher ⇒ 缺 GH_TOKEN 抛错 ⇒ 退出码非 0，且收尾的 update-info
+#   任务被整段跳过 —— **latest.yml 不落盘**。实测（CI=true、无 GH_TOKEN）：Setup.exe 与 zip
+#   都在，latest.yml 缺失。latest.yml 的写出条件只依赖 event.isWriteUpdateInfo（同文件 L158），
+#   与 isPublish 无关，故 --publish never 不会削掉它，也不会削掉包内 resources/app-update.yml。
+#   上传资产是 scripts/publish_release.py 的职责，构建脚本一律不发布。
 if [[ "$USE_NSIS" == true ]]; then
     if ! command -v makensis >/dev/null 2>&1 \
        && [[ ! -f "/c/Program Files (x86)/NSIS/makensis.exe" ]]; then
         warn "本机未检测到 NSIS，electron-builder 将尝试按需下载；失败则退回仅 zip"
     fi
     log "打包 NSIS 安装包 + zip 便携版"
-    run_electron_builder --win nsis zip \
+    run_electron_builder --win nsis zip --publish never \
         || { cd "$ROOT"; fail "Electron 打包失败（NSIS）：可用 --portable 仅出 zip"; }
 else
     log "打包 zip 便携版（--nsis 可同时产出 NSIS 安装包）"
-    run_electron_builder --win zip \
+    run_electron_builder --win zip --publish never \
         || { cd "$ROOT"; fail "Electron 打包失败"; }
 fi
 cd "$ROOT"
@@ -447,6 +457,6 @@ echo " 构建完成"
 echo " 后端 EXE : $BACKEND/dist/qmt_work/qmt_work.exe"
 echo " 桌面客户端: $UNPACKED"
 echo " 安装包目录: $FRONTEND/dist-electron/"
-echo " 更新源   : $QMT_UPDATE_URL"
+echo " 更新源   : frontend-next/electron-builder.yml (publish)"
 echo "========================================="
 exit "${VERIFY_RC:-0}"

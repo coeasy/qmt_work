@@ -41,7 +41,16 @@ from datasource.public_sources import SinaSource, TencentSource  # noqa: E402
 from datasource.registry import DataSourceManager, _BoundBrokerSource  # noqa: E402
 
 BACKEND = Path(__file__).resolve().parent.parent
-REGISTRY_SRC = (BACKEND / "datasource" / "registry.py").read_text(encoding="utf-8")
+#: ★ P1-1 拆分后，读路径的实现不再全在 ``registry.py`` 一个文件里
+#: （``get_quotes`` → ``manager_quotes.py``，``get_kline/get_minutes/...`` →
+#: ``manager_kline.py``）。源码级断言必须扫描**承载读路径的全部文件**，
+#: 否则这条护栏会因为「字符串不在这个文件里」而假红 ——
+#: 它要守的不变量（读路径不得绕过 ``_resolve_sources``）其实仍然成立。
+REGISTRY_SOURCES = ("registry.py", "manager_quotes.py", "manager_kline.py")
+REGISTRY_SRC = "\n".join(
+    (BACKEND / "datasource" / name).read_text(encoding="utf-8")
+    for name in REGISTRY_SOURCES
+)
 
 #: 能力 -> 承载方法（用于「声明必有实现」检查）。
 #: 注意 `index_constituent`：eltdx 用 get_board_kline，baostock/akshare 用

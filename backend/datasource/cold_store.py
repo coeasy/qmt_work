@@ -35,6 +35,8 @@ import threading
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
+from core.errors import swallow
+
 log = logging.getLogger("qmt_work.datasource.cold_store")
 
 #: 冷仓唯一的表。列定义与主库 ``kline_archive`` **逐列一致**（含 M6 的
@@ -312,4 +314,35 @@ def reset_cold_store() -> None:
         _cold = None
 
 
-__all__ = ["ColdStore", "get_cold_store", "init_cold_store", "reset_cold_store"]
+def count_rows_readonly(path: Path | str) -> int:
+    """只读地数某个冷仓文件里 ``kline_archive`` 的行数。
+
+    与 :meth:`ColdStore.count` 的区别（**别混用**）：
+
+    - ``ColdStore(path).count()`` 面向「本进程正在使用的那个冷仓」——
+      构造即 ``mkdir`` 并建表，是**会写盘**的；
+    - 本函数面向「用户机器上可能残留旧冷数据的位置」这类**探测**场景：
+      只以 ``mode=ro`` 打开，**绝不创建文件或目录**，任何失败都不抛异常。
+
+    返回 ``-1`` 表示「读不出来」（文件不存在 / 不是 SQLite / 没有该表），
+    与 ``0``（读出来了，确实一行都没有）**语义不同** —— 调用方要据此区分
+    「那边没有历史数据」和「那边根本打不开」，不能把后者说成前者。
+    """
+    try:
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5.0)
+    except sqlite3.Error:
+        return -1
+    try:
+        row = conn.execute("SELECT COUNT(1) FROM kline_archive").fetchone()
+        return int(row[0]) if row else 0
+    except sqlite3.Error:
+        return -1
+    finally:
+        try:
+            conn.close()
+        except sqlite3.Error as exc:
+            swallow(exc, why="只读连接关闭失败：进程退出时会回收，且本次已拿到行数")
+
+
+__all__ = ["ColdStore", "count_rows_readonly", "get_cold_store",
+           "init_cold_store", "reset_cold_store"]

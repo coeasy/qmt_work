@@ -395,7 +395,20 @@ async function fullShutdown() {
   // 再给后端短暂时间完成优雅停机
   await new Promise((r) => setTimeout(r, 1200));
   killBackendTree(); // 兜底：确保整棵进程树退出
-  setTimeout(() => { app.exit(0); }, 300);
+  // ★★ 收尾必须走 `app.quit()`，**不能**用 `app.exit(0)`（2026-09-25 修的真缺陷）。
+  //   Electron 文档明确 `app.exit()` 立即终止且**不发出** before-quit / will-quit /
+  //   quit 事件；而 electron-updater 的「退出时自动安装」正挂在 `app.once("quit", …)`
+  //   （electron-updater/out/ElectronAppAdapter.onQuit）。原实现用 app.exit 收尾 ⇒
+  //   该事件永不触发 ⇒ 更新**下载完成后永远装不上**，用户反复看到「发现新版本」，
+  //   而日志里没有任何异常（最难定位的一类断链）。
+  //   此刻 quitting / shuttingDown 均已置位：close 处理器与 before-quit 都会放行，
+  //   正常退出序列能走完；后端进程**已在上面杀掉**，随后被拉起的 NSIS 安装包不会再
+  //   撞上「qmt_work.exe 被占用」（与 build_all.bat 的 running-instance 检查同源）。
+  setTimeout(() => { app.quit(); }, 300);
+  // 兜底：正常退出序列若被异常阻塞（窗口/更新器句柄），超时强制结束，保留
+  // 「关闭即零残留」的原承诺。注意 JS 是单线程：安装包同步拉起期间本定时器
+  // 不会插进去打断安装。
+  setTimeout(() => { app.exit(0); }, 8000);
 }
 
 function readPortFile() {
@@ -647,6 +660,40 @@ async function bootSequence(respawn) {
   }
 }
 
+// ---- 渲染证明（仅 TEST_MODE）：把「页面的 DOM 到底渲染出来没」交给**渲染进程自己**回答 ----
+//
+// 为什么需要它（2026-09-26 R30 实测）：自动化用例原先截窗口图、数「不同颜色数」来判
+// 「是否白屏」。但 PrintWindow(PW_RENDERFULLCONTENT) 取的是 GDI 合成层 —— 窗口被别的
+// 窗口**遮挡**时 Chromium 会停止出帧、不再维护合成层，拿到的就是未合成的空白客户区：
+// 实测恒为 1 种颜色 / PNG 6406 bytes，而**同一时刻**渲染进程里
+// `document.querySelectorAll('*').length` = 200、`body.innerText` 473 字符
+// （真实行情：平安银行 000001.SZ 11.30 -0.44% / 贵州茅台 600519.SH）。
+// 即：用位图颜色数当判据，会把「页面好着呢」判成「纯色空窗」，构建因此在最后一道闸门
+// exit 1。渲染结论必须来自渲染进程本身，而不是一张受遮挡影响的 OS 位图。
+// 取样期间反复覆盖写（懒加载分片就绪前后差异很大），由用例侧自行判定阈值；
+// 执行失败/超时都不算错误 —— 文件没写出时用例按「未取得渲染证明」处理。
+const RENDER_PROOF_MS = 30000;
+
+function startRenderProof() {
+  const file = path.join(app.getPath("userData"), "render-proof.json");
+  const probe = "JSON.stringify({"
+    + "nodes:document.querySelectorAll('*').length,"
+    + "textLen:(document.body&&document.body.innerText||'').length,"
+    + "rootKids:(document.getElementById('root')||{}).childElementCount||0,"
+    + "ready:document.readyState})";
+  const t0 = Date.now();
+  const tick = () => {
+    if (!win || win.isDestroyed()) return;
+    win.webContents.executeJavaScript(probe, true)
+      .then((raw) => {
+        try { fs.writeFileSync(file, `${raw}\n`, "utf8"); } catch { /* 落盘失败不影响运行 */ }
+      })
+      .catch(() => { /* 渲染进程不可用：保留上一次取样，用例按未取得处理 */ });
+    if (Date.now() - t0 < RENDER_PROOF_MS) setTimeout(tick, 700);
+  };
+  tick();
+}
+
 function createWindow() {
   const st = loadWindowState();
   win = new BrowserWindow({
@@ -723,6 +770,8 @@ function createWindow() {
       fs.writeFileSync(path.join(app.getPath("userData"), "window-ready.txt"),
                        `${Date.now()}\n`, "utf8");
     } catch { /* 标记文件写失败不影响运行 */ }
+    // did-finish-load 只代表**文档**加载完；「页面真的渲染出来了」由渲染进程自己证明
+    if (TEST_MODE) startRenderProof();
   });
   win.webContents.on("did-fail-load", (_e, code, desc, url, isMainFrame) => {
     // -3 = ERR_ABORTED：loadURL 打断上一次导航时的正常中止（加载页 → 应用页切换、

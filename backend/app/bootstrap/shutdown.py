@@ -40,6 +40,33 @@ async def shutdown(app: FastAPI) -> None:
             # 系统广播 task 关停本身可预期被取消
             log.debug("system broadcast task 关停异常（已忽略）：%s", exc)
 
+    # 2b. 后台常驻协程（R26）——必须在任何 DB 关闭动作**之前**取消。
+    #      这三者都是 create_task 出来的永不退出的循环，且**都会写库**：
+    #        · 任务运行时派发器（空转 0.05s/轮）+ 租约收割器（30s/轮）+ 在飞作业；
+    #        · 资金流自动采集（交易日每 5 分钟写 moneyflow_cache）。
+    #      此前它们没有任何停机路径，句柄被丢弃后在 ``db.close()`` 之后仍可能触发写入。
+    try:
+        from app.runtime.jobs import get_runtime
+        await get_runtime().stop()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("jobs runtime stop failed: %s", exc)
+    try:
+        from app.services.market.kline_io import stop_moneyflow_collector
+        await stop_moneyflow_collector()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("moneyflow collector stop failed: %s", exc)
+
+    # 2c. WS 连接与心跳任务（R26）——广播完关闭通知后再收尾。
+    #      `WSManager._hb_tasks` 只在「客户端主动断开」时取消，正常停机时它仍挂在
+    #      事件循环上（"Task was destroyed but it is pending"），已建立的连接也收不到
+    #      关闭帧。放在 DB 关闭之前：close() 里没有库操作，但与其余收尾动作同属
+    #      「先停后台，再关资源」的顺序。
+    if state.ws_manager is not None:
+        try:
+            await state.ws_manager.close()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("ws manager close failed: %s", exc)
+
     # 3. DB 备份
     db_backup = state.db_backup
     if db_backup is not None and settings.db_backup_enabled:

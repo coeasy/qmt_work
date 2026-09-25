@@ -56,6 +56,18 @@ LEASE_SECONDS = 90.0
 #: 高频 report（如 EOD 每完成一只股票一次）若每次都同步写 DB，会把事件循环阻塞住。
 _PERSIST_MIN_INTERVAL = 1.0
 
+#: 内存中保留的**已终态**作业上限；``runtime_jobs`` 表保留的终态行上限。
+#:
+#: 为什么需要：``self._jobs`` 原实现只增不减（``submit`` 与启动补跑各插一条，
+#: 终态后永不移除），而 ``result`` 里可能挂着整份 EOD 汇总（几百 KB）；
+#: ``GET /runtime/jobs`` 又直接返回全部内存作业 ⇒ 进程内存与响应体都随
+#: 任务次数单调上涨。持久账本同理，只 upsert 不删除，库文件持续膨胀。
+#: 只淘汰终态：``queued``/``running`` 是调度、取消、进度更新的依据。
+_MAX_FINISHED_JOBS = 500
+_MAX_PERSISTED_JOBS = 2000
+#: 每完成多少个作业裁剪一次持久账本（内存裁剪每次终态都做，仅常数级判断）。
+_PERSIST_PRUNE_EVERY = 50
+
 Runner = Callable[[Dict[str, Any]], Awaitable[Any]]   # async (job) -> result
 
 
@@ -77,12 +89,18 @@ class JobRuntime:
         self._running: Dict[str, str] = {}   # job_id -> kind
         self._seq = 0
         self._dispatcher: Optional[asyncio.Task] = None
+        self._reaper_task: Optional[asyncio.Task] = None
+        #: 停机后置 True：``get()`` / ``submit()`` 都会经 ``_ensure_dispatcher``
+        #: 惰性拉起派发器，停机途中任何一次读接口调用都会把它**复活**，
+        #: 于是「已停机」的运行时继续在已关闭的 DB 上写。
+        self._stopped = False
         self._db = db
         self._owner = owner or uuid.uuid4().hex
         #: 任务失败回调（由装配层注入 notifier / 告警引擎）。
         #: 本模块刻意**不直接依赖**告警实现 —— 那样会让运行时与通知耦合，
         #: 且在测试里必须伪造一整套通知栈才能跑。
         self._on_failure: Optional[Callable[[dict], None]] = None
+        self._finished_since_prune = 0
 
     def set_failure_hook(self, hook) -> None:
         """注册任务失败回调：``hook(job)``，异常被吞掉（通知失败不能拖垮任务）。"""
@@ -262,6 +280,7 @@ class JobRuntime:
             job["finished_at"] = self._now()
             job["message"] = "已取消（未开始）"
             self._persist(job)
+            self._retention_tick()
             return True
         task = job.get("task")
         if task is not None and not task.done():
@@ -273,6 +292,8 @@ class JobRuntime:
 
     # ---------------- 调度 ----------------
     def _ensure_dispatcher(self) -> None:
+        if self._stopped:
+            return        # 已停机：绝不复活派发器
         try:
             asyncio.get_running_loop()
         except RuntimeError:
@@ -347,6 +368,55 @@ class JobRuntime:
             job["lease_owner"] = ""
             job["lease_until"] = None
             self._persist(job)
+            self._retention_tick()
+
+    # ---------------- 保留策略（防止内存 / durable ledger 无界增长） ----------------
+    def _prune_finished(self) -> None:
+        """把内存里的已终态作业裁剪到 ``_MAX_FINISHED_JOBS`` 以内（最旧的先淘汰）。
+
+        只淘汰终态作业：``queued`` 还在 ``_queue`` 里等派发，``running`` 还要靠
+        内存对象更新进度与响应取消 —— 淘汰它们等于让任务失去控制面。
+        被淘汰的作业仍在 ``runtime_jobs`` 表里，按 id 直查历史不受影响。
+        """
+        terminal = [j for j in self._jobs.values()
+                    if j["status"] not in ("queued", "running")]
+        excess = len(terminal) - _MAX_FINISHED_JOBS
+        if excess <= 0:
+            return
+        terminal.sort(key=lambda j: j.get("seq", 0))
+        for job in terminal[:excess]:
+            self._jobs.pop(job["id"], None)
+            # 同步移出排队列表：``_next_ready`` 会用 ``self._jobs[i] for i in self._queue``
+            # 反查，残留 id 会直接 KeyError。终态作业本不该还在队列里（派发前就出队、
+            # 取消排队分支也显式移除），这里是**淘汰动作自身**需要的兜底。
+            if job["id"] in self._queue:
+                self._queue.remove(job["id"])
+
+    def _prune_persisted(self) -> None:
+        """裁剪 ``runtime_jobs`` 表最旧的终态行（表只 upsert、从不删除）。
+
+        保留量（``_MAX_PERSISTED_JOBS``）刻意远大于内存上限：内存淘汰后
+        「按 id 直查历史」仍从表读，DB 只做容量保护而不做等量淘汰。
+        失败只记日志 —— 清理是运维动作，不能影响任务本身。
+        """
+        if self._db is None:
+            return
+        try:
+            self._db.execute(
+                "DELETE FROM runtime_jobs "
+                "WHERE status NOT IN ('queued','running') AND id NOT IN ("
+                "  SELECT id FROM runtime_jobs WHERE status NOT IN ('queued','running') "
+                "  ORDER BY created_at DESC, id DESC LIMIT ?)",
+                (_MAX_PERSISTED_JOBS,))
+        except Exception as exc:  # noqa: BLE001
+            log.debug("runtime_jobs 裁剪失败（已忽略）：%s", exc)
+
+    def _retention_tick(self) -> None:
+        """每个作业进入终态后调用一次：裁剪内存 + （节流）裁剪持久账本。"""
+        self._prune_finished()
+        self._finished_since_prune += 1
+        if self._finished_since_prune % _PERSIST_PRUNE_EVERY == 0:
+            self._prune_persisted()
 
     # ---------------- P1-20：lease reaper（租约收割） ----------------
     def reap_expired(self, now: Optional[float] = None) -> list[str]:
@@ -395,6 +465,8 @@ class JobRuntime:
 
     def start_reaper(self, interval: float = 30.0) -> None:
         """启动后台 reaper 循环（幂等）。"""
+        if self._stopped:
+            return        # 已停机：不再拉起新的常驻协程
 
         async def _loop() -> None:
             while True:
@@ -412,6 +484,42 @@ class JobRuntime:
             return    # 无运行循环：跳过（测试可手动调 reap_expired）
         if getattr(self, "_reaper_task", None) is None or self._reaper_task.done():
             self._reaper_task = asyncio.create_task(_loop())
+
+    async def stop(self) -> None:
+        """停机：取消派发器、租约收割器与在飞作业（幂等，可重复调用）。
+
+        为什么必须显式停 —— 这里三个东西都是 ``asyncio.create_task`` 出来的
+        **常驻**协程，此前**没有任何停机路径**，句柄创建后即被丢弃：
+
+          · ``_dispatcher``（``_dispatch_loop`` 永不退出，空转时 0.05s 一轮）；
+          · ``_reaper_task``（``_loop`` 每 30s 收割一次）；
+          · 在飞作业任务（``_run`` 可能正写到一半）。
+
+        事件循环关闭时它们被直接销毁（"Task was destroyed but it is pending"），
+        而这三者**都会写库** —— 一旦跑在 ``bootstrap.shutdown`` 的 ``db.close()``
+        之后，就是「往已关闭的库写」，抛错还可能盖住真正的停机日志。
+
+        取消在飞作业是刻意选择：``_run`` 的 ``CancelledError`` 分支会把作业落成
+        ``canceled`` 并**同步**写库（此刻 DB 仍开着），比放任它写已关闭的库安全。
+        """
+        tasks: List[asyncio.Task] = []
+        self._stopped = True
+        for attr in ("_dispatcher", "_reaper_task"):
+            t = getattr(self, attr, None)
+            if t is not None and not t.done():
+                tasks.append(t)
+            setattr(self, attr, None)
+        for job in self._jobs.values():
+            if job.get("status") != "running":
+                continue
+            t = job.get("task")
+            if t is not None and not t.done():
+                tasks.append(t)
+        for t in tasks:
+            t.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._running.clear()
 
     @staticmethod
     def _now() -> str:

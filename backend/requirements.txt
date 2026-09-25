@@ -24,6 +24,9 @@ redis==8.1.0
 fakeredis==2.34.1
 # G10-4 统一导出 Excel 支持（app/export）
 openpyxl==3.1.5
+# openpyxl 写 xlsx 的硬依赖（openpyxl 只声明未 pin；缺失时 to_excel 直接 ModuleNotFoundError，
+# 导出链路会静默降级为 CSV。必须显式 pin，否则打包产物在用户机上 Excel 导出必失败）
+et-xmlfile==2.0.0
 
 # —— 许可证与架构说明（勿删）——
 # eltdx（TDX 公共行情补充源）保留在 requirements-optional.txt：

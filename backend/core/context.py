@@ -38,6 +38,10 @@ class AppContext:
     # ---- 核心服务槽位（bootstrap 各阶段装配）----
     db: Any = None
     broker_manager: Any = None
+    #: ★★ P1-4：``bridge`` / ``gateway`` 是**只写槽位**（装配期快照），
+    #: 业务读活跃连接一律走 ``broker_manager.active_bridge()``（动态求值）。
+    #: 写入唯一入口 = :meth:`cache_active_bridge`，它**不读回**这两个字段。
+    #: 不变量由 ``tests/test_state_writeonly_guard.py`` 用 AST 扫描守着。
     bridge: Any = None
     gateway: Any = None
     risk: Any = None
@@ -109,6 +113,25 @@ class AppContext:
             else:
                 self.extras[k] = v
         return self
+
+    def cache_active_bridge(self) -> Any:
+        """把当前活跃连接**快照**进只写槽位 ``bridge`` / ``gateway``；返回该 bridge。
+
+        ★ 为什么写成方法而不是让调用方各写两行：原先两个调用点都写成
+        ``state.bridge = mgr.active_bridge()`` 紧跟
+        ``state.gateway = state.bridge.gateway if state.bridge else None`` ——
+        第二行**读回了刚写的槽位**，于是「只写槽位」在源码里出现了读点，
+        守卫要么放行这条、要么维护一份例外清单。本方法从 manager 求值**一次**，
+        再分别赋值，两个槽位都不被读回 ⇒ 不变量可以做成**无条件**的。
+
+        ``active_bridge()`` 返回 None（无连接）时两个槽位都置 None ——
+        「未连接」必须如实反映，不能留着上一次的陈旧引用。
+        """
+        mgr = self.broker_manager
+        bridge = mgr.active_bridge() if mgr is not None else None
+        self.bridge = bridge
+        self.gateway = bridge.gateway if bridge is not None else None
+        return bridge
 
 
 _ACTIVE: "AppContext | None" = None

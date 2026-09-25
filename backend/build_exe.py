@@ -31,6 +31,14 @@ HIDDEN = [
     "uvicorn.lifespan", "uvicorn.lifespan.on",
     "mcp", "fastmcp", "pydantic_settings", "cryptography",
     "starlette", "httpx", "websockets",
+    # ★ Excel 导出（app/export.to_excel -> df.to_excel(engine="openpyxl")）。
+    #   `engine="openpyxl"` 是**字符串**，PyInstaller 静态分析看不见；PyInstaller
+    #   也没有 hook-openpyxl（实测 6.22.1 只有 hook-pandas*）。不显式声明 ⇒ 发布包内
+    #   没有 openpyxl ⇒ to_excel 写入阶段 ImportError ⇒ 导出端点**静默降级为 CSV**
+    #   （源码/dev 环境正常，只有用户装的包缺能力，属最难发现的一类缺陷）。
+    #   et_xmlfile 是 openpyxl 写 xlsx 的硬依赖（openpyxl/worksheet/_writer.py 静态导入），
+    #   跟随 openpyxl 即可收集，这里仍显式列出以防 openpyxl 内部改为惰性导入。
+    "openpyxl", "et_xmlfile",
     # FastMCP 的 docket 会话管理器依赖（内存模式）
     "docket", "burner_redis", "fakeredis", "redis",
     # app.main 经 uvicorn 字符串在运行时加载，PyInstaller 不会自动收集，需显式声明

@@ -1,0 +1,22 @@
+# 行尾归一化规则（只针对「行尾会决定脚本能否运行」的文件，不做全仓 eol 策略）
+#
+# ★ 同一个「行尾」坑本项目踩过三次，三种不同的**引入方式**、同一个**后果**
+#   （构建静默空转 / 退出码 0，或脚本被撕裂后照跑）：
+#     TD-16  文件以 LF-only **入库**          -> cmd 括号块解析错位，顶层落进 goto :eof
+#     TD-17  只改了工作区、仓库 blob 仍是 LF  -> 新克隆 / CI / 源码包拿到坏版本
+#     TD-21  编辑器（含 AI 工具）只把**改动行**写成裸 LF -> 文件混排，括号块在 LF 处被撕裂
+#   因此：改完本文件声明的任何文件，**必须复核行尾**。
+#   门禁：`python scripts/ci_reconcile.py` 的第 5 项会逐字节扫描工作区并按行号报错。
+#
+# 背景：build_all.bat 曾经以 LF-only 入库，而 cmd.exe 是**逐字**读取 .bat 的：
+# LF-only 会让括号块（for / if）解析错位，脚本在打印横幅后直接落进子程序的
+# `goto :eof`（= 结束整个脚本），**一个产物都不产出却退出码 0**。
+# 详见 docs/TECH_DEBT.md::TD-16。
+#
+# 这里必须用 `text eol=crlf`（而不是 `-text` 直接存 CRLF 字节）：
+# `eol=crlf` 由 git 在**检出时强制**写成 CRLF —— 即使将来有人用 LF 编辑器改了
+# 这个文件并提交，下一位 Windows 用户拿到的仍然是可运行的 CRLF 版本。
+build_all.bat text eol=crlf
+# 反向同理：CRLF 会让 shebang 变成 `/bin/bash\r`，报 "bad interpreter"。
+build_all.sh text eol=lf
+scripts/verify_packaged_mcp_boot.sh text eol=lf

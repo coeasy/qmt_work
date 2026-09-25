@@ -158,14 +158,12 @@ def _sync_active_bridge() -> None:
     而 ``state.bridge`` / ``state.gateway`` 只在装配期赋值 —— 不同步的话，
     「先开软件、后开 QMT 客户端」（最常见路径）会变成「连上了但活跃指针是空的」。
 
-    注：业务侧取行情走 ``broker_manager.active_bridge()``（动态），不受影响；
-    真正读 ``state.bridge`` 的是本模块的交易日历刷新。
+    注：**业务侧一律走 ``broker_manager.active_bridge()``（动态）**。``state.bridge`` /
+    ``state.gateway`` 只是「装配期快照」，自 P1-4 起**没有任何读点** ——
+    交易日历刷新也已改为直接问 manager。保留这两个槽位是为了兼容旧调用点的
+    属性存在性（`hasattr`），不再作为数据来源。
     """
-    mgr = state.broker_manager
-    if mgr is None:
-        return
-    state.bridge = mgr.active_bridge()
-    state.gateway = state.bridge.gateway if state.bridge else None
+    state.cache_active_bridge()
 
 
 async def _refresh_trading_calendar() -> None:
@@ -174,14 +172,21 @@ async def _refresh_trading_calendar() -> None:
     抽成函数是为了能在**连接晚到**时再刷一次：启动预算内没连上时先按 fallback
     运行，等后台把连接拉起来后再校正 —— 否则整个进程生命周期都停在 fallback
     （工作日规则会把节假日当交易日）。
+
+    ★ P1-4：活跃连接**只问 ``broker_manager.active_bridge()``**，不再读
+    ``state.bridge``。后者是**只写缓存**（见 :func:`_sync_active_bridge`），
+    晚到连接若没走到同步点，缓存就停在 ``None`` —— 日历会永久停在 fallback。
+    问 manager 是**动态**的，不存在「缓存过期」这一状态。
     """
     from gateway.trading_session import default_session
+    mgr = state.broker_manager
+    bridge = mgr.active_bridge() if mgr is not None else None
     try:
-        if state.bridge is not None:
+        if bridge is not None:
             # ★ 必须带超时（R25）：券商 `call` 内部没有 wait_for，接口卡住时
             #   这里会无限等待 —— 既堵启动，也堵「连接晚到后重刷日历」那条路。
             cal = await asyncio.wait_for(
-                state.bridge.call(state.bridge.gateway.get_trading_calendar),
+                bridge.call(bridge.gateway.get_trading_calendar),
                 timeout=CALENDAR_FETCH_TIMEOUT)
             if not default_session.refresh_from_calendar(cal or []):
                 default_session.use_fallback()

@@ -1,12 +1,18 @@
 #!/usr/bin/env python3
-"""CI 数字核对：后端测试收集数 / 前端组件数 / 注册页数量必须与 README 声明一致。
+"""CI 数字核对：后端测试收集数 / 前端组件数 / 注册页数量 / API 契约必须自洽。
 
-三项计数契约（不是通过率旁路）：
+四项契约（不是通过率旁路）：
   1. EXPECTED_TESTS      —— pytest 逐文件 --collect-only 收集到的用例总数。
   2. EXPECTED_COMPONENTS —— frontend-next/src/{components,shell,charts,domains} 下全部 .tsx。
   3. EXPECTED_PAGES      —— app/routes.tsx 的 PAGES 键数量（= 前端「页」的真源）。
+  4. API 契约            —— 前端 services/api 声明的端点必须都存在于后端注册表（P1-5）。
 
   注：旧 frontend/ 已退役；前端契约全部改指 frontend-next/（见 §12.4 / 退役改造）。
+
+★ 第 4 项为什么放在这里而不是另起一个 hook：它和前三项是**同一类**问题 ——
+  「两处对同一事实的声明已经不一致，而没有任何编译期错误会提醒你」。三项核的是
+  文档里的数字，第四项核的是前端代码里的路径。分开放只会让「跑门禁」变成
+  「记得跑两个门禁」，而漏跑的那个永远不会有人发现。
 
 任一项不符即退出非 0，提示是「改了代码忘了更文档」还是「文档数字过时」。
 用法：
@@ -32,9 +38,10 @@ FRONTEND = os.path.join(ROOT, "frontend-next")
 SRC = os.path.join(FRONTEND, "src")
 PAGES_REGISTRY = os.path.join(SRC, "app", "routes.tsx")
 README = os.path.join(ROOT, "README.md")
+GITATTRIBUTES = os.path.join(ROOT, ".gitattributes")
 
 # ── 计数契约（与 README「核心能力」「项目结构」章节同步）─────────────────────
-EXPECTED_TESTS = 1635          # 后端用例收集数
+EXPECTED_TESTS = 1696          # 后端用例收集数
 EXPECTED_COMPONENTS = 72     # 前端 .tsx 组件数（components + shell + charts + domains）
 EXPECTED_PAGES = 43          # 注册页数量（routes.tsx PAGES 键；含占位）
 
@@ -182,6 +189,103 @@ def check_readme_numbers(tests: int, pages: int) -> list[str]:
     return problems
 
 
+def check_api_contract_drift() -> list[str]:
+    """第 4 项契约（P1-5）：前端调用的每个端点都必须存在于后端注册表。
+
+    判据逻辑**不在这里复制**，而是复用 ``scripts/check_api_contract_drift.py`` ——
+    复制一份就会出现「两份判据各自漂移」，那正是本门禁要防的病。这里只负责
+    把它的结果翻译成 ci_reconcile 的问题清单。
+
+    解析不到任何东西时（正则与代码形态脱节 / 契约文件缺失）返回一条失败，
+    而不是静默通过 —— 一个「永远绿」的检查比没有检查更糟。
+    """
+    script = os.path.join(ROOT, "scripts", "check_api_contract_drift.py")
+    if not os.path.isfile(script):
+        return [f"缺少契约漂移检查脚本：{script}"]
+    # 同目录模块：用 spec 加载，避免依赖运行时的 sys.path[0] 恰好是 scripts/
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("_api_contract_drift", script)
+    if spec is None or spec.loader is None:
+        return [f"无法加载契约漂移检查脚本：{script}"]
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    if not os.path.isfile(mod.CONTRACT):
+        return [f"缺少后端契约文件：{mod.CONTRACT}（先跑 tests/contracts/introspect.py）"]
+    if not os.path.isdir(mod.API_DIR):
+        return [f"缺少前端 API 目录：{mod.API_DIR}"]
+
+    backend = mod.load_backend_endpoints()
+    backend_norm = mod.contract_normalized(backend)
+    frontend, _unresolved = mod.scan_frontend()
+
+    if len(backend) < 50:
+        return [f"后端契约只解析到 {len(backend)} 个端点 —— 检查失效（疑契约文件被清空）"]
+    if len(frontend) < 20:
+        return [f"前端只解析到 {len(frontend)} 个端点 —— 正则已与代码形态脱节"]
+
+    missing = sorted(k for k in frontend if k not in backend_norm)
+    return [f"前端调用了后端不存在的端点：{k}（{', '.join(frontend[k])}）"
+            for k in missing]
+
+
+def check_line_endings() -> list[str]:
+    """`.gitattributes` 声明的行尾 ↔ 工作区实际字节 —— 混排即失败。
+
+    ★ 为什么必须自动核（2026-09-26 R30 实测）：`build_all.bat` 是 `.bat`，cmd.exe
+      **逐字节**读它。只要文件里出现**混排行尾**（绝大多数行 CRLF、刚被某个编辑器
+      保存过的那几行是裸 LF），括号块（`if` / `for`）就会在 LF 处被撕裂。症状极其
+      隐蔽：**脚本照跑、产物照出、退出码仍是 0**，只在 stderr 多几行
+      ``'xxx' is not recognized as an internal or external command``
+      —— 那正是被截断那几行的后半段，肉眼与 `git diff` 都看不出来。
+
+      而「工具只把**改动行**写成 LF」是默认行为（本项目实测踩到）。`.gitattributes`
+      早已声明谁必须 CRLF、谁必须 LF，但**从没有人核过工作区是否遵约** ⇒
+      同一个坑踩了三次（TD-16 入库 LF / TD-17 检出未生效 / TD-21 编辑引入混排）。
+      这里把它变成门禁：声明即契约，违约就报红。
+    """
+    if not os.path.isfile(GITATTRIBUTES):
+        return [f"缺少行尾契约文件：{GITATTRIBUTES}"]
+    rules = []
+    for line in open(GITATTRIBUTES, encoding="utf-8").read().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        m = re.match(r"^(\S+)\s+.*?\beol=(crlf|lf)\b", line)
+        if m:
+            rules.append((m.group(1), m.group(2)))
+    if not rules:
+        return ["`.gitattributes` 里没有任何 `eol=crlf` / `eol=lf` 声明 —— 门禁已失效"]
+
+    problems: list[str] = []
+    for pattern, want in rules:
+        # 本仓库的规则都是字面路径（无通配）；仍用 glob 兼容将来加通配
+        matches = glob.glob(os.path.join(ROOT, pattern), recursive=True)
+        if not matches:
+            continue  # 该文件在本工作区不存在（如 .sh 在别处生成）时不算错
+        for path in matches:
+            if os.path.isdir(path):
+                continue
+            raw = open(path, "rb").read()
+            bad: list[int] = []
+            line_no = 1
+            for i, byte in enumerate(raw):
+                if byte != 0x0A:
+                    continue
+                crlf = i > 0 and raw[i - 1] == 0x0D
+                if (want == "crlf" and not crlf) or (want == "lf" and crlf):
+                    bad.append(line_no)
+                line_no += 1
+            if bad:
+                rel = os.path.relpath(path, ROOT).replace("\\", "/")
+                shown = ", ".join(str(n) for n in bad[:20])
+                more = f" …共 {len(bad)} 行" if len(bad) > 20 else ""
+                problems.append(
+                    f"{rel} 要求 eol={want}，但第 {shown} 行{more} 不符"
+                    f" → 用编辑器「行尾=CRLF/LF」另存，或对该文件做一次整文件行尾归一化")
+    return problems
+
+
 def _self_update(tests: int, components: int, pages: int) -> None:
     """把实测值回写本文件的期望常量。"""
     path = os.path.abspath(__file__)
@@ -240,6 +344,26 @@ def main() -> int:
         print("     → 请更新 README 对应数字（或删掉该处数字声明）")
     else:
         print("[✓] README 计数声明与实测一致")
+
+    # P1-5：前端 API 层 ↔ 后端 REST 契约（前端调了后端没有的端点 ⇒ 运行时 404）
+    drift = check_api_contract_drift()
+    if drift:
+        ok = False
+        for p in drift:
+            print(f"[✗] API 契约: {p}")
+        print("     → 修前端路径或补后端端点；详见 "
+              "`python scripts/check_api_contract_drift.py -v`")
+    else:
+        print("[✓] 前端 API 调用全部命中后端契约")
+
+    # 行尾契约（.gitattributes ↔ 工作区字节）：混排会让 .bat 的括号块被撕裂
+    eol = check_line_endings()
+    if eol:
+        ok = False
+        for p in eol:
+            print(f"[✗] 行尾契约: {p}")
+    else:
+        print("[✓] .gitattributes 声明的行尾与工作区一致")
 
     if not ok:
         print("RECONCILE FAILED")

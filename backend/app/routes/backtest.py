@@ -2,6 +2,7 @@ from core.context import AppContext, get_ctx
 from fastapi import APIRouter, Depends
 
 from app.routes._common import err, ok
+from app.services import backtest_store
 
 # --- stdlib imports injected by fix_route_imports ---
 
@@ -21,7 +22,9 @@ async def create_backtest_job(body: dict, ctx: AppContext = Depends(get_ctx)):
 @router.get("/backtest/jobs")
 async def list_backtest_jobs(ctx: AppContext = Depends(get_ctx)):
     """获取backtest / jobs（GET /backtest/jobs）。"""
-    jobs = ctx.db.query("SELECT * FROM backtest_jobs ORDER BY created_at DESC LIMIT 50")
+    if ctx.db is None:
+        return err(503, "数据库未初始化")
+    jobs = backtest_store.list_jobs(ctx.db)
     return ok(jobs)
 
 @router.get("/backtest/jobs/{job_id}")
@@ -29,7 +32,9 @@ async def get_backtest_job(job_id: str, ctx: AppContext = Depends(get_ctx)):
     """获取backtest / jobs（GET /backtest/jobs/{job_id}）。"""
     job = ctx.backtest_queue.get(job_id)
     if not job:
-        row = ctx.db.query_one("SELECT * FROM backtest_jobs WHERE id=?", (job_id,))
+        if ctx.db is None:
+            return err(503, "数据库未初始化")
+        row = backtest_store.get_job(ctx.db, job_id)
         return ok(row) if row else err(404, "job not found")
     return ok({k: v for k, v in job.items()})
 

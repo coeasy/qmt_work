@@ -4,7 +4,7 @@
 
 所有行情 / 交易 / 账户接口均通过真实券商 SDK 调用，**零 mock**：未连接券商时端点返回 HTTP 503 + 可操作引导，绝不返回假数据、绝不用空列表冒充。
 
-- 版本：`0.3.4`（单一真源为仓库根 `VERSION`，构建时随包分发并由 `build_exe.py` 校验）
+- 版本：`0.3.5`（单一真源为仓库根 `VERSION`，构建时随包分发并由 `build_exe.py` 校验）
 - 许可证：Apache 2.0
 - 平台：Windows 10 / 11（迅投系券商依赖 xtquant 的 Windows 二进制，须与券商客户端**同机**运行）
 
@@ -46,7 +46,7 @@
 |------|------|
 | 可视化界面 | React + Vite + ECharts SPA，纯前端、前后端解耦；6 分组 / 43 页 + keep-alive 多标签工作区 |
 | MCP 接口 | FastMCP Streamable HTTP，Cursor / Claude Desktop 直连 |
-| REST API | FastAPI `/api/v1/*`，34 个路由模块（账户 / 行情 / 下单 / 回测 / 因子 / 再平衡 / 风控 / 配置…） |
+| REST API | FastAPI `/api/v1/*`，35 个路由模块（账户 / 行情 / 下单 / 回测 / 因子 / 再平衡 / 风控 / 配置…） |
 | 实时推送 | WebSocket，活跃券商只订阅一次，多客户端扇出；断线重连补发最近 30s 行情 |
 | 多账户网格 | 多券商 / 多账户统一看板，批量下单 / 撤单 / 重连 |
 | 回测引擎 | 向量化回测 + 参数扫描（与逐根信号一致），真实 K 线 |
@@ -166,11 +166,31 @@ bash build_all.sh                # Linux / Git Bash / macOS
 build_all.bat                    # Windows CMD
 ```
 
-依次执行 **Step 1 前端 build → Step 2 后端 EXE → Step 3 Electron 打包 → Step 4 构建后自检**，默认产出 zip 便携版。脚本内置三道闸门，任一失败即中断而不是产出半包：
+> **`build_all.bat` 必须是 CRLF 行尾**（`.sh` 反之必须是 LF）。`cmd.exe` 逐行读取 `.bat`，
+> LF-only 会让括号块（`for` / `if`）解析错位并报
+> `'x' is not recognized as an internal or external command` / `) was unexpected at this time`；
+> 更严重的是顶层会落进子程序的 `goto :eof`（= 结束整个脚本）——
+> **一个产物都不产出却退出码 0**（历史事故，见 `docs/TECH_DEBT.md::TD-16`）。
+> 该约束由仓库根的 `.gitattributes` **强制**（`build_all.bat text eol=crlf`、
+> `build_all.sh text eol=lf`），**检出时**即生效，不依赖各人本机的 `core.autocrlf`；
+> 请勿删除这两行，也勿对其做 LF/CRLF 手工归一化 —— 文件头部也写了同样的警告。
+> 自检：`git check-attr text eol -- build_all.bat` 应为 `text: set` / `eol: crlf`。
+>
+> ⚠ **「编辑了本文件」不等于「行尾还是对的」**：只改动少数行的编辑器（含 AI 编辑工具）
+> 会**只把改动的那几行写成裸 LF**，文件变成**混排**。混排的症状最阴：**脚本照跑、产物照出、
+> 退出码仍是 0**，只在 stderr 多几行 `'xxx' is not recognized as ...`（被撕裂的括号块后半段）。
+> 故 `ci_reconcile.py` 已把**行尾契约**纳入门禁（第 5 项，逐字节扫描并按行号报错），
+> 见 `docs/TECH_DEBT.md::TD-21`。**块内注释只写纯 ASCII**，中文说明写到块外。
+
+依次执行 **Step 1 前端 build → Step 2 后端 EXE → Step 3 Electron 打包 → Step 4 构建后自检（+ Step 4.5 MCP 协议端到端）**，默认产出 zip 便携版。脚本内置闸门，任一失败即中断而不是产出半包：
 
 1. `verify_static_ready` —— 前端产物必须存在，且 `index.html` 引用的每个资源都真实落地（历史事故：vite 半写入就打包 → 包内 6/32 个静态文件 → 桌面端白屏）
 2. 打包后 static 核对 —— 源 ↔ 包内文件数比对，多出即列出**孤儿文件**（上一轮残留）
 3. 包内入口核对 —— `index.html` 引用的 js 入口必须在包内，否则明确告警「桌面端可能白屏」
+4. `latest.yml` 硬核对（`--nsis`）—— 清单必须存在、`version` 必须等于仓库根 `VERSION`、`path` 指向的安装包必须在产物目录（缺失即中断：客户端「检查更新」会**静默失效**且界面无提示）
+5. Step 4 客户端自检里的**渲染判据以渲染进程自证为准** —— 权威判据是「**页面 DOM 已实际渲染（非空壳）**」（渲染进程经 `executeJavaScript` 自报节点数 / 正文长度，落盘 `render-proof.json`）；像素「非纯色空窗」只作**第二条独立证据**，窗口被其它窗口遮挡时**明确跳过**并打印原因（`PrintWindow` 取的是 GDI 合成层，被遮挡时 Chromium 停止出帧 ⇒ 位图恒为纯色，而此时页面其实完全正常，见 `docs/TECH_DEBT.md::TD-22`）
+6. Step 4.5 MCP 协议端到端 —— 对打包后的后端做**真握手 + tools/call**（REST 自省能列出 127 个工具 ≠ Agent 真能连上）。该步需要**真 Git Bash**：脚本按已知安装位置探测并用 `bash --version` 实测（必须回 `GNU bash`），
+   Windows 自带的 `C:\Windows\System32\bash.exe` 只是 **WSL 启动器**，未装发行版时不可用，不参与判定；确实没有可用 bash 时**降级为 skip 并打印原因**，不会误判成失败（见 `docs/TECH_DEBT.md::TD-20`）
 
 常用参数：
 
@@ -179,7 +199,7 @@ build_all.bat                    # Windows CMD
 | `--clean-dist` | 打包前彻底删除上一轮 `backend/dist` 产物（默认保留，PyInstaller 覆盖同名文件） |
 | `--nsis` | 同时产出 NSIS 安装包（需本机安装 NSIS，否则退回 zip） |
 | `--portable` | 仅 zip 便携版（默认） |
-| `--desktop-only` | 跳过前端与后端 EXE，仅打包 Electron（需 `backend/dist` 已存在） |
+| `--desktop-only` | 跳过前端与后端 EXE，仅打包 Electron（需 `backend/dist` 已存在）。**发布前不要只用它**：它会复用上一轮的 `backend/dist`，后端的构建配置（如 `build_exe.py` 的 `HIDDEN`）改动不会生效（见 `docs/TECH_DEBT.md::TD-09`） |
 | `--backend-only` | 仅打包后端 EXE |
 | `--skip-frontend` | 跳过前端构建（需 `backend/static` 已存在） |
 | `--no-verify` | 跳过 Step 4 构建后自检 |
@@ -189,10 +209,16 @@ build_all.bat                    # Windows CMD
 
 | 变量 | 说明 |
 |------|------|
-| `QMT_UPDATE_URL` | 自动更新服务器地址（默认 GitHub Releases 占位，**请按实际仓库设置**） |
 | `QMT_PYTHON` | 指定后端构建解释器（默认依次探测：WorkBuddy 托管 venv → `backend/.venv` → PATH） |
 | `QMT_NODE` / `QMT_NODE_DIR` | 指定前端构建解释器 / Node 安装目录 |
-| `CSC_LINK` / `CSC_KEY_PASSWORD` | Windows 代码签名证书路径 / 密码（设置后自动签名，消除 SmartScreen 告警并生成 `latest.yml`） |
+| `CSC_LINK` / `CSC_KEY_PASSWORD` | Windows 代码签名证书路径 / 密码（设置后自动签名，消除 SmartScreen 告警） |
+
+> 自动更新源**不由环境变量决定**：改 `frontend-next/electron-builder.yml` 的 `publish` 段
+> （electron-builder 据此生成包内 `resources/app-update.yml`，electron-updater 运行期只读它）。
+> 该 `publish` 段**只用于生成更新源**：构建脚本调用 electron-builder 时一律显式 `--publish never`；
+> 未指定时 electron-builder 在 `CI=true` 且当前提交无 tag 的环境里会**自行开启 GitHub 发布**，
+> 缺 `GH_TOKEN` 即在收尾阶段抛错 ⇒ 退出码 1 且**连带丢失 `latest.yml`**（见 `docs/TECH_DEBT.md::TD-18`）。
+> 上传安装包资产是 `scripts/publish_release.py` 的职责。
 
 > **解释器版本提示**：脚本会校验 Python 版本，若非 3.11 会告警并给出改用方式（本地功能可用，但打包出的 EXE 运行时与 CI 校验矩阵不一致）。建议：`python3.11 -m venv backend/.venv` 后构建，或 `QMT_PYTHON=<你的3.11解释器> bash build_all.sh`。
 
@@ -422,13 +448,13 @@ print(httpx.get(f"{BASE}/paper/positions", headers=HEAD).json())
 
 | 层级 | 命令 | 覆盖范围 |
 |------|------|----------|
-| 后端单测 | `cd backend && for f in tests/test_*.py; do python -m pytest "$f" -q -p no:cacheprovider; done` | 151 个 `test_*.py`，1635 个用例 |
+| 后端单测 | `cd backend && for f in tests/test_*.py; do python -m pytest "$f" -q -p no:cacheprovider; done` | 154 个 `test_*.py`，1696 个用例 |
 | 后端冒烟 | `python backend/tests/smoke2.py` | REST 主要端点 + 错误语义（**需先起后端**；默认连 `data/app.db`，检测到真实券商连接时自动跳过 3 条「未连接券商 → 503」断言并提示改用下方客户端测试做权威验证） |
 | 前端类型检查 | `cd frontend-next && npm run typecheck` | TypeScript strict 零错误 |
 | 前端单测 | `cd frontend-next && npm test` | vitest |
 | 前端渲染冒烟 | `node tests/render_smoke_all.mjs` | headless 逐页渲染，判定 `.pane-leaf-body` 非空 |
-| 客户端端到端 | `python scripts/client_start_test.py --target client\|dev\|backend` | 清理 → 启动 → 就绪 → REST 冒烟 → WS → 窗口截图 → 停机 → 零残留 |
-| 契约计数门禁 | `python scripts/ci_reconcile.py` | 测试数 / 组件数 / 注册页数与文档一致 |
+| 客户端端到端 | `python scripts/client_start_test.py --target client\|dev\|backend` | 清理 → 启动 → 就绪 → REST 冒烟 → WS → **DOM 渲染自证** + 窗口截图 → 停机 → 零残留（28 项） |
+| 契约计数门禁 | `python scripts/ci_reconcile.py` | 测试数 / 组件数 / 注册页数 / API 契约 / **行尾契约** 共 5 项与文档一致 |
 
 **两条重要约定**
 
@@ -468,7 +494,7 @@ print(httpx.get(f"{BASE}/paper/positions", headers=HEAD).json())
 
 ### 自动更新
 
-桌面壳集成 electron-updater：启动后静默检查更新，托盘菜单「检查更新」可手动触发；发现新版本提示下载，下载完成退出时自动安装。更新源由构建时 `QMT_UPDATE_URL` 指定。
+桌面壳集成 electron-updater：启动后静默检查更新（**不弹窗**），托盘菜单「检查更新」可手动触发并反馈结果；发现新版本提示下载，下载完成后提示「退出即自动安装」，退出时静默安装（走 NSIS `/S`）。更新源由 `frontend-next/electron-builder.yml` 的 `publish` 段决定（默认 GitHub Releases `coeasy/qmt_work`）。
 
 ---
 
@@ -479,7 +505,7 @@ qmt_work/
 ├─ backend/              # FastAPI 统一后端（V10 重构：core/ 无依赖内核 + engines/ 引擎）
 │  ├─ run.py            # 启动入口（端口自动扫描 + 单实例锁 + AppContext 装配）
 │  ├─ app/              # 装配层：main / routes / services / gateway
-│  │  ├─ routes/        # 34 个 REST 路由模块（account/market/trade/backtest/broker/…）
+│  │  ├─ routes/        # 35 个 REST 路由模块（account/market/trade/backtest/broker/…）
 │  │  └─ gateway/       # 鉴权 / 限流 / 风控 / 审计 / 脱敏 / K 线缓存 / metrics / 日志告警
 │  ├─ core/             # 无依赖内核（context / crypto / db …）
 │  ├─ engines/          # 交易引擎（signal router / execution / backtest …）
@@ -490,7 +516,7 @@ qmt_work/
 │  ├─ connectors/ plugins/ sync/   # 外部连接器 / 插件内核 / WebSocket 同步引擎
 │  ├─ tools/ runtimes/  # 因子策略工具 / 捆绑 Python 运行时（cp311）
 │  ├─ data/ static/ dist/   # SQLite / 前端构建产物 / PyInstaller 产物
-│  ├─ tests/            # 151 个 test_*.py（1635 用例）+ 冒烟测试 smoke2.py
+│  ├─ tests/            # 154 个 test_*.py（1696 用例）+ 冒烟测试 smoke2.py
 │  ├─ scripts/          # 门禁脚本（许可 / 能力漂移 / 契约生成 / 架构校验）
 │  └─ build_exe.py      # EXE 打包脚本（含 static 闸门）
 ├─ frontend-next/         # 主前端：React 18 + Vite 5 + TS 5 strict（已退役旧 frontend/）
@@ -507,6 +533,7 @@ qmt_work/
 ├─ scripts/              # 构建 / CI / 门禁脚本（ci_reconcile / verify_artifacts / client_start_test …）
 ├─ .github/workflows/    # ci.yml · build-client.yml · release.yml
 ├─ TOOLCHAIN.json        # 工具链锁（node / python / pyinstaller / electron）
+├─ .gitattributes        # 行尾由仓库表示强制（build_all.bat=CRLF，*.sh=LF；见下方「一键构建」）
 ├─ build_all.sh          # 一键构建（sh，默认 zip 便携版）
 ├─ build_all.bat         # 一键构建（Windows CMD）
 ├─ docs/                 # 使用指南 + 方案 / 重构记录（索引见 docs/README.md）

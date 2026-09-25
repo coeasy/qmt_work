@@ -96,12 +96,7 @@ async def ready_check(ctx: AppContext = Depends(get_ctx)):
     """
     import time as _t
 
-    db_ok = ctx.db is not None
-    if db_ok:
-        try:
-            ctx.db.query("SELECT 1")
-        except Exception:  # noqa: BLE001
-            db_ok = False
+    db_ok = ctx.db is not None and ctx.db.ping()
     required_phases = {n: ctx.phase_status.get(n) for n in REQUIRED_PHASES}
     started = all(v == "ready" for v in required_phases.values())
     engines = {

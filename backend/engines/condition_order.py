@@ -22,6 +22,19 @@ log = logging.getLogger("qmt_work")
 
 _TRIGGER_TYPES = ("gte", "lte")
 
+#: 内存中保留的**终态**条件单条数上限（最旧的先淘汰）。
+#
+# ★ R26：`_orders` 此前只增不减 —— `submit` 与 `load_from_db` 各插一条，进入终态
+#   （filled/canceled/rejected/expired/failed）后永不移除，而 `status()`
+#   （`GET /trade/conditions`，前端 Conditions 页整表渲染）直接把全部订单原样返回，
+#   每条约 22 个字段 ⇒ 进程内存与响应体都随历史条件单单调上涨。
+#   **只淘汰终态**：pending/triggered 还在轮询监控，submitted 还要靠
+#   `_settle_submitted` 回写终态、靠 `cancel` 响应取消 —— 淘汰它们等于让订单失控。
+#   被淘汰的单据仍在 `condition_orders` 表里（业务台账，不裁剪），按 id 可查。
+_MAX_TERMINAL_ORDERS = 500
+#: 非终态（未结束）状态：这些**永不淘汰**。
+_ACTIVE_STATUSES = ("pending", "triggered", "submitted")
+
 
 def _safe_int(v, default: int = 0) -> int:
     """把任意值安全转 int：None/空串/非数字 → default。用于屏蔽历史脏数据（DB 里
@@ -180,6 +193,24 @@ class ConditionOrderEngine:
     def _view(o: dict) -> dict:
         return {k: v for k, v in o.items()}
 
+    # ---------------- 内存保留策略（防止 _orders 无界增长） ----------------
+    def _prune_orders(self) -> None:
+        """把内存里的**终态**条件单裁剪到 ``_MAX_TERMINAL_ORDERS`` 以内。
+
+        仅淘汰终态；详见 ``_MAX_TERMINAL_ORDERS`` 的说明。淘汰时一并从
+        ``_retry_queue`` 移除该 id（终态本不该在重试队列里，这里是淘汰动作
+        自身的兜底，避免留下「重试队列指向已不存在订单」的悬垂引用）。
+        """
+        terminal = [o for o in self._orders.values()
+                    if o.get("status") not in _ACTIVE_STATUSES]
+        excess = len(terminal) - _MAX_TERMINAL_ORDERS
+        if excess <= 0:
+            return
+        terminal.sort(key=lambda o: o.get("created_at") or "")
+        for o in terminal[:excess]:
+            self._orders.pop(o["id"], None)
+            self._retry_queue.pop(o["id"], None)
+
     # ---------------- 提交/取消 ----------------
     def submit(self, code: str, side: str, trigger_type: str, trigger_price: float,
                volume: int, price_type: str = "market", price: float = 0.0,
@@ -231,6 +262,7 @@ class ConditionOrderEngine:
             self._retry_queue.pop(cid, None)
             self._persist(o)
             self._wal_append("cancel", cid, {"status": "canceled"})
+            self._prune_orders()
         return {"id": cid, "status": o["status"]}
 
     def _persist(self, o: dict) -> None:
@@ -329,6 +361,7 @@ class ConditionOrderEngine:
         self._wal_append("expire", o["id"], {"status": "expired", "expired_at": o["expired_at"]})
         self._emit({"type": "condition_expired", "data": self._view(o)})
         self._audit("condition.expired", o, f"expire_at={o.get('expire_at')}")
+        self._prune_orders()
         if self._notifier:
             try:
                 await self._notifier.notify(
@@ -445,6 +478,7 @@ class ConditionOrderEngine:
             self._emit({"type": "condition_settled", "data": self._view(o)})
             self._audit("condition.settled", o, f"order_id={oid} status={status}")
             log.info("condition %s 核销为终态: %s", o["id"], status)
+        self._prune_orders()
 
     def _schedule_retry(self, o: dict, reason: str) -> None:
         """拒单/异常 → 分级重试（P1-5）。
@@ -491,6 +525,7 @@ class ConditionOrderEngine:
                                             "next_retry_at": o.get("next_retry_at", "")})
         self._emit({"type": "condition_failed", "data": self._view(o)})
         self._audit("condition.failed", o, reason)
+        self._prune_orders()
 
     def _audit(self, action: str, o: dict, result: str) -> None:
         if self._db is not None:

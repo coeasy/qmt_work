@@ -25,6 +25,7 @@ from tools.factor_research import (
     run_portfolio_backtest,
     walk_forward,
 )
+from tools.portfolio_engine import run_portfolio_engine
 from xtquant_client.base import BrokerError
 
 router = APIRouter()
@@ -133,7 +134,17 @@ async def post_correlation(body: Dict[str, Any]):
 
 @router.post("/research/portfolio-backtest")
 async def post_portfolio_backtest(body: Dict[str, Any]):
-    """多标的组合回测。body: {symbols(逗号), weights_json?, strategy?, params_json?, ...}。"""
+    """多标的组合回测。
+
+    body: {symbols(逗号), weights_json?, strategy?, params_json?, engine?, rebalance?, ...}
+
+    ``engine`` 两种口径（**默认 sleeve，行为与历史完全一致**）：
+      - ``sleeve``：每标的一条独立资金袖套，最后按权重加总净值（旧口径）。
+      - ``shared_cash``：一个账户、多只持仓、共享现金，按 ``rebalance``
+        （none/daily/weekly/monthly/signal）把权重**维持**在目标上，
+        额外输出 turnover / cost 拆解 / 分标的归因。
+    未知 ``engine`` 值**报 400**，不静默回退到默认口径。
+    """
     import json as _json
     raw = body.get("symbols")
     if not raw:
@@ -144,6 +155,9 @@ async def post_portfolio_backtest(body: Dict[str, Any]):
     period = body.get("period") or "1d"
     count = int(body.get("count") or 250)
     broker_id = body.get("broker_id") or None
+    engine = (body.get("engine") or "sleeve").strip().lower()
+    if engine not in ("sleeve", "shared_cash"):
+        return err(400, f"未知 engine={engine!r}，可选 sleeve / shared_cash")
     try:
         klines = {}
         for sym in syms:
@@ -152,6 +166,18 @@ async def post_portfolio_backtest(body: Dict[str, Any]):
             if not bars:
                 return err(503, f"{sym} 无历史K线或未连接券商")
             klines[sym] = bars
+        if engine == "shared_cash":
+            out = run_portfolio_engine(
+                syms, klines, weights, body.get("strategy", "ma_cross"), params,
+                float(body.get("initial_capital", 1_000_000.0)),
+                commission_rate=float(body.get("commission_rate", 0.0003)),
+                stamp_tax=float(body.get("stamp_tax", 0.001)),
+                slippage_bps=float(body.get("slippage_bps", 5.0)),
+                rebalance=body.get("rebalance", "signal"),
+                enforce_limit=bool(body.get("enforce_limit", True)),
+                max_participation_pct=float(body.get("max_participation_pct", 1.0)),
+                period=period, rf=float(body.get("rf", 0.0)))
+            return ok(out)
         out = run_portfolio_backtest(
             syms, klines, weights, body.get("strategy", "ma_cross"), params,
             float(body.get("initial_capital", 1_000_000.0)),

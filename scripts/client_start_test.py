@@ -331,8 +331,32 @@ def _win32():
         user32.SetWindowPos.restype = wintypes.BOOL
         user32.BringWindowToTop.argtypes = [wintypes.HWND]
         user32.BringWindowToTop.restype = wintypes.BOOL
+        user32.WindowFromPoint.argtypes = [wintypes.POINT]
+        user32.WindowFromPoint.restype = wintypes.HWND
+        user32.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
+        user32.GetAncestor.restype = wintypes.HWND
         _USER32 = user32
     return _USER32
+
+
+def window_occluded(hwnd: int, rect: tuple[int, int, int, int]) -> bool:
+    """窗口**中心点**是否落在别的窗口上（= 被遮挡）。
+
+    为什么必须单独判它（2026-09-26 R30 实测）：``PrintWindow(PW_RENDERFULLCONTENT)``
+    取的是 GDI 合成层。窗口被别的窗口完全遮住时 Chromium 停止出帧、不再维护合成层，
+    于是拿到的只是**未合成的空白客户区** —— 实测恒为 1 种颜色 / PNG 6406 bytes，而
+    **同一时刻**渲染进程里 ``querySelectorAll('*')`` 有 200 个节点、``body.innerText``
+    473 字符（真实行情）。即：位图颜色数在遮挡下**不是**「页面渲染了没」的有效判据，
+    此时必须跳过该判据（改由渲染进程的 DOM 证明回答），而不是判失败。
+    """
+    left, top, right, bottom = rect
+    user32 = _win32()
+    pt = wintypes.POINT((left + right) // 2, (top + bottom) // 2)
+    under = user32.WindowFromPoint(pt)
+    if not under:
+        return False
+    root = user32.GetAncestor(under, 2)  # GA_ROOT：点到 Chromium 子窗口要归一化到顶层
+    return root not in (0, hwnd)
 
 
 def find_windows(pid: int) -> list[dict]:
@@ -621,7 +645,8 @@ def main() -> int:
     # ② 其实不需要删——陈旧文件用「修改时间是否早于本次运行」判定即可（见 fresh()）。
     # 这样脚本变成纯只读+只写自己产物的工具，随时可安全运行。
     profile.mkdir(parents=True, exist_ok=True)
-    stale_files = [name for name in ("port.txt", "startup-error.log", "window-ready.txt")
+    stale_files = [name for name in ("port.txt", "startup-error.log", "window-ready.txt",
+                                     "render-proof.json")
                    if (profile / name).exists() and not fresh(profile / name)]
     record("prep", "残留进程已清理，无文件删除", True,
            f"清理本脚本实例 qmt_work={len(pre_client)} electron={len(pre_electron)}"
@@ -832,10 +857,39 @@ def main() -> int:
         record("window", "客户端主窗口已创建（可见且尺寸达标）", main_win is not None,
                (f"「{main_win['title']}」{main_win['width']}x{main_win['height']}"
                 if main_win else "未发现主窗口（进程可能已崩或窗口未渲染）"))
+
+        # ---- 渲染结论的**权威判据**：渲染进程自己给出的 DOM 证明 ----
+        # 为什么不用窗口截图当判据（2026-09-26 R30 实测）：PrintWindow 取的是 GDI 合成层，
+        # 窗口被别的窗口遮挡时 Chromium 停止出帧 ⇒ 恒为纯色（1 色 / 6406 bytes），
+        # 而**同一时刻**渲染进程里 DOM 有 200 个节点、正文 473 字符（真实行情）。
+        # 见 ``window_occluded`` 与 electron/main.cjs::startRenderProof。
+        proof_path = profile / "render-proof.json"
+        facts: dict | None = None
+        for _ in range(60):  # 最长 30s（主进程侧同样取样 30s，覆盖懒加载分片就绪）
+            if proc.poll() is not None:
+                break
+            if fresh(proof_path):
+                try:
+                    parsed = json.loads(proof_path.read_text(encoding="utf-8").strip())
+                    if isinstance(parsed, dict):
+                        facts = parsed
+                except Exception:  # noqa: BLE001
+                    facts = None
+            if facts and facts.get("nodes", 0) >= 50 and facts.get("textLen", 0) >= 100:
+                break
+            time.sleep(0.5)
+        dom_ok = bool(facts) and facts.get("nodes", 0) >= 50 and facts.get("textLen", 0) >= 100
+        record("window", "页面 DOM 已实际渲染（非空壳）", dom_ok,
+               (f"节点 {facts['nodes']} / 正文 {facts['textLen']} 字符"
+                f" / root 子节点 {facts.get('rootKids')} / readyState={facts.get('ready')}"
+                if facts else "未取得渲染证明（render-proof.json 未写出）"))
         if main_win and not args.no_shot:
             # PrintWindow 本身不需要窗口在前台；但若它失败会回退到屏幕搬运，
             # 所以仍先尝试置前，提高回退路径的成功率。
             focus_window(main_win["hwnd"])
+            # 窗口被遮挡时 PrintWindow 恒为纯色（见 window_occluded）：此时颜色判据
+            # 不成立，轮询等到天亮也不会变绿 ⇒ 只抓一次留证，不空等 30s。
+            occluded = window_occluded(main_win["hwnd"], main_win["rect"])
             shot = OUT_DIR / "client_window.png"
             # ⚠️ 不要用「固定 sleep 后只抓一次」：`did-finish-load` 只代表**文档**加载完，
             # 路由 chunk（Dashboard-*.js / account-*.js …）与 echarts 首帧还在异步路上，
@@ -856,7 +910,7 @@ def main() -> int:
                 time.sleep(0.5)
                 detail, colors, size = screenshot_window(
                     main_win["hwnd"], shot, main_win["rect"])
-                if colors >= 50 or time.time() - t0 >= 30.0:
+                if colors >= 50 or occluded or time.time() - t0 >= 30.0:
                     break
             waited = round(time.time() - t0, 1)
             if args.settle > 0:
@@ -873,8 +927,15 @@ def main() -> int:
             # 失败时把**主色占比**也打出来（诊断）：纯色空窗 ≈ 1.0，真渲染的界面远低于它，
             # 于是「真·空窗」与「渲染了但某块懒加载还没到」能一眼分开，不必再靠复现去猜。
             share = last_dominant_share()
-            record("window", "窗口已实际渲染（非纯色空窗）", colors >= 50,
-                   f"采样到的不同颜色数={colors}（等待 {waited}s，主色占比={share}）")
+            note = f"采样到的不同颜色数={colors}（等待 {waited}s，主色占比={share}）"
+            if colors >= 50:
+                record("window", "窗口像素已实际渲染（非纯色空窗）", True, note)
+            elif occluded:
+                # 遮挡下这个判据**无效**（≠「页面没渲染」）：渲染结论已由上面的 DOM 证明
+                # 给出，此处跳过而不是判失败 —— 强行判失败就是把好产物判死（R30 事故）。
+                info(f"[skip] 窗口被其它窗口遮挡，像素判据不适用：{note}")
+            else:
+                record("window", "窗口像素已实际渲染（非纯色空窗）", False, note)
             unfocus_window(main_win["hwnd"])
 
     # ---------- 阶段 7：停机 + 零残留 ----------

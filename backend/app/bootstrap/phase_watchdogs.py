@@ -87,9 +87,8 @@ async def _broker_auto_connect_guard() -> None:
                 continue
             cid = await _auto_connect_active()
             if cid:
-                # 同步进程级活跃指针，供 routes/tools/sync 取行情
-                state.bridge = mgr.active_bridge()
-                state.gateway = state.bridge.gateway if state.bridge else None
+                # 同步进程级活跃指针（只写槽位，唯一入口见 core.context.cache_active_bridge）
+                state.cache_active_bridge()
                 log.info("broker auto-connect guard connected: %s", cid)
         except asyncio.CancelledError:
             raise

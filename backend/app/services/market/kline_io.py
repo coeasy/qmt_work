@@ -5,9 +5,11 @@
 import asyncio
 import json
 import logging
+from typing import Optional
 
 from app.services.market.common import BOARD_MF_SEM
 from core.db import get_db
+from core.errors import swallow
 from core.state import MSG_NO_BROKER, state
 from datasource.registry import get_hub
 from xtquant_client.base import BrokerError
@@ -94,13 +96,38 @@ async def _moneyflow_collector_loop():
         await asyncio.sleep(300)
 
 
+#: 采集循环的任务句柄。此前 ``asyncio.create_task`` 的返回值被直接丢弃 ——
+#: 常驻协程没有停机路径，事件循环关闭时被销毁（"Task was destroyed but it is
+#: pending"），而它每 5 分钟会 ``snapshot_codes`` 写 ``moneyflow_cache``：
+#: 一旦跑在 ``shutdown`` 的 ``db.close()`` 之后就变成「往已关闭的库写」。
+_collector_task: Optional[asyncio.Task] = None
+
+
 def start_moneyflow_collector():
-    """在 lifespan 启动资金流自动采集后台任务（需在事件循环内调用）。"""
+    """在 lifespan 启动资金流自动采集后台任务（需在事件循环内调用，幂等）。"""
+    global _collector_task
     try:
-        asyncio.create_task(_moneyflow_collector_loop())
+        if _collector_task is not None and not _collector_task.done():
+            return
+        _collector_task = asyncio.create_task(_moneyflow_collector_loop())
         log.info("资金流自动采集已启动（交易时段每 5 分钟）")
     except Exception as exc:  # noqa: BLE001
         log.warning("资金流自动采集启动失败：%s", exc)
+
+
+async def stop_moneyflow_collector() -> None:
+    """停机：取消资金流采集循环（幂等，未启动时为空操作）。"""
+    global _collector_task
+    task, _collector_task = _collector_task, None
+    if task is None or task.done():
+        return
+    task.cancel()
+    try:
+        await task
+    except (asyncio.CancelledError, Exception) as exc:  # noqa: BLE001
+        # 停机路径：取消与循环内异常都属预期终态，绝不能阻断 shutdown 的后续步骤；
+        # 但**必须留痕** —— 静默 pass 会让「采集循环到底怎么退出的」永远查不出来。
+        swallow(exc, why="停机取消资金流采集循环（取消/循环异常均属预期终态）")
 
 
 def moneyflow_replay(db, code: str, date: str = "", limit: int = 500) -> dict:

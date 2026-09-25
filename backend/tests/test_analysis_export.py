@@ -85,3 +85,41 @@ def test_to_excel_writes_file(tmp_path):
     p = tmp_path / "out.xlsx"
     to_excel(rows, cols, str(p))
     assert p.exists() and p.stat().st_size > 0
+
+
+def test_to_excel_degrades_when_engine_missing(tmp_path, monkeypatch):
+    """R26：写引擎缺失时须按文档承诺回退 CSV，且绝不落盘伪 xlsx。"""
+    import pandas as pd
+    import app.export as export_mod
+
+    def _boom(*a, **kw):
+        raise ImportError("Missing optional dependency 'openpyxl'")
+
+    monkeypatch.setattr(pd.DataFrame, "to_excel", _boom, raising=True)
+    p = tmp_path / "out.xlsx"
+    content = export_mod.to_excel([{"code": "A"}], [{"key": "code", "label": "代码"}], str(p))
+    assert content.startswith("代码")          # 返回 CSV 内容（含标签行）
+    assert not p.exists()                      # 降级不落盘
+
+
+def test_market_export_reports_real_artifact(tmp_path, monkeypatch):
+    """R26：/market/export 的信封必须与真实产物一致（xlsx 未落盘 ⇒ 不得返回 path）。"""
+    import app.routes.analysis as analysis_route
+    import pandas as pd
+
+    captured = {}
+
+    def _boom(*a, **kw):
+        raise ImportError("Missing optional dependency 'openpyxl'")
+
+    monkeypatch.setattr(pd.DataFrame, "to_excel", _boom, raising=True)
+    monkeypatch.setattr(analysis_route, "ok", lambda data: ("ok", data))
+    monkeypatch.setattr(analysis_route, "audit_log", lambda *a, **kw: None)
+
+    import asyncio
+    res = asyncio.run(analysis_route.market_export(
+        {"format": "xlsx", "filename": "t", "rows": [{"code": "A", "v": 1}]}))
+    captured.update(res[1])
+    assert captured["format"] == "csv"
+    assert "path" not in captured              # 不返回不存在的 xlsx 路径
+    assert captured["content"].startswith("code,v")   # 未传 columns ⇒ 键名推导标签

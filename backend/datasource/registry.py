@@ -17,7 +17,6 @@ registry 注册一个 DataSource 实现，路由 / 回退 / 健康检查全部�
   冷却一段时间，避免慢/坏源拖垮 auto 链或打爆远端）。
 """
 import asyncio
-import inspect
 import time
 from typing import Optional
 
@@ -31,6 +30,13 @@ from datasource.periods import (
     normalize_period,
 )
 from xtquant_client.base import BrokerError
+from datasource.bars_util import bars_last_date  # noqa: F401  re-export：公开 API
+from datasource.bound_broker import _BoundBrokerSource  # noqa: F401  re-export：工厂与测试用
+from datasource.manager_kline import (  # noqa: F401
+    KlineMixin,
+    _accepts_kline_range,  # re-export：tests/test_kline_range.py 从本模块导入
+)
+from datasource.manager_quotes import QuotesMixin
 
 log = __import__("logging").getLogger("qmt_work.datasource.registry")
 
@@ -48,26 +54,6 @@ def _local_name(code: str) -> str:
     except Exception:  # noqa: BLE001  名称查不到不该让行情链路整体失败
         return ""
 
-
-def bars_last_date(bars) -> str:
-    """取一批 K 线里**最后一根**的交易日（``"YYYYMMDD"``；无法解析返回 ``""``）。
-
-    ★ 不假设 bars 已按时间升序：实测券商与在线源都升序，但补洞/合并路径不保证，
-    直接取 ``bars[-1]`` 会拿错。这里对所有行归一化后取最大，代价 O(n)，
-    n 通常 <= 320，可接受。
-    """
-    if not bars:
-        return ""
-    latest = ""
-    for b in bars:
-        if isinstance(b, dict):
-            raw = b.get("time")
-        else:
-            raw = getattr(b, "time", None)
-        d = bar_date(raw)
-        if d and d > latest:
-            latest = d
-    return latest
 
 # 单源调用超时与熔断参数
 _PER_SOURCE_TIMEOUT = 8.0
@@ -137,119 +123,7 @@ class UnsupportedDataSource(DataSourceUnavailable):
         )
 
 
-def _accepts_kline_range(src) -> bool:
-    """这个源能不能**按日期区间**取 K 线（声明 + 签名双重确认）。
-
-    判据有两层，缺一不可：
-
-    1. ``supports_kline_range`` 显式声明（**声明式能力**，不是 try/except 试探）；
-    2. ``get_kline`` 的签名**真的收** ``start``/``end``。
-
-    第 2 层不是多余的：签名不收区间时，``src.get_kline(..., start=...)`` 会在
-    **协程创建处**抛 ``TypeError``（在 ``_call_source`` 的 try 之外），于是整条
-    链在这一步就断了 —— 表面现象是「全量回补永远不生效」，而日志里只有一条
-    debug 级异常，极难定位。这里提前把「声明了却不认」的源判为不支持，
-    让它老老实实降级，而不是把整条链拖死。
-    """
-    if not getattr(src, "supports_kline_range", False):
-        return False
-    fn = getattr(src, "get_kline", None)
-    if fn is None:
-        return False
-    try:
-        params = inspect.signature(fn).parameters
-    except (TypeError, ValueError):     # 内建/C 扩展无签名 ⇒ 无法确认，按不支持处理
-        return False
-    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
-        return True                      # **kwargs 能收下区间
-    return "start" in params and "end" in params
-
-
-class _BoundBrokerSource:
-    """把单个券商连接包装成 DataSource 形态（仅行情/基础数据，无交易）。
-
-    内置到 manager，不对外注册；为 broker 连接动态创建，conn_id 已绑定。
-    """
-
-    name = "broker"
-    # V11 R6：补 kline_qfq/kline_hfq —— get_kline 明确透传 adjust（QMT 经 dividend_type
-    # 参数化），契约链也把 broker 列在复权链首位，此前声明漏了两个变体。
-    # 不含 stock_list：get_stock_list 恒返回 None（券商侧无全市场列表接口）。
-    capabilities = frozenset({"quote", "kline", "kline_qfq", "kline_hfq",
-                              "instrument_detail"})
-    #: ★ 唯一支持**按日期区间**取 K 线的源（V11 §5.3 P0-3 III）。
-    #: 迅投 ``get_market_data(start_time=, end_time=)`` + ``download_history_data``
-    #: 都能按日期区间工作，因此「全量回补」可以**逐年向前翻页**；
-    #: 而 eltdx / 免费在线源只接受 ``count``（最近 N 根），无法指定区间 ——
-    #: 声明这个标志，让回补逻辑只走真正做得到的源，而不是「假装翻页、其实一直
-    #: 拿最近 120 根」。声明式能力优于 try/except TypeError。
-    supports_kline_range = True
-
-    def __init__(self, bridge):
-        self._b = bridge
-
-    async def get_quote(self, code: str) -> Optional[dict]:
-        try:
-            q = await self._b.call(self._b.gateway.get_quote, code)
-        except BrokerError:
-            return None
-        if isinstance(q, dict) and isinstance(q.get("code"), int):
-            return None  # _call 返回了 err(503) dict
-        return q
-
-    async def get_kline(self, code: str, period: str = "1d", count: int = 250,
-                        adjust: Optional[str] = None,
-                        start: str = "", end: str = "") -> Optional[list]:
-        try:
-            # 透传 adjust：QMT 复权经 dividend_type 参数化（quotes.get_kline），
-            # 使 broker 能参与 qfq/hfq 链（D9 v1.3）。
-            # ``start``/``end``（YYYYMMDD 或 YYYY-MM-DD，空 = 不限）供全量回补
-            # 按区间翻页；普通调用不传，行为与改造前完全一致。
-            bars = await self._b.call(self._b.gateway.get_kline, code, period, count,
-                                      adjust=adjust, start=start or "", end=end or "")
-        except BrokerError:
-            return None
-        if isinstance(bars, dict) and bars.get("code"):
-            return None
-        return bars
-
-    async def get_instrument_detail(self, code: str) -> Optional[dict]:
-        try:
-            det = await self._b.call(self._b.gateway.get_instrument_detail, code)
-        except (BrokerError, AttributeError):
-            # AttributeError：适配器未实现该方法（如 BridgeAdapter 历史缺失
-            # get_instrument_detail）。降级为不可用，避免击穿 auto 链 / 误触发熔断。
-            return None
-        if isinstance(det, dict) and isinstance(det.get("code"), int):
-            return None
-        return det
-
-    async def get_stock_list(self) -> Optional[list]:
-        # 券商侧无统一全市场股票列表接口；auto 链中跳过。
-        return None
-
-    async def get_sector_stocks(self, sector: str = "沪深A股") -> Optional[list[str]]:
-        """板块成分股代码列表（实测「沪深A股」返回 5224 只）。
-
-        ★ 为什么需要它：``_sup_chain`` 对 ``sector`` 能力**刻意排除 broker**
-        （历史上券商未实现 ``get_board_constituents``），但券商其实有
-        ``gateway.get_sector_stocks`` —— 同一个能力，K 线同步那条路走得通
-        （``app/routes/market.py::_get_sector_stocks``），选股池那条路却走不通，
-        于是**纯券商环境下选股永远报「股票池为空」**。本方法把这条能力接进
-        ``DataSource`` 抽象，供 universe 作券商兜底。
-        """
-        try:
-            res = await self._b.call(self._b.gateway.get_sector_stocks, sector)
-        except (BrokerError, AttributeError):
-            return None
-        if isinstance(res, dict) and res.get("code"):
-            return None
-        if isinstance(res, list) and res:
-            return [str(c) for c in res]
-        return None
-
-
-class DataSourceManager:
+class DataSourceManager(QuotesMixin, KlineMixin):
     """多源行情路由中心（进程级单例，见 get_manager）。"""
 
     def __init__(self):
@@ -637,126 +511,6 @@ class DataSourceManager:
                 return q
         return None
 
-    # ---------- 行情快照（批量） ----------
-    async def get_quotes(self, codes, source: str = "auto",
-                         conn_id: Optional[str] = None) -> dict:
-        """批量盘口快照 —— ``{code: dict | None}``。
-
-        ★ 为什么必须有这个方法（2026-09-20 实测）：``/market/quotes`` 的自选股 /
-        报价牌冷启动要一次拉 4~N 只。此前它逐只调本类的 ``get_quote``，而公开源
-        有 **全局 0.3s 节流锁**（``_PublicSource._MIN_INTERVAL``，跨请求共享），
-        N 只 = N 次 HTTP + N 次锁等待；同步任务在前面占着锁时，冷启动 4 只
-        **一只都拿不到**（items 恒空）。批量接口让 N 只收敛成 1 次 HTTP。
-
-        与 ``get_quote`` 的语义差异（重要，勿混淆）：
-        - ``get_quote`` 的 auto 是「逐个源尝试，第一个成功的整体返回」；
-          批量版是「**同一源内**批量拉取，未拿到的 code **带着缺口继续走下一个源**」，
-          即降级粒度是 **code 级** 而不是整批级 —— 一批里 3 只成功 1 只失败时，
-          失败的 1 只仍有机会被下一个源补上，成功的 3 只不会被重来一遍。
-        - 券商没有批量接口（QMT 盘口是逐只订阅的），故 broker 分支仍是并发单只，
-          与 ``get_quote(broker)`` 语义完全一致。
-
-        ⚠️ 返回值**总包含全部入参 code**（拿不到的显式置 None），调用方据此决定
-        是否走兜底；绝不静默丢键。
-        """
-        source = self._validate_source(source)
-        # 规范化 + 去重（保序）：券商只认 600519.SH，名称表也以带后缀代码为键
-        ordered: list = []
-        seen: set = set()
-        for raw_code in codes or []:
-            full = with_exchange_suffix(raw_code)
-            if full and full not in seen:
-                seen.add(full)
-                ordered.append(full)
-        if not ordered:
-            return {}
-        boards = {c: classify_board(c) for c in ordered}
-        out: dict = {c: None for c in ordered}
-
-        async def _plugin_batch(name: str, todo: list) -> dict:
-            src = self._plugins.get(name)
-            if src is None:
-                return {c: None for c in todo}
-            raws = await self._call_source(name, src.get_quotes(todo))
-            if not isinstance(raws, dict):
-                return {c: None for c in todo}
-            hit = [c for c in todo if raws.get(c)]
-            dets: dict = {}
-            # ① 画像**先从已取到的快照派生**（公开源零额外 HTTP —— 见
-            #    ``_PublicSource.derive_detail``）；不能派生的才回源批量取。
-            #    这样一次批量 = 1 次 HTTP；否则画像会再打一次，收益砍半。
-            todo_det: list = []
-            for c in hit:
-                try:
-                    d = src.derive_detail(raws[c])
-                except Exception:  # noqa: BLE001  派生是增强项，失败不该拖垮行情
-                    d = None
-                if d:
-                    dets[c] = d
-                else:
-                    todo_det.append(c)
-            if todo_det:
-                got = await self._call_source(name, src.get_details(todo_det))
-                if isinstance(got, dict):
-                    dets.update({c: v for c, v in got.items() if v})
-            res: dict = {}
-            for c in todo:
-                raw = raws.get(c)
-                if not raw:
-                    res[c] = None
-                    continue
-                det = dets.get(c) or {}
-                # 与 _from_plugin 同一条规则：详情名缺失或等于代码时回退源层名称，
-                # 否则指数会被详情层的「名称 == 代码」覆盖成 000001.SH。
-                det_name = str(det.get("name") or "").strip()
-                if not det_name or det_name.upper() == c.upper():
-                    if raw.get("name"):
-                        det = {**det, "name": raw["name"]}
-                res[c] = self._merge_quote(
-                    raw, c, boards[c], det, name,
-                    industry=det.get("industry") or "",
-                    concepts=det.get("concepts") or [])
-            return res
-
-        async def _broker_batch(todo: list) -> dict:
-            # ⚠️ 这里是「一批标的」的**假并发**：`asyncio.gather` 只并发了等待，
-            #    每次 `self.get_quote(...)` 都会各发一条 `get_quote` RPC
-            #    （`bridge_client.py::BridgeAdapter.get_quote` → `_rpc("get_quote", [code])`）
-            #    ⇒ **N 只标的 = N 次跨进程 RPC**。取 8 个指数就是 8 次。
-            #
-            # ★ 桥接侧其实**已有批量接口**：`BridgeAdapter.get_full_tick(codes)`
-            #   （`_rpc("get_full_tick", [list(codes)])`）一次就能拿全。
-            #
-            # ⚠️ 但**不能**把这里直接换成批量 RPC：`self.get_quote()` 除取价之外还做了
-            #    名称兜底 / 板块分类 / 详情合并（见上面 `_merge_quote` 那段），
-            #    直接批量取原始 tick 会**静默丢掉这些字段**（指数名会退化成代码）。
-            #    正确做法是「批量只用于取原始 tick，逐只归一化照旧」。
-            #
-            # ⚠️ 归属**尚未定论**，别当结论用：隔离实例实测 `source=broker` 冷 8.140s、
-            #    `source=tencent` 冷 0.688s（同一后端进程，8 只指数）。8 次 RPC 是不是
-            #    那 8 秒的**主因**，需要真券商环境再测一次才能确认。
-            results = await asyncio.gather(
-                *[self.get_quote(c, "broker", conn_id) for c in todo],
-                return_exceptions=True)
-            return {c: (None if isinstance(r, Exception) else r)
-                    for c, r in zip(todo, results)}
-
-        if source == "broker":
-            return await _broker_batch(ordered)
-        if source in self._plugins:
-            return await _plugin_batch(source, ordered)
-        # auto：code 级降级 —— 缺口交给链上的下一个源
-        for name in self._resolve_sources(source, "quote"):
-            todo = [c for c in ordered if out.get(c) is None]
-            if not todo:
-                break
-            part = await (_broker_batch(todo) if name == "broker"
-                          else _plugin_batch(name, todo))
-            for c, q in (part or {}).items():
-                if q is not None:
-                    out[c] = q
-        return out
-
     # ---------- 合约基础信息 ----------
     async def get_instrument_detail(self, code: str, source: str = "auto",
                                     conn_id: Optional[str] = None) -> Optional[dict]:
@@ -892,81 +646,6 @@ class DataSourceManager:
                       code, min_date, fallback[1], fallback[2] or "无日期")
             return fallback[0], fallback[1]
         return None, None
-
-    async def get_kline_range(self, code: str, period: str = "1d", *,
-                              adjust: Optional[str] = None,
-                              start: str = "", end: str = "",
-                              count: int = 5000,
-                              source: str = "auto",
-                              conn_id: Optional[str] = None
-                              ) -> tuple[Optional[list], Optional[str]]:
-        """按**日期区间**取 K 线（全量回补专用；V11 §5.3 P0-3 III）。
-
-        返回 ``(bars, source_name)``；``bars is None`` 表示**链上没有源支持区间**，
-        调用方据此如实报「退化」而不是假装拿到了历史。
-
-        ★ 与 :meth:`get_kline` 只差一点，但这一点是关键：这里**只走声明了
-        ``supports_kline_range`` 的源**。免费在线源（eltdx / 腾讯 / 新浪）只接受
-        ``count``（最近 N 根），把 ``start``/``end`` 传过去它们会**静默忽略** ——
-        调用方拿到「最近 N 根」却以为拿到了某一年的历史，逐年翻页于是变成
-        「同一批最近数据重复 12 遍」。判据必须来自**声明式能力**，
-        而不是 try/except TypeError 那种「试了才知道」的写法。
-
-        当前只有券商（``_BoundBrokerSource``）声明该能力：迅投
-        ``get_market_data(start_time=, end_time=)`` + ``download_history_data``
-        都能按区间工作。纯在线源环境下本方法恒返 ``(None, None)``。
-        """
-        source = self._validate_source(source)
-        try:
-            _canon = normalize_period(period)
-        except UnknownPeriodError:
-            _canon = None
-        cap = ("kline_qfq" if (adjust in ("qfq", "hfq")
-                               and _canon in adjust_allowed_periods()) else "kline")
-        for name in self._resolve_sources(source, cap):
-            if name == "broker":
-                b = self._broker(conn_id)
-                if b is None or not _accepts_kline_range(b):
-                    continue
-                bars = await self._call_source(
-                    "broker", b.get_kline(code, period, count, adjust,
-                                          start=start or "", end=end or ""))
-            else:
-                src = self._plugins.get(name)
-                if src is None or not hasattr(src, "get_kline"):
-                    continue
-                if not _accepts_kline_range(src):
-                    continue
-                bars = await self._call_source(
-                    name, src.get_kline(code, period, count, adjust,
-                                        start=start or "", end=end or ""))
-            if bars:
-                return bars, name
-        return None, None
-
-    # ---------- 当日分时（仅补充源提供；券商 SDK 无分时接口） ----------
-    async def get_minutes(self, code: str, trading_date: Optional[str] = None,
-                          source: str = "auto") -> Optional[dict]:
-        """当日分时曲线（价格+均价+分钟量）。按 ``minutes`` 能力链遍历补充源（跳过券商），
-        全部无数据返回 None。
-
-        V11 R6：此前借道「注册序」候选链，会去试 sina/tencent 等**没有 get_minutes**
-        的源（靠 hasattr 事后跳过）；现按 ``minutes`` 能力解析，候选集即「真正实现该
-        能力的源」。
-        """
-        source = self._validate_source(source)
-        for name in self._resolve_sources(source, "minutes"):
-            if name == "broker":
-                continue
-            if source not in ("auto", name):
-                continue
-            src = self._plugins.get(name)
-            if src is None or not hasattr(src, "get_minutes"):
-                continue
-            res = await self._call_source(name, src.get_minutes(code, trading_date))
-            if res and res.get("points"):
-                return res
-        return None
 
     # ---------- 指数 / 板块 / ETF / 资金流（东财对标能力，仅补充源提供） ----------
     def _sup_chain(self, source: str = "auto", capability: str = "kline") -> list:

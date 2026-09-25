@@ -5,8 +5,11 @@
 让各引擎在盘中按业务间隔轮询、非交易时段降频探活。
 
 交易日判定优先级：
-1. refresh_from_calendar() 注入的真实交易日历（券商 get_trading_calendar 拉取）；
-2. 未注入时回退「周一至周五」周末规则（不排除法定节假日，可接受：降频不影响正确性）。
+1. refresh_from_calendar() 注入的真实交易日历（券商 get_trading_calendar 拉取），
+   且日期落在该日历的覆盖区间内；
+2. 区间外或未注入时取内置节假日表（app.sync.calendar，覆盖 2024-2026 且含周末规则）；
+3. 内置表不可用时才退回「周一至周五」周末规则（不排除法定节假日，可接受：
+   降频不影响正确性）。
 
 交易时段（A 股，边界放宽 5 分钟）：
 - 盘中活跃：9:15–11:35、13:00–15:05（覆盖集合竞价与收盘）
@@ -95,24 +98,25 @@ class TradingSession:
     def is_trading_day(self, d: date | None = None) -> bool:
         # V11 R8：``date.today()`` 是第二份「当前日期」实现，统一取 core.clock。
         d = d or local_now().date()
-        if self._calendar:
+        if self._calendar and self.covers(d):
             key = d.strftime("%Y%m%d")
-            if self.covers(d):
-                return key in self._calendar
-            # ★ 超出已注入日历的覆盖区间（最常见的是**未来日期**：券商日历默认
-            #   只到「最后一个已公布交易日」）。此时直接返回 False 是错的 ——
-            #   后果是**所有未来交易日都被判成休市**：
-            #     · 「下一个交易日」永远找不到（实测 next_trading_day 走满 30 天
-            #       扫描上限后返回 20261020 这种荒谬结果）；
-            #     · 客户端跨周末连续运行到周一时，is_active() 整天为 False，
-            #       引擎一整天不轮询，行情停更且没有任何报错。
-            #   退回内置节假日表（覆盖 2024-2027，比「周一~周五」精确），
-            #   拿不到内置表时再退周末规则。
-            builtin = _builtin_is_trading_day()
-            if builtin is not None:
-                return builtin(d)
-            return d.weekday() < 5
-        return d.weekday() < 5          # 周一~周五
+            return key in self._calendar
+        # ★ 覆盖区间外（最常见的是**未来日期**：券商日历默认只到「最后一个已公布
+        #   交易日」）不能直接返回 False —— 后果是**所有未来交易日都被判成休市**：
+        #     · 「下一个交易日」永远找不到（实测 next_trading_day 走满 30 天
+        #       扫描上限后返回 20261020 这种荒谬结果）；
+        #     · 客户端跨周末连续运行到周一时，is_active() 整天为 False，
+        #       引擎一整天不轮询，行情停更且没有任何报错。
+        #   ★★ R26 修复：**无券商日历**时同样不能退回「周一~周五」—— 那会把
+        #   工作日节假日（中秋 / 国庆 / 春节调休段）判成交易日，直接后果有两个：
+        #     · `phase()` 在节假日返回 "closed" 而不是 "holiday"（界面提示错）；
+        #     · `is_active()` 在节假日 9:15-15:05 为 True ⇒ 引擎整天高频空转打源。
+        #   故一律先取内置节假日表（覆盖 2024-2026，比周末规则精确），
+        #   真拿不到内置表时才退回周末规则。
+        builtin = _builtin_is_trading_day()
+        if builtin is not None:
+            return builtin(d)
+        return d.weekday() < 5          # 周一~周五（最后的兜底）
 
     def in_active_hours(self, now: datetime | None = None) -> bool:
         """是否处于盘中活跃时段（9:15–11:35 / 13:00–15:05）。"""

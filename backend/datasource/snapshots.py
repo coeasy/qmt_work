@@ -189,6 +189,23 @@ class DatasetSnapshotStore:
             "SELECT * FROM dataset_snapshots WHERE dataset_id=? "
             "ORDER BY created_at DESC LIMIT 1", (dataset_id,))
 
+    def list_recent(self, dataset_id: str, limit: int = 20) -> list[dict]:
+        """按创建时间倒序列出某数据集的快照（界面列表用）。
+
+        ★ 列**显式点名**而不是 ``SELECT *``：``manifest_json`` 之外将来可能新增
+        列（如 ``calendar_version``），``SELECT *`` 会静默把它们塞进响应体 ——
+        一个「列出快照」的接口没有理由把新列顺带发出去。
+
+        ★ ``limit`` 的上限（200）由本层强制：调用方传 100000 不该真的去读
+        100000 行。这是仓储的取数策略，不是请求参数校验。
+        """
+        return self.db.query(
+            "SELECT id,dataset_id,version,provider_id,batch_id,as_of,coverage_start,"
+            "coverage_end,row_count,checksum,quality_state,manifest_json,created_at "
+            "FROM dataset_snapshots WHERE dataset_id=? ORDER BY created_at DESC LIMIT ?",
+            (dataset_id, max(1, min(int(limit), 200))),
+        )
+
 
 def require_quality(snapshot: dict, allowed: tuple[str, ...] = ("complete", "match")) -> None:
     state = snapshot.get("quality_state")

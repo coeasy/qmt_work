@@ -124,6 +124,79 @@ def test_resolve_xtquant_multi_layouts():
             assert os.path.normcase(os.path.normpath(diag["xtquant_site"])) == want
 
 
+def _fake_client_site_packages(root: str, *, trader: bool = True) -> str:
+    """构造一个「客户端自带 xtquant」的假目录，返回其 site-packages 路径。"""
+    sp = os.path.join(root, "bin.x64", "Lib", "site-packages")
+    pkg = os.path.join(sp, "xtquant")
+    os.makedirs(pkg)
+    body = ("class XtQuantTrader:\n    pass\n"
+            "class StockAccount:\n    pass\n") if trader else ""
+    for name, text in (("__init__.py", ""), ("xtdata.py", ""), ("xt_trader.py", body)):
+        with open(os.path.join(pkg, name), "w", encoding="utf-8") as fh:
+            fh.write(text)
+    return sp
+
+
+def test_load_xtquant_does_not_leave_client_site_packages_on_syspath():
+    """★ R26：客户端 site-packages 只允许在加载 xtquant 期间临时入 sys.path。
+
+    旧实现永久注入：客户端捆的是**另一个 Python 运行时**的旧库（实测 defusedxml
+    在 py3.11 上构造 XMLParser 直接 TypeError），会把本进程的惰性 import 劫持 ——
+    表现为「连过券商之后 Excel 导出开始报错」；更严重的是环境探测（probe_environment）
+    也会调本函数，一次探测即永久污染整个后端进程。
+    """
+    from xtquant_client.xtp import _common
+
+    with tempfile.TemporaryDirectory() as d:
+        sp = _fake_client_site_packages(d)
+        saved_mods = {k: v for k, v in sys.modules.items()
+                      if k == "xtquant" or k.startswith("xtquant.")}
+        saved_cache = dict(_common._TRADER_API_CACHE)
+        for k in saved_mods:
+            sys.modules.pop(k, None)
+        _common._TRADER_API_CACHE.clear()
+        try:
+            _common._load_xtquant_from(sp)
+            assert sp not in sys.path, sys.path[:3]        # 加载完必须摘除
+            assert "xtquant.xtdata" in sys.modules         # 但 xtquant 已加载
+        finally:
+            for k in [k for k in sys.modules
+                      if k == "xtquant" or k.startswith("xtquant.")]:
+                sys.modules.pop(k, None)
+            sys.modules.update(saved_mods)
+            _common._TRADER_API_CACHE.clear()
+            _common._TRADER_API_CACHE.update(saved_cache)
+
+
+def test_load_xtquant_removes_syspath_even_on_import_failure():
+    """★ R26：导入失败同样要摘除（旧实现在失败路径上把路径永久留下）。"""
+    from xtquant_client.xtp import _common
+
+    with tempfile.TemporaryDirectory() as d:
+        sp = _fake_client_site_packages(d, trader=False)   # 缺交易 API ⇒ 必然失败
+        saved_mods = {k: v for k, v in sys.modules.items()
+                      if k == "xtquant" or k.startswith("xtquant.")}
+        saved_cache = dict(_common._TRADER_API_CACHE)
+        for k in saved_mods:
+            sys.modules.pop(k, None)
+        _common._TRADER_API_CACHE.clear()
+        try:
+            try:
+                _common._load_xtquant_from(sp)
+            except ImportError:
+                pass
+            else:  # pragma: no cover - 假包应必然导入失败
+                raise AssertionError("假 xtquant 缺交易 API，本应导入失败")
+            assert sp not in sys.path
+        finally:
+            for k in [k for k in sys.modules
+                      if k == "xtquant" or k.startswith("xtquant.")]:
+                sys.modules.pop(k, None)
+            sys.modules.update(saved_mods)
+            _common._TRADER_API_CACHE.clear()
+            _common._TRADER_API_CACHE.update(saved_cache)
+
+
 def test_resolve_xtquant_no_stub_false_positive():
     """P1：不存在的路径绝不向上爬（防误命中 IDE 生成的 xtquant stub）。"""
     from xtquant_client.xtp import _is_system_dir

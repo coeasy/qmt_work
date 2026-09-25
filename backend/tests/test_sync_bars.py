@@ -119,8 +119,10 @@ def test_calendar_excludes_holidays():
     assert is_trading_day(_d(2025, 10, 1)) is False
     # 2025-10-09 节后首个交易日（周四）
     assert is_trading_day(_d(2025, 10, 9)) is True
-    # 调休补班周末（2025-09-28 周日为交易日）
-    assert is_trading_day(_d(2025, 9, 28)) is True
+    # ★ R26 修正：调休补班周末（2025-09-28 周日）**不是** A 股交易日 ——
+    #   全社会上班但证券交易/清算照休。此处原断言 True，是把错误行为写成了契约。
+    assert is_trading_day(_d(2025, 9, 28)) is False
+    assert is_trading_day(_d(2025, 10, 11)) is False   # 2025-10-11 周六补班，同样休市
 
 
 def test_weekday_calendar_now_holiday_accurate():

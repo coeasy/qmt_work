@@ -73,8 +73,13 @@ async def market_export(body: Dict[str, Any]):
         out_dir.mkdir(parents=True, exist_ok=True)
         path = out_dir / f"{safe_name}.xlsx"
         content = to_excel(rows, columns, str(path))
-        return ok({"format": "xlsx", "path": str(path), "count": len(rows),
-                   "note": "openpyxl 不可用时已回退为 CSV 内容", "fallback_csv": content})
+        if path.exists() and path.stat().st_size > 0:
+            return ok({"format": "xlsx", "path": str(path), "count": len(rows)})
+        # 写引擎缺失（openpyxl/et-xmlfile 未安装）→ to_excel 已降级，xlsx 未落盘。
+        # 按真实产物回信封：绝不返回不存在的 path（否则前端/脚本按 path 取文件必然 404）。
+        return ok({"format": "csv", "content": content, "count": len(rows),
+                   "filename": f"{safe_name}.csv",
+                   "note": "openpyxl 不可用，已回退为 CSV 内容"})
     except Exception as exc:  # noqa: BLE001
         return err(500, f"导出失败：{exc}")
 

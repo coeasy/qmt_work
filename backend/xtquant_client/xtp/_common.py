@@ -5,6 +5,8 @@ import os
 import re
 import sys
 
+from core.errors import swallow
+
 log = logging.getLogger("qmt_work")
 
 # 账户类型 -> xt_trader 账户类
@@ -180,29 +182,58 @@ def _resolve_xtquant_path(client_path: str) -> str | None:
 
 
 def _load_xtquant_from(site_packages: str) -> None:
-    """把客户端自带 xtquant 注入 sys.path / PATH，并验证可导入（失败抛原异常）。"""
-    # 关键顺序：在注入客户端 site-packages 之前，先从「当前运行时」加载并缓存
-    # 科学栈依赖（numpy/pytz/dateutil/pandas...）。
-    # 客户端 site-packages 常捆绑按客户端内嵌 Python 编译的旧版本——numpy 1.19.1
-    # 与桥接运行时 ABI 不兼容，pytz ~2020 用了 Python3.10 已删的 collections.Mapping，
-    # pandas._libs 编译扩展在新解释器上根本加载不了；若让它们抢占 sys.path[0]，
-    # xtdata.get_market_data_ex 内部 `import pandas` -> get_kline/get_market_data 直接崩。
-    # 提前 import 使其进入 sys.modules 缓存，xtdata 后续 `import X` 复用运行时版本，
-    # 客户端捆绑的坏版本被完全屏蔽（桥接跨进程 JSON 序列化，不会把 DataFrame 传回主端，
-    # 因此屏蔽是安全且更优的）。运行时未提供某包时静默跳过，回退客户端自带。
+    """把客户端自带 xtquant 注入 sys.path / PATH，并验证可导入（失败抛原异常）。
+
+    ★ R26：注入必须是**临时的** —— 只在加载 xtquant 期间生效，加载完立刻从
+    sys.path 摘除。原因：客户端 ``bin.x64\\Lib\\site-packages`` 属于**另一个 Python
+    运行时**（客户端内嵌解释器），里面捆着大量按那个版本编译的旧库。一旦长期留在
+    sys.path，本进程后续任何一次惰性 import 都可能命中这些旧库：
+      · 实测缺陷：``defusedxml``（客户端捆绑版）在 py3.11 上构造
+        ``XMLParser`` 直接 TypeError（``__init__() takes 1 positional argument``），
+        而 openpyxl 是首次导出 Excel 时才 import 的 —— 于是「连过券商之后，Excel
+        导出开始报错」，前因后果完全看不出来；
+      · 探测/测试（``probe_environment``）也会调本函数，旧实现让**一次环境探测**
+        永久污染整个后端进程的 import 解析顺序；
+      · 导入失败时旧实现同样把路径留在 sys.path（失败更要摘除）。
+    摘除后 xtquant 子模块仍可正常加载（``xtquant`` 包已在 sys.modules，子模块经
+    ``__path__`` 解析，不依赖 sys.path），其后续惰性 import 的第三方库则一律走
+    本进程运行时版本 —— 正是下面预屏蔽注释想要的效果。
+
+    关键顺序：在注入客户端 site-packages 之前，先从「当前运行时」加载并缓存
+    科学栈依赖（numpy/pytz/dateutil/pandas...）。
+    客户端 site-packages 常捆绑按客户端内嵌 Python 编译的旧版本——numpy 1.19.1
+    与桥接运行时 ABI 不兼容，pytz ~2020 用了 Python3.10 已删的 collections.Mapping，
+    pandas._libs 编译扩展在新解释器上根本加载不了；若让它们抢占 sys.path[0]，
+    xtdata.get_market_data_ex 内部 `import pandas` -> get_kline/get_market_data 直接崩。
+    提前 import 使其进入 sys.modules 缓存，xtdata 后续 `import X` 复用运行时版本，
+    客户端捆绑的坏版本被完全屏蔽（桥接跨进程 JSON 序列化，不会把 DataFrame 传回主端，
+    因此屏蔽是安全且更优的）。运行时未提供某包时静默跳过，回退客户端自带。
+    """
     for _mod in ("numpy", "pytz", "dateutil", "pandas"):
         try:
             __import__(_mod)  # noqa: F401
         except ImportError:  # noqa: BLE001  运行时缺失时静默，回退客户端自带
             pass
-    if site_packages and site_packages not in sys.path:
+    _added = bool(site_packages) and site_packages not in sys.path
+    if _added:
         sys.path.insert(0, site_packages)
-    # 客户端 bin 目录加入 PATH（xtquant 依赖其下 dll）
+    # 客户端 bin 目录加入 PATH（xtquant 依赖其下 dll）——DLL 解析靠 PATH，
+    # 且 xtquant 运行期仍需其下原生依赖，故这一项保留（不随加载结束撤销）。
     bin_dir = os.path.dirname(os.path.dirname(site_packages))
     if os.path.isdir(bin_dir):
         os.environ["PATH"] = bin_dir + os.pathsep + os.environ.get("PATH", "")
-    import xtquant.xtdata  # noqa: F401
-    _load_trader_api()  # 新旧 xt_trader/xttrader 兼容导入
+    try:
+        import xtquant.xtdata  # noqa: F401
+        _load_trader_api()  # 新旧 xt_trader/xttrader 兼容导入
+    finally:
+        if _added:
+            try:
+                sys.path.remove(site_packages)
+            except ValueError as exc:
+                # 只有当 site_packages 已被别处提前摘除时才会走到这里——目标状态
+                # （该路径不在 sys.path 里）已经达成，属**可忽略**。仍留痕以便排查
+                # 「谁动了 sys.path」。
+                swallow(exc, why="卸载注入的客户端 site-packages：路径已被移除", logger=log)
 
 def _ensure_xtconstant():
     import xtquant.xtconstant as xtc  # noqa: F401

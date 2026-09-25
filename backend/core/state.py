@@ -6,8 +6,18 @@ V11 R5 容器合一：``AppState`` 继承 :class:`core.context.AppContext`，
 —— 路由与引擎读写**同一对象**，不再有启动快照，也就没有「快照陈旧」这一类问题。
 
 重点：券商连接由 `broker_manager` 统一管理（多券商 / 多账户 / 多客户端版本）。
-`bridge` / `gateway` 保持为「当前活跃连接」的引用以便单连接调用点兼容；
 多连接场景下请通过 `broker_manager.bridge(conn_id)` 指定。
+
+★★ P1-4：``bridge`` / ``gateway`` 是**只写槽位**（write-only cache），语义为
+「装配期把当时的活跃连接记下来」。**任何业务代码都不得读它**：
+
+- 业务读活跃连接的唯一入口是 ``broker_manager.active_bridge()``（动态求值）；
+- 只写槽位会**过期** —— 晚到连接若没走到 :func:`app.bootstrap.phase_broker._sync_active_bridge`，
+  槽位就停在 ``None``，而调用方无从分辨「没连接」与「连接了但缓存没更新」；
+- 历史教训：交易日历刷新曾读 ``state.bridge``，于是「先开软件、后开 QMT」这条最常见
+  路径上日历永久停在 fallback（工作日规则把节假日当交易日）。
+
+该不变量由 ``tests/test_state_writeonly_guard.py`` 用 AST 扫描守着（扫 Load 上下文）。
 """
 from __future__ import annotations
 

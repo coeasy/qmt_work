@@ -6,6 +6,7 @@ import time
 from fastapi import APIRouter, Depends
 
 from app.routes._common import BrokerError, _call, _need, err, no_broker, ok
+from app.services import account_store
 from app.services.positions import enrich_positions
 from gateway.execution import get_execution_service
 from core.clock import now_iso
@@ -103,17 +104,10 @@ async def account_pnl(account_id: str = "", ctx: AppContext = Depends(get_ctx)):
     - 不传 → 取全部，但回报 ``mixed_accounts=true`` 与账户清单，
       让调用方（界面）能显式提示「当前为多账户合并曲线」，而不是默默混算。
     """
-    if account_id:
-        rows = ctx.db.query(
-            "SELECT ts, net_value FROM account_snapshot WHERE account_id=? "
-            "ORDER BY ts DESC LIMIT 50", (account_id,))
-        accounts = [account_id]
-    else:
-        rows = ctx.db.query(
-            "SELECT ts, net_value FROM account_snapshot ORDER BY ts DESC LIMIT 50")
-        accounts = sorted(
-            {r["account_id"] for r in ctx.db.query(
-                "SELECT DISTINCT account_id FROM account_snapshot") if r.get("account_id")})
+    if ctx.db is None:
+        return err(503, "数据库未初始化")
+    rows = account_store.pnl_series(ctx.db, account_id)
+    accounts = [account_id] if account_id else account_store.list_account_ids(ctx.db)
     series = [{"ts": r["ts"], "net_value": r["net_value"]} for r in reversed(rows)]
     return ok({
         "net_value_series": series,

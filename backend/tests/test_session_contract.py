@@ -131,6 +131,86 @@ def test_holiday_is_not_trading_day():
     assert is_trading_day(date(2026, 10, 1)) is False
 
 
+def test_compensated_weekends_are_not_trading_days():
+    """★ R26：调休补班日（周末上班日）**不是** A 股交易日。
+
+    交易所 2026 年休市通知原文逐条写明这些周末日是「周末休市」：
+    「另外，1 月 4 日（星期日）为周末休市」「10 月 10 日（星期六）为周末休市」…
+    旧实现把它们放进 `WORKDAYS` 当作交易日，直接后果是 `/market/session` 在
+    周末声称「今天是交易日」、引擎整天高频空转打源。
+    """
+    for iso in ("2026-01-04", "2026-02-14", "2026-02-15", "2026-04-05",
+                "2026-09-27", "2026-10-10", "2025-01-26", "2025-09-28"):
+        y, m, dd = (int(x) for x in iso.split("-"))
+        assert is_trading_day(date(y, m, dd)) is False, iso
+
+
+def test_missing_holiday_weekdays_are_not_trading_days():
+    """★ R26：原内置表漏列的**工作日**休市日（春节/劳动节尾部）。
+
+    2026 春节 2/15-2/23、劳动节 5/1-5/5、2024-2025 春节尾部，均含周一至周五；
+    漏列 ⇒ `phase()` 返回 "closed"（应为 "holiday"）、`is_active()` 全天为真。
+    """
+    for iso in ("2026-02-23", "2026-05-04", "2026-05-05",
+                "2025-01-28", "2025-01-29", "2025-01-30"):
+        y, m, dd = (int(x) for x in iso.split("-"))
+        assert is_trading_day(date(y, m, dd)) is False, iso
+
+
+def test_next_trading_day_after_mid_autumn_is_monday():
+    """★ R26：中秋 9/25(五)-9/27(日) 休市 ⇒ 下一交易日是 9/28（周一），不是周日。
+
+    旧实现把 9/27（周日补班日）当交易日，`next_trading_day` 直接返回周日 ——
+    界面上「下一交易日」指向一个不可能有行情的日期。
+    """
+    assert next_trading_day(date(2026, 9, 25)) == date(2026, 9, 28)
+    assert prev_trading_day(date(2026, 9, 28), include_self=False) == date(2026, 9, 24)
+
+
+def test_long_holiday_runs_use_real_exchange_schedule():
+    """春节/劳动节长假边界（2026 官方安排）。"""
+    assert next_trading_day(date(2026, 2, 13)) == date(2026, 2, 24)    # 春节 2/15-2/23
+    assert prev_trading_day(date(2026, 2, 24), include_self=False) == date(2026, 2, 13)
+    assert next_trading_day(date(2026, 4, 30)) == date(2026, 5, 6)     # 劳动 5/1-5/5
+    assert next_trading_day(date(2026, 1, 2)) == date(2026, 1, 5)      # 元旦 1/1-1/3
+
+
+def test_coverage_does_not_claim_unpublished_year():
+    """★ R26：2027 年安排公布前不得声称「精确」。
+
+    原 `_CALENDAR_MAX_YEAR = 2027` 但 2027 只填了元旦 1 天 ⇒ `exact=True` 是
+    虚假精度，上层会据此把启发式结果当交易所精确日历用。
+    """
+    from app.sync.calendar import exchange_calendar
+
+    assert exchange_calendar.coverage(date(2026, 12, 31)).exact is True
+    assert exchange_calendar.coverage(date(2027, 6, 1)).exact is False
+
+
+def test_snapshot_holiday_is_never_closed():
+    """★ R26：工作日节假日必须是 holiday，不得是 closed。
+
+    实测缺陷（2026-09-25 中秋，周五）：`/market/session` 返回
+    `trading_day=False` 却 `phase="closed"` —— `phase` 取自 TradingSession 自己的
+    判定，与权威的 `is_trading_day_exact` 各调一次，口径分叉即自相矛盾。
+    界面据 `phase` 显示「已收盘」，而真相是「休市」，引导完全不同。
+    """
+    snap = session_snapshot(_at(date(2026, 9, 25), hour=23))
+    assert snap["today"] == "20260925"
+    assert snap["trading_day"] is False
+    assert snap["phase"] == "holiday", snap
+
+
+def test_snapshot_phase_obeys_authoritative_trading_day(monkeypatch):
+    """★ R26：phase 必须服从权威交易日判定（结构性不变量，而非两个来源恰好一致）。"""
+    import gateway.trading_session as ts_mod
+
+    monkeypatch.setattr(ts_mod.TradingSession, "phase", lambda self, now=None: "closed")
+    snap = session_snapshot(_at(date(2026, 9, 25), hour=11))   # 中秋休市
+    assert snap["trading_day"] is False
+    assert snap["phase"] == "holiday", snap
+
+
 def test_prev_trading_day_skips_weekend():
     """周五之后回退是周四；周六之后回退是周五。"""
     assert prev_trading_day(date(2026, 9, 19), include_self=False) == date(2026, 9, 18)

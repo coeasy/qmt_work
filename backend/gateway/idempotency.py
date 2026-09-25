@@ -21,6 +21,33 @@ _lock = threading.Lock()
 _cache: dict[str, tuple[float, object]] = {}
 _inflight: dict[str, "asyncio.Future"] = {}
 
+#: 窗口缓存条数上限。★ R26：`_cache` 此前只增不减 —— 命中的条目过期后仍然留在
+#: 字典里，而 key 是外部可控的（`SignalRouter.route` 直接用请求带来的
+#: `client_order_id` / `idempotency_key`），任何调用方用随机 key 连续下单即可
+#: 让进程内存单调上涨（也拖慢每次 `single_flight` 的字典操作）。
+#: 窗口只有 30s，超出窗口的条目**语义上已无用**，故按时间淘汰最旧的即可。
+_MAX_CACHE = 4096
+#: 每 N 次写入做一次裁剪（摊薄成本；条目本身很小，无需每次清理）。
+_PRUNE_EVERY = 128
+_writes_since_prune = 0
+
+
+def _prune_locked(now: float) -> None:
+    """裁剪窗口缓存。**必须在持有 ``_lock`` 时调用**。
+
+    先按窗口淘汰过期条目（它们已不可能命中）；若仍然超限，再按时间淘汰最旧的，
+    保证字典大小有硬上限。不做 O(n log n) 全排序 —— 超限时只裁掉超出部分。
+    """
+    stale = [k for k, (ts, _) in _cache.items() if now - ts > _WINDOW]
+    for k in stale:
+        _cache.pop(k, None)
+    excess = len(_cache) - _MAX_CACHE
+    if excess <= 0:
+        return
+    oldest = sorted(_cache.items(), key=lambda kv: kv[1][0])[:excess]
+    for k, _ in oldest:
+        _cache.pop(k, None)
+
 
 def _mark_dup(result):
     if isinstance(result, dict):
@@ -33,6 +60,7 @@ async def single_flight(key: str, coro_factory, window: float = _WINDOW):
 
     coro_factory: 无参协程工厂（每次执行时调用，返回真实结果）。
     """
+    global _writes_since_prune
     now = time.time()
     with _lock:
         hit = _cache.get(key)
@@ -46,7 +74,7 @@ async def single_flight(key: str, coro_factory, window: float = _WINDOW):
             return _mark_dup(hit[1])
         fut = _inflight.get(key)
         if fut is None:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             fut = loop.create_future()
             _inflight[key] = fut
             created = True
@@ -64,7 +92,13 @@ async def single_flight(key: str, coro_factory, window: float = _WINDOW):
         raise
     else:
         fut.set_result(result)
-        _cache[key] = (time.time(), result)
+        with _lock:
+            _cache[key] = (time.time(), result)
+            # 只在**写入侧**裁剪：命中/未命中都不改变字典大小，无需顺带做无用功。
+            _writes_since_prune += 1
+            if _writes_since_prune >= _PRUNE_EVERY:
+                _writes_since_prune = 0
+                _prune_locked(time.time())
         return result
     finally:
         with _lock:

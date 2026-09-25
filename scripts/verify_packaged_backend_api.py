@@ -244,6 +244,42 @@ def main() -> int:
                         f"metrics_source 为空 ⇒ 本机可能拿不到公开行情；已填 {len(filled)}/{len(METRIC_KEYS)}")
         else:
             rep.add("FAIL", "GET /market/stock-info", f"status={ci_} body={str(ir)[:160]}")
+        # ── Excel 导出：打包态**真的**能产出 xlsx（TD-09）─────────────────
+        # 为什么必须在这一层测：`engine="openpyxl"` 是**字符串**，PyInstaller 静态分析
+        # 看不见它，也没有 hook-openpyxl ⇒ 源码/dev 正常，**用户装的包**里没有
+        # openpyxl ⇒ 导出静默降级为 CSV。
+        # ★ 判据为什么不能是「看 `_internal/` 下有没有 openpyxl 目录」：
+        #   纯 Python 模块被收成 `PYMODULE` 进 PYZ，PYZ **内嵌在 exe 里**，
+        #   不会生成目录（只有带 .pyd 的包如 numpy/pandas 才会）；
+        #   而 `--add-data=backend/runtimes;runtimes` 又会带进一份
+        #   `runtimes/cp311/Lib/site-packages/openpyxl`（客户端运行时数据副本，
+        #   不在冻结应用 sys.path 上）⇒ 按目录判定**两头都会错**。
+        #   唯一可信的判据就是这里：**跑一次真实导出，看信封里的 format**。
+        xe, xr = call("POST", f"{base}/market/export", {
+            "format": "xlsx", "filename": "_pkg_api_verify",
+            "columns": [{"key": "code", "label": "代码"},
+                        {"key": "name", "label": "名称"},
+                        {"key": "close", "label": "收盘"}],
+            "rows": [{"code": "000001.SZ", "name": "平安银行", "close": 11.30}],
+        })
+        d = (xr or {}).get("data") if isinstance(xr, dict) else None
+        if xe == 200 and isinstance(d, dict):
+            fmt, xp = d.get("format"), d.get("path")
+            rep.add("PASS" if fmt == "xlsx" else "FAIL",
+                    "Excel 导出产出真 xlsx（openpyxl 已随包）",
+                    f"format={fmt!r} path={xp!r} note={d.get('note')!r}")
+            p = Path(str(xp)) if xp else None
+            if p is not None and p.is_file() and p.stat().st_size > 0:
+                head = p.open("rb").read(2)
+                rep.add("PASS" if head == b"PK" else "FAIL",
+                        "xlsx 是 zip 容器（首两字节 PK）",
+                        f"{p.name} {p.stat().st_size} bytes head={head!r}")
+            else:
+                rep.add("FAIL", "xlsx 是 zip 容器（首两字节 PK）",
+                        f"信封称 xlsx 但产物不可用：{xp!r}")
+        else:
+            rep.add("FAIL", "Excel 导出产出真 xlsx（openpyxl 已随包）",
+                    f"status={xe} body={str(xr)[:160]}")
     finally:
         try:
             proc.terminate()

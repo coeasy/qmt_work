@@ -506,10 +506,22 @@ class SyncEngine:
                                     "broker": event.get("broker", "")})
 
     async def stop(self) -> None:
-        if self._account_task:
-            self._account_task.cancel()
-        if self._batch_task:
-            self._batch_task.cancel()
+        """停止快照归档与微批 flush 循环。
+
+        ★ R26：原来只 `cancel()` **不 await** —— 取消是**异步**的，循环要等到下一次
+        await 点才真正退出。而停机顺序是 `sync_engine.stop()` → … → `db.close()`，
+        于是 `_batch_loop`（每 100ms 一次 `market_cache` 批量落盘）完全可能在
+        「库已关闭」之后才跑到写入那一行。这里取消后显式等待其退出，把「停机完成」
+        的语义钉死；任务句柄同时置空，避免 stop() 后 `start_batch()` 复活旧引用。
+        """
+        tasks = [t for t in (self._account_task, self._batch_task)
+                 if t is not None and not t.done()]
+        self._account_task = None
+        self._batch_task = None
+        for t in tasks:
+            t.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     def start_batch(self) -> None:
         """启动行情微批 flush 循环（100ms 窗口，C2）。"""
@@ -651,10 +663,39 @@ class WSManager:
         if task is not None:
             task.cancel()
         self._sockets.pop(cid, None)
+        # ★ R26：`_seq` 也必须一起回收。cid 单调自增**永不复用**（见 `_next_cid` 注释），
+        # 所以每个用过一次的 cid 都会在 `_seq` 里留下一条永不使用的计数 —— 反复
+        # 重连的客户端（本项目前端就是断开即重连）会让它随连接次数单调上涨。
+        # 这里安全的原因：所有 `_bump(cid)` 调用点都先取 `_sockets.get(cid)`，
+        # 断开后不可能再命中该 cid。
+        self._seq.pop(cid, None)
         self.engine.client_unsubscribe(cid, list(self.engine._client_subscriptions.get(cid, set())))
 
     def client_count(self) -> int:
         return len(self._sockets)
+
+    async def close(self) -> None:
+        """停机：取消全部心跳任务、关闭全部客户端连接（幂等）。
+
+        ★ R26：此前 `WSManager` **完全没有停机路径** —— `_hb_tasks` 只在
+        `disconnect()`（客户端主动断开）里取消，`_sockets` 也只在客户端断开时才清理。
+        正常停机时两者都还活着：心跳协程被事件循环销毁（"Task was destroyed but it
+        is pending"），已建立的 WS 连接也不会收到关闭帧，只能靠进程退出被动断开。
+        """
+        tasks = list(self._hb_tasks.values())
+        self._hb_tasks.clear()
+        sockets = list(self._sockets.values())
+        self._sockets.clear()
+        self._seq.clear()
+        for t in tasks:
+            t.cancel()
+        for ws in sockets:
+            try:
+                await ws.close()
+            except Exception:  # noqa: BLE001
+                pass      # 对端已断开/半死连接：关不掉不影响停机
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     def _bump(self, cid: str) -> int:
         self._seq[cid] += 1

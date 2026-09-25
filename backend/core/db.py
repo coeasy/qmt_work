@@ -282,6 +282,24 @@ class DB:
         rows = self.query(sql, params)
         return rows[0] if rows else None
 
+    def ping(self) -> bool:
+        """探活：能在这条连接上完成一次最简读取即视为可用。
+
+        专供 ``GET /ready`` 就绪探针使用。之所以做成 DB 的方法而不是让路由写
+        ``ctx.db.query("SELECT 1")``：路由层不得出现裸 SQL（门禁
+        ``scripts/check_execution_architecture.py`` 会拦），且「什么算活着」
+        属于 DB 自身的语义，应由 DB 承担。
+
+        返回 ``False`` 而不是抛异常 —— 探针的调用方要的是**布尔就绪信号**，
+        不是异常栈；把 ``sqlite3.Error`` 抛给路由只会让 /ready 变成 500，
+        而它本该在 DB 坏掉时返回 503「未就绪」。
+        """
+        try:
+            self.query("SELECT 1")
+        except Exception:  # noqa: BLE001 — 任何读取失败都等价于「不可用」
+            return False
+        return True
+
     @contextlib.contextmanager
     def readonly_conn(self):
         """独占只读连接（**大结果集批处理**专用）：不占读写锁、与写者互不阻塞。
