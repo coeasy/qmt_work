@@ -370,6 +370,9 @@ class AlgoEngine:
         total = job["volume"]
         b = self._manager.active_bridge()
         gap = max(1.0, job["duration"] / max(1, job["slices"]))
+        # 阶段 2：与 _run_iceberg 同源的迭代上限——无成交/无成交量回报时必须有界退出，
+        # 否则 while done<total 会无限重复下发同量单（重复下单事故）
+        max_idx = max(job["slices"] * 5, 20)
         idx = 0
         last_mkt_vol = None
         rate = float(job.get("participation_rate", 0.1))
@@ -378,6 +381,11 @@ class AlgoEngine:
                 await asyncio.sleep(0.5)
             if job["status"] == "canceled":
                 break
+            if idx >= max_idx:
+                job["error"] = (f"达最大切片次数({max_idx})仍未完成"
+                                f"（无成交量回报/流动性不足），剩余 {total - job['done']}")
+                break
+            idx += 1
             remaining = total - job["done"]
             mkt_vol = 0
             if b is not None:

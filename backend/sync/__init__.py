@@ -374,8 +374,10 @@ class SyncEngine:
                             await self._push_order_deal_events(conn, acc_key)
                         except Exception as exc:
                             log.debug("order/deal diff failed: %s", exc)
-                        for handler in self._notify_handlers:
-                            await handler("account", {"type": "account_snapshot", "data": snap, "broker": conn.cfg.name})
+                        # 统一经 _notify 派发：直接 handler 别名调用无法被契约内省静态识别，
+                        # 导致 account 事件长期漏出 ws_events 基线（前端收不到却当成 unknown）；
+                        # 经 _notify 后 account 与 order/deal/risk 一致地同步投递 webhook。
+                        await self._notify("account", {"type": "account_snapshot", "data": snap, "broker": conn.cfg.name})
                 except Exception as exc:
                     log.warning("account snapshot failed: %s", exc)
                 iv = interval

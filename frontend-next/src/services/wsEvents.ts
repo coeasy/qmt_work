@@ -49,6 +49,10 @@ export const WS_EVENT_REGISTRY: Record<string, WsEventHandler> = {
   "order.timeout": "system-log",
   "reconcile": "system-log",
   "risk.blocked": "system-log",
+  // 账户净值快照：后端 SyncEngine.start_account_snapshots 经 _notify 广播
+  // type="account"（payload.data.type="account_snapshot"），前端统一进系统日志流
+  "account": "system-log",
+  "account_snapshot": "system-log",
   "signal_dry_run": "system-log",
   "signal_live": "system-log",
   "signal_paper": "system-log",

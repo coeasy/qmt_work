@@ -211,10 +211,10 @@ async def trade_target(body: dict, ctx: AppContext = Depends(get_ctx)):
     b = _need()
     if b is None:
         return no_broker()
-    from tools.position import order_target_position
+    from tools.position import order_target_position_impl
     try:
-        return ok(await order_target_position(
-            str(body.get("code", "")), float(body.get("target_pct", 0)),
+        return ok(await order_target_position_impl(
+            b, str(body.get("code", "")), float(body.get("target_pct", 0)),
             float(body.get("price", 0) or 0), bool(body.get("do_trade", False))))
     except Exception as exc:  # noqa: BLE001
         return err(400, str(exc))

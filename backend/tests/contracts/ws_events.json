@@ -1,4 +1,7 @@
 {
+  "account": [
+    "account_snapshot"
+  ],
   "algo_alert": [],
   "algo_slice": [],
   "broker.connected": [],

@@ -10,6 +10,7 @@
 """
 import asyncio
 import logging
+import os
 import queue
 import threading
 from abc import ABC, abstractmethod
@@ -22,6 +23,11 @@ log = logging.getLogger("qmt_work")
 _MAX_QUEUE = 5000
 # 网关 close 超时：SDK 挂死时 stop() 也要能及时返回（优雅停机不永久挂死）
 _CLOSE_TIMEOUT = 5.0
+# 同步调用隔离的硬超时（阶段 R31）：engines 的 fn 可能因客户端卡顿永久挂死；
+# 不设超时则 4 次并发挂死即耗尽 4 线程池 → 所有券商调用冻结（路由层虽各自
+# wait_for 12s，但底层线程不释放、池容量永久下降）。给同步调用加内部超时，
+# 异常由调用方自行处理（重试/降级）。
+_CALL_TIMEOUT = float(os.environ.get("QMT_BRIDGE_CALL_TIMEOUT", "30"))
 
 
 class XTQuantGateway(ABC):
@@ -174,7 +180,10 @@ class XTQuantBridge:
             from xtquant_client.base import BrokerError
             raise BrokerError("网关已关闭")
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(pool, lambda: fn(*args, **kwargs))
+        # R31：内部硬超时，避免 fn 挂死拖垮整个线程池（见 _CALL_TIMEOUT）
+        return await asyncio.wait_for(
+            loop.run_in_executor(pool, lambda: fn(*args, **kwargs)),
+            _CALL_TIMEOUT)
 
     # ---- 下单串行化（§4.14 关键）----
     async def call_locked(self, fn, *args, **kwargs):
@@ -183,8 +192,10 @@ class XTQuantBridge:
             from xtquant_client.base import BrokerError
             raise BrokerError("网关已关闭")
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(
-            pool, self._locked_call, fn, args, kwargs)
+        # R31：内部硬超时（同 call）
+        return await asyncio.wait_for(
+            loop.run_in_executor(pool, self._locked_call, fn, args, kwargs),
+            _CALL_TIMEOUT)
 
     def _locked_call(self, fn, args, kwargs):
         with self._lock:

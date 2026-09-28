@@ -206,8 +206,3 @@ def describe_dir(raw: Any, *, create: bool = False) -> dict:
         "is_drive_root": False,
     })
     return out
-
-
-def is_frozen() -> bool:
-    """PyInstaller 打包运行时为 True（透传，便于界面区分「安装目录」的含义）。"""
-    return bool(getattr(sys, "frozen", False))

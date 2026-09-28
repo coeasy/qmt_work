@@ -1,7 +1,10 @@
 import asyncio
 import json
 import logging
+import os
 import re
+import threading
+import time
 from pathlib import Path
 
 from core.clock import now_iso
@@ -449,9 +452,25 @@ async def run_db_backup(ctx: AppContext = Depends(get_ctx)):
     def _audit_created(dst) -> None:
         ctx.db.audit("admin", "paths.run_db_backup", str(dst), {"action": "created"}, "ok")
 
-    # 1GB+ 主库的一致性复制是**同步重活**：必须丢到线程里，否则整个事件循环
-    # （含 WS 广播与所有 HTTP）在复制期间一起卡住。
-    path = await asyncio.to_thread(view.backup_once, "manual", _audit_created)
+    # 1GB+ 主库的一致性复制是**同步重活**：必须丢到**守护线程**里（与启动/周期备份
+    # 同一模式），否则 asyncio.to_thread 的非 daemon 线程会在进程退出时被 atexit join
+    # 钉死（TD-25 同类隐患）；并做有界等待，避免手动备份卡死时请求/进程挂起。
+    _result: list = []
+
+    def _do_manual_backup() -> None:
+        try:
+            _result.append(view.backup_once("manual", _audit_created))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("手动备份异常（已忽略）：%s", exc)
+
+    _t = threading.Thread(target=_do_manual_backup, name="db-backup-manual",
+                          daemon=True)
+    _t.start()
+    _timeout = float(os.environ.get("QMT_MANUAL_BACKUP_TIMEOUT", "120"))
+    _deadline = time.monotonic() + _timeout
+    while _t.is_alive() and time.monotonic() < _deadline:
+        await asyncio.sleep(0.1)
+    path = _result[0] if _result else None
     st = dict(view.last_status or {})
     action = str(st.get("action") or "failed")
     if action == "created":

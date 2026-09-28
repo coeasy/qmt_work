@@ -54,6 +54,10 @@ async def setup(app: FastAPI) -> dict:
                                    runtime_config=state.runtime_config)
     state.ws_manager = WSManager(state.sync_engine)
     state.sync_engine.on_notify(state.ws_manager.broadcast)
+    # 告警引擎 WS 广播接线（R31 修复）：phase_db 创建 alert_engine 时 ws_manager 尚
+    # 未初始化，故在此补接，使 alert 事件能真正推送到前端而非静默死路径
+    if state.alert_engine is not None:
+        state.alert_engine._on_event = state.ws_manager.broadcast
 
     # 行情管道统一注册（C3 修复：SyncEngine 构造之后）
     # V9 Phase 5（P1-17）：注册加保护 —— 单个 bridge 注册失败不炸整个阶段；

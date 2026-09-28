@@ -18,6 +18,66 @@ def _audit(action: str, target: str, params: dict, result: str):
             pass
 
 
+async def order_target_position_impl(b, code: str, target_pct: float,
+                                      price: float = 0.0, do_trade: bool = False,
+                                      broker_id: str = "") -> dict:
+    """目标仓位调仓核心逻辑（路由 POST /trade/target 与 MCP 工具共用）。
+
+    b: 已解析的券商 bridge；broker_id 仅用于下发时的来源标注。
+    """
+    cash = await b.call(b.gateway.get_cash)
+    assets = float(cash.get("assets", 0) or 0)
+    if assets <= 0:
+        raise BrokerError("账户总资产为 0，无法计算目标仓位")
+    target_pct = float(target_pct)
+    if not 0 <= target_pct <= 1:
+        raise BrokerError("target_pct 须在 0~1 之间")
+    positions = await b.call(b.gateway.get_positions, code)
+    cur_mv = sum(float(p.get("market_value", 0) or 0) for p in positions)
+    target_mv = assets * target_pct
+    diff = target_mv - cur_mv
+    if abs(diff) < 500:
+        return {"code": code, "target_pct": target_pct, "assets": assets,
+                "current_mv": cur_mv, "target_mv": target_mv, "diff": round(diff, 2),
+                "action": "none", "reason": "差额过小无需调仓"}
+    quote_px = float(price or 0)
+    if quote_px <= 0:
+        q = await b.call(b.gateway.get_quote, code)
+        quote_px = float(q.get("last") or 0)
+    if quote_px <= 0:
+        raise BrokerError("无法获取最新价，请显式传入 price")
+    direction = "buy" if diff > 0 else "sell"
+    volume = (int(abs(diff) / quote_px) // 100) * 100
+    if volume <= 0:
+        return {"code": code, "target_pct": target_pct, "assets": assets,
+                "current_mv": cur_mv, "target_mv": target_mv, "diff": round(diff, 2),
+                "action": "none", "reason": f"折股数不足 100 股（{abs(diff)/quote_px:.0f} 股）"}
+    plan = {"code": code, "target_pct": target_pct, "assets": assets,
+            "current_mv": cur_mv, "target_mv": target_mv, "diff": round(diff, 2),
+            "direction": direction, "volume": volume,
+            "price": round(quote_px, 4), "action": "trade"}
+    if not do_trade:
+        _audit("target_position.plan", code, {"target_pct": target_pct,
+                                              "direction": direction,
+                                              "volume": volume}, "plan_only")
+        return plan
+    # 阶段 0-B（F6）：统一经 SignalRouter.submit()，由它完成
+    # 风控(check_order) + 幂等 + 审计 + 真实下单，杜绝绕过风控直接 place_order。
+    from core.state import state
+    sr = state.signal_router
+    if sr is None:
+        raise BrokerError("信号路由器未初始化")
+    res = await sr.submit(
+        code, direction, volume, quote_px, "limit",
+        source="target_position", broker_id=broker_id or "",
+        remark=f"target_pct={target_pct:.4f}", auto_confirm=True)
+    ok = bool(res.get("ok"))
+    reason = res.get("reason") or None
+    _audit("target_position.order", code, plan,
+           f"order_id={res.get('order_id')} ok={ok} reason={reason}")
+    return {**plan, "ok": ok, "order_id": res.get("order_id"), "reason": reason}
+
+
 def register_position_tools(mcp, risk):
     @mcp.tool()
     async def order_target_position(code: str, target_pct: float,
@@ -28,54 +88,5 @@ def register_position_tools(mcp, risk):
         do_trade=True 时实际下单（过风控），否则仅返回调仓计划。
         """
         b = get_bridge(broker_id or None)
-        cash = await b.call(b.gateway.get_cash)
-        assets = float(cash.get("assets", 0) or 0)
-        if assets <= 0:
-            raise BrokerError("账户总资产为 0，无法计算目标仓位")
-        target_pct = float(target_pct)
-        if not 0 <= target_pct <= 1:
-            raise BrokerError("target_pct 须在 0~1 之间")
-        positions = await b.call(b.gateway.get_positions, code)
-        cur_mv = sum(float(p.get("market_value", 0) or 0) for p in positions)
-        target_mv = assets * target_pct
-        diff = target_mv - cur_mv
-        if abs(diff) < 500:
-            return {"code": code, "target_pct": target_pct, "assets": assets,
-                    "current_mv": cur_mv, "target_mv": target_mv, "diff": round(diff, 2),
-                    "action": "none", "reason": "差额过小无需调仓"}
-        quote_px = float(price or 0)
-        if quote_px <= 0:
-            q = await b.call(b.gateway.get_quote, code)
-            quote_px = float(q.get("last") or 0)
-        if quote_px <= 0:
-            raise BrokerError("无法获取最新价，请显式传入 price")
-        direction = "buy" if diff > 0 else "sell"
-        volume = (int(abs(diff) / quote_px) // 100) * 100
-        if volume <= 0:
-            return {"code": code, "target_pct": target_pct, "assets": assets,
-                    "current_mv": cur_mv, "target_mv": target_mv, "diff": round(diff, 2),
-                    "action": "none", "reason": f"折股数不足 100 股（{abs(diff)/quote_px:.0f} 股）"}
-        plan = {"code": code, "target_pct": target_pct, "assets": assets,
-                "current_mv": cur_mv, "target_mv": target_mv, "diff": round(diff, 2),
-                "direction": direction, "volume": volume,
-                "price": round(quote_px, 4), "action": "trade"}
-        if not do_trade:
-            _audit("target_position.plan", code, {"target_pct": target_pct,
-                                                  "direction": direction,
-                                                  "volume": volume}, "plan_only")
-            return plan
-        # 阶段 0-B（F6）：统一经 SignalRouter.submit()，由它完成
-        # 风控(check_order) + 幂等 + 审计 + 真实下单，杜绝绕过风控直接 place_order。
-        from core.state import state
-        sr = state.signal_router
-        if sr is None:
-            raise BrokerError("信号路由器未初始化")
-        res = await sr.submit(
-            code, direction, volume, quote_px, "limit",
-            source="target_position", broker_id=broker_id or "",
-            remark=f"target_pct={target_pct:.4f}", auto_confirm=True)
-        ok = bool(res.get("ok"))
-        reason = res.get("reason") or None
-        _audit("target_position.order", code, plan,
-               f"order_id={res.get('order_id')} ok={ok} reason={reason}")
-        return {**plan, "ok": ok, "order_id": res.get("order_id"), "reason": reason}
+        return await order_target_position_impl(
+            b, code, target_pct, price, do_trade, broker_id)
