@@ -2,6 +2,7 @@
 
 import os
 import threading
+import time
 
 from ..base import BrokerAdapter, BrokerNotConnectedError, BrokerSDKError
 from ._common import _load_trader_api, _load_xtquant_from, _resolve_xtquant_path, _shell_attr, log
@@ -22,6 +23,16 @@ from .trading import TradingMixin
 
 class XTPQuantAdapter(QuotesMixin, AccountMixin, TradingMixin, InstrumentMixin, BrokerAdapter):
     """迅投 XTQuant 真实适配器。"""
+
+    # 交易连接重试总预算（秒）。★ 2026-09-28：重试循环本来是
+    # 「候选目录数(≤2) × session 数(6)」= 最多 12 次 XtQuantTrader.connect()；
+    # 每次 connect() 在本机实测约 3.1s（客户端拒绝路径），于是最坏 ~38s。
+    # 而桥接侧握手/就绪等待窗口原先只有 30s ⇒ **真实错误（rc=-1 + 客户端日志
+    # 证据）还没产出，子进程就被父端判为「握手超时」并杀掉**，用户看到的是
+    # 「桥接子进程握手失败：_ping 调用超时」这种与根因完全无关的文案。
+    # 现在两侧同时收紧/放宽到同一口径：本预算 45s（覆盖重试最坏耗时），
+    # 桥接就绪等待 _READY_TIMEOUT = 100s（覆盖预算 + 子进程启动 + 导入开销）。
+    _CONNECT_RETRY_BUDGET = 45.0
 
     def __init__(self, client_path: str, account_id: str, account_type: str = "STOCK",
                  session_id: int = 0, min_version: str = "", client_mode: str = "auto"):
@@ -287,15 +298,25 @@ class XTPQuantAdapter(QuotesMixin, AccountMixin, TradingMixin, InstrumentMixin, 
             last_err = ""
             used_dir = trade_dir
             resolved_mode_final = resolved_mode
+            attempts_made = 0
+            deadline = time.monotonic() + self._CONNECT_RETRY_BUDGET
+            budget_exhausted = False
             for d in candidate_dirs:
                 if trader is not None:
+                    break
+                if time.monotonic() >= deadline:
+                    budget_exhausted = True
                     break
                 used_dir = d
                 resolved_mode_final = ("mini" if d.endswith("userdata_mini") else "full")
                 for attempt in range(6):
+                    if time.monotonic() >= deadline:
+                        budget_exhausted = True
+                        break
                     sid = self.session_id + attempt
                     t = XtQuantTrader(d, sid)
                     rc = t.start()
+                    attempts_made += 1
                     if rc is not None and rc != 0:
                         last_err = f"start rc={rc}"
                         continue
@@ -310,18 +331,41 @@ class XTPQuantAdapter(QuotesMixin, AccountMixin, TradingMixin, InstrumentMixin, 
                         t.stop()
                     except Exception:  # noqa: BLE001
                         pass
+                if trader is not None:
+                    break
             trade_dir = used_dir
             if trader is None:
                 _exe_procs = _running_client_exes()
                 _login_log = _latest_login_log(trade_dir)
+                # ★ 客户端侧根因诊断（2026-09-28 新增）：读客户端交易日志，识别
+                # 「严格连接校验 / PID 未授权」等新版本才有的拒绝原因，把证据
+                # 直接放进报错文案——而不是让用户去猜「登录模式/路径/session/权限」。
+                try:
+                    _diag = _shell_attr("diagnose_trade_connect")(trade_dir)  # monkeypatch 兼容：经壳模块动态查找（见 _common._shell_attr）
+                except Exception:  # noqa: BLE001  诊断失败绝不阻断报错
+                    _diag = {}
+                _diag = _diag if isinstance(_diag, dict) else {}
+                _diag_block = ""
+                if _diag.get("reason"):
+                    _ev = "\n".join(f"      {e}" for e in (_diag.get("evidence") or []))
+                    _diag_block = (
+                        f"### ★ 客户端侧根因（优先按此处理）\n"
+                        f"  {_diag.get('title')}\n"
+                        + (f"  客户端日志证据：\n{_ev}\n" if _ev else "")
+                        + f"{_diag.get('steps')}\n")
                 # 多因子真实归因（替代旧版「一律归因程序化权限请联系券商」的误导文案）：
                 # rc=-1 常见根因按官方排查顺序为 ①登录模式 ②路径 ③session ④权限。
                 # 这里把已实测到的事实（运行进程 / 尝试的模式 + 目录互备 / client_mode）
                 # 一并列出，让定位不再猜。
                 tried = " → ".join(os.path.basename(x) for x in candidate_dirs)
+                _budget_note = ("（已用尽重试预算 "
+                                f"{self._CONNECT_RETRY_BUDGET:.0f}s，共尝试 "
+                                f"{attempts_made} 次；未尝试剩余组合）"
+                                if budget_exhausted else "")
                 raise BrokerNotConnectedError(
                     f"交易连接失败（session_id {self.session_id}~{self.session_id + 5} "
-                    f"均 {last_err}）。\n"
+                    f"均 {last_err}）{_budget_note}。\n"
+                    + _diag_block +
                     f"### 已实测的排查事实\n"
                     f"  1) 客户端进程：{_exe_procs or '未检测到'}；\n"
                     f"  2) 尝试的数据目录（按顺序）：{tried or (trade_dir or '（无）')}；\n"

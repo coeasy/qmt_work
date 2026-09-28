@@ -2,8 +2,11 @@
 
 ★ ``_accepts_kline_range`` 与这些方法同生共死（只有区间回补会用它），所以一起搬走；
   ``datasource.registry`` 仍 re-export 它（``tests/test_kline_range.py`` 从那里导入）。
-★ ``bars_last_date`` 反过来：它是公开 API，实现落在 ``datasource/bars_util.py``，
-  本模块 import 使用。
+★ ``bars_last_date``（公开 API，实现在 ``datasource/bars_util.py``）**已不在此模块使用**，
+  由 ``datasource.registry`` 直接从 bars_util re-export（2026-09-28 清理死导入）。
+★ ``BrokerError`` 是**本模块**的连接失败吞掉契约（``except BrokerError`` 降级返回 None）。
+  2026-09-28 修：此前该名字从未在本模块导入（``datasource.registry`` 导了却没用），
+  一旦真有异常发生，``except BrokerError`` 本身会抛 ``NameError`` 把原始错误彻底掩盖。
 """
 from __future__ import annotations
 
@@ -11,12 +14,12 @@ import inspect
 import logging
 from typing import Optional
 
-from datasource.bars_util import bars_last_date
 from datasource.periods import (
     UnknownPeriodError,
     adjust_allowed_periods,
     normalize_period,
 )
+from xtquant_client.base import BrokerError
 
 #: 与拆分前**同名**的 logger —— 日志的 logger 名与级别行为逐字不变。
 log = logging.getLogger("qmt_work.datasource.registry")

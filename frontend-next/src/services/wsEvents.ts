@@ -28,6 +28,13 @@ export const WS_EVENT_REGISTRY: Record<string, WsEventHandler> = {
   "risk_circuit": "system-log",
   "system": "system-log",
 
+  // 券商连接生命周期：后端 `gateway/health.py::_emit` 发出 `broker.<event>`
+  // （connected / disconnected）。此前**未登记** ⇒ 前端把它标成
+  // `unknown:broker.connected`，一次真实的连接状态变化被当成未知事件，券商角标
+  // 只能等用户手动刷新页面才更新（后端发了、前端不认 = 断链）。
+  "broker.connected": "system-log",
+  "broker.disconnected": "system-log",
+
   // 引擎事件：当前由 SystemLog 全量记录；领域页面可在后续按需升级专用消费者
   "algo_alert": "system-log",
   "algo_slice": "system-log",

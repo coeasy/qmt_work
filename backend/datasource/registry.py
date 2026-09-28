@@ -20,7 +20,6 @@ import asyncio
 import time
 from typing import Optional
 
-from core.clock import bar_date  # K 线交易日格式唯一入口（V11 R13）
 from datasource.base import DataSource, EXT_DETAIL_KEYS
 from datasource.board import classify_board, limit_ratio
 from datasource.instrument import with_exchange_suffix
@@ -29,7 +28,6 @@ from datasource.periods import (
     adjust_allowed_periods,
     normalize_period,
 )
-from xtquant_client.base import BrokerError
 from datasource.bars_util import bars_last_date  # noqa: F401  re-export：公开 API
 from datasource.bound_broker import _BoundBrokerSource  # noqa: F401  re-export：工厂与测试用
 from datasource.manager_kline import (  # noqa: F401

@@ -34,6 +34,13 @@ log = logging.getLogger("qmt_work")
 # 下次 start 复用旧 proc 同样卡住——是「连接按钮点很多次都不通」的根因之一。
 _HANDSHAKE_TIMEOUT = 30.0
 
+# 就绪等待窗口（秒）：等待子进程内异步 adapter.start() 真正结束。
+# ★ 2026-09-28：必须 **大于** 适配器的交易连接重试总预算
+# （XTPQuantAdapter._CONNECT_RETRY_BUDGET = 45s），否则「重试还没跑完，父端就
+# 判就绪超时」——正是「真实 rc=-1 被伪装成握手超时」的成因。100s 覆盖：
+# 子进程启动 + xtquant 导入(≈2s) + 45s 重试预算 + 客户端日志诊断(≈0.1s) + 余量。
+_READY_TIMEOUT = 100.0
+
 # Windows：spawn 桥接子进程（python.exe，控制台子系统）时隐藏其控制台窗口，
 # 避免桌面运行时券商连接/重连时弹出黑窗。其他平台该值为 0（无副作用）。
 CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
@@ -275,9 +282,13 @@ class BridgeAdapter(BrokerAdapter):
             # XtQuantTrader.start() 在未登录时会一直阻塞等登录，子进程无法在
             # 窗口内响应 _ping。给出明确指引，避免用户误以为是平台 bug。
             hint = ""
-            if isinstance(exc, TimeoutError) or "Timeout" in type(exc).__name__:
-                hint = (f"（握手超时：子进程 {_HANDSHAKE_TIMEOUT:.0f}s 内无响应——最常见原因是 QMT 客户端"
-                        f"未登录，导致 xtquant 交易连接 SDK 阻塞。请先登录客户端后重试）")
+            # ★ 2026-09-28：`_rpc` 的**超时**路径抛的是 BrokerError（文案含「调用超时」），
+            # 不是 TimeoutError——旧判断 `isinstance(exc, TimeoutError)` 恒为 False，
+            # 导致「子进程 IPC 起不来」这一最需要指引的场景从不给出提示。改为看文案。
+            if "超时" in str(exc) or isinstance(exc, TimeoutError):
+                hint = (f"（握手超时：子进程 {_HANDSHAKE_TIMEOUT:.0f}s 内无响应——"
+                        f"常见原因是桥接运行时缺失/被安全软件拦截，"
+                        f"或 QMT 客户端未登录导致 SDK 阻塞。请先登录客户端后重试）")
             # 失败必落日志（打包 EXE 黑盒下，qmt_work.log 是唯一诊断通道）
             try:
                 log.error("bridge 握手失败: %s%s | 子进程 stderr: %s | proc rc=%s",
@@ -293,14 +304,50 @@ class BridgeAdapter(BrokerAdapter):
                 raise BrokerNotConnectedError(init_err) from exc
             tail = f"（子进程 stderr: {err}）" if err else ""
             raise BrokerNotConnectedError(f"桥接子进程握手失败：{exc}{hint}{tail}") from exc
-        if self._init_error:
-            err = self._init_error
-            self.close()
-            raise BrokerNotConnectedError(f"桥接子进程初始化失败：{err}")
+        # ★ 2026-09-28（P0）：_ping 现在**只**证明 IPC 就绪（子进程读循环已起，
+        #   adapter.start() 在后台线程跑），**不代表启动已完成**。因此必须再用
+        #   _wait_ready 等待启动结果：否则「启动失败」会被静默当成
+        #   「已连接但 is_connected()==False」，用户只看到「未连接」而没有任何原因。
+        ready_err = None
+        ready: dict = {}
         try:
-            self._connected = bool(self._rpc("is_connected", [], timeout=10.0) or False)
-        except Exception:  # noqa: BLE001
-            self._connected = False
+            _res = self._rpc("_wait_ready", [max(1.0, _READY_TIMEOUT - 10.0)],
+                             timeout=_READY_TIMEOUT)
+            ready = _res if isinstance(_res, dict) else {}
+        except Exception as exc:  # noqa: BLE001
+            ready_err = exc
+        if ready_err is not None:
+            init_err = self._init_error  # close() 前先取，避免被清理
+            tail = self._stderr_tail()
+            msg = str(ready_err)
+            try:
+                log.error("bridge 就绪等待失败: %s | 子进程 stderr: %s | proc rc=%s",
+                          ready_err, tail,
+                          self._proc.poll() if self._proc else "N/A")
+            except Exception:  # noqa: BLE001
+                pass
+            self.close()
+            # 子进程 init_error 的文案已是「用户可照做」的指引：直接透出，不套内部术语前缀
+            if init_err:
+                raise BrokerNotConnectedError(init_err) from ready_err
+            # 适配器产出的领域报错（含客户端侧根因诊断）原样透出——套上
+            # 「桥接子进程…」前缀会把真正的根因淹没在实现细节里。
+            _domain = any(k in msg for k in (
+                "交易连接失败", "行情服务连接失败", "连接失败", "初始化失败", "不支持账户类型"))
+            hint = ""
+            if not _domain and ("超时" in msg or isinstance(ready_err, TimeoutError)):
+                hint = (f"（就绪等待超时 {_READY_TIMEOUT:.0f}s：适配器 start() 未在窗口内"
+                        f"结束——请确认 QMT 客户端已登录，且无其他程序占用同一账号/session）")
+            prefix = "" if _domain else "桥接子进程就绪等待失败："
+            t = f"（子进程 stderr: {tail}）" if tail else ""
+            raise BrokerNotConnectedError(f"{prefix}{msg}{hint}{t}") from ready_err
+        if ready.get("starting"):
+            # 预算内仍未结束（极慢机器）：绝不静默当作成功，给出可操作提示
+            self.close()
+            raise BrokerNotConnectedError(
+                f"桥接子进程就绪等待超时（{_READY_TIMEOUT:.0f}s）：适配器 start() 仍在执行。"
+                f"请确认 QMT 客户端已登录并保持运行后重试。")
+        self._connected = bool(ready.get("connected", False))
         # 阶段 0-D（C5）订阅恢复：子进程（重新）启动后其订阅状态清零，
         # 若不清洗 _subscribed_codes 的 SyncEngine 会以为「已订阅」而永不重订，
         # 行情流静默死亡直到客户端退订再重订。这里在握手上成功后重新下发已订阅 codes，

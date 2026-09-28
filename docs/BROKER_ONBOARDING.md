@@ -228,10 +228,64 @@ POST /api/v1/brokers/profiles/hotplug     # 见 registry.hotplug_profile
 
 ## 8. 排障要点
 
-- **连不上已运行的 QMT 客户端**：根因多为 `client_path` 填错或指向非 `userdata_mini`。`connect` 会先 `probe_environment(light=True)` + `discover()` 预检，给出「路径不存在 / 未找到 xtquant SDK / 本机已发现运行中客户端请对齐路径」等可操作提示。
-- **大/小窗口客户端识别**：平台自动识别 58600（XtItClient 大窗口交易端口）/ 58610（miniquote 小窗口行情端口），并在端口回退时连本机 miniquote 实际监听端口。
-- **多连接**：不同连接用不同数据库目录天然获得不同端口；`active` 连接是实时行情与交易的默认来源，切换活跃连接即 `POST /api/v1/brokers/{conn_id}/active`。
+### 8.1 `connect` 失败：先读诊断，再动手
+
+`POST /api/v1/brokers/{conn_id}/connect` 失败时返回的是**结构化多行诊断**，不是一句「连不上」。
+处理顺序：先看 `### ★ 客户端侧根因（优先按此处理）` 一节（它带**客户端日志原始证据**），
+再看 `### 已实测的排查事实`，最后才是 `### 官方四步排查`。
+
+| 诊断里的 `reason` | 含义 | 处理 |
+|---|---|---|
+| `pid_not_allowed` / `strict_check` | 客户端启用了「量化连接严格校验」，对本平台进程做 **PID 白名单校验**（客户端日志：`quant session N, pid X not allowed, return`） | 该开关由**券商服务端下发的模块授权**控制（`mdl_auth_xttrader_strict_connection_check=1`、`mdl_auth_xtquant_no_pid_check=0`），**平台侧无法改写**。联系券商为该资金账号申请「程序化交易 / 外部策略接入」授权，并把调用进程加入白名单 |
+| 路径类 | `client_path` 指向不存在目录 / 未找到 xtquant SDK | 按诊断给出的路径提示修正（极速版 `userdata_mini` / 完整版 `userdata`） |
+| session 类 | `connect rc=...` 且日志显示 session 冲突 | 换 `session_id` 重试；同一 session 两次 `connect` 间隔需 >3 秒 |
+
+> ### ⚠️ QMT 客户端小版本升级后突然连不上，第一嫌疑就是这个严格校验开关
+>
+> 实测（广发 `gd_qmt`，2026-09-28）：客户端升级前授权串 `strict_connection_check=0`，
+> 升级后变成 `1` 且 `no_pid_check=0` ⇒ 交易通道 `connect()` **恒返回 `-1`**，
+> 而**行情（xtdata）完全不受影响**。
+>
+> 所以 **「行情正常能看、就是下不了单 / 连不上券商」是这个根因的典型症状**，
+> 不要误判成网络、端口或资金账号未开通的问题。
+>
+> 定位方法（与平台内部所用同一套证据）：打开
+> `<客户端数据目录>/log/XtMiniQmt_<YYYYMMDD>.log`
+> （完整版是 `XtClient_<YYYYMMDD>.log`），搜 `not allowed`：
+> ```
+> quant session 5, pid 28844 not allowed, return
+> [quant]XtQuantServer:: connect ret error-1
+> ```
+> 出现即命中。授权串本身写在日志**头部**的 `receive module auth string` 之后
+> （键名 `mdl_auth_*`），平台侧 `read_client_auth_flags()` 可直接读出。
+
+其余要点：
+
+- **连不上已运行的 QMT 客户端**：除上表外，根因多为 `client_path` 填错或指向非 `userdata_mini`。
+  `connect` 会先做一次 `probe_environment(light=True)` + `discover()` 预检，给出可操作提示。
+- **大 / 小窗口客户端识别**：平台自动识别 58600（XtItClient 大窗口交易端口）与 58610（miniquote 小窗口行情端口），
+  端口回退时连本机 miniquote 实际监听端口。**数据目录顺序按运行进程判定**
+  （跑 `XtMiniQmt.exe` 就先试 `userdata_mini`），不会被静态布局结论覆盖。
+- **多连接**：不同连接用不同数据库目录天然获得不同端口；`active` 连接是实时行情与交易的默认来源，
+  切换即 `POST /api/v1/brokers/{conn_id}/active`。
 - **零 mock**：未连接任何券商时 `active_bridge()` 返回 `None`，上层返回明确 503，**不会返回任何模拟数据**。
+
+### 8.2 客户端调用时延预算（前后端必须同时给足，否则真实原因会被超时掩盖）
+
+一次 `connect` 最坏要跑「桥接子进程冷启动 + 候选数据目录(≤2) × session(6) 逐个 `XtQuantTrader.connect()`」，
+实测约 **45 s**（`XTPQuantAdapter._CONNECT_RETRY_BUDGET`）。两端预算必须配套：
+
+| 环节 | 常量 | 值 | 说明 |
+|---|---|---|---|
+| 子进程内交易重试总预算 | `XTPQuantAdapter._CONNECT_RETRY_BUDGET` | **45 s** | 12 次 connect 的最坏耗时 |
+| 父端等待子进程启动结果 | `bridge_client._READY_TIMEOUT` | **100 s** | 必须 > 上者 |
+| 父端握手（**只管 IPC 就绪**） | `bridge_client._HANDSHAKE_TIMEOUT` | **30 s** | `_ping` 在启动期立即回 `starting:true`，启动结果由 `_wait_ready` 承载 |
+| 前端 `connect` / `test` | `frontend-next/src/services/api/broker.ts` 显式 `timeout` | **120 s** | 不得落到默认 15 s |
+| 前端 `auto-detect` | 同上（全盘扫描实测约 25 s，且 `retry: 0`） | **60 s** | 默认 15 s 会把「正在发现」误报成「发现失败」 |
+
+> **绝不能让任一环使用 `http` 的默认超时（15 s）**：那样 `connect` 会在诊断信息产出**之前**
+> 就被 abort，用户只看到「请求超时（15s）」，后端辛苦构造的根因永远到不了界面
+> —— 这正是「前后端未贯通」最典型的形态。回归测试：`frontend-next/tests/brokerConnectBudget.test.ts`。
 
 ---
 

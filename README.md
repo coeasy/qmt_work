@@ -448,7 +448,7 @@ print(httpx.get(f"{BASE}/paper/positions", headers=HEAD).json())
 
 | 层级 | 命令 | 覆盖范围 |
 |------|------|----------|
-| 后端单测 | `cd backend && for f in tests/test_*.py; do python -m pytest "$f" -q -p no:cacheprovider; done` | 154 个 `test_*.py`，1696 个用例 |
+| 后端单测 | `cd backend && for f in tests/test_*.py; do python -m pytest "$f" -q -p no:cacheprovider; done` | 154 个 `test_*.py`，1698 个用例 |
 | 后端冒烟 | `python backend/tests/smoke2.py` | REST 主要端点 + 错误语义（**需先起后端**；默认连 `data/app.db`，检测到真实券商连接时自动跳过 3 条「未连接券商 → 503」断言并提示改用下方客户端测试做权威验证） |
 | 前端类型检查 | `cd frontend-next && npm run typecheck` | TypeScript strict 零错误 |
 | 前端单测 | `cd frontend-next && npm test` | vitest |
@@ -516,7 +516,7 @@ qmt_work/
 │  ├─ connectors/ plugins/ sync/   # 外部连接器 / 插件内核 / WebSocket 同步引擎
 │  ├─ tools/ runtimes/  # 因子策略工具 / 捆绑 Python 运行时（cp311）
 │  ├─ data/ static/ dist/   # SQLite / 前端构建产物 / PyInstaller 产物
-│  ├─ tests/            # 154 个 test_*.py（1696 用例）+ 冒烟测试 smoke2.py
+│  ├─ tests/            # 154 个 test_*.py（1698 用例）+ 冒烟测试 smoke2.py
 │  ├─ scripts/          # 门禁脚本（许可 / 能力漂移 / 契约生成 / 架构校验）
 │  └─ build_exe.py      # EXE 打包脚本（含 static 闸门）
 ├─ frontend-next/         # 主前端：React 18 + Vite 5 + TS 5 strict（已退役旧 frontend/）
@@ -642,6 +642,49 @@ qmt_work/
 <summary><b>启动后接口返回 503，提示「未连接券商」</b></summary>
 
 这是**预期行为**。平台零 mock，未连接券商时不返回假数据。请到「连接管理」页添加券商，或通过 `QMT_BROKER_ID` / `QMT_CLIENT_PATH` / `QMT_ACCOUNT_ID` 配置引导连接。
+</details>
+
+<details>
+<summary><b>QMT 客户端升级了一个小版本后，突然连不上客户端（行情正常，就是连不上券商 / 下不了单）</b></summary>
+
+**第一嫌疑：客户端启用了「量化连接严格校验」，把本平台进程挡在白名单外。**
+
+定位只需一步：打开客户端数据目录下的日志
+`<客户端数据目录>/log/XtMiniQmt_<YYYYMMDD>.log`（完整版为 `XtClient_*.log`），搜 `not allowed`：
+
+```
+quant session 5, pid 28844 not allowed, return
+[quant]XtQuantServer:: connect ret error-1
+```
+
+出现即命中。客户端升级会把券商下发的模块授权刷成
+`mdl_auth_xttrader_strict_connection_check=1` + `mdl_auth_xtquant_no_pid_check=0`
+⇒ 客户端对本平台进程做 **PID 白名单校验**，交易 `connect()` 恒返回 `-1`；
+而**行情走 xtdata，完全不受影响** —— 这就是「行情能看、交易连不上」的成因。
+
+**该开关由券商服务端授权控制，平台侧无法自行改写**，请带着上面的日志片段联系券商：
+1. 为该资金账号申请「程序化交易 / 外部策略接入」授权；
+2. 要求关闭「xtquant 严格连接校验」，或把本平台后端进程加入客户端白名单；
+3. 客户端刚升级过时，先在客户端重新登录一次，让它拉取最新授权串。
+
+平台在 `connect` 失败时会**自动读客户端日志识别该根因**，并把证据、影响面与处理步骤
+一并放进返回的诊断文案里（见「连接管理」页的失败提示）。完整说明见
+[`docs/BROKER_ONBOARDING.md`](docs/BROKER_ONBOARDING.md) §8.1。
+</details>
+
+<details>
+<summary><b>点「连接」后转很久，或提示「请求超时」</b></summary>
+
+一次 `connect` 最坏要跑「桥接子进程冷启动 + 候选数据目录(≤2) × session(6) 逐个 `XtQuantTrader.connect()`」，
+实测约 **45 秒**，因此界面上会出现「连接中…」并禁用按钮，属正常现象。
+
+若提示超时，请区分两类：
+
+- 「请求超时（15s）」—— **不该出现**。前端 `connect` / `test` 已显式给到 120 s，
+  只有旧版本前端才会落到 15 s 默认值；出现请升级到最新版。
+- 后端返回的 `code=503` + 多行诊断 —— 这才是**真实失败**，请按上面的 FAQ 条目处理。
+
+两端的时延预算表与回归测试见 [`docs/BROKER_ONBOARDING.md`](docs/BROKER_ONBOARDING.md) §8.2。
 </details>
 
 <details>

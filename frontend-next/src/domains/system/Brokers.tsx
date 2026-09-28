@@ -72,6 +72,22 @@ export function Brokers() {
   const [accountType, setAccountType] = useState("STOCK");
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
+  /**
+   * 连接失败的多行诊断（危险色、保留换行、单独通道）。
+   *
+   * 不复用 `msg` 的原因：`msg` 同时承载「已取消编辑」「已批量删除 N 个连接」这类
+   * 中性提示（信息色）。把 2KB 级失败诊断混进去，既分不清语义，也会让普通提示
+   * 被误导成「出错了」。
+   */
+  const [connErr, setConnErr] = useState("");
+  /**
+   * 正在连接的 conn_id。
+   *
+   * 后端一次 connect 最坏约 60s（桥接子进程冷启动 + 候选目录×session 逐个 connect）。
+   * 旧实现按钮既无 loading 也不禁用 ⇒ 用户点完毫无反馈，会反复点击，
+   * 每次都在后台再起一轮 45s 的连接重试。
+   */
+  const [connectingId, setConnectingId] = useState("");
   /** 探测/一键连接的结果消息，显示在「检测到的本地客户端」面板内（与表单消息分开） */
   const [detectMsg, setDetectMsg] = useState("");
 
@@ -241,10 +257,25 @@ export function Brokers() {
     }
   };
 
-  /** 从健康探测响应推导展示色调与摘要（后端结构不唯一，做宽松适配）。 */
+  /**
+   * 健康状态机（后端 `gateway/health.py` 的 `conn.health_status`）中文映射。
+   *
+   * ★ 必须映射而不能直接透出原始值：`needs_action`（券商授权/白名单类**非自愈**失败，
+   *   后端已把重连退避降到 5 分钟）是给人看的最终结论，直接显示英文枚举值等于没提示。
+   */
+  const HEALTH_STATUS_LABEL: Record<string, { text: string; tone: "success" | "warning" | "danger" | "neutral" }> = {
+    connected: { text: "已连接", tone: "success" },
+    connecting: { text: "重连中…", tone: "warning" },
+    disconnected: { text: "未连接", tone: "neutral" },
+    error: { text: "连接错误（自动重试中）", tone: "danger" },
+    needs_action: { text: "需人工处理：券商侧拒绝连接，请按上方原因联系券商", tone: "danger" },
+  };
+
   const healthTone = (res: Record<string, unknown> | undefined): "success" | "warning" | "danger" | "neutral" => {
     if (!res) return "neutral";
     if (res.error) return "danger";
+    const mapped = HEALTH_STATUS_LABEL[String(res.status)];
+    if (mapped) return mapped.tone;
     const ok = res.healthy === true || res.status === "ok" || res.connected === true;
     const bad = res.healthy === false || res.status === "fail" || res.connected === false;
     if (ok) return "success";
@@ -255,6 +286,8 @@ export function Brokers() {
     if (!res) return "未探测";
     if (res.error) return `探测失败：${String(res.error)}`;
     if (typeof res.summary === "string") return res.summary;
+    const mapped = HEALTH_STATUS_LABEL[String(res.status)];
+    if (mapped) return mapped.text;
     if (typeof res.status === "string") return res.status;
     if (typeof res.connected === "boolean") return res.connected ? "已连接" : "未连接";
     return "已探测";
@@ -392,6 +425,9 @@ export function Brokers() {
             </Button>
           </div>
           {msg && <div className={s.msg}>{msg}</div>}
+          {/* 连接失败：多行长诊断必须保留换行（CSS pre-wrap）并用危险色，
+              否则「★ 客户端侧根因 / 日志证据 / 官方四步排查」会塌成一坨看不见结构 */}
+          {connErr && <div className={s.msgErr}>{connErr}</div>}
         </div>
       </Panel>
 
@@ -476,6 +512,14 @@ export function Brokers() {
                 <div className={s.itemSub}>
                   {c.account_id ?? "—"} · {c.account_type ?? "—"} · {c.client_path ?? "—"}
                 </div>
+                {/* 最近一次失败原因：后端已压成单行（`brief_error`），此处单行省略 +
+                    title 悬停看全文。此前该字段前端**完全没消费** ⇒ 用户在列表里
+                    看不到任何失败原因，只能去翻日志。 */}
+                {!c.connected && c.last_error && (
+                  <div className={s.itemErr} title={c.last_error}>
+                    {c.last_error}
+                  </div>
+                )}
                 {healthMap[c.conn_id] && (
                   <div className={s.healthRow}>
                     <Badge tone={healthTone(healthMap[c.conn_id])}>
@@ -493,13 +537,19 @@ export function Brokers() {
                   <Button
                     size="sm"
                     variant="primary"
-                    onClick={() =>
-                      void connect(c.conn_id).then((r) => {
-                        if (!r.ok) setMsg(`连接失败：${r.reason ?? "未知原因"}`);
-                      })
-                    }
+                    disabled={connectingId !== ""}
+                    title="连接最坏需约 60s（要逐个尝试候选数据目录与 session），期间请勿重复点击"
+                    onClick={() => {
+                      setConnErr("");
+                      setConnectingId(c.conn_id);
+                      void connect(c.conn_id)
+                        .then((r) => {
+                          if (!r.ok) setConnErr(`连接失败：${r.reason ?? "未知原因"}`);
+                        })
+                        .finally(() => setConnectingId(""));
+                    }}
                   >
-                    连接
+                    {connectingId === c.conn_id ? "连接中…" : "连接"}
                   </Button>
                 )}
                 <Button

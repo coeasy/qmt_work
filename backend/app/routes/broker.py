@@ -336,8 +336,17 @@ async def connect_broker(conn_id: str, ctx: AppContext = Depends(get_ctx)):
         ctx.db.audit("broker", "broker.connect_failed", conn_id, {}, str(exc))
         return err(503, str(exc))
     except Exception as exc:  # noqa: BLE001  探测抛 RuntimeError 等也记录
-        ctx.db.audit("broker", "broker.connect_failed", conn_id, {}, str(exc))
-        return err(503, str(exc))
+        # ★ 2026-09-28（R2）语义纠偏：走到这里的都**不是** BrokerError，即平台自身缺陷
+        #   （TypeError / NameError / AttributeError / RuntimeError…）。旧实现把它一并
+        #   映射成 503「券商不可用」，于是「我们的代码 bug」被如实报成「券商连不上」，
+        #   用户被引导去重装客户端 / 联系券商 —— 排查方向彻底带偏
+        #   （真实案例：datasource 层 `except BrokerError` 未导入 BrokerError 而抛 NameError，
+        #    在旧口径下会显示成 503 券商不可用）。
+        #   内部错误必须是 500，并把异常类型显式带出，日志同时留完整栈。
+        ctx.db.audit("broker", "broker.connect_failed", conn_id, {},
+                     f"{type(exc).__name__}: {exc}")
+        log.exception("connect %s 内部异常（非券商层错误）", conn_id)
+        return err(500, f"平台内部错误（{type(exc).__name__}）：{exc}")
     ctx.db.audit("broker", "broker.connect", conn_id,
                    {"connected": res.get("connected")}, "ok")
     return ok(res)

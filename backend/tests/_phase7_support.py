@@ -1,6 +1,5 @@
 """V9 Phase 7 共享夹具：临时 DB（完整迁移到最新 schema）。"""
 import sys
-import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))

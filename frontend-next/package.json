@@ -1,7 +1,7 @@
 {
   "name": "qmt-work-frontend-next",
   "private": true,
-  "version": "0.3.5",
+  "version": "0.3.6",
   "type": "module",
   "description": "qmt_work 量化平台 · 专业交易终端前端（全新工程）",
   "main": "electron/main.cjs",
@@ -11,6 +11,7 @@
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "test:serial": "vitest run --no-file-parallelism",
     "test:watch": "vitest",
     "electron:dev": "electron .",
     "backend:build": "node ../scripts/backend-build.mjs",

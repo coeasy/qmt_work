@@ -9,7 +9,6 @@
 
 注意：后端测试须逐文件运行（同进程全量会硬崩溃）。
 """
-import threading
 from concurrent.futures import ThreadPoolExecutor
 
 from gateway.risk import DEMO_TOTAL_ASSETS, RiskManager

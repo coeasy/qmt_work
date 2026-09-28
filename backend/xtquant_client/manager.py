@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 
 from core.db import get_db
 
-from .base import BrokerAdapter
+from .base import BrokerAdapter, brief_error
 from .gateway import XTQuantBridge
 from .registry import create_adapter, get_profile
 from core.clock import now_iso
@@ -286,7 +286,7 @@ class BrokerManager:
                 self._active_id = conn_id
         except Exception as exc:  # noqa: BLE001
             conn.connected = False
-            conn.last_error = str(exc)[:500]
+            conn.last_error = brief_error(exc, 500)
             log.error("_safe_start %r 失败: %s", conn_id, exc)
 
     async def ensure_pump(self, conn_id: str) -> None:

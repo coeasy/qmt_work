@@ -15,7 +15,6 @@ from __future__ import annotations
 import ast
 import pathlib
 import re
-import sys
 
 ROUTES = pathlib.Path("app/routes")
 DEC = {"get", "post", "put", "delete", "patch", "websocket"}
@@ -111,9 +110,7 @@ def main():
 
         # 导入处理
         new_lines = []
-        need_ctx_import = any(True for _ in [1])  # placeholder
         need_active = any(c[2] == "active_context()." for c in changed)
-        pending_ctx_import = False
         for idx, line in enumerate(lines):
             new_line = line
             # 移除 _common 的 state 标记

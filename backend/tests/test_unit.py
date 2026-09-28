@@ -1984,6 +1984,57 @@ def test_discover_accounts_prefers_full_userdata(tmp_path):
     assert found[0]["account_id"] == "111111"
 
 
+def _seed_two_userdata(tmp_path, xml):
+    """造 userdata(10086) + userdata_mini(10010) 并存的数据目录。"""
+    full = os.path.join(tmp_path, "userdata")
+    mini = os.path.join(tmp_path, "userdata_mini")
+    os.makedirs(os.path.join(full, "users", "10086"))
+    os.makedirs(os.path.join(mini, "users", "10010"))
+    with open(os.path.join(full, "users", "10086", "Config.xml"), "w", encoding="utf-8") as f:
+        f.write(xml)
+    with open(os.path.join(mini, "users", "10010", "Config.xml"), "w", encoding="utf-8") as f:
+        f.write(xml)
+    return full, mini
+
+
+def test_discover_accounts_explicit_data_dir_is_deterministic(tmp_path, monkeypatch):
+    """显式传入数据目录时，结果必须与「本机跑着什么客户端」完全无关。
+
+    回归背景（2026-09-28）：旧实现用全局 ``_running_client_mode()`` 决定
+    ``userdata`` / ``userdata_mini`` 的扫描顺序，于是**调用方明确指定的目录会被
+    本机运行态改写** —— 同一个 client_path 在「跑着极速版」的机器上读到
+    ``userdata_mini`` 的账号、在别的机器上读到 ``userdata`` 的账号。
+    这正是那种「只有本机恰好跑着客户端时才红」的非 hermetic 缺陷。
+    """
+    from xtquant_client import discovery
+
+    xml = ('<Config><Accounts><Account broker_type="2" user_id="111111" '
+           'broker_name="测试证券"/></Accounts></Config>')
+    full, mini = _seed_two_userdata(tmp_path, xml)
+
+    monkeypatch.setattr(discovery, "_running_client_mode", lambda: "mini")
+    got = discovery.discover_accounts(full)
+    assert [(a["login_account"], a["account_id"]) for a in got] == [("10086", "111111")]
+
+    got = discovery.discover_accounts(mini)
+    assert [(a["login_account"], a["account_id"]) for a in got] == [("10010", "111111")]
+
+
+def test_discover_accounts_root_uses_running_client_mode(tmp_path, monkeypatch):
+    """传入的是客户端**根目录**（两目录并存）时，才用运行态消歧。"""
+    from xtquant_client import discovery
+
+    xml = ('<Config><Accounts><Account broker_type="2" user_id="111111" '
+           'broker_name="测试证券"/></Accounts></Config>')
+    _seed_two_userdata(tmp_path, xml)
+
+    monkeypatch.setattr(discovery, "_running_client_mode", lambda: "mini")
+    assert discovery.discover_accounts(str(tmp_path))[0]["login_account"] == "10010"
+
+    monkeypatch.setattr(discovery, "_running_client_mode", lambda: "")
+    assert discovery.discover_accounts(str(tmp_path))[0]["login_account"] == "10086"
+
+
 def test_effective_trade_dir_modes():
     """客户端模式 -> 交易数据目录解析（极速版 userdata_mini / 完整版 userdata）。"""
     from xtquant_client.xtp import _effective_trade_dir

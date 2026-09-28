@@ -43,7 +43,7 @@ def test_optional_phase_failure_degrades():
     state = AppState()
     phases = [("db", _ok), ("broker", _boom), ("engines", _ok),
               ("watchdogs", _ok), ("replay", _ok), ("misc", _ok)]
-    results = _run(run_phases(None, phases, state.mark_phase))
+    _run(run_phases(None, phases, state.mark_phase))
     assert state.phase_status["broker"] == "error"   # 降级记录
     assert state.mark_ready() is True                # 但不阻断 READY
 

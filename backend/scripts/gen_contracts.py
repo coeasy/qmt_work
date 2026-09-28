@@ -18,15 +18,22 @@ from __future__ import annotations
 import json
 import os
 import sys
-from core.clock import now_iso
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tests"))
+# ★ 2026-09-28 修：`sys.path` 必须先于任何「包内 import」生效。
+#   原实现把这两行 insert 写在 `from core.clock import now_iso` **之后**，
+#   于是按文档用法 `python scripts/gen_contracts.py` 运行必然抛
+#   `ModuleNotFoundError: No module named 'core'` —— 只有外部恰好已把 backend
+#   放进 PYTHONPATH（如 CI / 已安装环境）才「看起来能用」。
+#   契约基线刷新是改契约时的**规定动作**，这条路走不通会逼人手工改 JSON 基线，
+#   而手工改的基线无法随代码派生（正是 `ws_events` 漏事件那类漂移的温床）。
+_BACKEND = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _BACKEND)
+sys.path.insert(0, os.path.join(_BACKEND, "tests"))
 
+from core.clock import now_iso  # noqa: E402
 from contracts.introspect import collect_all  # noqa: E402
 
-_CONTRACT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                             "tests", "contracts")
+_CONTRACT_DIR = os.path.join(_BACKEND, "tests", "contracts")
 _FILES = ("rest_endpoints", "mcp_tools", "qmt_contracts", "screen_contract", "ws_events")
 
 

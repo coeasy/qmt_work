@@ -30,6 +30,34 @@
   border-radius: var(--radius);
   padding: var(--sp-2);
   word-break: break-all;
+  /* ★ 后端诊断是**多行结构文本**（`### 标题` + 编号步骤 + 证据行）。默认
+     `white-space: normal` 会把 \n 折叠成空格，「★ 客户端侧根因 / 客户端日志证据 /
+     官方四步排查」整段塌成一坨，可读性尽失。 */
+  white-space: pre-wrap;
+}
+
+/* 失败态消息：排版同 .msg，但改用危险色。
+   连接失败却渲染成蓝色「信息条」，用户会当成普通提示，不觉得需要处理。 */
+.msgErr {
+  font-size: var(--font-sm);
+  color: var(--danger);
+  background: var(--danger-dim);
+  border: 1px solid var(--danger);
+  border-radius: var(--radius);
+  padding: var(--sp-2);
+  word-break: break-all;
+  white-space: pre-wrap;
+}
+
+/* 连接行内的「最近错误」：单行省略，完整文本走 title 悬停。
+   列表高度不能被 2KB 级诊断撑爆，但也不能因此把原因整条藏起来。 */
+.itemErr {
+  margin-top: 2px;
+  font-size: var(--font-xs);
+  color: var(--danger);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .list {

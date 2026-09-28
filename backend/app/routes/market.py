@@ -8,13 +8,10 @@ import logging
 import os
 
 from fastapi import APIRouter, Depends
-from pydantic import BaseModel
-
 from app.routes._common import BrokerError, _call, _need, envelope_ok, err, no_broker, ok
 from app.routes import market_multidim
 from app.services.market import (
     QUOTES_FILL_SEM,
-    ServiceError,
     build_analysis,
     enrich_search_row,
     kline_io,
@@ -23,15 +20,13 @@ from app.services.market import (
     perf_stale,
     quote_error,
 )
-from app.services.market import aggregates as msvc
 # V11 §5.3 F：同步状态落库（「上次同步跑成什么样」跨重启可见）
 from app.sync.state import STREAM_MARKET_SYNC, STREAM_SYNC_BARS, last_run
 
-# 这两个常量定义在 common.py；此前经 aggregates 隐式 re-export 使用，
-# 2026-09-08 改为从源头直接导入，消除「删掉 aggregates 的未使用导入就断」的脆弱耦合。
+# 常量定义在 common.py，从源头直接导入。ETF_LIST_TTL / ETF_QUOTE_CAP 的真实消费者是
+# market_multidim.py（本模块不用）——2026-09-28 移除未使用导入，避免「看着像 re-export、
+# 实际是死导入」的孤儿接线。
 from app.services.market.common import (
-    ETF_LIST_TTL,
-    ETF_QUOTE_CAP,
     METRIC_KEYS,
     metric_sources,
 )
@@ -43,7 +38,6 @@ from datasource.periods import (
     all_periods,
     normalize_period,
     spec,
-    to_eltdx_period,
 )
 from datasource.providers import provider_catalog
 from datasource.registry import (
@@ -52,7 +46,6 @@ from datasource.registry import (
     UnsupportedDataSource,
     get_hub,
 )
-from core.clock import now_iso
 
 log = logging.getLogger("qmt_work.market")
 

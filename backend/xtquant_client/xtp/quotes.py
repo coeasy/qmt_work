@@ -1,6 +1,6 @@
 """行情：tick / K 线 / 订阅（QuotesMixin，自原 xtp.py 逐行搬移）。"""
 
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from ..base import BrokerNotConnectedError, BrokerSDKError
 from ._common import _dget, _normalize_kline_period, log
@@ -149,7 +149,6 @@ class QuotesMixin:
         if memo.get(code) == last:
             return False, last       # 这个状态已经试过了，别反复打 RPC
         try:
-            from datetime import timedelta
             d = datetime.strptime(last, "%Y%m%d").date()
         except ValueError:
             return False, last

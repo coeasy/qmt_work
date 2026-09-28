@@ -27,8 +27,6 @@ from __future__ import annotations
 
 import asyncio
 
-import pytest
-
 import datasource.degrade as degrade_mod
 import tools as tools_mod
 

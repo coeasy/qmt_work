@@ -456,31 +456,35 @@ def _running_client_exes() -> list:
         return []
 
 
-def _latest_login_log(trade_dir: str) -> str:
-    """从客户端交易日志中提取最近一次“登录成功”记录（best-effort）。"""
-    try:
-        log_dir = os.path.join(trade_dir, "log")
-        if not os.path.isdir(log_dir):
-            return ""
-        logs = [f for f in os.listdir(log_dir)
-                if f.startswith("XtClient_") and f.endswith(".log")]
-        if not logs:
-            return ""
-        # 优先取“主连接日志”(XtClient_YYYYMMDD.log，纯日期、无附加后缀)，
-        # 避免选中 FormulaOutput / Debug / PerformanceFile / Message 等辅助日志。
-        import re as _re
-        _date = _re.compile(r"^XtClient_\d{8}\.log$").match
-        _pool = [f for f in logs if _date(f)] or logs
-        newest = max(_pool,
-                     key=lambda f: os.path.getmtime(os.path.join(log_dir, f)))
-        data = open(os.path.join(log_dir, newest), "rb").read()
-        txt = data.decode("gb18030", errors="ignore")
-        # 交易登录成功在主日志里的标记词
-        hits = [ln.strip() for ln in txt.splitlines()
-                if ("LoginSuccess" in ln or "登录成功" in ln)][-1:]
-        return f"{newest}: {hits[0][-90:] if hits else '未找到登录成功记录'}"
-    except Exception:  # noqa: BLE001
-        return ""
+# ---------------- 客户端日志诊断（已按职责拆出到 .diagnostics） ----------------
+# ★ 2026-09-28：`check_execution_architecture` Gate 4 要求非测试 *.py ≤ 50KB，而本文件
+#   因新增「严格连接校验」诊断逻辑达到 54.0KB。客户端日志定位 / 授权串读取 / 根因判定
+#   是一块独立职责（只读客户端日志，不碰 xtquant），故整体搬到 `xtp/diagnostics.py`。
+#   此处**仅再导出**，以保证：
+#     (a) 既有导入路径不变（`adapter.py` 的 `from .env import _latest_login_log` 等）；
+#     (b) 壳模块 `xtquant_client.xtp`（`from .env import *`）仍持有这些符号，
+#         从而 `_common._shell_attr` 的 monkeypatch 兼容层继续有效。
+from .diagnostics import (  # noqa: F401
+    _AUTH_NO_PID_KEY,
+    _AUTH_SNIPPET_RE,
+    _AUTH_STRICT_KEYS,
+    _CLIENT_LOG_MAIN_RE,
+    _CLIENT_LOG_RE,
+    _QUOTE_LOG_RE,
+    _TRADE_LOG_MAIN_RE,
+    _client_log_dirs,
+    _diagnose_one,
+    _head_text,
+    _latest_login_log,
+    _log_rank,
+    _newest_client_log,
+    _read_window,
+    _tail_text,
+    diagnose_trade_connect,
+    read_client_auth_flags,
+)
+
+
 
 
 def _find_client_exe(root: str, names: tuple[str, ...]) -> str | None:
@@ -849,6 +853,19 @@ __all__ = [
     '_QUOTE_EXE_NAMES',
     '_running_client_exes',
     '_latest_login_log',
+    '_CLIENT_LOG_RE',
+    '_CLIENT_LOG_MAIN_RE',
+    '_QUOTE_LOG_RE',
+    '_TRADE_LOG_MAIN_RE',
+    '_log_rank',
+    '_client_log_dirs',
+    '_newest_client_log',
+    '_tail_text',
+    '_head_text',
+    '_read_window',
+    'read_client_auth_flags',
+    'diagnose_trade_connect',
+    '_diagnose_one',
     '_find_client_exe',
     'launch_client',
     '_effective_trade_dir',

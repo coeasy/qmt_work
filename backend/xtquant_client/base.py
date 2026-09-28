@@ -17,7 +17,58 @@ _QUOTE_PROBE_CODES = ("000001.SZ", "600519.SH", "600000.SH")
 
 
 class BrokerError(Exception):
-    """券商层通用异常。"""
+    """券商层通用异常。
+
+    ★ 2026-09-28 新增两个派生属性，用于让**错误语义可被上层机器读取**，而不仅是给人看：
+      - ``needs_action``：该失败是否**非自愈**（必须人工处理），健康监控据此改用长退避，
+        而不是每 60s 无意义地重拉一次桥接子进程；
+      - ``brief``：单行摘要，供 ``last_error`` / 列表行使用，避免把 2KB 多行诊断
+        塞进列表并在句中截断成无意义的碎片。
+
+    两者都基于**文案**判定而非类型：桥接子进程与主进程之间只传 error 文案 +
+    error_type，异常对象本身过不了进程边界。
+    """
+
+    #: 非自愈型失败特征（命中即判定「需人工处理」）。这些根因由券商侧授权/白名单/
+    #: 权限决定，盲目重试永远不会成功：
+    #:   - 严格连接校验 / 进程不在白名单（QMT 客户端升级后新增的默认策略）
+    #:   - 资金账号未开通程序化交易（策略交易）权限
+    _NEEDS_ACTION_MARKERS = (
+        "严格连接校验",
+        "not allowed",
+        "程序化交易",
+        "策略交易权限",
+        "未开通",
+        "无权限",
+    )
+
+    @property
+    def needs_action(self) -> bool:
+        """True = 需要人工处理（退避应放大），False = 可能自愈（正常重试节奏）。"""
+        text = str(self)
+        return any(m in text for m in self._NEEDS_ACTION_MARKERS)
+
+    @property
+    def brief(self) -> str:
+        """单行摘要：取第一条非空行并限长。多行诊断的首行恒为结论句。"""
+        return brief_error(self)
+
+
+def brief_error(exc, limit: int = 300) -> str:
+    """把（可能很长的多行）异常文案压成**单行摘要**，供 ``last_error`` 等字段使用。
+
+    为什么要单行：``last_error`` 会进入连接列表 / 健康状态 / 账户页的错误字段，
+    这些位置是一行式展示；直接 ``str(exc)[:200]`` 会在一句话中间截断，还会把
+    换行带进 UI（前端若未设 ``white-space: pre-wrap`` 就整段塌成一行）。
+    首行永远是「交易连接失败（session_id 0~5 均 connect rc=-1）。」这类结论句，
+    信息密度最高。完整诊断仍保留在 connect 接口的响应里，不丢失。
+    """
+    text = str(exc)
+    for line in text.splitlines():
+        line = line.strip()
+        if line:
+            return line[:limit]
+    return text[:limit]
 
 
 class BrokerNotConnectedError(BrokerError):

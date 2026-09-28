@@ -11,7 +11,6 @@ handler.setLevel(logging.INFO)
 logging.getLogger().addHandler(handler)
 logging.getLogger().setLevel(logging.INFO)
 
-from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 import contextlib

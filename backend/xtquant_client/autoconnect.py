@@ -63,10 +63,16 @@ def detect_candidates() -> list[dict]:
 
             c["broker_id"] = resolve_broker_id(c)
 
-            # 通用档案建议用极速版：识别为 generic（含光大/国信等）或无明确券商时，
-            # 完整版大客户端(XtItClient)常对独立外部进程报 'illegal pid' 拒绝接入，
-            # 而极速版 MiniQMT(userdata_mini) 是更稳的程序化通道——优先建议 mini。
-            if c.get("broker_id") == "generic" and c.get("has_userdata_mini"):
+            # 通用档案的**兜底**建议：识别为 generic（含光大/国信等）且**无法从运行
+            # 进程判定模式**时，优先极速版 userdata_mini —— 完整版大客户端未以
+            # 「极简模式」登录时，对独立外部进程的接入更易被拒（历史 'illegal pid' 反馈），
+            # 而极速版 MiniQMT(userdata_mini) 通常更稳。
+            # ★ 2026-09-28：当候选已按**运行中进程**判定出模式（mode_source=="process"）
+            #   时**不再改写** —— 用户实际启动的是哪个客户端就以哪个为准。旧实现在两
+            #   目录并存时无条件改写为 mini，会把「完整版以极简模式在跑」的连接硬指向
+            #   userdata_mini（错误数据目录 → 交易取不到数据），属孤儿逻辑。
+            if (c.get("broker_id") == "generic" and c.get("has_userdata_mini")
+                    and c.get("mode_source") != "process"):
                 c["client_mode"] = "mini"
                 cur = c.get("client_path") or ""
                 if not cur.endswith("userdata_mini"):

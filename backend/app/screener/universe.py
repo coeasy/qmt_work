@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional
 
 log = logging.getLogger("qmt_work.screener.universe")
 
-_UNIVERSE_KINDS = (
+UNIVERSE_KINDS = (
     "all", "sector", "index", "custom", "saved_board", "screen_result", "holdings",
 )
 
@@ -122,7 +122,7 @@ async def resolve_universe(spec: UniverseSpec, *, policy_str: str = "auto",
     解析失败（源不可用 / 空池）一律返回 **空 codes + degraded + 原因**，绝不抛 500 也不伪造。
     """
     spec = UniverseSpec.parse(spec)
-    if spec.kind not in _UNIVERSE_KINDS:
+    if spec.kind not in UNIVERSE_KINDS:
         return _empty(f"unknown_universe:{spec.kind}")
 
     # 仅本地类（all/custom/saved_board）才惰性取本地仓；纯在线类（sector/index/

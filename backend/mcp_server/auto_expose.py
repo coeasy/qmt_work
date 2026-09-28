@@ -99,10 +99,10 @@ def _make_tool_func(endpoint, cap, name: str):
         f"    _kwargs = {dict_literal}\n"
         f"    _kwargs = {{k: v for k, v in _kwargs.items() if v is not None}}\n"
         + di_block +
-        f"    _res = await _ENDPOINT(**_kwargs)\n"
-        f"    if isinstance(_res, dict) and 'code' in _res and 'data' in _res:\n"
-        f"        return _res['data'] if _res['code'] == 0 else _res\n"
-        f"    return _res\n"
+        "    _res = await _ENDPOINT(**_kwargs)\n"
+        "    if isinstance(_res, dict) and 'code' in _res and 'data' in _res:\n"
+        "        return _res['data'] if _res['code'] == 0 else _res\n"
+        "    return _res\n"
     )
     ns: dict = {"_ENDPOINT": endpoint, "_DI": di,
                 "_isawaitable": inspect.isawaitable}

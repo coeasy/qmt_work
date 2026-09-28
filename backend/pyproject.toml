@@ -36,12 +36,18 @@ line-length = 100
 target-version = "py311"
 
 [tool.ruff.lint]
-# 项目约定：只跑 F（pyflakes）+ E9（语法/缩进）——见项目记忆（ruff 无配置文件，全量规则误伤 re-export）
+# 项目约定：只跑 F（pyflakes）+ E9（语法/缩进）。
+# ★ 配置**只**放本文件：不要再新增 backend/ruff.toml —— ruff 优先读 ruff.toml，
+#   会静默覆盖这里的 select，把全量规则（F+E+I+B+S）压到存量代码上产生数百条噪声。
 select = ["F", "E9"]
 
 [tool.ruff.lint.per-file-ignores]
 # 多版本 xtquant 兼容层的 47 个 F401 为故意保留（re-export 供多版本 SDK 兼容）
 "xtquant_client/xtp/__init__.py" = ["F401"]
+# 测试夹具：模块级 ``from _phase7_support import tmp_db`` 之后，用例签名里用同名参数
+# 取用（pytest 按名字注入 fixture），ruff 会把它误判为「模块级名字被重定义」（F811）。
+# 这是 pytest 的标准用法，非缺陷，故按目录豁免。
+"tests/*" = ["F811"]
 
 [build-system]
 requires = ["setuptools>=68"]

@@ -225,7 +225,9 @@ export const useBrokerStore = create<BrokerState>((set, get) => ({
       return res;
     } catch (e) {
       const reason = e instanceof Error ? e.message : String(e);
-      set({ error: reason });
+      // ★ 不在 store 里写 `error`：`error` 是「列表加载失败」的通道（在列表面板渲染），
+      //   而 connect 的调用方（连接按钮）已经把完整诊断就地展示。
+      //   两边都写 ⇒ 同一段诊断在同一屏出现两次（R2 修复）。
       return { ok: false, reason };
     }
   },

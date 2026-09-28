@@ -17,6 +17,8 @@ import re
 import subprocess
 import sys
 
+from core.errors import swallow
+
 from .xtp import _is_system_dir, probe_environment
 
 log = logging.getLogger("qmt_work.discovery")
@@ -142,6 +144,54 @@ def guess_broker_id_by_name(broker_name: str) -> str:
     return ""
 
 
+# ---------------- 客户端模式（极速版 mini / 完整版 full）推断 ----------------
+# ★ 2026-09-28：auto-detect 原先无条件优先 userdata（完整版）。当同一客户端
+#   userdata 与 userdata_mini **并存**、而用户实际启动的是极速版 XtMiniQmt 时，
+#   界面推荐会填成 userdata + full —— 与运行态不符，也与 _effective_trade_dir 的
+#   运行态感知口径不一致（同一事实两套结论 = 孤儿逻辑）。
+#   现在统一：**运行中进程名（用户实际启动的 exe）优先**，无运行时才退回目录布局。
+_MINI_EXE_HINT = ("miniqmt", "miniquote", "xtminiqt")
+_FULL_EXE_HINT = ("itclient", "xtclient")
+
+
+def mode_from_proc(proc: str) -> str:
+    """由运行中的客户端进程名推断数据目录模式；无法判定返回 ''（不臆测）。
+
+    与 xtp/env.py 的 exe 白名单保持一致（_FULL_EXE_NAMES / _MINI_EXE_NAMES）。
+    """
+    low = (proc or "").strip().lower()
+    if not low:
+        return ""
+    try:
+        from .xtp import _FULL_EXE_NAMES, _MINI_EXE_NAMES
+        if low in {n.lower() for n in _MINI_EXE_NAMES} or low == "miniquote.exe":
+            return "mini"
+        if low in {n.lower() for n in _FULL_EXE_NAMES}:
+            return "full"
+    except Exception as exc:  # noqa: BLE001
+        swallow(exc, why="xtp 的 exe 白名单导入失败，退回进程名关键词兜底（结果仍可用，只是判定略粗）")
+    if any(k in low for k in _MINI_EXE_HINT):
+        return "mini"
+    if any(k in low for k in _FULL_EXE_HINT):
+        return "full"
+    return ""
+
+
+def _running_client_mode() -> str:
+    """本机运行中客户端的模式：mini / full / both / ''（未知）。best-effort。"""
+    try:
+        from .xtp import _running_client_exes
+        exes = _running_client_exes() or []
+    except Exception:  # noqa: BLE001
+        return ""
+    modes = {m for m in (mode_from_proc(e) for e in exes) if m}
+    if "mini" in modes and "full" in modes:
+        return "both"
+    if modes:
+        return next(iter(modes))
+    return ""
+
+
 # ---------------- 资金账号 / 真实券商名自动发现 ----------------
 # XTQuant 客户端把「登录账号 + 资金账号」写在本机数据目录：
 #   userdata[(_mini)]/users/<登录账号>/Config.xml
@@ -224,8 +274,28 @@ def discover_accounts(client_path: str) -> list[dict]:
         base = client_path
     seen: set[str] = set()
     found: list[dict] = []
-    # 完整版 userdata 优先，极速版 userdata_mini 兜底（与 _effective_trade_dir 一致）
-    for ud in ("userdata", "userdata_mini"):
+    # 数据目录优先级：
+    # ① 调用方**显式**指定了数据目录（路径以 userdata / userdata_mini 结尾）→ 只扫它。
+    #    ★ 2026-09-28：显式入参必须**确定** —— 否则本机「恰好跑着极速版」会悄悄
+    #    改写调用方明确指定的目录，同一个 client_path 在不同机器上得出不同账号。
+    #    （已由 test_discover_accounts_prefers_full_userdata 钉住）
+    # ② 传入的是客户端**根目录**（两目录并存）→ 才用本机运行中的客户端消歧：
+    #    极速版在跑就先查 userdata_mini，否则完整版 userdata 优先。
+    #    旧实现无条件先查 userdata，会读到完整版目录下的 Config.xml
+    #    （可能是另一套 / 过期的账号表）。
+    tail = os.path.basename(os.path.normpath(client_path)).lower()
+    if tail in ("userdata", "userdata_mini"):
+        order = [tail]
+        # base 是 _candidate_roots 按打分选出的；若它没落在调用方给的数据目录上，
+        # 直接以调用方给的路径为准（显式入参优先于任何启发式）。
+        if (not os.path.isdir(os.path.join(base, tail, "users"))
+                and os.path.isdir(os.path.join(client_path, "users"))):
+            base = client_path
+    elif _running_client_mode() == "mini":
+        order = ["userdata_mini", "userdata"]
+    else:
+        order = ["userdata", "userdata_mini"]
+    for ud in order:
         users_dir = os.path.join(base, ud, "users")
         if not os.path.isdir(users_dir):
             continue
@@ -465,18 +535,25 @@ def _candidate(root: str, running: bool = False, pid: str = "",
     ud_full = os.path.join(root, "userdata")
     has_mini = os.path.isdir(ud_mini)
     has_full = os.path.isdir(ud_full)
-    # 交易数据目录优先级与 xtp._effective_trade_dir 保持一致：
-    # 完整版 userdata 优先（多数券商主数据目录；且用户默认启动 XtItClient），
-    # 仅当只有 userdata_mini（纯极速版）时才退回它。
-    if has_full:
-        client_path = ud_full
-        suggested_mode = "full"
+    # 交易数据目录优先级（与 xtp._effective_trade_dir 的运行态口径一致）：
+    #   ① 运行中进程名（用户实际启动了哪个 exe，最可信）——
+    #      极速版 XtMiniQmt → userdata_mini；完整版 XtItClient → userdata；
+    #   ② 完整版 userdata 优先（多数券商主数据目录）；
+    #   ③ 仅 userdata_mini（纯极速版）时退回它。
+    # ★ 2026-09-28：旧实现只有 ②③，两目录并存且用户在跑极速版时会推荐 userdata + full
+    #   （与运行态不符，前端据此填出的连接会指向错误的数据目录）。
+    pref = mode_from_proc(proc) if running else ""
+    mode_source = "process" if pref else "layout"
+    if pref == "mini" and has_mini:
+        client_path, suggested_mode = ud_mini, "mini"
+    elif pref == "full" and has_full:
+        client_path, suggested_mode = ud_full, "full"
+    elif has_full:
+        client_path, suggested_mode = ud_full, "full"
     elif has_mini:
-        client_path = ud_mini
-        suggested_mode = "mini"
+        client_path, suggested_mode = ud_mini, "mini"
     else:
-        client_path = root
-        suggested_mode = "auto"
+        client_path, suggested_mode = root, "auto"
     # light=True：auto-detect 阶段只做轻量定位，不 import xtquant、不扫运行时，避免每条
     # 候选触发昂贵扫描导致 auto-detect 慢/超时；完整诊断在用户点击候选后由 /brokers/test 给出。
     probe = probe_environment(client_path, light=True)
@@ -498,6 +575,7 @@ def _candidate(root: str, running: bool = False, pid: str = "",
         "process": proc,
         "client_path": client_path,
         "client_mode": suggested_mode,   # 建议客户端模式：mini / full / auto
+        "mode_source": mode_source,      # 建议来源：process（按运行进程）/ layout（按目录）
         "client_path_mini": ud_mini if has_mini else "",
         "client_path_full": ud_full if has_full else "",
         "has_userdata_mini": has_mini,

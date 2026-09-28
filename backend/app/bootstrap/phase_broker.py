@@ -19,6 +19,7 @@ from core.config import settings
 from core.errors import swallow
 from core.state import state
 from core.state import init_broker_manager
+from xtquant_client.base import brief_error
 from xtquant_client.manager import ConnectionConfig
 
 log = logging.getLogger("qmt_work.bootstrap.broker")
@@ -211,7 +212,7 @@ async def _start_one(conn) -> str:
         return "failed"
     except Exception as exc:  # noqa: BLE001
         conn.connected = False
-        conn.last_error = str(exc)[:500]
+        conn.last_error = brief_error(exc, 500)
         log.warning("broker start failed %s: %s", conn.cfg.conn_id, exc)
         return "failed"
     conn.connected = conn.adapter.is_connected()

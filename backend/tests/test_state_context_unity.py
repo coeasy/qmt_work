@@ -19,7 +19,6 @@
 """
 from __future__ import annotations
 
-import dataclasses
 import pathlib
 import re
 

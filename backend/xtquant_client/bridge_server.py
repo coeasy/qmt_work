@@ -9,9 +9,16 @@
 - 启动失败: {"event": "init_error", "error": str, "error_type": str}
 
 特殊方法：
-- _ping       : 握手，返回 {"alive": true, "connected": adapter.is_connected()}
+- _ping       : 握手，返回 {"alive": true, "connected": adapter.is_connected(),
+                 "starting": adapter.start() 是否仍在执行}
+- _wait_ready : 等待异步 adapter.start() 结束；失败时以 ok=false 回传真实错误，
+                 超预算仍未结束时返回 {"starting": true}（父端据此判定就绪超时）
 - _subscribe_quote : 注册内部回调推送 quote 事件，立即返回 ok
 - _shutdown   : 关闭适配器并退出循环
+
+★ 启动为异步（后台线程）：`adapter.start()` 可能耗时数十秒（交易侧要串行尝试
+多个候选数据目录与 session），同步执行会让 _ping 在握手窗口内无响应，被父端误判为
+「握手超时」并杀掉子进程，真实根因随之丢失。故读循环先就绪，启动结果由 _wait_ready 交回。
 
 其余方法一律通过 getattr(adapter, method)(*args) 反射调用，因此服务端无需枚举每个方法。
 """
@@ -143,6 +150,25 @@ def _write(out: TextIO, obj: dict) -> None:
             pass
 
 
+def _stderr_async(text: str) -> None:
+    """在 daemon 线程里写 stderr，**绝不允许阻塞调用线程**。
+
+    父端若不排空子进程 stderr（管道缓冲写满），同步 write 会永久阻塞。启动失败
+    通道上的同步 stderr 写入曾导致「启动态永不释放 → 父端报就绪等待超时」，
+    真实根因被掩盖。放入 daemon 线程后，最坏情况只是这个线程卡住，进程退出即回收。
+    """
+    def _w() -> None:
+        try:
+            stderr = sys.stderr
+            if stderr is not None:
+                stderr.write(text)
+                stderr.flush()
+        except Exception:  # noqa: BLE001
+            pass
+
+    threading.Thread(target=_w, daemon=True).start()
+
+
 def _start_status_pump(adapter, stdout, state, interval: float = 2.0) -> None:
     """状态泵线程：周期性轮询 adapter.is_connected()，状态翻转时主动推送 conn_state。
 
@@ -172,31 +198,49 @@ def serve_adapter(adapter, stdin=None, stdout=None,
     stdout = stdout if stdout is not None else sys.stdout
 
     # 共享连接态：状态泵线程与请求处理线程共同维护；变化时推送 conn_state 事件
-    state = {"connected": False}
+    state: dict = {"connected": False, "starting": True,
+                   "init_error": None, "error_type": ""}
 
     # ---- 启动（可能抛 BrokerError / DLL 不兼容）----
-    try:
-        adapter.start()
-        state["connected"] = bool(adapter.is_connected())
-    except Exception as exc:  # noqa: BLE001
-        # 启动失败是最需要可观测性的路径：除规范化文案外，必须把 traceback
-        # 同时（a）放入事件供父端记日志、（b）写 stderr 供父端 _stderr_tail 读取。
-        # 此前两者都缺失，父端只能看到「None」，真实根因彻底丢失。
-        tb = traceback.format_exc()
-        _write(stdout, {"event": "init_error", "error": _safe_err(exc),
-                        "error_type": _err_type(exc), "traceback": tb[-2000:]})
+    # ★ 2026-09-28（P0）启动必须**异步**：旧实现同步跑完 adapter.start() 才进读循环，
+    #   而交易路径 start() 要串行尝试「候选目录 × session」最多 12 次 connect()
+    #   （真机实测约 38s，客户端拒绝路径每次 connect ≈ 3.1s）。期间读循环根本没起来，
+    #   父端在 30s 握手窗口内收不到 _ping 响应 → 判为「桥接子进程握手失败：_ping 调用
+    #   超时」并 kill 子进程，**真实根因（rc=-1 + 客户端日志证据）在产出前就被丢弃**。
+    #   现在：后台线程执行 start()，读循环立刻可用（_ping/_shutdown 即时响应），
+    #   父端通过 _wait_ready 等待启动结果并透出真实错误。
+    def _start_worker() -> None:
+        # ★ 2026-09-28（P1）严格时序：**先发布启动结果，再做任何 IO**。
+        #   旧实现把「写 stderr（错误摘要 + 完整 traceback，可达数 KB）」放在
+        #   except 分支里、`state["starting"] = False` 之前。若父端未持续排空子进程
+        #   stderr（或排空线程卡顿），管道缓冲写满即**阻塞在 stderr.write**，
+        #   启动态永远不释放 → 父端 _wait_ready 走到预算尽头，把一个**已经完成**的
+        #   启动失败报成「就绪等待超时」，真实根因（rc=-1 + 客户端日志证据）被丢弃。
+        #   实测：同一子进程，不排空 stderr 时 _wait_ready 300s 才返回；排空后 41s 返回。
+        #   现在：结果先写入 state，starting 立刻释放，之后的事件/stderr 写入即便阻塞
+        #   也只是留一个 daemon 线程，绝不影响启动结果发布。
+        err: tuple[str, str, str] | None = None
         try:
-            stderr = sys.stderr
-            if stderr is not None:
-                stderr.write(f"[bridge_server] adapter.start() 失败: "
-                             f"{_err_type(exc)}: {_safe_err(exc)}\n{tb}")
-                stderr.flush()
-        except Exception:  # noqa: BLE001
-            pass
-        # 仍进入读取循环，使父端 _ping 能收到响应（再带上 init_error 已记录）
-        log_init = _safe_err(exc)
-    else:
-        log_init = None
+            adapter.start()
+            state["connected"] = bool(adapter.is_connected())
+        except Exception as exc:  # noqa: BLE001
+            err = (_safe_err(exc), _err_type(exc), traceback.format_exc())
+        finally:
+            # 先落状态：父端一旦看到 starting=False，init_error 必然已可见
+            if err is not None:
+                state["init_error"] = err[0]
+                state["error_type"] = err[1]
+            state["starting"] = False
+        if err is None:
+            return
+        # 启动失败是最需要可观测性的路径：事件（父端记日志）+ stderr（父端 _stderr_tail）
+        # 双通道留痕。两者都在启动态释放之后，且失败绝不反噬主流程。
+        _write(stdout, {"event": "init_error", "error": err[0],
+                        "error_type": err[1], "traceback": err[2][-2000:]})
+        _stderr_async(f"[bridge_server] adapter.start() 失败: "
+                      f"{err[1]}: {err[0]}\n{err[2][-2000:]}")
+
+    threading.Thread(target=_start_worker, daemon=True).start()
 
     # SDK 连接态变化时主动推送（QMT 客户端关闭/重登即时感知，不等健康轮询）
     _start_status_pump(adapter, stdout, state, status_interval)
@@ -228,10 +272,43 @@ def serve_adapter(adapter, stdin=None, stdout=None,
         method = req.get("method", "")
         params = req.get("args", []) or []
         if method == "_ping":
-            cur = bool(adapter.is_connected())
+            # 快速路径：启动期间只回「存活 + 正在启动」，绝不触碰可能阻塞的 SDK 调用
+            starting = bool(state.get("starting"))
+            if starting:
+                cur = False
+            else:
+                try:
+                    cur = bool(adapter.is_connected())
+                except Exception:  # noqa: BLE001
+                    cur = False
             _mark_connected(cur)
             _write(stdout, {"id": rid, "ok": True,
-                            "result": {"alive": True, "connected": cur}})
+                            "result": {"alive": True, "connected": cur,
+                                       "starting": starting}})
+            return
+        if method == "_wait_ready":
+            # 等待异步 adapter.start() 结束（成功/失败），把真实结果交回父端。
+            # 走线程池（非读循环快速路径），阻塞期间 _ping/_shutdown 仍即时可用。
+            budget = 60.0
+            if params:
+                try:
+                    budget = float(params[0])
+                except (TypeError, ValueError):
+                    budget = 60.0
+            budget = max(1.0, min(budget, 600.0))
+            t0 = time.time()
+            while state.get("starting") and (time.time() - t0) < budget:
+                time.sleep(0.1)
+            if state.get("init_error"):
+                _write(stdout, {"id": rid, "ok": False,
+                                "error": state["init_error"],
+                                "error_type": state.get("error_type")
+                                or "BrokerNotConnectedError"})
+                return
+            _write(stdout, {"id": rid, "ok": True,
+                            "result": {"alive": True,
+                                       "starting": bool(state.get("starting")),
+                                       "connected": bool(state.get("connected"))}})
             return
         if method == "_shutdown":
             try:
@@ -325,20 +402,8 @@ def serve_adapter(adapter, stdin=None, stdout=None,
         return None
 
     try:
-        if log_init:
-            # 启动已失败：仅保持最小读取循环以便父端探测到 init_error
-            for line in stdin:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    req = json.loads(line)
-                except Exception:  # noqa: BLE001
-                    continue
-                if _handle_line(req) == "stop":
-                    break
-            return 1
-
+        # 启动已改为异步（见 _start_worker）：此处无条件进入读循环，保证
+        # _ping / _shutdown / _wait_ready 在 adapter.start() 仍在跑时也即时可用。
         for line in stdin:
             line = line.strip()
             if not line:

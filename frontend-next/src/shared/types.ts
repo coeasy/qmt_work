@@ -312,6 +312,16 @@ export interface BrokerConnection {
    */
   path_exists?: boolean;
   runtime_mode?: string;
+  /**
+   * 最近一次失败的单行摘要。
+   *
+   * 后端用 `brief_error()` 产出（取诊断首行结论句，如
+   * 「交易连接失败（session_id 0~5 均 connect rc=-1）。」），**保证不含换行**，
+   * 因此可以安全地放进列表行（省略号截断 + title 悬停看全文）。
+   */
+  last_error?: string;
+  /** 健康状态机：connected / disconnected / connecting / error / needs_action。 */
+  health_status?: string;
 }
 
 /* ---------------- 算法与自动化 ---------------- */

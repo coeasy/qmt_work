@@ -56,7 +56,6 @@ class _FakeXtdata:
         if not self.last_date:
             return {}
         import pandas as pd
-        dates = [self.last_date]
         return {"close": pd.DataFrame(
             [[1.0]], index=["600519.SH"], columns=[self.last_date])}
 

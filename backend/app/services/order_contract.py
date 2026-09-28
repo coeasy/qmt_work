@@ -25,7 +25,7 @@
 """
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, Optional
 
 from xtquant_client.order_status import normalize_order_status
 

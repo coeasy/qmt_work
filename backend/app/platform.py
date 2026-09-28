@@ -143,7 +143,9 @@ def _active_conn_id() -> Any:
 
 def _chains() -> bool:
     try:
-        from datasource.providers import DEFAULT_CAPABILITY_CHAINS
+        from datasource.providers import DEFAULT_CAPABILITY_CHAINS  # noqa: F401
+        # ↑ 本行是「可用性探针」：导入成功即代表能力链表可加载，
+        #   名字本身不参与后续逻辑（2026-09-28 显式标注，避免被当成死导入删除）。
         return True
     except Exception:  # noqa: BLE001
         return False

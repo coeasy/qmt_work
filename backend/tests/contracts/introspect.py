@@ -234,12 +234,42 @@ def _type_constants(call: ast.Call) -> list[str]:
     return out
 
 
+def _emit_event_types(tree: ast.AST) -> list[str]:
+    """扫描标准出口 ``core.emit.emit_event(callback, event_type, payload)`` 的**第二个**实参。
+
+    ★ 2026-09-28 补：`core.emit.emit_event` 是项目**唯一**允许的事件派发出口
+    （由 ``tests/test_emit_event.py::test_no_direct_on_event_call_sites`` 静态强制），
+    但本自省此前只认 ``broadcast(channel, payload)`` 与 ``_emit({"type": ...})`` 两种形态，
+    于是**走标准出口发出的事件反而全部漏出基线**。
+
+    这不是「少一条记录」，而是**契约面与实际不符**：前端按规范登记消费策略后，
+    ``scripts/check_ws_consumption.py`` 会报「前端登记但后端基线不存在」，
+    把正确的登记判成错的 —— 契约门禁在惩罚遵守契约的人。
+
+    这里只接受字符串常量：``f"broker.{event}"`` 这类动态构造无法静态还原，
+    须在调用点改为常量全名（见 ``gateway/health.py::BrokerHealthMonitor._emit``）。
+    """
+    out: list[str] = []
+    for call in ast.walk(tree):
+        if not isinstance(call, ast.Call) or len(call.args) < 2:
+            continue
+        fn = call.func
+        name = getattr(fn, "attr", None) or getattr(fn, "id", None)
+        if name != "emit_event":
+            continue
+        a1 = call.args[1]
+        if isinstance(a1, ast.Constant) and isinstance(a1.value, str):
+            out.append(a1.value)
+    return out
+
+
 def ws_events() -> dict:
     """扫描全部事件发射点，返回 {频道/事件类型: [子类型]}。
 
-    兼容两种发射形态（见 sync.WSManager.broadcast 的 P2-2 兼容逻辑）：
+    兼容三种发射形态（见 sync.WSManager.broadcast 的 P2-2 兼容逻辑）：
     - ``broadcast(channel, payload)`` → 首参字符串即频道；
-    - ``_emit({"type": evt, "data": payload})`` → dict 的 type 即事件类型。
+    - ``_emit({"type": evt, "data": payload})`` → dict 的 type 即事件类型；
+    - ``core.emit.emit_event(cb, event_type, payload)`` → 第二参即事件类型（标准出口）。
     """
     channels: dict = {}
     for root in _WS_SCAN_ROOTS:
@@ -253,6 +283,8 @@ def ws_events() -> dict:
                 continue
             for direct_type in _direct_ws_types(tree):
                 channels.setdefault(direct_type, set())
+            for ev_type in _emit_event_types(tree):
+                channels.setdefault(ev_type, set())
             for call in _emit_calls(tree):
                 if not call.args:
                     continue
@@ -266,6 +298,15 @@ def ws_events() -> dict:
                         continue
                     ch, subs = tvals[0], tvals[1:]
                 else:
+                    # 辅助发射函数形态：首参**不是**常量（如
+                    # `self._emit(conn_id, "broker.connected", data)`），此时事件名在**第二参**。
+                    # 见 `gateway/health.py::BrokerHealthMonitor._emit` 的说明。
+                    #
+                    # 该分支不会误伤既有形态：`broadcast(channel_var, payload)` 的第二参是 dict、
+                    # `_notify(event_type_var, ...)` 同理，都无法通过下面的「字符串常量」判定。
+                    if (len(call.args) >= 2 and isinstance(call.args[1], ast.Constant)
+                            and isinstance(call.args[1].value, str)):
+                        channels.setdefault(call.args[1].value, set())
                     continue  # 频道为变量（如 quote_bus.publish(code,…)）不属事件词汇
                 channels.setdefault(ch, set()).update(subs)
     return {ch: sorted(ts) for ch, ts in sorted(channels.items())}

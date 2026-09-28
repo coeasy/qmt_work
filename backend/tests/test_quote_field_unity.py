@@ -153,5 +153,5 @@ def test_known_call_sites_use_the_shared_entry():
     }
     for rel, symbol in expectations.items():
         text = (BACKEND / rel).read_text(encoding="utf-8", errors="ignore")
-        assert f"from core.quote_fields import" in text, f"{rel} 未导入唯一入口"
+        assert "from core.quote_fields import" in text, f"{rel} 未导入唯一入口"
         assert symbol in text, f"{rel} 未使用 {symbol}"

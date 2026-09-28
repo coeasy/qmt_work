@@ -18,7 +18,7 @@ _orig_find_spec = importlib.util.find_spec
 importlib.util.find_spec = lambda name: types.ModuleType(name)
 
 from datasource.models import Bar
-from app.screener.source_policy import resolve_policy, SourcePolicy
+from app.screener.source_policy import resolve_policy
 
 
 class FakeStore:

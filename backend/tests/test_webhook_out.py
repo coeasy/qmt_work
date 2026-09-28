@@ -18,7 +18,6 @@ import hmac
 import json
 
 import httpx
-import pytest
 
 from gateway.webhook_out import WebhookOut
 

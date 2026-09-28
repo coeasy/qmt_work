@@ -243,8 +243,6 @@ def test_get_kline_degrades_when_first_source_is_stale():
 
 def test_get_kline_returns_closest_when_all_stale():
     """全链都陈旧时返回**最接近**的一份（有数据优于无数据），但不谎报新鲜。"""
-    from datasource.registry import DataSourceManager
-
     class _A:
         async def get_kline(self, code, period, count, adjust=None):
             return [{"time": "20250418", "close": 1.0}]
@@ -265,8 +263,6 @@ def test_get_kline_returns_closest_when_all_stale():
 
 def test_get_kline_without_min_date_keeps_old_behavior():
     """不传 min_date 时行为与改造前一致（第一个非空即返回）。"""
-    from datasource.registry import DataSourceManager
-
     class _StaleSrc:
         async def get_kline(self, code, period, count, adjust=None):
             return [{"time": "20250418", "close": 1.0}]

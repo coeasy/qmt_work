@@ -157,26 +157,45 @@ export const brokerApi = {
   health: (connId: string) =>
     http.get<Record<string, unknown>>(`/brokers/${connId}/health`),
 
-  connect: (connId: string) => http.post<{ ok: boolean; reason?: string }>(`/brokers/${connId}/connect`),
+  /**
+   * 连接一条券商连接。
+   *
+   * ★ 必须显式给足超时。后端一次 connect 最坏要跑「桥接子进程冷启动 +
+   *   候选数据目录(≤2) × session(6) 逐个 XtQuantTrader.connect()」，实测约 45s
+   *   （`XTPQuantAdapter._CONNECT_RETRY_BUDGET`），加子进程启动余量接近 60s。
+   *   前端默认 15s 会在**诊断信息产出之前**就 abort 掉请求，用户只看到
+   *   「请求超时（15s）」——后端辛苦构造的根因（客户端日志证据 + 官方四步排查）
+   *   永远到不了界面。这正是「前后端未贯通」的典型形态，故此处显式覆盖。
+   *   120s = 后端最坏 ~60s 的两倍余量（含磁盘 / 客户端日志 IO 抖动）。
+   */
+  connect: (connId: string) =>
+    http.post<{ ok: boolean; reason?: string }>(
+      `/brokers/${connId}/connect`, undefined, { timeout: 120_000 }),
 
   disconnect: (connId: string) =>
     http.post<{ ok: boolean }>(`/brokers/${connId}/disconnect`),
 
   setActive: (connId: string) => http.post<{ ok: boolean }>(`/brokers/${connId}/active`),
 
+  /** 环境探测：与 connect 同源（都要跑适配器 start()），超时同样必须给足。 */
   test: (body: { broker_id: string; client_path: string }) =>
-    http.post<BrokerTestResult>("/brokers/test", body),
+    http.post<BrokerTestResult>("/brokers/test", body, { timeout: 120_000 }),
 
   /**
    * 自动发现本机 QMT / MiniQMT 客户端（运行中进程 + 安装目录扫描）。
    * 只读、无副作用；候选里已含自动读出的资金账号，可免手填。
+   *
+   * 实测本机全盘扫描 + 逐个探 xtquant 可导入性约 25s，默认 15s 会把「正在发现」
+   * 误报成「发现失败」；`retry: 0` 避免把 25s 级的扫描白跑两遍。
    */
-  autoDetect: () => http.get<AutoDetectResult>("/brokers/auto-detect"),
+  autoDetect: () =>
+    http.get<AutoDetectResult>("/brokers/auto-detect", { timeout: 60_000, retry: 0 }),
 
   runtimes: () => http.get<Record<string, unknown>>("/brokers/runtimes"),
 
+  /** 版本画像：内部会做一次客户端目录探测（可能 spawn 子进程），同样给足超时。 */
   versionInfo: (body: { client_path: string }) =>
-    http.post<VersionProfile>("/brokers/version-info", body),
+    http.post<VersionProfile>("/brokers/version-info", body, { timeout: 60_000 }),
 
   /**
    * 端到端可观测性快照（排障用）：宿主 ABI、随包桥接运行时、各连接状态与行情泵健康。

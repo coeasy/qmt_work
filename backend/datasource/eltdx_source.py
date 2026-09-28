@@ -58,7 +58,6 @@ from datasource.eltdx_utils import (  # noqa: F401
     _to_qmt,
     is_index_code,
 )
-from datasource.periods import to_eltdx_period
 from datasource.eltdx_boards import EltdxBoardMixin
 
 log = logging.getLogger("qmt_work.datasource.eltdx")

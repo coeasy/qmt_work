@@ -1,6 +1,8 @@
 {
   "algo_alert": [],
   "algo_slice": [],
+  "broker.connected": [],
+  "broker.disconnected": [],
   "condition_created": [],
   "condition_expired": [],
   "condition_failed": [],

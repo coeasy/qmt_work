@@ -386,7 +386,7 @@ def _classic_screen_runner(params: dict) -> Runner:
         # ★ 落库：定时选股的结果必须**有稳定的界面**。此前只存在于本作业的返回值里，
         #   用户只能去「任务运行时」翻一个巨大的 JSON 字段，翻不到就等于没有 ——
         #   「每天收盘后自动选股」这条链路事实上是跑给日志看的。
-        from app.screener.picks import bars_last_date, save_run
+        from app.screener.picks import save_run
 
         saved = save_run(
             results=results, scanned=len(bars_map), source="schedule",

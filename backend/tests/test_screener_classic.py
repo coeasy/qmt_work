@@ -8,7 +8,6 @@ from __future__ import annotations
 import pytest
 
 from app.screener.classic import (
-    CLASSIC_STRATEGIES,
     STRATEGY_IDS,
     compute_rps,
     evaluate_classic,
