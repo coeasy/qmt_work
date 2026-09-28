@@ -9,8 +9,10 @@ import hashlib
 import json
 import logging
 import os
+import shutil
 import sqlite3
 import threading
+import time
 from pathlib import Path
 
 # ``now_iso`` 的唯一实现在 ``core.clock``（V11 R8 收敛）。此处**保留同名 re-export**：
@@ -129,6 +131,12 @@ def _split_statements(sql: str) -> list[str]:
 
 class DB:
     """极简 SQLite 封装：线程安全、版本化迁移、自动建表。"""
+
+    #: 备份分块拷贝的页数（默认 4 KiB/页 ⇒ 每个 progress 间隔约 16 MB）。
+    #: 分块**只为让 `progress` 有机会按墙钟中止**「在推进但极慢」的备份；
+    #: 它救不了「源库被锁死」—— 那种情况 CPython 不回调 progress、只无限重试，
+    #: 真正的保护是 `backup_to()` 不再持有进程级写锁（见其 docstring）。
+    _BACKUP_CHUNK_PAGES = 4096
 
     def __init__(self, path: Path):
         self.path = path
@@ -436,31 +444,95 @@ class DB:
         return await asyncio.to_thread(self.prune_market_cache, keep)
 
     # ---------------- 阶段 3：一致性备份（sqlite3 backup API） ----------------
-    def backup_to(self, dst: Path) -> bool:
+    def backup_to(self, dst: Path, *, deadline_s: float = 300.0) -> bool:
         """用 sqlite3 backup API 生成**一致性**备份（含 WAL 中已提交但未 checkpoint 的数据）。
 
         相比逐文件 copy 主库 + -wal/-shm（可能拿到中间状态、且重启时 -wal 失效），
         `Connection.backup()` 在事务层面拷贝出单一完整文件，可直接单独使用/还原。
-        备份期间持有全局锁，避免写入并发导致快照不一致。
+
+        ★★ 2026-09-28（R31 第 31 轮，实测「启动备份把整个应用冻死」后重写）两处修正：
+
+        1. **不再持有进程级写锁 `_rw.write()`。** 旧实现是
+           ``with _rw.write(): self._conn.backup(dst_conn)``，理由是「备份期间持锁，
+           避免写入并发导致快照不一致」。但 CPython 的 ``Connection.backup()`` 一旦
+           源库被任何其它连接持锁，就按 ``SQLITE_BUSY`` **每 0.25 s 无限重试、且不回调
+           ``progress``**，调用方永远拿不回控制权。于是「一次卡住的备份」= **全进程
+           所有读写一起排队**。实测（py-spy dump 真实进程）：7 个线程中 6 个卡在
+           ``_rw.write()``，其中包含 lifespan 主协程（经 jobs reaper 的 ``upsert``）
+           ⇒ ``TestClient.__enter__`` 永不返回 ⇒ **应用永远起不来**。
+           一致性并不依赖这把**进程级**锁：SQLite 备份 API 自身就保证快照一致（源被
+           改动时自动更新/重启）。去掉它只损失「拷贝期间进程内完全无写入」这一不必要的
+           强约束，换来「卡住的备份只卡它自己」。
+
+        2. **有界 + 预检磁盘。** 分块拷贝（``pages``）配合 ``progress`` 回调按墙钟中止
+           （默认 300 s，**尽力而为**：受 CPython 实现粒度限制，且源库被锁死时 progress
+           根本不会被回调 —— 那种情况只能靠「不持进程锁 + 启动不等结果」保命）；
+           目标盘可用空间不足 ``1.5 × 库体积 + 64 MB`` 时直接放弃（**仅对 ≥64 MB 的
+           大库生效**）—— 实测 585 MB 主库 × ``keep=10`` 把 98% 满的盘又写进去 4.4 GB。
+           中止/失败时**清掉半份 ``.tmp``**，不再留下孤儿残片（历史遗留：
+           ``data/backups/`` 里 8/30、9/11、9/12、9/25 各有一份 0 字节或半截的
+           ``.db.tmp``，正是旧实现无界阻塞的化石）。
         """
+        tmp = ""
         try:
             dst = Path(dst)
             dst.parent.mkdir(parents=True, exist_ok=True)
             tmp = str(dst) + ".tmp"
             if os.path.exists(tmp):
                 os.remove(tmp)
+            need = self.file_size()
+            # 只对**大库**做磁盘预检：小库（<64 MB）所需余量远小于任何正常卷的
+            # 剩余空间，硬套 64 MB 安全垫反而会在紧张的 CI 盘上误判成「空间不足」。
+            if need >= (64 << 20):
+                free = shutil.disk_usage(str(dst.parent)).free
+                if free < need + need // 2 + (64 << 20):
+                    log.warning(
+                        "跳过数据库备份：目标盘可用 %.2f GB 不足（源库 %.2f GB）",
+                        free / 2 ** 30, need / 2 ** 30)
+                    return False
+            deadline = time.monotonic() + max(1.0, float(deadline_s))
+            aborted: list[str] = []
+
+            def _progress(_status: int, _remaining: int, _total: int) -> int:
+                if time.monotonic() > deadline:
+                    aborted.append("deadline")
+                    return 1     # 非零 ⇒ 请求 SQLite 中止本次备份
+                return 0
+
             dst_conn = sqlite3.connect(tmp)
+            done = False
             try:
-                with _rw.write():
-                    self._conn.backup(dst_conn)
-                dst_conn.commit()
+                try:
+                    self._conn.backup(dst_conn, pages=self._BACKUP_CHUNK_PAGES,
+                                      progress=_progress)
+                    done = True
+                except sqlite3.Error:
+                    if not aborted:
+                        raise
+                if done and not aborted:
+                    dst_conn.commit()
             finally:
                 dst_conn.close()
+            if aborted or not done:
+                log.warning("数据库备份超时中止（>%.0fs），已放弃本次备份", deadline_s)
+                return False
             os.replace(tmp, dst)   # 原子落位：进程崩溃不会留下半份备份
             return True
-        except sqlite3.Error as exc:
+        except (sqlite3.Error, OSError) as exc:
             log.warning("sqlite backup API 失败：%s", exc)
             return False
+        finally:
+            # 未走到 os.replace 就清掉半份 .tmp：别在备份目录里留孤儿残片
+            if tmp and os.path.exists(tmp):
+                with contextlib.suppress(OSError):
+                    os.remove(tmp)
+
+    def file_size(self) -> int:
+        """主库文件字节数（取不到返回 0）。供备份的磁盘预检使用。"""
+        try:
+            return int(os.path.getsize(str(self.path)))
+        except OSError:
+            return 0
 
     # ---------------- 审计日志（E4 脱敏 + D4 hash 链） ----------------
     def _last_audit_hash(self) -> str:

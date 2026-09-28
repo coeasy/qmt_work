@@ -764,6 +764,16 @@ def test_sidecar_written_is_valid_json(tmp_path):
 _BACKEND = Path(__file__).resolve().parent.parent
 
 
+def _code_only(src: str) -> str:
+    """只留**可执行代码**：剥掉注释与三引号字符串。
+
+    护栏必须扫代码、不能扫说明文字 —— 否则「注释里引用被禁写法」会让护栏自己
+    误报（本文件就踩过：新交代的 why 里逐字写了旧写法）。
+    """
+    text = "\n".join(line.split("#", 1)[0] for line in src.splitlines())
+    return re.sub(r'"""[\s\S]*?"""|\'\'\'[\s\S]*?\'\'\'', "", text)
+
+
 def test_db_backup_is_assembled_in_the_last_startup_phase():
     """★★ 启动备份必须装配在**最后一个**启动阶段，不能放回 watchdogs。
 
@@ -781,11 +791,66 @@ def test_db_backup_is_assembled_in_the_last_startup_phase():
     misc = (_BACKEND / "app" / "bootstrap" / "phase_misc.py").read_text(encoding="utf-8")
     watch = (_BACKEND / "app" / "bootstrap" / "phase_watchdogs.py").read_text(encoding="utf-8")
     assert "DBBackup(" in misc, "启动备份应装配在 phase_misc（最后一个启动阶段）"
-    assert "backup_once" in misc, "启动备份调用应在 phase_misc"
+    # ★ 2026-09-28（R31）：调用形态由 `backup_once` 改为 `spawn_startup_backup` ——
+    #   必须**后台线程、不等结果**。见下方 test_startup_backup_never_blocks_readiness。
+    assert "spawn_startup_backup" in misc, "启动备份调用应在 phase_misc"
     assert "DBBackup(" not in watch, (
         "phase_watchdogs 不是最后一个启动阶段：它之后还有 replay / misc 写库，"
         "在此采指纹会当场过期 ⇒ 每次启动都白复制一份整库")
     assert "state.db_backup" in misc, "db_backup 必须挂到 AppContext 供停机与占用展示读取"
+
+
+def test_startup_backup_never_blocks_readiness():
+    """★★ 回归护栏（2026-09-28 R31 实测「应用永远起不来」）：
+
+    启动阶段**绝不能 await 备份结果**。旧写法
+    ``await asyncio.to_thread(db_backup.backup_once, "startup")`` 虽然不占用事件循环，
+    但 lifespan 仍在等它返回；而 CPython 的 ``Connection.backup()`` 在源库被别的连接
+    持锁时按 ``SQLITE_BUSY`` 每 0.25 s **无限重试、不回调 progress** —— 调用方拿不回
+    控制权。于是「一次卡住的备份」= lifespan 永不完成 = 就绪广播与前端首屏永远等不到。
+
+    实测现场（py-spy dump 真实进程）：7 个线程里 6 个排队在 ``_rw.write()``，
+    其中就有 lifespan 主协程（经 jobs reaper 的 ``upsert``）；
+    ``TestClient.__enter__`` 永不返回，逐文件回归**卡在同一个文件上 > 10 分钟**。
+
+    修法就是「丢 daemon 线程 + 不等」，所以这里静态钉住「不许再 await 它」。
+    """
+    misc = (_BACKEND / "app" / "bootstrap" / "phase_misc.py").read_text(encoding="utf-8")
+    code = _code_only(misc)
+    assert "await asyncio.to_thread(db_backup.backup_once" not in code, (
+        "启动阶段又 await 备份了：备份卡住会让应用永远起不来（TECH_DEBT TD-25）")
+    assert "spawn_startup_backup" in code, (
+        "启动备份必须走 spawn_startup_backup（后台 daemon 线程、不等结果）")
+    svc = _code_only((_BACKEND / "gateway" / "db_backup.py").read_text(encoding="utf-8"))
+    assert "def spawn_startup_backup" in svc and "daemon=True" in svc, (
+        "spawn_startup_backup 必须是 daemon 线程，否则进程退出会被它拖住")
+    assert "asyncio.to_thread(self.backup_once" not in svc, (
+        "备份不得走 asyncio.to_thread：默认 ThreadPoolExecutor 的线程是**非 daemon** "
+        "的，concurrent.futures 在解释器退出时会 atexit join 它们 ⇒ 备份卡死时"
+        "`asyncio.wait_for` 能超时返回、但**进程仍然退不出去**（实测被钉死到强杀）。"
+        "必须用自建 daemon 线程（_run_backup_bounded）")
+
+
+def test_backup_to_never_holds_the_process_write_lock():
+    """★★ 回归护栏（2026-09-28 R31 冻机根因）：``DB.backup_to`` 不得把
+    ``Connection.backup()`` 包在 ``_rw.write()`` 里。
+
+    为什么必须**静态**钉住：这条耦合在动态测试里极难稳定复现（要恰好撞上「备份卡住
+    + 其它线程想写库」），但代价是**全进程冻死**。SQLite/CPython 的
+    ``Connection.backup()`` 在源库被任何其它连接持锁时按 ``SQLITE_BUSY`` 每 0.25 s
+    无限重试且**不回调 progress** —— 调用方拿不回控制权，于是「持锁 + 无界等待」
+    就等于「整个应用停摆」。一致性由 SQLite 备份 API 自身保证，进程级锁并非必需。
+    """
+    src = (_BACKEND / "core" / "db.py").read_text(encoding="utf-8")
+    assert "def backup_to(" in src, "core/db.py 里找不到 backup_to"
+    body = _code_only(src.split("def backup_to(", 1)[1].split("\n    def ", 1)[0])
+    assert "_rw.write()" not in body, (
+        "backup_to 又持有了进程级写锁 ⇒ 备份卡住会冻死全进程（TECH_DEBT TD-25）")
+    assert "progress=" in body and "deadline" in body, (
+        "backup_to 必须有墙钟上限（分块 pages + progress 回调）")
+    assert "shutil.disk_usage" in body, (
+        "backup_to 必须有磁盘可用空间预检：实测 585 MB 主库 × keep=10 把 98% 满的盘"
+        "又写进去 4.4 GB")
 
 
 def test_last_phase_really_is_last():

@@ -550,6 +550,62 @@
 
 ---
 
+### TD-25 「有界阻塞 + 持全局锁」的启动备份 ⇒ **应用永远打不开**（**R31 已闭环**，★ 最严重的一次「静默冻死」）
+
+- **现象 A（用户可见）**：双击应用长时间无反应 / 永远打不开。就绪广播、前端首屏一起等。
+- **现象 B（开发侧，同一个 bug 的另一种脸）**：逐文件后端回归**卡死在某一个文件上**
+  > 10 分钟不推进；`pytest` 已把汇总写进日志（说明用例其实跑完了），但进程不退出。
+- **现场证据（py-spy dump 真实进程，非推测）**：7 个线程里 **6 个排队在
+  `core/db.py:98` 的 `_rw.write()`**，其中包含：
+  ```
+  Thread 10152  backup_to (core\db.py:455) → self._conn.backup(dst_conn)   ← 持有写锁
+  Thread  7356  upsert → _persist → reap_expired → jobs._loop              ← 等锁（lifespan 主协程）
+  Thread 15080/15320/14772/16328  query → query_one                        ← 等锁
+  MainThread    TestClient.__enter__ (starlette/testclient.py:698)         ← 等 portal = 永不返回
+  ```
+  另有一个独立进程在做 `BEGIN IMMEDIATE` 时得到 `database is locked` —— 证实**确实有写锁被占**；
+  杀掉该进程后**立刻**恢复。`data/backups/` 里 8/30、9/11、9/12、9/25 各留一份 0 字节/半截的
+  `.db.tmp`，正是历次被强杀的化石。
+- **根因（两个缺陷叠加）**：
+  1. **`core/db.py::DB.backup_to()` 把 `Connection.backup()` 包在 `with _rw.write():` 里。**
+     CPython 的 `Connection.backup()` 一旦源库被**任何**其它连接持锁，就按 `SQLITE_BUSY`
+     **每 0.25 s 无限重试，且不回调 `progress`** —— 调用方永远拿不回控制权（Python API
+     不暴露 `SQLITE_BUSY`）。于是「一次卡住的备份」= 持有进程级写锁无限期 = **全进程读写一起排死**。
+  2. **`app/bootstrap/phase_misc.py` 在启动阶段 `await asyncio.to_thread(backup_once, "startup")`。**
+     虽不占用事件循环，但 **lifespan 仍在等它的结果** ⇒ 备份卡住 ⇒ lifespan 永不完成 ⇒
+     `/ready` 永远 503、窗口永远白着。
+- **放大条件（本机实测，说明为何偏偏这次爆）**：主库 **585 MB**，`keep=10`、
+  `max_total_mb=4096`，**每次应用启动**都复制一份整库 ⇒ 11 分钟内连写 8 份（**4.4 GB**），
+  卷已 **98% 满（剩 15 GB）**。此外 `_r3d` 那轮「全绿」是假象：safe-delete 护栏（TD-23）
+  把 `_prune()` 拦成 `SystemExit` ⇒ **备份根本没真的落盘**；一旦按 TD-23 正解关掉护栏，
+  备份真的开始写，这个缺陷才现形。
+- **处置（已落地，含 3 道静态护栏）**：
+  1. `backup_to()` **不再持进程级写锁**（一致性由 SQLite 备份 API 自身保证），
+     分块 `pages` + `progress` 按墙钟中止（尽力而为）、**磁盘可用空间预检**
+     （仅对 ≥64 MB 大库：`free < 1.5×库 + 64 MB` 就放弃）、中止/失败**清掉半份 `.tmp`**；
+  2. 启动备份改 `spawn_startup_backup()`：**独立 daemon 线程 + 不等结果**；
+  3. 周期/停机备份改 `_run_backup_bounded()`：**自建 daemon 线程**，不用
+     `asyncio.to_thread`。
+- **★ 第 3 点的独立坑（务必记住）**：`asyncio.to_thread` 用的是默认
+  `ThreadPoolExecutor`，其线程是**非 daemon** 的，`concurrent.futures` 在解释器退出时
+  会 `atexit` join 它们 ⇒ 备份卡死时 `asyncio.wait_for` **能**超时返回，
+  但**进程仍然退不出去**（实测 `timeout 300` 强杀前一直不退出 = 用户点「关闭」关不掉）。
+  凡是「可能无界阻塞」的活都**不能**丢给 `asyncio.to_thread`。
+- **验收（可复现）**：
+  - 正常：`lifespan 9.40s` → `GET /ready` **200**，后台线程照常产出 585 MB 备份；
+  - **把 `backup_once` 换成永久阻塞**（模拟卡死）：`lifespan 9.65s` → `/ready` **200** ✔，
+    卡死线程为 `daemon=True`，进程可正常退出。
+- **护栏（静态，防回归）**：`tests/test_db_backup_policy.py`
+  `test_backup_to_never_holds_the_process_write_lock` /
+  `test_startup_backup_never_blocks_readiness`（含「禁用 `asyncio.to_thread(backup_once)`」）。
+  ⚠️ 护栏扫的是**剥掉注释与字符串后的代码**（`_code_only()`）—— 否则「解释里引用被禁写法」
+  会让护栏自己误报（这次就踩了）。
+- **状态**：`已闭环`
+- **遗留**：测试套件本身会被启动备份打到（154 个文件 × 585 MB）；回归时用
+  `QMT_DB_BACKUP_ENABLED=0` 跑。正解是在 `tests/conftest.py` 里默认关闭（见 §一 遗留）。
+
+---
+
 ## 二、本轮（R26–R29）闭环情况
 
 | 条目 | 对应方案项 | 验收判据 | 状态 |
@@ -610,4 +666,4 @@
 
 ---
 
-*最后更新：2026-09-28（R31 第 31 轮：QMT 客户端升级后交易连不上根因闭环 + 前后端贯通；新增 TD-23 safe-delete 护栏陷阱、TD-24 vitest 静默丢文件）*
+*最后更新：2026-09-28（R31 第 31 轮：QMT 客户端升级后交易连不上根因闭环 + 前后端贯通 + 数据库备份「静默冻死」根因闭环；新增 TD-23 safe-delete 护栏陷阱、TD-24 vitest 静默丢文件、TD-25 有界阻塞+持全局锁的备份）*

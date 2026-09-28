@@ -42,6 +42,7 @@ import logging
 import os
 import shutil
 import sqlite3
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -52,6 +53,9 @@ log = logging.getLogger("qmt_work.db_backup")
 
 #: 指纹旁挂文件（放在 backups/ 里，点号开头、非 .db ⇒ 不会被 list_backups 当备份）
 _FP_FILE = ".last_backup.json"
+
+#: 停机备份的最长等待秒数：备份卡住时**也必须能退出**（否则进程永远关不掉）。
+_SHUTDOWN_BACKUP_TIMEOUT = 120.0
 
 #: 主库目录里**属于主库自身**的文件名（其余同名派生文件视为「未纳管的库副本」）
 _MANAGED_DB_NAMES = {"app.db", "app.db-wal", "app.db-shm"}
@@ -126,6 +130,12 @@ class DBBackup:
         self.max_total_bytes = max(0, int(mb * 1024 * 1024)) if mb > 0 else 0
         self._task: asyncio.Task | None = None
         self._stop = False
+        #: 备份目录写入互斥：启动备份（后台线程）/ 周期备份 / 停机备份可能同时被触发，
+        #: 并发写同一目录会重复复制整库（585 MB 起）且让 `_prune` 看到中间态。
+        #: 用 RLock：`backup_once` 自己取一次锁，启动线程只是「调用它」。
+        self._io_lock = threading.RLock()
+        #: 启动备份的线程句柄（见 `spawn_startup_backup`）。
+        self._startup_thread: threading.Thread | None = None
         #: 最近一次 backup_once 的**真实结果**：created / skipped / failed / idle。
         #: 返回值是 `str | None`（None 既可能是「跳过」也可能是「失败」），
         #: 调用方要区分必须读这里 —— 把「跳过」当成「失败」会误报磁盘故障。
@@ -393,6 +403,10 @@ class DBBackup:
         用户连点两次「立即备份」必然白复制两份整库（实测 1.14GB × 2）。
         回调异常只记日志，不影响备份结果。
         """
+        with self._io_lock:
+            return self._backup_once_locked(reason, after_create)
+
+    def _backup_once_locked(self, reason: str, after_create) -> str | None:
         if not self.db_path.exists():
             self.last_status = {"action": "failed", "reason": reason,
                                 "detail": f"主库文件不存在：{self.db_path}"}
@@ -546,6 +560,63 @@ class DBBackup:
         }
 
     # ---------------- 周期任务 ----------------
+    # ---------------- 启动备份：后台线程，绝不阻塞就绪 ----------------
+    def spawn_startup_backup(self, reason: str = "startup") -> threading.Thread:
+        """把启动备份丢进**独立 daemon 线程**并立即返回（不等结果）。
+
+        ★★ 2026-09-28（R31 第 31 轮）：此前启动路径是
+        ``await asyncio.to_thread(db_backup.backup_once, "startup")`` —— 虽不阻塞事件
+        循环，但 lifespan **仍在等它的结果**。而 SQLite 的 ``Connection.backup()`` 一旦
+        源库被别的连接持锁，就按 ``SQLITE_BUSY`` 每 0.25 s **无限重试**（CPython 内部
+        行为，不向调用方暴露）。于是一次卡住的备份让整个 lifespan 永不完成：
+        应用表现为「双击没反应 / 永远打不开」，测试里表现为**逐文件回归卡死在某一个
+        文件上**（实测卡 > 10 分钟；py-spy dump 显示 7 个线程里 6 个排队在
+        ``_rw.write()``，其中就有 lifespan 主协程）。
+
+        改法：daemon 线程 + 不等待 ⇒ 备份再慢也不挡就绪广播与前端首屏；
+        结果照旧落在 ``last_status``，界面「备份」区块能如实显示 created/skipped/failed。
+        """
+        prev = self._startup_thread
+        if prev is not None and prev.is_alive():
+            return prev          # 已有在跑的启动备份：别再拉一份整库复制
+        t = threading.Thread(target=self._guarded_backup, args=(reason,),
+                             name="db-backup-startup", daemon=True)
+        self._startup_thread = t
+        t.start()
+        return t
+
+    def _guarded_backup(self, reason: str) -> None:
+        try:
+            self.backup_once(reason)
+        except Exception as exc:  # noqa: BLE001 备份线程绝不能把异常抛到天上
+            log.warning("备份线程异常（%s）：%s", reason, exc)
+
+    async def _run_backup_bounded(self, reason: str,
+                                 timeout: float = _SHUTDOWN_BACKUP_TIMEOUT) -> bool:
+        """在**独立 daemon 线程**里跑一次备份，最多等 ``timeout`` 秒。
+
+        ★ 为什么不用 ``asyncio.to_thread``（2026-09-28 R31 实测）：它跑在默认
+        ``ThreadPoolExecutor`` 上，而 ``concurrent.futures`` 的线程是**非 daemon** 的，
+        解释器退出时会 ``atexit`` join 它们。备份一旦卡死（SQLite 的
+        ``Connection.backup()`` 拿不到锁就按 ``SQLITE_BUSY`` 无限重试），
+        ``asyncio.wait_for`` 虽然能超时返回，**进程却仍然退不出去** —— 被 atexit 的
+        join 钉死（实测：探针在 ``timeout 300`` 强杀前始终不退出）。
+        自己的 daemon 线程随进程结束而消失，这个「关不掉」的口子才堵上。
+        """
+        t = threading.Thread(target=self._guarded_backup, args=(reason,),
+                             name=f"db-backup-{reason}", daemon=True)
+        t.start()
+        waited = 0.0
+        step = 0.1
+        while t.is_alive() and waited < timeout:
+            await asyncio.sleep(step)
+            waited += step
+        if t.is_alive():
+            log.warning("备份（%s）超过 %.0fs 仍未结束，放弃等待（daemon 线程随进程结束）",
+                        reason, timeout)
+            return False
+        return True
+
     async def start(self) -> None:
         """启动后台周期备份任务（事件循环内）。"""
         self._stop = False
@@ -560,7 +631,8 @@ class DBBackup:
                     break
                 # ★ 一致性复制是**同步重活**（1GB+ 主库要好几秒）：必须丢线程，
                 #   否则周期任务一到点，整个事件循环（WS 广播 + 全部 HTTP）跟着卡住。
-                await asyncio.to_thread(self.backup_once, "periodic")
+                #   用 daemon 线程 + 有界等待（理由见 _run_backup_bounded）。
+                await self._run_backup_bounded("periodic")
         except asyncio.CancelledError:
             pass
         except Exception as exc:  # noqa: BLE001
@@ -576,4 +648,11 @@ class DBBackup:
             except (asyncio.CancelledError, Exception):  # noqa: BLE001
                 pass
             self._task = None
-        await asyncio.to_thread(self.backup_once, "shutdown")
+        # 启动备份还没落地时别再补一次：两份整库复制会互相排队（而 _io_lock 是 RLock，
+        # 前者卡住会让后者白等满超时）。
+        if self._startup_thread is not None and self._startup_thread.is_alive():
+            log.info("启动备份仍在进行，跳过停机备份")
+            return
+        # ★ 停机备份同样不能无界等待：`Connection.backup()` 卡住时（源库被锁）进程
+        #   必须仍能退出，否则「关不掉的窗口」比「没备份」更糟。超时只记日志。
+        await self._run_backup_bounded("shutdown")

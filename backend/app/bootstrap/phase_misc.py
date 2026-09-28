@@ -158,9 +158,15 @@ async def setup(app: FastAPI) -> dict:
             interval=settings.db_backup_interval, db=state.db,
             max_total_mb=settings.db_backup_max_total_mb,
             min_keep=settings.db_backup_min_keep)
-        # 1GB+ 主库的一致性复制要数秒：丢线程，否则整个启动被它拖住
-        # （就绪广播、前端首屏全在等它）。
-        await asyncio.to_thread(db_backup.backup_once, "startup")
+        # ★ 2026-09-28（R31 第 31 轮，实测冻机后重写）：**绝不等备份结果**。
+        #   旧写法 `await asyncio.to_thread(db_backup.backup_once, "startup")` 虽不占用
+        #   事件循环，但 lifespan 仍在等它返回；而 SQLite 的 `Connection.backup()` 在源库
+        #   被别的连接持锁时会按 SQLITE_BUSY 每 0.25s **无限重试**（CPython 内部行为），
+        #   于是一次卡住的备份 ⇒ lifespan 永不完成 ⇒ **应用永远起不来**（实测：7 个
+        #   线程里 6 个排队在 `_rw.write()`，就绪广播、前端首屏全在等它）。
+        #   改成后台 daemon 线程：备份再慢也不挡就绪；结果由 `state.db_backup.last_status`
+        #   如实呈现（created/skipped/failed），用户点「立即备份」时的口径不变。
+        db_backup.spawn_startup_backup("startup")
         await db_backup.start()
         # ★ 日志必须同时报「份数」与「体积」两个上限：只报 keep 会让人以为备份占用
         #   有界，而实测 1.14GB 主库 × 10 份 = 11GB（磁盘真被吃满过）。

@@ -4,7 +4,7 @@
 
 所有行情 / 交易 / 账户接口均通过真实券商 SDK 调用，**零 mock**：未连接券商时端点返回 HTTP 503 + 可操作引导，绝不返回假数据、绝不用空列表冒充。
 
-- 版本：`0.3.5`（单一真源为仓库根 `VERSION`，构建时随包分发并由 `build_exe.py` 校验）
+- 版本：`0.3.6`（单一真源为仓库根 `VERSION`，构建时随包分发并由 `build_exe.py` 校验）
 - 许可证：Apache 2.0
 - 平台：Windows 10 / 11（迅投系券商依赖 xtquant 的 Windows 二进制，须与券商客户端**同机**运行）
 
@@ -448,7 +448,7 @@ print(httpx.get(f"{BASE}/paper/positions", headers=HEAD).json())
 
 | 层级 | 命令 | 覆盖范围 |
 |------|------|----------|
-| 后端单测 | `cd backend && for f in tests/test_*.py; do python -m pytest "$f" -q -p no:cacheprovider; done` | 154 个 `test_*.py`，1698 个用例 |
+| 后端单测 | `cd backend && for f in tests/test_*.py; do python -m pytest "$f" -q -p no:cacheprovider; done` | 154 个 `test_*.py`，1700 个用例 |
 | 后端冒烟 | `python backend/tests/smoke2.py` | REST 主要端点 + 错误语义（**需先起后端**；默认连 `data/app.db`，检测到真实券商连接时自动跳过 3 条「未连接券商 → 503」断言并提示改用下方客户端测试做权威验证） |
 | 前端类型检查 | `cd frontend-next && npm run typecheck` | TypeScript strict 零错误 |
 | 前端单测 | `cd frontend-next && npm test` | vitest |
@@ -490,7 +490,20 @@ print(httpx.get(f"{BASE}/paper/positions", headers=HEAD).json())
 
 ### 数据备份
 
-启动 / 周期 / 关闭前各执行一次 SQLite 备份，保留最近 `QMT_DB_BACKUP_KEEP`（默认 10）份。
+启动 / 周期 / 关闭前各执行一次 SQLite 备份，保留最近 `QMT_DB_BACKUP_KEEP`（默认 10）份，
+并另受总体积上限 `QMT_DB_BACKUP_MAX_TOTAL_MB`（默认 4096）与下限份数
+`QMT_DB_BACKUP_MIN_KEEP`（默认 2）约束（取更严者，但绝不少于下限）。
+
+备份用 SQLite 在线备份 API 生成**单个一致性文件**。三点硬保证：
+
+- **启动不等备份**：备份跑在独立后台线程（daemon），就绪广播与首屏**不**受它影响 ——
+  即使备份卡死，应用照常启动、`/ready` 照常 200（v0.3.6 修复，见 `docs/TECH_DEBT.md` TD-25）；
+- **有界**：单次备份有墙钟上限；目标盘可用空间不足 `1.5 × 库体积 + 64 MB`（仅对 ≥64 MB 的库）
+  时直接放弃，不会把磁盘写满；中止时清掉半份 `.tmp`；
+- **不挡退出**：周期 / 停机备份走自建 daemon 线程并带上限，备份卡住也能关得掉。
+
+> 开发/CI 提示：主库较大（数百 MB）时每个用到 `app_client` 的测试文件都会在启动时
+> 后台复制一份整库。跑全量回归请设 `QMT_DB_BACKUP_ENABLED=0`。
 
 ### 自动更新
 
@@ -516,7 +529,7 @@ qmt_work/
 │  ├─ connectors/ plugins/ sync/   # 外部连接器 / 插件内核 / WebSocket 同步引擎
 │  ├─ tools/ runtimes/  # 因子策略工具 / 捆绑 Python 运行时（cp311）
 │  ├─ data/ static/ dist/   # SQLite / 前端构建产物 / PyInstaller 产物
-│  ├─ tests/            # 154 个 test_*.py（1698 用例）+ 冒烟测试 smoke2.py
+│  ├─ tests/            # 154 个 test_*.py（1700 用例）+ 冒烟测试 smoke2.py
 │  ├─ scripts/          # 门禁脚本（许可 / 能力漂移 / 契约生成 / 架构校验）
 │  └─ build_exe.py      # EXE 打包脚本（含 static 闸门）
 ├─ frontend-next/         # 主前端：React 18 + Vite 5 + TS 5 strict（已退役旧 frontend/）
@@ -694,8 +707,22 @@ quant session 5, pid 28844 not allowed, return
 
 1. **包内静态资源是否完整**：`build_all.sh` 打包后会打印 `包内 static: N / M 个文件` 与「入口 xxx 在包内」。若文件数不一致或入口缺失，用 `--clean-dist` 彻底清理后重打包。
 2. **是否发生半写入打包**：vite 先清 `assets` 再逐块写入，PyInstaller 若在半写入时冻结清单 → 产出的包只含少量分片，且 **exit code 仍为 0、日志无报错**。判断依据：`backend/build/qmt_work/Analysis-00.toc` 的 mtime 早于前端构建完成时间。`build_all.sh` 的 `verify_static_ready` 与 `build_exe.py` 的同类闸门就是为此加的。
-3. **浏览器旧 chunk 缓存**：SPA 重部署后浏览器持有旧 entry chunk，其引用的旧 hash 分片已被清理 → `Failed to fetch dynamically imported module`。`pagesRegistry.jsx` 的 `lazyWithRetry` 会自动整页刷新一次拉取最新构建（`sessionStorage` 守卫防循环）。
-4. **截图空白 ≠ 内容为空**：headless Chromium 加 `--disable-gpu` 后滚动容器 `.pane-leaf-body` 不被光栅化，截图 / 像素采样恒空白。必须用 DOM / hit-test（`elementsFromPoint` + `getBoundingClientRect`）交叉验证，这也是 `tests/render_smoke*.mjs` 已去掉 `--disable-gpu` 的原因。
+3. **浏览器旧 chunk 缓存**：SPA 重新构建部署后，若浏览器仍持有旧 entry chunk，其引用的旧 hash 分片已被清理 → `Failed to fetch dynamically imported module`。当前前端**没有**自动整页重试守卫，请强制刷新（`Ctrl+Shift+R`）或清空壳内缓存后重开。
+4. **截图空白 ≠ 内容为空**：headless Chromium 加 `--disable-gpu` 后滚动容器 `.pane-leaf-body` 不被光栅化，截图 / 像素采样恒空白。必须用 DOM / hit-test（`elementsFromPoint` + `getBoundingClientRect`）交叉验证。
+</details>
+
+<details>
+<summary><b>双击应用长时间没反应 / 永远打不开，或点「关闭」关不掉</b></summary>
+
+**v0.3.6 已修复**，若你在旧版本遇到，请升级。两个成因都已根治（详见 `docs/TECH_DEBT.md` TD-25）：
+
+- **打不开**：启动阶段会做一次数据库备份。旧实现把它包在进程级写锁里、又在启动流程中**等它返回**；
+  而 SQLite 的在线备份在拿不到库锁时会**无限重试** ⇒ 一次卡住的备份让整个启动流程永远走不完。
+  现在备份跑在独立 daemon 线程、启动**不等它**：实测即使把备份改成永久卡死，应用仍能在约 10 秒内就绪（`/ready` 返回 200）。
+- **关不掉**：周期 / 停机备份过去走 `asyncio.to_thread`（默认线程池的线程是**非 daemon** 的，
+  解释器退出时会 join 它们）⇒ 备份卡死会让进程无法退出。现在改走自建 daemon 线程并带上限。
+
+若仍遇到，请附上 `<数据目录>/logs/` 里的后端日志与 `data/backups/` 目录列表。
 </details>
 
 <details>
