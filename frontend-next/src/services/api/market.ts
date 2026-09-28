@@ -489,9 +489,12 @@ export const marketApi = {
   /**
    * 批量快照。优先命中 SyncEngine 已订阅缓存，缺失项再打源补齐。
    *
-   * ⚠️ 同 `quote`：当前无调用方；且 `/market/quotes` 在补齐失败时会**静默丢弃**
-   * 缺项（`routes/market.py` 的 `except: return None`），只能靠 served/requested
-   * 差值发现 —— 启用前需让调用方显式处理缺项。
+   * ⚠️ 后端在补齐失败时会**静默丢弃**缺项（`routes/market.py` 的
+   * `except: return None`），只能靠 served/requested 差值发现 —— 调用方须显式
+   * 处理缺项，不得假设返回长度 == 请求长度。
+   *
+   * 调用方：`hooks/useLiveQuotes.ts`（报价牌命脉）。**不要删除**。
+   * （注：无调用方的是单只的 `quote`，不是本方法。）
    */
   quotes: (codes: string[], connId = "", source = "auto") =>
     http.post<QuotesResponse>("/market/quotes", { codes, conn_id: connId, source }),

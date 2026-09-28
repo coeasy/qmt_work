@@ -97,6 +97,23 @@ async def shutdown(app: FastAPI) -> None:
     if state.condition_engine:
         await state.condition_engine.stop()
 
+    # 8b. 算法单引擎 + 策略运行时 —— ★必须在 db.close() **之前**（2026-09-28 补漏）
+    #      二者都是 create_task 起的常驻循环，且链路末端都会**向柜台真实下单**
+    #      （algo 切片下单 / strategy `_maybe_order`），此前停机表里根本没有它们：
+    #        · `db.close()` 之后协程仍可能写库；
+    #        · 更致命：用户已要求停机，却仍可能有委托落到柜台 —— 资金安全级缺口。
+    #      顺序要求同 2b：先停所有会写库 / 会下单的后台协程，最后才关资源。
+    if getattr(state, "algo_engine", None) is not None:
+        try:
+            await state.algo_engine.stop()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("algo_engine stop failed: %s", exc)
+    if getattr(state, "strategy_runtime", None) is not None:
+        try:
+            await state.strategy_runtime.stop_all()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("strategy_runtime stop failed: %s", exc)
+
     # 9. 行情缓存定时
     if getattr(state, "market_sync", None) is not None:
         await state.market_sync.stop()

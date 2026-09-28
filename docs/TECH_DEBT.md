@@ -669,7 +669,41 @@
 | 作业记录只增不减 | R26 | 同上 |
 | 组合净值按索引加总（日期混叠） | R29 (TD-05) | `test_portfolio_engine.py::test_legacy_portfolio_backtest_aligns_dates_not_indices` |
 | 分钟线被 `[:10]` 压成一天 | R29 (TD-06) | `test_align_panel_keeps_intraday_distinct` |
+| 三个引擎 `_emit` 同步调用 `ws_manager.broadcast`(async) ⇒ 10 类事件丢推送 | R34 (A/B) | `tests/test_emit_event.py`（AST 扫描全量 + engines 范围，含注入探针自证） |
+| 停机漏停 `algo_engine` / `strategy_runtime`（两者都能真实下单） | R34 (C) | `app/bootstrap/shutdown.py` 于 `db.close()` 前显式 stop |
+| 冷仓搬移 `while True` 无上限 + 启动期线程 ⇒ 起不来也退不出 | R34 (D) | `datasource/cold_store.py` 有上限 + `phase_db` daemon 线程有界等待 |
+| 账户快照循环 sleep 在 `try` 外 ⇒ 配置非法即打死循环 | R34 (E) | 间隔与 sleep 入 `try`，非有限值回退默认 |
+| 批处理缓冲无界 + 循环单点异常即死 ⇒ OOM | R34 (F/M) | `deque(maxlen=20000)`；循环体 `try/except` 续跑；清理块移出 `continue` |
+| `bridge.call` 无超时 ⇒ 挂死调用占满 4 线程池级联冻结 | R34 (G) | `QMT_BRIDGE_CALL_TIMEOUT=30` 硬超时 |
+| POV 算法单无 `max_idx` ⇒ 无成交量回报时无限重复下单 | R34 (H) | 补同源有界退出 `max(slices*5, 20)` |
+| 手动备份 `asyncio.to_thread` 非 daemon 无超时（TD-25 同族） | R34 (I) | daemon 线程 + `QMT_MANUAL_BACKUP_TIMEOUT` |
+| `AlertEngine` 创建时 `ws_manager` 未就绪 ⇒ `alert` 死路径 | R34 (J) | `phase_engines` 就绪后补接 `_on_event` |
+| WAL checkpoint / 回放 **静默吞** 异常 ⇒ 恢复失败却报成功 | R34 (K) | 补计数与告警；`_corrupt_lines` 计数供读路径告警 |
+| 任务派发循环无保护 + 悬垂 id `KeyError` ⇒ 定时任务永久 queued | R34 (L) | 派发体 `try/except` + 退避；剔除悬垂 id |
+| `limitup._triggered` 不按交易日重置 ⇒ 昨日触发票今日永不再报 | R34 (N) | `_roll_day()` 跨日清空触发记录 + K 线缓冲 |
+| `limitup` 轮询 `interval` 无下限（用户 POST 直传）⇒ CPU 打满 | R34 (O) | `sleep(max(0.1, interval))` |
+| 对账循环异常路径可能空转（sleep 位置） | R34 (P) | 循环体统一 `except` + sleep，`CancelledError` 上抛 |
+| `alert` 走 dict 形态 `emit_event` ⇒ 内省认不出 ⇒ 漏出 WS 基线 | R34 (Q) | 调用点改三参标准形态；内省兼容 dict 字面量（基线 29→30 键） |
+| `signal_confirm_ttl` 未声明 ⇒ 用户不可配置（配置漂移） | R34 (R) | 补入 `Settings` 与默认值 |
+| `_RWLock.write()` 无超时 ⇒ `db.close()` 停机永久卡住（TD-25 同族） | R34 (S) | `write(timeout=…)`；`close()` 有界获取，超时跳过 checkpoint |
+| `account_snapshot` / `moneyflow_cache` 无保留策略 ⇒ 主库无界膨胀 | R34 (T) | 90 天 / 30 天保留 + 迁移 28 补 `ts` 索引 |
+| 前端 `sectorStocks` 参数名 `code` ≠ 后端 `sector` ⇒ 静默错误数据 | R34 (U) | 参数名对齐；记入门禁盲区 |
+| CI 缺嵌入 Python 运行时却「构建成功」 | R34 (C1/C2) | `QMT_BUILD_REQUIRE_RUNTIMES=1` 硬闸门 + `fetch_runtimes --install-deps --strict` |
+| `build-client.yml` 上传 `release/*`（实际产物在 `dist-electron`）⇒ 资产恒空 | R34 (C3) | 上传路径修正 |
 
 ---
 
-*最后更新：2026-09-28（R31 第 31 轮：QMT 客户端升级后交易连不上根因闭环 + 前后端贯通 + 数据库备份「静默冻死」根因闭环；新增 TD-23 safe-delete 护栏陷阱、TD-24 vitest 静默丢文件、TD-25 有界阻塞+持全局锁的备份）*
+## 五、通用纪律（由 TD 归纳，逐条可 grep 验证）
+
+| 纪律 | 由来 | 验证方式 |
+|------|------|----------|
+| **停机路径禁止无界等待**：任何 `db.close()` / 线程 join / 锁获取 / `subprocess.wait` 必须有超时；拿不到就跳过优化步骤，绝不阻塞进程退出 | TD-25、R34 (S)(D) | `grep -n "\.wait()\|_rw.write()\|to_thread" backend/core/db.py backend/app/bootstrap/` 应无裸无超时获取 |
+| **事件派发只走 `core.emit.emit_event`**，且调用点用**三参标准形态**（第二参字符串常量），否则契约内省会漏记 | R33 (F)、R34 (Q) | `tests/test_emit_event.py`（AST 全量扫描） |
+| **所有常驻循环体必须整体 `try/except`**（`CancelledError` 上抛），并在**异常路径上也 sleep**；否则单点异常会静默打死整条数据链 | R34 (E)(F)(P) | `grep -n "while True" -A 3` 逐条人工核（无自动门禁） |
+| **hot path 的缓冲/缓存必须有上限**（`deque(maxlen=…)` 或显式保留策略） | R34 (F)(T) | `grep -n "\.append(" backend/sync/__init__.py` 只应出现在有界容器上 |
+| **「零引用」≠「孤儿」**：判定前必须回查历史决策（`docs/*_第NN轮_*.md`），项目里存在**刻意的扩展点** | R34 (Y) | 报告 `PagePlaceholder.tsx` 即为反例 |
+| **契约门禁只核路径存在性，不核参数名/取值** —— 参数漂移是盲区，须人工比对签名 | R34 (U) | 尚无自动门禁（见 §建议 1） |
+
+---
+
+*最后更新：2026-09-29（R34 第 34 轮：GitHub 发布→自动构建三处断链闭环 + 三遍深度审计 30 处修复 + 文档全面校准；新增 §五「通用纪律」——停机路径禁止无界等待、事件派发三参形态、常驻循环必须 try/except、hot path 缓冲必须有界、「零引用≠孤儿」）*

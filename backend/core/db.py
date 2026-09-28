@@ -13,6 +13,7 @@ import shutil
 import sqlite3
 import threading
 import time
+from datetime import datetime, timedelta
 from pathlib import Path
 
 # ``now_iso`` 的唯一实现在 ``core.clock``（V11 R8 收敛）。此处**保留同名 re-export**：
@@ -90,16 +91,39 @@ class _RWLock:
                     self._cond.notify_all()
 
     @contextlib.contextmanager
-    def write(self):
+    def write(self, timeout: float | None = None):
+        """获取写锁。``timeout`` 为 None 时无限等待（默认，保持既有语义）；
+        给定秒数时超时抛 :class:`TimeoutError`。
+
+        ★ 2026-09-29 补：停机路径必须用有界等待。此前的 `write()` 只有
+        `self._cond.wait()`（无超时）——若某后台线程正持写锁做慢操作（大事务、
+        EOD 落库、备份），`DB.close()` 会**永久卡住**，表现为「进程关不掉」
+        （TD-25 同族：无界等待 = 可冻死进程）。``close()`` 现改走有界获取。
+        """
         # `_writers_waiting` 仅保留为观测字段（写者排队数）：自 read() 改为
         # 「读者不让路」后，它不再参与读者调度——此前读者一见有写者排队就让路，
         # 在持续写负载下会把读者饿死（详见 read() 注释）。
+        acquired = False
         with self._cond:
             self._writers_waiting += 1
-            while self._writer or self._readers:
-                self._cond.wait()
+            if timeout is None:
+                while self._writer or self._readers:
+                    self._cond.wait()
+                acquired = True
+            else:
+                deadline = time.monotonic() + max(0.0, float(timeout))
+                while self._writer or self._readers:
+                    remain = deadline - time.monotonic()
+                    if remain <= 0:
+                        break
+                    self._cond.wait(remain)
+                acquired = not (self._writer or self._readers)
             self._writers_waiting -= 1
-            self._writer = True
+            if acquired:
+                self._writer = True
+        if not acquired:
+            raise TimeoutError(
+                f"获取数据库写锁超时（{timeout}s）：可能有长写事务或读者未释放")
         try:
             yield
         finally:
@@ -226,9 +250,15 @@ class DB:
         if self._closed:
             return False
         self._closed = True
+        # 停机路径上的锁必须有界：无界等待会让进程「关不掉」（TD-25 同族）。
+        # checkpoint 只是优化——拿不到锁/超时就跳过，WAL 会在下次打开时自愈，
+        # 数据本身已落盘（-wal 文件仍在，不会丢）。
+        _close_to = float(os.environ.get("QMT_DB_CLOSE_TIMEOUT", "5"))
         try:
-            with _rw.write():
+            with _rw.write(timeout=_close_to):
                 self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        except TimeoutError as exc:
+            log.warning("db close：%s —— 跳过 checkpoint（WAL 将于下次打开时恢复）", exc)
         except sqlite3.Error as exc:
             log.warning("db close：wal_checkpoint 失败（已忽略）：%s", exc)
         ro = self._ro
@@ -442,6 +472,44 @@ class DB:
 
     async def aprune_market_cache(self, keep: int = 20) -> int:
         return await asyncio.to_thread(self.prune_market_cache, keep)
+
+    # ---------------- 时间维度保留策略（防 account_snapshot / moneyflow_cache 无界增长）----
+    def _prune_before(self, table: str, keep_days: int) -> int:
+        days = int(keep_days)
+        if days < 1:
+            raise ValueError("keep_days 必须 >= 1")
+        cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+        # 有界获取：本方法跑在 ``asyncio.to_thread`` 的默认线程池里，而该池在解释器
+        # 退出时会被 atexit join —— 无界等待 = 可能把进程钉死（TD-25 同族）。
+        # 保留策略本就是尽力而为，拿不到锁就跳过本轮（下个周期再来）。
+        with _rw.write(timeout=float(os.environ.get("QMT_PRUNE_LOCK_TIMEOUT", "30"))):
+            cur = self._conn.execute(f"DELETE FROM {table} WHERE ts < ?", (cutoff,))
+            self._conn.commit()
+            return int(cur.rowcount or 0)
+
+    def prune_account_snapshot(self, keep_days: int = 90) -> int:
+        """按时间保留账户净值快照，防止无界增长。
+
+        快照循环每 5s 写一行/账户（非交易时段 60s 探活），单账户一年可达百万行、
+        每行还带 ``positions_json``/``cash_json`` 两份 JSON ⇒ 数 GB 级冗余。
+        而净值曲线读取只取最近若干点（``app/services/account_store.pnl_series``），
+        旧行不再被任何路径消费。默认保留 90 天。
+        """
+        return self._prune_before("account_snapshot", keep_days)
+
+    def prune_moneyflow_cache(self, keep_days: int = 30) -> int:
+        """按时间保留资金流快照，防止无界增长。
+
+        采集循环交易时段每 5 分钟写一批 ``snapshot_codes``；回放读取
+        （``moneyflow_replay``）最多取 5000 条/代码，更早的行不被消费。默认保留 30 天。
+        """
+        return self._prune_before("moneyflow_cache", keep_days)
+
+    async def aprune_account_snapshot(self, keep_days: int = 90) -> int:
+        return await asyncio.to_thread(self.prune_account_snapshot, keep_days)
+
+    async def aprune_moneyflow_cache(self, keep_days: int = 30) -> int:
+        return await asyncio.to_thread(self.prune_moneyflow_cache, keep_days)
 
     # ---------------- 阶段 3：一致性备份（sqlite3 backup API） ----------------
     def backup_to(self, dst: Path, *, deadline_s: float = 300.0) -> bool:

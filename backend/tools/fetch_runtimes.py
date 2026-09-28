@@ -11,6 +11,15 @@
 用法：python tools/fetch_runtimes.py            # 准备 cp38~cp312（已存在则跳过）
       python tools/fetch_runtimes.py --only cp311 cp38
       python tools/fetch_runtimes.py --list       # 仅列出将下载的目标
+      python tools/fetch_runtimes.py --only cp311 --with-deps --strict   # CI 推荐
+
+--with-deps：给运行时装好**桥接子进程的第三方依赖闭包**。embed 版 Python 只有
+  标准库，而 `xtquant_client` / `core` 还 import 了 cryptography / pydantic /
+  pydantic-settings / psutil（core/crypto.py 用 AESGCM、core/config.py 用
+  BaseSettings）⇒ 裸 embed 运行时起桥接必 ModuleNotFoundError。
+  ⚠️ `backend/runtimes/` 不入库（.gitignore），CI checkout 后必须跑本脚本，
+  否则打出的安装包「构建全绿但桥接 100% 起不来」（2026-09-28 实测断链）。
+--strict：任一目标未就绪即以非零码退出（CI 用；默认只打印告警继续）。
 """
 import argparse
 import os
@@ -70,6 +79,74 @@ def _patch_pth(dest: str) -> None:
         print(f"  [warn] 修改 ._pth 失败（{exc}），子进程可能无法 import 后端包")
 
 
+# 桥接子进程（`runtimes/cpXXX/python.exe -m xtquant_client.bridge_server`）的第三方
+# 依赖闭包。来源：静态扫描 xtquant_client/ + core/ 的顶层 import（bridge_server 走
+# 磁盘真实 .py，只依赖这两包 + stdlib）。改动这两包的新依赖时需同步本清单
+# —— 打包期 `build_exe._verify_bridge_imports` 会真实 import 兜底验证。
+BRIDGE_DEPS = ["cryptography", "pydantic", "pydantic-settings", "psutil"]
+
+
+def _bootstrap_pip(exe: str) -> bool:
+    """embed 版 Python 不带 pip；先 ensurepip，失败则回退 get-pip.py。"""
+    import subprocess  # 局部导入：保持本脚本零第三方依赖
+
+    def _ok() -> bool:
+        r = subprocess.run([exe, "-m", "pip", "--version"],  # noqa: S603
+                           check=False, capture_output=True, text=True)
+        return r.returncode == 0
+
+    if _ok():
+        return True
+    print(f"  [pip] 引导 pip（ensurepip）...")
+    r = subprocess.run([exe, "-m", "ensurepip", "--upgrade", "--default-pip"],  # noqa: S603
+                       check=False, capture_output=True, text=True)
+    if r.returncode != 0:
+        print(f"  [pip] ensurepip 失败，回退 get-pip.py（{r.stderr.strip()[:200]}）")
+        try:
+            import tempfile
+            tmp = os.path.join(tempfile.gettempdir(), "get-pip.py")
+            for base in ("https://bootstrap.pypa.io/pip/",
+                         "https://mirrors.huaweicloud.com/pypi/web/packages/"
+                         "source/g/get-pip/"):
+                try:
+                    _download(base + "get-pip.py", tmp)
+                    break
+                except Exception:  # noqa: BLE001
+                    continue
+            r2 = subprocess.run([exe, tmp], check=False,  # noqa: S603
+                                capture_output=True, text=True)
+            if r2.returncode != 0:
+                print(f"  [warn] get-pip 也失败：{r2.stderr.strip()[:200]}")
+        except Exception as exc:  # noqa: BLE001
+            print(f"  [warn] get-pip 下载失败：{exc}")
+    return _ok()
+
+
+def _install_bridge_deps(exe: str) -> bool:
+    """把桥接依赖装进该运行时；失败返回 False（CI 配合 --strict 会直接失败）。"""
+    import subprocess  # 局部导入
+
+    if not _bootstrap_pip(exe):
+        print("  [warn] 运行时无 pip，跳过依赖安装（桥接可能 import 失败）")
+        return False
+    cmd = [exe, "-m", "pip", "install", "--no-warn-script-location",
+           "--disable-pip-version-check", *BRIDGE_DEPS]
+    print(f"  [deps] 安装桥接依赖：{' '.join(BRIDGE_DEPS)}")
+    r = subprocess.run(cmd, check=False, capture_output=True, text=True)  # noqa: S603
+    if r.returncode != 0:
+        print(f"  [warn] 依赖安装失败：{(r.stderr or '').strip()[-400:]}")
+        return False
+    # 真实 import 兜底验证：装了不代表能 import（._pth / 路径问题）
+    probe = "import cryptography, pydantic, pydantic_settings, psutil; print('deps-ok')"
+    v = subprocess.run([exe, "-c", probe], check=False,  # noqa: S603
+                       capture_output=True, text=True)
+    if v.returncode != 0 or "deps-ok" not in (v.stdout or ""):
+        print(f"  [warn] 依赖 import 验证失败：{(v.stderr or '').strip()[-400:]}")
+        return False
+    print("  [deps] 桥接依赖 import 验证通过")
+    return True
+
+
 def _download(url: str, dest: str) -> bool:
     req = urllib.request.Request(url, headers={"User-Agent": "qmt_work-fetch-runtimes/1.0"})
     with urllib.request.urlopen(req, timeout=60) as r:
@@ -78,7 +155,7 @@ def _download(url: str, dest: str) -> bool:
     return os.path.getsize(dest) > 1_000_000  # embed 包应 >1MB，防错误页
 
 
-def prepare(minor: int, dry: bool = False) -> str:
+def prepare(minor: int, dry: bool = False, with_deps: bool = False) -> str:
     """下载并解压指定小版本的嵌入 Python；返回状态描述。"""
     if minor not in EMBED:
         return f"cp{minor}: 未配置下载源"
@@ -86,6 +163,9 @@ def prepare(minor: int, dry: bool = False) -> str:
     exe = os.path.join(dest, "python.exe")
     if os.path.isfile(exe):
         _patch_pth(dest)
+        if with_deps:
+            ok = _install_bridge_deps(exe)
+            return f"cp{minor}: 已存在 -> {exe}；依赖{'OK' if ok else '缺失'}"
         return f"cp{minor}: 已存在 -> {exe}"
     if dry:
         return f"cp{minor}: 将下载 {EMBED[minor]}"
@@ -116,6 +196,9 @@ def prepare(minor: int, dry: bool = False) -> str:
         z.extractall(dest)
     os.remove(zip_path)
     _patch_pth(dest)
+    if with_deps:
+        ok = _install_bridge_deps(exe)
+        return f"cp{minor}: 已准备 -> {exe}；依赖{'OK' if ok else '缺失'}"
     return f"cp{minor}: 已准备 -> {exe}"
 
 
@@ -124,6 +207,10 @@ def main():
     ap.add_argument("--only", nargs="*", default=None,
                     help="仅准备指定 cpXXX（如 --only cp311 cp38）")
     ap.add_argument("--list", action="store_true", help="仅列出目标，不下载")
+    ap.add_argument("--with-deps", action="store_true",
+                    help="同时安装桥接子进程的第三方依赖闭包")
+    ap.add_argument("--strict", action="store_true",
+                    help="任一目标未就绪即非零退出（CI 用）")
     args = ap.parse_args()
 
     targets = [int(k[2:]) for k in (args.only or [])] if args.only else list(EMBED)
@@ -132,8 +219,20 @@ def main():
             print(prepare(m, dry=True))
         return
     print(f"目标运行时目录: {RUNTIMES}")
+    failed = []
     for m in targets:
-        print(prepare(m))
+        status = prepare(m, with_deps=args.with_deps)
+        print(status)
+        if not os.path.isfile(os.path.join(RUNTIMES, f"cp{m}", "python.exe")):
+            failed.append(f"cp{m}")
+        elif args.with_deps and "依赖缺失" in status:
+            failed.append(f"cp{m}(deps)")
+    if failed:
+        msg = ("运行时未就绪：" + ", ".join(failed)
+               + "。桥接将不可用；请检查网络或手动放置 python.org embed 包。")
+        if args.strict:
+            raise SystemExit("[FATAL] " + msg)
+        print("[warn] " + msg)
     print("完成。缺失项请检查网络或手动放置 python.org embed 包。")
 
 

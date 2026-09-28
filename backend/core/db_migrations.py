@@ -717,6 +717,14 @@ UPDATE schedules SET cron = '0 16 * * 1-5', updated_at = datetime('now','localti
 UPDATE schedules SET cron = '15 16 * * 1-5', updated_at = datetime('now','localtime')
  WHERE id = 'sch-default-classic-screen' AND cron = '0 16 * * 1-5';
 """),
+    # ★ 28（2026-09-29）：为「按时间保留」补索引。
+    #   account_snapshot 的保留删除走 `WHERE ts < ?`；moneyflow_cache 原有索引
+    #   是 (code, ts)，**无法**服务纯 ts 范围扫描 ⇒ 每次保留删除都全表扫。
+    #   account_snapshot 已有 idx_account_snapshot_ts（迁移 292 行处），此处只补
+    #   moneyflow_cache。IF NOT EXISTS 保证幂等。
+    (28, """
+CREATE INDEX IF NOT EXISTS idx_moneyflow_cache_ts ON moneyflow_cache(ts);
+"""),
 ]
 
 

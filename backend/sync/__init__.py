@@ -8,6 +8,7 @@
 import asyncio
 import json
 import logging
+import math
 import time
 from collections import deque
 
@@ -39,6 +40,12 @@ def deal_fingerprint(d: dict) -> tuple:
     )
 
 
+# 行情微批缓冲上限（行数）。100ms 窗口内正常仅数百行；上限用于兜底
+# 「_batch_loop 卡住/变慢 → 生产端无界堆积 → 内存爆掉」这一路径。
+# 超出时丢最旧的样本（market_cache 本身是缓存，最新的行情才有意义）。
+_BATCH_MAX_ITEMS = 20000
+
+
 class SyncEngine:
     def __init__(self, manager, db, quote_bus=None, risk=None, notifier=None,
                  webhook_out=None, runtime_config=None):
@@ -59,9 +66,10 @@ class SyncEngine:
         self._last_account_bcast: float = 0.0
         self._quote_bus = quote_bus                      # 可选行情总线（内存/Redis）
         self._latency_stats: dict[str, list[float]] = {} # code -> 最近延迟样本
-        self._batch_buf: list[dict] = []                 # 行情微批缓冲（100ms 窗口，C2）
-        # C1/P2-1：market_cache 批量写盘缓冲（(code, dtype, ts, payload_json) 行）
-        self._batch_rows: list[tuple] = []
+        # 行情微批缓冲（100ms 窗口，C2）。有界：满了自动丢最旧，防消费端卡住时无界增长
+        self._batch_buf: deque = deque(maxlen=_BATCH_MAX_ITEMS)
+        # C1/P2-1：market_cache 批量写盘缓冲（(code, dtype, ts, payload_json) 行）；同样有界
+        self._batch_rows: deque = deque(maxlen=_BATCH_MAX_ITEMS)
         self._batch_task: asyncio.Task | None = None
         self._trade_cbs: set[str] = set()          # 已注册实时成交回调的连接（幂等）
 
@@ -378,14 +386,28 @@ class SyncEngine:
                         # 导致 account 事件长期漏出 ws_events 基线（前端收不到却当成 unknown）；
                         # 经 _notify 后 account 与 order/deal/risk 一致地同步投递 webhook。
                         await self._notify("account", {"type": "account_snapshot", "data": snap, "broker": conn.cfg.name})
+                except asyncio.CancelledError:
+                    raise
                 except Exception as exc:
                     log.warning("account snapshot failed: %s", exc)
-                iv = interval
-                if self.runtime_config is not None:
-                    iv = self.runtime_config.snapshot_interval
-                # 非交易时段放大快照间隔（60s 探活），减少无效券商请求
-                from gateway.trading_session import default_session
-                await asyncio.sleep(default_session.sleep_seconds(iv, 60.0))
+                # 间隔计算与 sleep 一并放进 try：此前它们在 try 之外，
+                # 一旦 runtime_config.snapshot_interval 取到非法值（None/负数/字符串），
+                # sleep 抛错就会**打死整个快照循环** —— 账户/持仓/成交从此静默停更。
+                try:
+                    iv = interval
+                    if self.runtime_config is not None:
+                        iv = self.runtime_config.snapshot_interval
+                    iv = float(iv)
+                    if not math.isfinite(iv) or iv <= 0:
+                        iv = interval
+                    # 非交易时段放大快照间隔（60s 探活），减少无效券商请求
+                    from gateway.trading_session import default_session
+                    await asyncio.sleep(default_session.sleep_seconds(iv, 60.0))
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("account snapshot sleep failed (回退默认间隔): %s", exc)
+                    await asyncio.sleep(interval)
 
         self._account_task = asyncio.create_task(_loop())
 
@@ -533,37 +555,60 @@ class SyncEngine:
     async def _batch_loop(self) -> None:
         prune_tick = 0
         while True:
-            window = 0.1
-            if self.runtime_config is not None:
-                window = self.runtime_config.batch_window
-            await asyncio.sleep(window)
-            # 取走并清空两个缓冲（广播 + 写盘）
-            buf = self._batch_buf
-            rows = self._batch_rows
-            items = list(buf)
-            buf.clear()
-            row_items = list(rows)
-            rows.clear()
-            # C1/P2-1：market_cache 单事务批量落盘（一窗口一次 commit）
-            if row_items and self.db is not None:
-                try:
-                    await self.db.aexecutemany_in_txn(
-                        "INSERT OR REPLACE INTO market_cache (code, dtype, ts, payload_json) "
-                        "VALUES (?,?,?,?)", row_items)
-                except Exception as exc:  # noqa: BLE001
-                    log.warning("market_cache batch write failed: %s", exc)
-            if not items:
-                continue
-            await self._notify("quotes", {"items": items})
-            # C1/P2-1：周期性收敛 market_cache 数据量（约每 100 个窗口≈10s 一次）
-            prune_tick += 1
-            if prune_tick % 100 == 0 and self.db is not None:
-                try:
-                    removed = await self.db.aprune_market_cache(keep=20)
-                    if removed:
-                        log.info("market_cache pruned %d rows", removed)
-                except Exception as exc:  # noqa: BLE001
-                    log.debug("market_cache prune failed: %s", exc)
+            try:
+                window = 0.1
+                if self.runtime_config is not None:
+                    window = self.runtime_config.batch_window
+                await asyncio.sleep(window)
+                # 取走并清空两个缓冲（广播 + 写盘）
+                buf = self._batch_buf
+                rows = self._batch_rows
+                items = list(buf)
+                buf.clear()
+                row_items = list(rows)
+                rows.clear()
+                # C1/P2-1：market_cache 单事务批量落盘（一窗口一次 commit）
+                if row_items and self.db is not None:
+                    try:
+                        await self.db.aexecutemany_in_txn(
+                            "INSERT OR REPLACE INTO market_cache (code, dtype, ts, payload_json) "
+                            "VALUES (?,?,?,?)", row_items)
+                    except Exception as exc:  # noqa: BLE001
+                        log.warning("market_cache batch write failed: %s", exc)
+                if items:
+                    await self._notify("quotes", {"items": items})
+                # C1/P2-1：周期性收敛 market_cache 数据量（约每 100 个窗口≈10s 一次）。
+                # ★ 注意：此前这段在 `if not items: continue` **之后** ⇒ 空闲窗口
+                #   直接跳过，prune_tick 不递增，行情静默期（盘后/周末）永不清理。
+                prune_tick += 1
+                if prune_tick % 100 == 0 and self.db is not None:
+                    try:
+                        removed = await self.db.aprune_market_cache(keep=20)
+                        if removed:
+                            log.info("market_cache pruned %d rows", removed)
+                    except Exception as exc:  # noqa: BLE001
+                        log.warning("market_cache prune failed: %s", exc)
+                # 慢周期保留策略（约每 3600 窗口≈6 分钟一次）：account_snapshot /
+                # moneyflow_cache 此前**没有任何保留策略**，按写入速率推算单账户
+                # 一年可达百万行、每行带两份 JSON ⇒ 主库体积无界膨胀。
+                if prune_tick % 3600 == 0 and self.db is not None:
+                    for _name, _fn, _days in (
+                        ("account_snapshot", self.db.aprune_account_snapshot, 90),
+                        ("moneyflow_cache", self.db.aprune_moneyflow_cache, 30),
+                    ):
+                        try:
+                            gone = await _fn(keep_days=_days)
+                            if gone:
+                                log.info("%s retention: 清理 %d 行（保留 %d 天）",
+                                         _name, gone, _days)
+                        except Exception as exc:  # noqa: BLE001
+                            log.warning("%s retention failed: %s", _name, exc)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                # 单窗口异常绝不能打死整个循环 —— 否则行情静默停推、缓冲持续堆积
+                log.warning("batch loop error (已续跑): %s", exc)
+                await asyncio.sleep(0.2)
 
     def on_notify(self, handler) -> None:
         self._notify_handlers.append(handler)

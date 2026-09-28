@@ -11,6 +11,12 @@ import s from "./placeholder.module.css";
  * 1. 能力可达性清晰（对照 /capabilities 逐条核对）
  * 2. 后续实现者能直接看到需要对接的端点
  * 3. 用户不会误判功能缺失
+ *
+ * ⚠️ **"全仓库零引用"是刻意的**，不是死代码：它是 `app/routes.tsx` 中
+ * `status: "planned"` 机制的组成部分（`shell/MenuBar` 会为 planned 渲染
+ * 「待实现」角标）。当前 43 个页面全部为 done/partial，故暂无人调用。
+ * 第 23 轮审计已明确判定为「既定扩展点而非缺陷」并保留 —— 后续审计勿再
+ * 将其当作孤儿逻辑重复上报；除非同时决定移除 `status: "planned"` 机制。
  */
 export function makePlaceholder(
   title: string,

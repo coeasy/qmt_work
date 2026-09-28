@@ -246,6 +246,31 @@ class StrategyRuntime:
             (_now(), run_id))
         return self.get_run(run_id)
 
+    async def stop_all(self) -> int:
+        """停机专用：取消全部运行实例协程并等待结束。
+
+        ★ 为什么必须有它（2026-09-28 审计）：`app/bootstrap/shutdown.py` 此前
+        从未停过本运行时。`_run_loop` 是 `asyncio.create_task` 起的无限循环，
+        且链路末端 `_maybe_order` 会**向柜台真实下单**；不停它的后果是：
+          ① `db.close()` 之后协程仍可能写库（SQLite "database is closed" 或脏写）；
+          ② 更严重 —— 用户已要求停机，策略仍可能在收尾窗口内发出新委托。
+        这是资金安全级的停机缺口，故补这个统一出口。
+        """
+        tasks = [(rid, t) for rid, t in list(self._tasks.items()) if not t.done()]
+        for rid in list(self._tasks.keys()):
+            # 逐 run 走一遍 stop()：落 status='stopped'，避免下次 restore() 误复活
+            try:
+                self.stop(rid)
+            except Exception as exc:  # noqa: BLE001
+                log.debug("stop run %s failed: %s", rid, exc)
+        if tasks:
+            for _rid, t in tasks:
+                if not t.done():
+                    t.cancel()
+            await asyncio.gather(*(t for _rid, t in tasks), return_exceptions=True)
+            log.info("已停止 %d 个策略运行实例", len(tasks))
+        return len(tasks)
+
     def delete(self, run_id: int) -> None:
         self.stop(run_id)
         self._db().execute("DELETE FROM strategy_runs WHERE id=?", (run_id,))

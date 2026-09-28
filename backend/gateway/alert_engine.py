@@ -59,10 +59,15 @@ class AlertEngine:
         if self._on_event:
             # 唯一实现见 core/emit.py：on_event 常为 `ws_manager.broadcast`（async），
             # 直接同步调用只会创建协程、永不 await ⇒ 告警事件静默丢失。
+            #
+            # 必须用**标准三参形态** `emit_event(cb, event_type, payload)`：
+            # 契约内省（tests/contracts/introspect.py::_emit_event_types）只从
+            # 第二参的**字符串常量**提取事件名，此前这里传 dict 字面量
+            # `{"type": "alert", ...}` ⇒ `alert` 长期漏出 ws_events 基线 ⇒
+            # 前端按基线核对时被判为「后端不存在」，告警频道无人登记。
             from core.emit import emit_event
-            emit_event(self._on_event,
-                       {"type": "alert", "data": {
-                           "rule": rule.get("name"), "event": event_type}})
+            emit_event(self._on_event, "alert",
+                       {"rule": rule.get("name"), "event": event_type})
 
     def evaluate_event(self, event_type: str, payload: dict | None = None) -> list:
         """事件型规则评估（由 Notifier.on_event 回调）。

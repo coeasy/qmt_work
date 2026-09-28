@@ -11,7 +11,8 @@ import time
 from collections import deque
 
 from xtquant_client.base import BrokerError
-from core.clock import now_iso
+from core.clock import now_iso, today_str
+from core.emit import emit_event
 
 log = logging.getLogger("qmt_work")
 
@@ -27,6 +28,9 @@ class LimitUpMonitor:
         self._pool: dict[str, str] = {}          # code -> name(占位)
         self._ticks: dict[str, deque] = {}       # code -> 最近 last 序列（含涨停前）
         self._triggered: set[str] = set()
+        # 触发记录的归属交易日。跨日不自动清 ⇒ 昨日已触发的票今日**永不再报**
+        # （打板监控静默失效，且只表现为「今天怎么没信号」）。见 _loop 的跨日重置。
+        self._trigger_date: str = ""
         self._events: deque = deque(maxlen=200)
         self._cfg: dict = {}
         self._task: asyncio.Task | None = None
@@ -98,6 +102,20 @@ class LimitUpMonitor:
     def reset_triggered(self) -> None:
         """清空当日触发记录（新交易日/重新打板前调用）。"""
         self._triggered.clear()
+        self._trigger_date = today_str()
+
+    def _roll_day(self) -> None:
+        """跨交易日自动重置触发记录（幂等，每个循环周期调用一次）。"""
+        today = today_str()
+        if self._trigger_date != today:
+            if self._triggered:
+                log.info("涨停监控跨交易日（%s→%s）：重置 %d 条触发记录",
+                         self._trigger_date or "-", today, len(self._triggered))
+            self._triggered.clear()
+            # 同时清 K 线缓冲：昨日的 tick 序列不能作为今日涨幅基准
+            for buf in self._ticks.values():
+                buf.clear()
+            self._trigger_date = today
 
     # ---------------- 启停 ----------------
     async def start(self, cfg: dict | None = None) -> dict:
@@ -106,6 +124,7 @@ class LimitUpMonitor:
         if not self._pool:
             raise ValueError("股票池为空，请先添加监控代码")
         self._triggered.clear()
+        self._trigger_date = today_str()
         self._task = asyncio.create_task(self._loop())
         log.info("limitup monitor started: pool=%s cfg=%s", len(self._pool), self._cfg)
         return self.status()
@@ -135,6 +154,8 @@ class LimitUpMonitor:
     async def _loop(self):
         from gateway.trading_session import default_session
         while True:
+            # 跨交易日自动重置触发记录/涨幅基准（否则昨日已触发的票今日永不再报）
+            self._roll_day()
             # 阶段 2：交易日 + 盘中时段判定——非交易日/非盘中不判定涨停、不触发打板下单
             if not default_session.is_active():
                 await asyncio.sleep(max(float(self._cfg.get("interval", 2.0)), 30.0))
@@ -152,7 +173,12 @@ class LimitUpMonitor:
                         self._check(code, q, in_window)
             except Exception as exc:  # noqa: BLE001
                 log.warning("limitup loop error: %s", exc)
-            await asyncio.sleep(float(self._cfg.get("interval", 2.0)))
+            # ★ 必须有下限（2026-09-28 修）：`interval` 直接来自用户 POST body 且
+            #   路由层未做 clamp，传 0 / 负数时 `asyncio.sleep(0/-1)` 立即返回 ⇒
+            #   循环体以 CPU 极限速度反复请求全池 tick ⇒ 单核打满、桥接子进程被
+            #   行情请求淹没，WS/HTTP 全部饿死。`runtime_config` 里
+            #   `limitup.poll_interval` 虽有 0.1s 下限，但本循环当初没读它。
+            await asyncio.sleep(max(0.1, float(self._cfg.get("interval", 2.0))))
 
     def _check(self, code: str, q: dict, in_window: bool) -> None:
         last = q.get("last") or 0
@@ -243,11 +269,17 @@ class LimitUpMonitor:
                 pass
 
     def _emit(self, event: dict) -> None:
-        if self._on_event:
-            try:
-                self._on_event(event)
-            except Exception:  # noqa: BLE001
-                pass
+        """事件派发：**必须**走 `core.emit.emit_event` 唯一出口。
+
+        ★ 历史缺陷（2026-09-28 审计发现）：此处原为 `self._on_event(event)` 同步直调，
+        而接线端传入的是 `state.ws_manager.broadcast`（`async def`，见
+        `app/bootstrap/phase_watchdogs.py`）⇒ 只创建协程对象、永不 await ⇒
+        `limitup` / `limitup_order` 事件**静默丢失**（不抛错、前端打板页无任何实时推进），
+        且每次触发冒一条 `RuntimeWarning: coroutine was never awaited`。
+        gateway 层此前已用 emit_event 修掉同一缺陷，引擎层这 3 份漏改。
+        `emit_event` 内部已兜住「回调抛异常」与「无事件循环」两种情形，这里不再 try。
+        """
+        emit_event(self._on_event, event)
 
 
 def _monitor():

@@ -37,10 +37,18 @@ def _job_failure_alert(job: dict) -> None:
     detail = f"{job.get('error') or job.get('message') or '未知错误'}（job {job.get('id', '')}）"
     try:
         from core.emit import emit_event
-        emit_event(None, {"type": "system",
-                          "data": {"event": "job_failed", "kind": kind,
-                                   "job_id": job.get("id", ""), "title": title,
-                                   "message": detail}})
+        # ★ 为什么不能直接 `emit_event(None, ...)`（2026-09-28 修）：那样 WS 通路
+        #   是**死路** —— `emit_event` 对 `None` 是静默 return，「任务天天失败而
+        #   界面永远风平浪静」正是本函数存在的唯一要解决的问题。
+        #   这里在**回调时刻**再取 ws_manager（而不是模块导入期），因为定时任务
+        #   失败可能发生在启动早期（ws_manager 尚未装配）也可能在停机后。
+        ws = getattr(state, "ws_manager", None)
+        cb = getattr(ws, "broadcast", None)
+        if cb is None:
+            log.debug("WS 尚未就绪，任务失败事件仅走 notifier：%s", title)
+        emit_event(cb, "system", {"event": "job_failed", "kind": kind,
+                                  "job_id": job.get("id", ""), "title": title,
+                                  "message": detail})
     except Exception as exc:  # noqa: BLE001
         log.warning("任务失败事件推送异常（已忽略）：%s", exc)
     try:

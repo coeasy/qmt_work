@@ -172,29 +172,57 @@ class ColdStore:
         placeholders = ",".join("?" * len(_ARCHIVE_COLS))
         moved = 0
         batches = 0
-        while True:
+        # ★ 为什么必须有硬上限（2026-09-28 审计）：本函数在**启动期**的
+        #   `asyncio.to_thread` 里被调用（`app/bootstrap/phase_db.py`），而
+        #   `concurrent.futures` 默认线程池的线程是**非 daemon** 的 —— 解释器退出时
+        #   会被 `atexit` join 钉住。一旦循环停不下来：
+        #     ① lifespan 永不返回 ⇒ `/ready` 恒 503（客户端一直转圈）；
+        #     ② **进程也退不出去**（与 TD-25「备份冻死进程」完全同形态）。
+        #   原实现只靠「DELETE 真的删掉了行」来推进，而 DELETE 按
+        #   (code,period,dt,adjust) 匹配 —— `adjust` 是迁移后补的列，存量行可能是
+        #   NULL，SQL 里 `NULL = NULL` 不成立 ⇒ 影响 0 行 ⇒ 下轮返回**同一批**行
+        #   ⇒ 无限循环 + 冷仓反复 REPLACE + 日志刷屏。
+        #   三重保险：① 批次数硬上限；② 改按**主键 id** 删除；③ 每批核对删除生效。
+        max_batches = 2000
+        while batches < max_batches:
             try:
                 rows = db.query(
-                    f"SELECT {cols} FROM {table} ORDER BY id LIMIT ?", (int(batch),))
+                    f"SELECT id, {cols} FROM {table} ORDER BY id LIMIT ?", (int(batch),))
             except sqlite3.Error as exc:
                 log.info("冷仓搬移：主库 %s 不可读（%s），视为无需搬移", table, exc)
                 return {"moved": moved, "batches": batches, "done": True}
             if not rows:
                 return {"moved": moved, "batches": batches, "done": True}
+            ids = [int(r["id"]) for r in rows]
             seq = [tuple(r[c] for c in _ARCHIVE_COLS) for r in rows]
             # ① 先写冷仓（幂等：UNIQUE 冲突时 REPLACE）
             self.executemany_in_txn(
                 f"INSERT OR REPLACE INTO {table} ({cols}) VALUES ({placeholders})", seq)
-            # ② 再删主库（按 (code,period,adjust,dt) 精确定位，不用 id —— id 是主库内部行号）
+            # ② 再删主库：改按主键 id —— 同一次 query 里取到的 id 必然能命中，
+            #    彻底消除「组合键匹配不上」导致的零删除。
             with self._lock:
                 db.executemany_in_txn(
-                    f"DELETE FROM {table} WHERE code=? AND period=? AND dt=? AND adjust=?",
-                    [(r["code"], r["period"], r["dt"], r["adjust"]) for r in rows])
+                    f"DELETE FROM {table} WHERE id=?", [(i,) for i in ids])
+            # ③ 核对：若删完仍在，说明这一批删不动（脏数据 / 锁 / 触发器），
+            #    立刻停手 —— 否则下一轮又拿到同样的行，回到无限循环。
+            _marks = ",".join("?" * len(ids))
+            try:
+                left = db.query(
+                    f"SELECT COUNT(1) AS c FROM {table} WHERE id IN ({_marks})", ids)
+            except sqlite3.Error:
+                left = None
+            _left_n = int(((left or [{}])[0]).get("c") or 0) if left else 0
+            if _left_n > 0:
+                log.error("冷仓搬移：主库 %s 有 %d 行删除未生效，停止搬移以避免无限循环",
+                          table, _left_n)
+                return {"moved": moved, "batches": batches, "done": False}
             moved += len(rows)
             batches += 1
             log.info("冷仓搬移：已搬 %d 行（第 %d 批）", moved, batches)
             if len(rows) < int(batch):
                 return {"moved": moved, "batches": batches, "done": True}
+        log.error("冷仓搬移：达到批次上限 %d 仍未搬完，剩余行留待下次启动继续", max_batches)
+        return {"moved": moved, "batches": batches, "done": False}
 
     def copy_from_file(self, src: Path | str, batch: int = 5000) -> dict:
         """把**另一个冷仓文件**里的行复制进来（**不删源**）。

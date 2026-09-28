@@ -113,8 +113,18 @@ jobs:
         run: npm ci
         shell: bash
 
+      # 桥接运行时不入库（.gitignore），CI checkout 后必须现备，否则产物"看起来能装、
+      # 桥接却 100% 起不来"。--with-deps 同时装齐桥接依赖闭包（cryptography/pydantic/
+      # pydantic-settings/psutil），--strict 让下载失败直接炸而不是静默降级。
+      - name: Prepare bridge runtimes
+        working-directory: backend
+        run: python tools/fetch_runtimes.py --only cp311 --with-deps --strict
+        shell: bash
+
       - name: Build client (frontend + backend + electron)
         working-directory: frontend-next
+        env:
+          QMT_BUILD_REQUIRE_RUNTIMES: "1"
         run: npm run dist:portable
         shell: bash
 
@@ -122,9 +132,18 @@ jobs:
         run: python scripts/verify_artifacts.py --require-client
         shell: bash
 
+      # 产物真目录是 dist-electron（electron-builder.yml 的 directories.output）。
+      # 此前写的是 frontend-next/release/* —— 该目录根本不存在，上传的 artifact
+      # 一直是**空的**（2026-09-28 修：看得见流水线绿、下载不到包）。
+      # 只传安装包/便携包/清单，不传 win-unpacked（几百 MB 且可直接由 zip 解开）。
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: qmt_work-client-${{ github.sha }}
-          path: frontend-next/release/*
+          path: |
+            frontend-next/dist-electron/*.exe
+            frontend-next/dist-electron/*.zip
+            frontend-next/dist-electron/latest.yml
+            frontend-next/dist-electron/release-manifest.json
           retention-days: 14
+          if-no-files-found: error

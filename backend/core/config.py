@@ -88,6 +88,9 @@ def _default_config_payload() -> dict[str, Any]:
         "broker_auto_connect": True,
         # ---- 交易二次确认 ----
         "signal_confirm_threshold": 100_000.0,
+        # 待二次确认令牌有效期（秒）。此前仅由 signal_router 用 getattr 兜底默认值读取，
+        # 未在本模型声明 ⇒ 用户无法配置、文档无从记载（配置漂移）。
+        "signal_confirm_ttl": 600.0,
         "totp_secret": "",
         "totp_digits": 6,
         # ---- 外部信号 webhook 签名密钥 ----
@@ -269,6 +272,8 @@ class Settings(BaseSettings):
 
     # 交易二次确认（大额下单需确认）
     signal_confirm_threshold: float = 100_000.0
+    # 待二次确认令牌 TTL（秒）：超时未确认即失效，防内存滞留与过期确认
+    signal_confirm_ttl: float = 600.0
     totp_secret: str = ""          # 非空时启用 TOTP 二次确认（RFC 6238）
     totp_digits: int = 6
 

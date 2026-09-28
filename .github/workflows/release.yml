@@ -5,11 +5,18 @@ name: Release build
 #
 # 注意事项：
 # - 构建需要 Windows runner（后端是 PyInstaller 打的 Windows exe，electron-builder --win 亦然）。
-# - Release 的 tag 必须与 frontend-next/package.json 的 version 一致（electron-builder 用 package.json
-#   version 命名产物并生成 latest.yml；tag 不一致会导致 electron-updater 找不到对应安装包）。
+# - Release 的 tag 必须与 VERSION / frontend-next/package.json 的 version 一致（electron-builder 用
+#   package.json version 命名产物并生成 latest.yml；tag 不一致会导致 electron-updater 找不到对应
+#   安装包）。本工作流会**显式校验三者一致**，不一致直接失败，避免产出"装得上更不了"的包。
 # - App 内自动更新（electron-updater 拉 latest.yml）仅对【公开】仓库默认可用；
 #   私有仓库请改用自建更新服务器或在 electron-builder.yml 配 publish 源。
 # - 代码签名可选：设置 CSC_LINK + CSC_KEY_PASSWORD 后自动签名，避免 SmartScreen 告警。
+#
+# ★★ 桥接运行时（2026-09-28 实测断链修复）★★
+#   backend/runtimes/ 由 python.org 下载、被 .gitignore 排除 ⇒ CI checkout 后**不存在**。
+#   以前这里直接 build，结果"构建全绿、安装包里没有桥接运行时"，ABI 不匹配的券商 100%
+#   连不上，而界面只报"桥接子进程握手失败"。现在必须先跑 fetch_runtimes.py --with-deps
+#   （装齐桥接依赖闭包），再由 build_exe.py 的 QMT_BUILD_REQUIRE_RUNTIMES 硬闸门兜底。
 
 on:
   release:
@@ -43,6 +50,32 @@ jobs:
           cache: npm
           cache-dependency-path: frontend-next/package-lock.json
 
+      # ---- Step 0: 版本一致性闸门（tag = VERSION = package.json）----
+      - name: Verify version consistency
+        shell: bash
+        env:
+          TAG: ${{ github.event.release.tag_name || github.ref_name }}
+        run: |
+          python - <<'PY'
+          import json, os, sys
+          tag = os.environ.get("TAG", "").lstrip("vV").strip()
+          ver = open("VERSION", encoding="utf-8").read().strip()
+          pkg = json.load(open("frontend-next/package.json", encoding="utf-8"))["version"]
+          print(f"tag={tag or '(workflow_dispatch)'} VERSION={ver} package.json={pkg}")
+          if ver != pkg:
+              sys.exit(f"[FATAL] VERSION({ver}) 与 package.json({pkg}) 不一致 —— 产物命名与 latest.yml 会错配")
+          if tag and tag not in ("", "main") and tag != ver:
+              sys.exit(f"[FATAL] Release tag({tag}) 与 VERSION({ver}) 不一致 —— "
+                       "electron-updater 将找不到该版本的安装包。请先同步 VERSION + package.json 再发版。")
+          print("[version] 一致性校验通过")
+          PY
+
+      # ---- Step 0.5: 准备桥接运行时（不入库，CI 必须现备）----
+      - name: Prepare bridge runtimes
+        working-directory: backend
+        run: python tools/fetch_runtimes.py --only cp311 --with-deps --strict
+        shell: bash
+
       # ---- Step 1: 前端构建（vite 产物 → backend/static）----
       - name: Install frontend deps
         working-directory: frontend-next
@@ -61,6 +94,9 @@ jobs:
 
       - name: Build backend EXE
         working-directory: backend
+        env:
+          # 硬闸门：缺桥接运行时直接失败，不再"静默产出坏包"
+          QMT_BUILD_REQUIRE_RUNTIMES: "1"
         run: python build_exe.py
 
       # ---- Step 3: Electron 桌面壳打包并上传到 Release assets ----
@@ -70,3 +106,32 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: npx electron-builder --win -p always
+
+      # ---- Step 4: 产物校验（exe + zip 必须齐备）+ 生成 SBOM 清单 ----
+      - name: Verify desktop artifacts
+        run: python scripts/verify_artifacts.py --require-client
+        shell: bash
+
+      # ---- Step 5: 兜底上传（-p always 可能因网络/权限丢资产，这里补一次）----
+      - name: Upload release assets (fallback)
+        if: ${{ github.event.release.tag_name != '' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          tag="${{ github.event.release.tag_name }}"
+          shopt -s nullglob
+          files=(frontend-next/dist-electron/*.exe frontend-next/dist-electron/*.zip frontend-next/dist-electron/latest.yml)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "::error::dist-electron 下没有可上传的安装包产物"
+            exit 1
+          fi
+          gh release upload "$tag" "${files[@]}" --clobber --repo "${{ github.repository }}"
+          echo "[upload] 已上传 ${#files[@]} 个资产到 $tag"
+
+      - name: Upload build manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-manifest-${{ github.event.release.tag_name || github.run_id }}
+          path: frontend-next/dist-electron/release-manifest.json
+          retention-days: 90

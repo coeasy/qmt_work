@@ -312,37 +312,63 @@ class JobRuntime:
                 busy_groups.add(grp)
         if len(self._running) >= GLOBAL_MAX:
             return None
-        ready = [
-            j for j in (self._jobs[i] for i in self._queue)
-            if running_by_kind.get(j["kind"], 0) < QUOTA.get(j["kind"], 1)
-            # 同组已有 job 在跑 ⇒ 排队等它结束，绝不并发写同一份数据
-            and RESOURCE_GROUP.get(j["kind"], "") not in busy_groups
-        ]
+        ready: list[dict] = []
+        stale: list[str] = []
+        for i in list(self._queue):
+            j = self._jobs.get(i)
+            if j is None:
+                # ★ 悬垂 id（2026-09-28 修）：原实现 `(self._jobs[i] for i in self._queue)`
+                #   在队列残留「已不在 _jobs 的 id」时抛 KeyError —— 而 `_dispatch_loop`
+                #   当时外层没有任何 try ⇒ **派发器当场死亡**，所有后续 job 永久停在
+                #   queued（EOD / 日线同步 / 定时选股全线静默停摆），且 `_ensure_dispatcher`
+                #   只在下次 `submit()` 才可能复活。这里顺手自愈：丢弃悬垂 id 并留痕。
+                stale.append(i)
+                continue
+            if (running_by_kind.get(j["kind"], 0) < QUOTA.get(j["kind"], 1)
+                    # 同组已有 job 在跑 ⇒ 排队等它结束，绝不并发写同一份数据
+                    and RESOURCE_GROUP.get(j["kind"], "") not in busy_groups):
+                ready.append(j)
+        if stale:
+            for i in stale:
+                if i in self._queue:
+                    self._queue.remove(i)
+            log.warning("清理 %d 个悬垂队列 id（对应 job 已不存在）：%s",
+                        len(stale), ", ".join(stale[:5]))
         if not ready:
             return None
         ready.sort(key=lambda j: (j["priority"], j["seq"]))
         return ready[0]
 
     async def _dispatch_loop(self) -> None:
+        # ★ 循环体必须有整体兜底（2026-09-28 修）：此前整段裸奔，**一次**异常就会让
+        #   派发器永久死亡（连 CancelledError 之外的普通异常也不例外），表现为
+        #   「所有定时任务突然全部停在 queued，而服务看起来完全健康」。
+        #   异常后短暂退避再继续，保证派发能力可自愈。
         while True:
-            job = self._next_ready()
-            if job is None:
-                await asyncio.sleep(0.05)
-                continue
-            self._queue.remove(job["id"])
-            self._running[job["id"]] = job["kind"]
-            job["status"] = "running"
-            job["started_at"] = self._now()
-            job["message"] = "执行中"
-            job["lease_owner"] = self._owner
-            job["lease_until"] = time.time() + LEASE_SECONDS
-            job["heartbeat_at"] = time.time()
-            self._persist(job)
-            task = asyncio.create_task(self._run(job))
-            job["task"] = task
-            # 不 await：job 任务并行跑，完成后回调清理 _running，循环继续派发
-            task.add_done_callback(
-                lambda _t, jid=job["id"]: self._running.pop(jid, None))
+            try:
+                job = self._next_ready()
+                if job is None:
+                    await asyncio.sleep(0.05)
+                    continue
+                self._queue.remove(job["id"])
+                self._running[job["id"]] = job["kind"]
+                job["status"] = "running"
+                job["started_at"] = self._now()
+                job["message"] = "执行中"
+                job["lease_owner"] = self._owner
+                job["lease_until"] = time.time() + LEASE_SECONDS
+                job["heartbeat_at"] = time.time()
+                self._persist(job)
+                task = asyncio.create_task(self._run(job))
+                job["task"] = task
+                # 不 await：job 任务并行跑，完成后回调清理 _running，循环继续派发
+                task.add_done_callback(
+                    lambda _t, jid=job["id"]: self._running.pop(jid, None))
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                log.exception("任务派发循环异常（已退避续跑）：%s", exc)
+                await asyncio.sleep(0.5)
 
     async def _run(self, job: dict) -> None:
         try:

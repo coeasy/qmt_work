@@ -158,6 +158,26 @@ runtimes_dir = ROOT / "runtimes"
 if runtimes_dir.is_dir():
     DATAS.append(f"{runtimes_dir};runtimes")
 
+# 硬闸门：CI 发布构建必须带桥接运行时（QMT_BUILD_REQUIRE_RUNTIMES=1）。
+#
+# 背景（2026-09-28 实测的静默断链）：`backend/runtimes/` 由 tools/fetch_runtimes.py
+# 从 python.org 下载，**被 .gitignore 排除**（336MB 不入库）。于是 GitHub Actions
+# checkout 出来的工作区**根本没有该目录** ⇒ 上面 `if runtimes_dir.is_dir()` 直接跳过
+# ⇒ 产物内无 runtimes ⇒ `_verify_bridge_imports()` 也「跳过」⇒ **构建全绿但安装包
+# 缺桥接运行时**，ABI 不匹配的券商 100% 连不上，且界面只报「桥接子进程握手失败」。
+#
+# 因此 CI 必须显式开启本闸门，让「缺运行时」以非零退出码炸出来，而不是静默降级。
+REQUIRE_RUNTIMES = os.environ.get("QMT_BUILD_REQUIRE_RUNTIMES", "0") == "1"
+if REQUIRE_RUNTIMES:
+    _rts = sorted(runtimes_dir.glob("cp*/python.exe")) if runtimes_dir.is_dir() else []
+    if not _rts:
+        raise SystemExit(
+            "[FATAL] QMT_BUILD_REQUIRE_RUNTIMES=1，但 backend/runtimes/ 下没有 cpXXX/python.exe。\n"
+            "        CI 环境请先执行：python tools/fetch_runtimes.py --only cp311\n"
+            "        （该目录不入库，本地已有不代表 CI 有。）缺失时打出的包桥接不可用，\n"
+            "        且构建期不会报错 —— 这是 2026-09-28 实测的静默断链，故此处硬失败。")
+    print(f"  [runtimes] 闸门通过：{', '.join(p.parent.name for p in _rts)}")
+
 # P0：桥接子进程需要「磁盘上的真实 .py」，不能只靠 PYZ 归档。
 #
 # 背景：桥接子进程以 `runtimes/cpXXX/python.exe -m xtquant_client.bridge_server`
@@ -356,10 +376,17 @@ def _verify_bridge_imports() -> None:
     internal = DIST / "qmt_work" / "_internal"
     runtimes = internal / "runtimes"
     if not runtimes.is_dir():
+        if REQUIRE_RUNTIMES:
+            raise SystemExit(
+                "[FATAL] QMT_BUILD_REQUIRE_RUNTIMES=1，但产物 _internal/ 内无 runtimes/。"
+                "        桥接子进程无法启动；请检查 runtimes 是否真的打进了包。")
         print("  [bridge] 跳过：产物内无 runtimes/（无嵌入运行时，桥接不可用）")
         return
     pythons = sorted(runtimes.glob("cp*/python.exe"))
     if not pythons:
+        if REQUIRE_RUNTIMES:
+            raise SystemExit(
+                "[FATAL] QMT_BUILD_REQUIRE_RUNTIMES=1，但产物 runtimes/ 下无 cpXXX/python.exe。")
         print("  [bridge] 跳过：runtimes/ 下无 cpXXX/python.exe")
         return
     exe = pythons[0]

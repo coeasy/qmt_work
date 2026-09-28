@@ -162,7 +162,13 @@ export interface ScheduleCreate {
   /** 标准 cron 表达式 */
   cron: string;
   name?: string;
-  /** coalesce | skip | catchup */
+  /**
+   * 错过的触发如何处理。
+   *
+   * ⚠️ 取值必须是 `catch_up | coalesce | skip`（**下划线**）。后端
+   * `app/runtime/schedules.py:82` 对非白名单值直接抛 `ValueError` → 400。
+   * 曾误写为 `catchup`（无下划线），传进去必失败。默认 `coalesce`。
+   */
   misfire_policy?: string;
   enabled?: boolean;
   params?: Record<string, unknown>;
@@ -355,15 +361,26 @@ export const systemApi = {
     http.post<{ schedule_id: string; job_id: string }>(`/runtime/schedules/${id}/trigger`),
 };
 
-/** 参考数据 API。路径与 app/routes/reference.py 对应。 */
+/** 参考数据 API。路径与 app/routes/reference.py 一一对应。
+ *
+ * ⚠️ 契约要点（2026-09-29 修）：
+ * - `/reference/sector-stocks` 的查询参数名是 **`sector`**（板块**名称**字符串，
+ *   默认 `沪深A股`），**不是** `code`。此前这里发的是 `?code=...`，后端从不读该名，
+ *   于是无论传什么都恒返回默认板块的成分股 —— 200 + 看似正常的结果，静默数据错误。
+ * - `/reference/financial` 的查询参数名是 `code`。
+ *
+ * 说明：本 API 层当前在 UI 侧暂无调用方（参考数据已由 MCP 工具
+ * `tools/reference.py` 覆盖）。保留为后续「交易日历 / 板块 / 成分股 / 财务摘要」
+ * 页面的接入点；若确定不做，请连同后端路由一并评估移除。
+ */
 export const referenceApi = {
   calendar: (start?: string, end?: string) =>
     http.get<unknown[]>("/reference/calendar", { query: { start, end } }),
 
   sectors: () => http.get<unknown[]>("/reference/sectors"),
 
-  sectorStocks: (code: string) =>
-    http.get<unknown[]>("/reference/sector-stocks", { query: { code } }),
+  sectorStocks: (sector: string) =>
+    http.get<unknown[]>("/reference/sector-stocks", { query: { sector } }),
 
   financial: (code: string) =>
     http.get<Record<string, unknown>>("/reference/financial", { query: { code } }),

@@ -54,6 +54,7 @@ class WAL:
         self._fsync_interval = 0.2           # 最多攒 200ms
         self._fsync_count = 64               # 或攒满 64 条即刷
         self._corrupt_lines = 0              # 阶段 3：损坏行计数（读路径告警用）
+        self._checkpoint_errors = 0          # checkpoint 失败计数（防轮转静默停摆）
         self._fsync_thread.start()
 
     def _fsync(self) -> None:
@@ -103,8 +104,14 @@ class WAL:
         try:
             if self.path.stat().st_size >= self._threshold:
                 self.checkpoint()
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            # ★ 不能静默（2026-09-28 修）：本函数是 WAL「不无限增长」的**唯一**
+            #   保障。磁盘只读 / 权限 / 句柄异常时轮转悄悄停下，wal.jsonl 一路涨到
+            #   写满磁盘，而上层看到的一切照常 —— 这类失败必须有痕。
+            self._checkpoint_errors += 1
+            if self._checkpoint_errors <= 10 or self._checkpoint_errors % 100 == 0:
+                log.warning("WAL checkpoint 失败（第 %d 次，将在下次写入重试）：%s",
+                            self._checkpoint_errors, exc)
 
     def checkpoint(self) -> None:
         """将当前 WAL 归档到 .snapshot.jsonl（覆盖写 + 原子 rename），并截断主 WAL。
@@ -160,14 +167,30 @@ class WAL:
                     log.warning("WAL 损坏行过多（>10），后续不再逐条告警")
 
     def _apply(self, rec: dict, handlers: dict, summary: dict) -> None:
+        """应用一条WAL记录。
+
+        ★ 两处修正（2026-09-28）：
+          ① handler 异常原本 `pass` 且**不落任何日志** —— 崩溃恢复是 WAL 存在的
+             唯一理由，单条 apply 失败必须可见、可追。
+          ② 计数原本在 handler **执行前**就 +1 —— 于是恢复失败的记录也被算成
+             「已恢复」，`replay()` 的 summary 报喜不报忧，运维看到完整成功，
+             实际算法单 / 条件单状态并未复原。现在按真实结果分别计数。
+        """
         entity = rec.get("entity", "unknown")
-        summary[entity] = summary.get(entity, 0) + 1
         h = handlers.get(entity)
-        if h:
-            try:
-                h(rec)
-            except Exception:  # noqa: BLE001
-                pass
+        if not h:
+            summary["no_handler"] = summary.get("no_handler", 0) + 1
+            log.warning("WAL 重放：实体 %s 无处理函数，记录已跳过（entity_id=%s）",
+                        entity, rec.get("entity_id"))
+            return
+        try:
+            h(rec)
+        except Exception as exc:  # noqa: BLE001
+            summary["handler_failed"] = summary.get("handler_failed", 0) + 1
+            log.exception("WAL 重放失败：实体=%s entity_id=%s（该记录未生效，请检查数据一致性）：%s",
+                          entity, rec.get("entity_id"), exc)
+            return
+        summary[entity] = summary.get(entity, 0) + 1
 
     def replay(self, handlers: dict[str, Callable[[dict], Any]] | None = None) -> dict:
         """重放：优先快照（历史归档），再主 WAL 增量（A1 轮转）。

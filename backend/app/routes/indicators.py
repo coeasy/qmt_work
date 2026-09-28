@@ -1,8 +1,12 @@
 """G2-2 指标引擎 REST 暴露（GET 只读）。
 
-- ``GET /market/indicators``：指标目录（元数据单一真源，供前端/Agent 发现）。
-- ``GET /market/indicators/calc``：按 code 取真实 K 线后**服务端计算**指标——
-  前端 K 线不再自带 7 个本地指标实现，改为消费本端点（R2 断崖收敛）。
+- ``GET /market/indicators``：指标目录（元数据单一真源，供 Agent / 脚本发现）。
+- ``GET /market/indicators/calc``：按 code 取真实 K 线后**服务端计算**指标。
+
+⚠️ **当前消费方为脚本 / Agent / MCP，前端 UI 不消费这三个端点**（2026-09-29 复核）。
+前端指标由 `frontend-next/src/shared/indicators.ts` 本地计算、图表由
+`charts/KLineChart.tsx` 渲染。原注释所称「前端 K 线改为消费本端点」**未落地** ——
+若将来要接回，须先对齐两侧口径，避免「双真源」；在那之前请勿据此删除前端实现。
 
 **G3 联动**：两端点均为 GET 且签名只含简单类型命名参数（无 Request/**kwargs），
 经能力自描述自动暴露为 MCP tool（auto_safe），Agent 可直接调用。
@@ -84,8 +88,11 @@ async def market_indicators_calc(
 
 @router.get("/market/chart-spec")
 async def market_chart_spec():
-    """G9-4 图表规范（后端下发，前端渲染器统一消费，消灭 4 份模板）：
-    主图指标（MA 周期/配色）、副图指标、K 线配色。"""
+    """G9-4 图表规范（后端下发）：主图指标（MA 周期/配色）、副图指标、K 线配色。
+
+    ⚠️ 消费方为脚本 / Agent / MCP；前端 K 线当前自带配色与模板**未消费本端点**
+    （2026-09-29 复核）。原称「前端渲染器统一消费，消灭 4 份模板」未落地。
+    """
     return ok({
         "candlestick": {"up": "#ef4d56", "down": "#29c08a"},
         "main": {

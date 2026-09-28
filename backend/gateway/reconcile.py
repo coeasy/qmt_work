@@ -246,8 +246,15 @@ class OrderReconciler:
 
         async def _loop():
             while True:
+                # ★ 休眠必须**每条路径都执行**（2026-09-28 修）：原实现把
+                #   `await asyncio.sleep(...)` 写在 try **内部**，一旦它前面的
+                #   `default_session.sleep_seconds(...)` 抛异常（读 runtime_config /
+                #   交易日历时可能出错），被 except 吞掉后就**直接下一轮**——
+                #   异常持续存在时即退化为零间隔自旋，100% CPU 空转。
+                #   对照 `gateway/health.py` 的同构循环：那里 try 先结束、sleep 在外面，
+                #   是安全的；本文件写反了。改为「异常也照睡」+ 间隔下限 1s。
+                iv = interval
                 try:
-                    iv = interval
                     try:
                         from core.state import state
                         if state.runtime_config is not None:
@@ -256,7 +263,14 @@ class OrderReconciler:
                         pass
                     # 非交易时段放大对账巡检间隔
                     from gateway.trading_session import default_session
-                    await asyncio.sleep(default_session.sleep_seconds(iv, 600.0))
+                    sleep_for = default_session.sleep_seconds(iv, 600.0)
+                except asyncio.CancelledError:
+                    break
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("reconcile 间隔计算失败，退化为默认间隔：%s", exc)
+                    sleep_for = 600.0
+                try:
+                    await asyncio.sleep(max(1.0, float(sleep_for)))
                     await self.reconcile()
                 except asyncio.CancelledError:
                     break

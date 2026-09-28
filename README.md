@@ -536,11 +536,12 @@ qmt_work/
 │  ├─ src/
 │  │  ├─ main.tsx · App.tsx · app/routes.tsx   # 入口 / 页面注册表（单一真源，PAGES 含 status）
 │  │  ├─ services/api/         # 统一 REST 客户端（TS 类型化）
-│  │  ├─ components/           # 可复用 UI 组件
+│  │  ├─ design/               # 设计系统：tokens.css / base.css / skins.css + primitives/（可复用 UI）
 │  │  ├─ domains/              # 页面级组件：market/ research/ trading/ account/ automation/ system/
-│  │  ├─ shell/ · stores/ · charts/ · shared/   # 外壳 / 状态 / 图表 / 工具
-│  │  ├─ tests/                # vitest 单测
+│  │  ├─ shell/ · stores/ · charts/ · shared/   # 外壳 / 状态 / 图表 / 工具（format.ts / indicators.ts）
+│  │  ├─ hooks/                # useLiveQuotes / useQuoteSubscription / useAsync 等
 │  │  └─ electron/             # 桌面壳（端口发现 + 托盘 + 开机自启 + 自动更新；从旧 frontend 移植）
+│  ├─ tests/                    # vitest 单测（与 src 平级；必须 `npm run test:serial`，见 TD-24）
 │  ├─ vite.config.ts           # base="/"，outDir → backend/static
 │  └─ electron-builder.yml     # 打包配置（extraResources: ../backend/dist）
 ├─ scripts/              # 构建 / CI / 门禁脚本（ci_reconcile / verify_artifacts / client_start_test …）

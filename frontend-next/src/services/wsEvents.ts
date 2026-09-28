@@ -36,6 +36,9 @@ export const WS_EVENT_REGISTRY: Record<string, WsEventHandler> = {
   "broker.disconnected": "system-log",
 
   // 引擎事件：当前由 SystemLog 全量记录；领域页面可在后续按需升级专用消费者
+  // `alert`：告警规则命中（gateway/alert_engine.py::_trigger）。三参标准出口发出，
+  // 此前因 alert_engine 传 dict 字面量而漏出 ws_events 基线 ⇒ 前端无从登记。
+  "alert": "system-log",
   "algo_alert": "system-log",
   "algo_slice": "system-log",
   "condition_created": "system-log",

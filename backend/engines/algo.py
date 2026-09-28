@@ -14,6 +14,8 @@ from collections import deque
 
 from xtquant_client.base import BrokerError
 
+from core.emit import emit_event
+
 log = logging.getLogger("qmt_work")
 
 
@@ -42,11 +44,15 @@ class AlgoEngine:
         return f"algo-{self._seq}"
 
     def _emit(self, event: dict) -> None:
-        if self._on_event:
-            try:
-                self._on_event(event)
-            except Exception:  # noqa: BLE001
-                pass
+        """事件派发：**必须**走 `core.emit.emit_event` 唯一出口。
+
+        ★ 历史缺陷（2026-09-28 审计发现）：此处原为 `self._on_event(event)` 同步直调，
+        而接线端传入的是 `state.ws_manager.broadcast`（`async def`，见
+        `app/bootstrap/phase_watchdogs.py`）⇒ 只创建协程对象、永不 await ⇒
+        `algo_alert` / `algo_slice` 等事件**静默丢失**，前端算法单页看不到任何推进，
+        且每次触发冒一条 `RuntimeWarning: coroutine was never awaited`。
+        """
+        emit_event(self._on_event, event)
 
     # ---------------- 提交 ----------------
     async def submit(self, code: str, direction: str, volume: int, algo: str = "twap",

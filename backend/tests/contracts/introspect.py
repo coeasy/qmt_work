@@ -246,8 +246,14 @@ def _emit_event_types(tree: ast.AST) -> list[str]:
     ``scripts/check_ws_consumption.py`` 会报「前端登记但后端基线不存在」，
     把正确的登记判成错的 —— 契约门禁在惩罚遵守契约的人。
 
-    这里只接受字符串常量：``f"broker.{event}"`` 这类动态构造无法静态还原，
+    这里优先接受字符串常量：``f"broker.{event}"`` 这类动态构造无法静态还原，
     须在调用点改为常量全名（见 ``gateway/health.py::BrokerHealthMonitor._emit``）。
+
+    ★ 2026-09-29 补：同时接受**第二参为 dict 字面量**的形态
+    ``emit_event(cb, {"type": "alert", "data": {...}})``。
+    `WSManager.broadcast` 两种形态都兼容（见其 P2-2 分支），但内省原先只认字符串，
+    于是 alert 这类走 dict 形态的事件静默漏出基线。为免「内省口径 ≠ 运行口径」，
+    这里把 dict 的 ``type`` 键一并提取 —— 与 ``_type_constants`` 同源判定。
     """
     out: list[str] = []
     for call in ast.walk(tree):
@@ -260,6 +266,12 @@ def _emit_event_types(tree: ast.AST) -> list[str]:
         a1 = call.args[1]
         if isinstance(a1, ast.Constant) and isinstance(a1.value, str):
             out.append(a1.value)
+        elif isinstance(a1, ast.Dict):
+            for k, v in zip(a1.keys, a1.values):
+                if (isinstance(k, ast.Constant) and k.value == "type"
+                        and isinstance(v, ast.Constant) and isinstance(v.value, str)):
+                    out.append(v.value)
+                    break
     return out
 
 

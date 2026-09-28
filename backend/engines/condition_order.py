@@ -12,6 +12,7 @@ import uuid
 from datetime import timedelta
 
 from core.clock import FORMAT, local_now, now_iso, parse_iso, today_str
+from core.emit import emit_event
 from xtquant_client.base import BrokerError
 from xtquant_client.order_status import (  # P1-5：调用统一状态词汇表做终态核销
     is_active,
@@ -537,11 +538,14 @@ class ConditionOrderEngine:
                 pass
 
     def _emit(self, event: dict) -> None:
-        if self._on_event:
-            try:
-                self._on_event(event)
-            except Exception:  # noqa: BLE001
-                pass
+        """事件派发：**必须**走 `core.emit.emit_event` 唯一出口。
+
+        ★ 历史缺陷（2026-09-28 审计发现）：此处原为 `self._on_event(event)` 同步直调，
+        而接线端传入的是 `state.ws_manager.broadcast`（`async def`）⇒ 只创建协程对象、
+        永不 await ⇒ `condition_created/triggered/order/settled/failed/expired`
+        六类事件**静默丢失**，前端条件单页看不到任何状态推进。
+        """
+        emit_event(self._on_event, event)
 
 
 def _engine():

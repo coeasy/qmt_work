@@ -12,6 +12,7 @@
 """
 from __future__ import annotations
 
+import ast
 import asyncio
 import gc
 import re
@@ -21,6 +22,61 @@ from pathlib import Path
 from core.emit import emit_event
 
 BACKEND = Path(__file__).resolve().parents[1]
+
+# ★ 扫描范围：全后端**源码**包，不是只扫 gateway。
+#
+# 2026-09-28 审计发现的历史漏洞：原实现只扫 `(BACKEND / "gateway")`，而
+# `engines/algo.py` / `engines/limitup.py` / `engines/condition_order.py` 三处
+# 同样是 `self._on_event(event)` 同步直调 —— 它们接的也是 async 的
+# `ws_manager.broadcast`，导致 10 类事件静默丢失，护栏却常年全绿。
+# 「有门禁但扫描根写窄」等于没有门禁，故改为穷举所有一级源码包。
+SCAN_ROOTS = ("gateway", "engines", "sync", "app", "tools", "core",
+              "mcp_server", "datasource", "connectors", "xtquant_client")
+# 这些子树是构建产物 / 第三方随包代码，不属本项目源码
+SKIP_PARTS = {"dist", "build", "__pycache__", "runtimes", "_internal"}
+
+
+def _source_files():
+    for name in SCAN_ROOTS:
+        root = BACKEND / name
+        if not root.is_dir():
+            continue
+        for p in sorted(root.rglob("*.py")):
+            if SKIP_PARTS & set(p.parts):
+                continue
+            yield p
+
+
+def _direct_call_sites() -> list[str]:
+    """AST 扫描「同步直调被注入的回调槽」。
+
+    为什么不用逐行正则：本文件与 `core/emit.py` 的文档字符串里都要引用
+    `self._on_event(event)` 这个**反例**（否则没人看得懂在防什么），正则会把
+    解释性文字判成违规；而去掉这些说明又会失去文档价值。AST 天然只看真实代码。
+
+    为什么要排除「自己定义了 _on_event 方法」的类：`xtquant_client/bridge_client.py`
+    的 `_on_event` 是**成员方法**（处理子进程事件的处理器），那里的
+    `self._on_event(event, msg)` 是调自己的方法，语义完全不同、**不是**被注入的
+    回调槽 —— 这类调用合法，不得误报。
+    """
+    offenders: list[str] = []
+    for p in _source_files():
+        try:
+            tree = ast.parse(p.read_text(encoding="utf-8"), filename=str(p))
+        except SyntaxError:  # 语法破损文件交给 py_compile 类门禁管，这里跳过
+            continue
+        for cls in (n for n in ast.walk(tree) if isinstance(n, ast.ClassDef)):
+            has_own = any(
+                isinstance(c, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and c.name == "_on_event" for c in cls.body)
+            if has_own:
+                continue
+            for call in (n for n in ast.walk(cls) if isinstance(n, ast.Call)):
+                f = call.func
+                if (isinstance(f, ast.Attribute) and f.attr == "_on_event"
+                        and isinstance(f.value, ast.Name) and f.value.id == "self"):
+                    offenders.append(f"{p.relative_to(BACKEND)}:{call.lineno}")
+    return offenders
 
 
 def test_none_callback_is_noop():
@@ -128,11 +184,6 @@ def test_no_direct_on_event_call_sites():
     `ws_manager.broadcast`（async），同步调用只会创建协程、永不 await。
     必须统一走 `core/emit.py::emit_event`。新增引擎照抄旧写法会被本护栏拦下。
     """
-    offenders: list[str] = []
-    for p in sorted((BACKEND / "gateway").rglob("*.py")):
-        for i, line in enumerate(p.read_text(encoding="utf-8").splitlines(), 1):
-            if line.lstrip().startswith("#"):
-                continue
-            if re.search(r"self\._on_event\s*\(", line):
-                offenders.append(f"{p.relative_to(BACKEND)}:{i}")
+    # 真实违规 = AST 命中的「同步直调注入回调槽」
+    offenders = _direct_call_sites()
     assert offenders == [], "必须改用 core.emit.emit_event：" + ", ".join(offenders)

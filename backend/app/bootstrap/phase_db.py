@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import logging
+import os
 
 from fastapi import FastAPI
 
@@ -76,12 +77,40 @@ async def setup(app: FastAPI) -> dict:
         # 一次性搬移：历史版本把冷数据放在**主库**的 kline_archive 表里，
         # 不搬过来的话 `_arch` 指向冷仓后就再也读不到它们 —— 表现为图表历史
         # 静默变短（不报错、不提示，最难查的那种）。幂等：主库表空即空操作。
-        moved = await asyncio.to_thread(cold.migrate_from, state.db)
-        if moved.get("moved"):
-            log.info("冷仓就绪：历史归档搬移 %d 行 → %s",
-                     moved["moved"], cold.path)
+        # 用**自建 daemon 线程 + 有界等待**，不用 `asyncio.to_thread`：
+        # 后者的线程来自 `concurrent.futures` 默认池，是**非 daemon** 的，解释器
+        # 退出时会被 atexit join —— 搬移若因脏数据卡住（哪怕只是一次长事务），
+        # 进程就「关不掉」。这是本仓库 TD-25 已经踩过两次的形态（备份 / 手动备份），
+        # 启动期这一处此前漏改。冷仓内的批次上限只保证「单次调用会有界返回」，
+        # 这里要的是 **主线程不被陪葬**：等满配额就放弃本次搬移，冷仓回退主库表即可
+        #（历史归档的兜底路径仍在，只是慢，不会出错）。
+        _result: list = []
+
+        def _run() -> None:
+            try:
+                _result.append(cold.migrate_from(state.db))
+            except Exception as exc:  # noqa: BLE001
+                log.warning("冷仓搬移异常（已忽略）：%s", exc)
+
+        import threading
+        import time
+        _t = threading.Thread(target=_run, name="cold-store-migrate", daemon=True)
+        _t.start()
+        _quota = float(os.environ.get("QMT_COLD_MIGRATE_TIMEOUT", "60"))
+        _deadline = time.monotonic() + _quota
+        while _t.is_alive() and time.monotonic() < _deadline:
+            await asyncio.sleep(0.1)
+        if _t.is_alive():
+            log.error("冷仓搬移超过 %.0fs 未完成 —— 放弃本次搬移并回退主库表"
+                      "（daemon 线程会在后台退出，不阻塞启动/停机）", _quota)
+            moved = {}
         else:
-            log.info("冷仓就绪：%s（无需搬移）", cold.path)
+            moved = _result[0] if _result else {}
+            if moved.get("moved"):
+                log.info("冷仓就绪：历史归档搬移 %d 行 → %s",
+                         moved["moved"], cold.path)
+            else:
+                log.info("冷仓就绪：%s（无需搬移）", cold.path)
     except Exception as exc:  # noqa: BLE001
         log.warning("冷仓初始化失败，归档回退主库表（不影响启动）：%s", exc)
         cold = None

@@ -2,6 +2,7 @@
   "account": [
     "account_snapshot"
   ],
+  "alert": [],
   "algo_alert": [],
   "algo_slice": [],
   "broker.connected": [],
