@@ -601,8 +601,14 @@
   ⚠️ 护栏扫的是**剥掉注释与字符串后的代码**（`_code_only()`）—— 否则「解释里引用被禁写法」
   会让护栏自己误报（这次就踩了）。
 - **状态**：`已闭环`
-- **遗留**：测试套件本身会被启动备份打到（154 个文件 × 585 MB）；回归时用
-  `QMT_DB_BACKUP_ENABLED=0` 跑。正解是在 `tests/conftest.py` 里默认关闭（见 §一 遗留）。
+- **遗留（均已闭环，2026-09-28 收尾）**：
+  - **#7 测试默认关备份**：已在 `backend/tests/conftest.py::pytest_configure` 内置
+    `settings.db_backup_enabled = False`（与既有的 `broker_auto_connect = False` 同模式），
+    回归套件不再复制 585 MB 主库，也消除了「大库 + 持锁」对 TD-25 的放大路径。
+  - **#8 历史 `.db.tmp` 残片**：已清理 `backend/data/backups/` 下 8 个 TD-25 化石
+    （8/30、9/11、9/12、9/25、9/28 的 `*.db.tmp` / `*.db.tmp-journal`，约 571 MB；
+    其中 9/25 那份正是 585 MB 的「冻结中」备份）。实时 `app.db` 与 7 份已完成 `*.db`
+    备份保留不动。
 
 ---
 

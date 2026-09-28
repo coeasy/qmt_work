@@ -59,10 +59,16 @@ def pytest_configure(config):  # noqa: ARG001 — pytest 钩子签名
     **就地**写入 ``broker_manager`` / ``db`` / ``risk`` 等槽位，且**从不还原**。
     基线必须在 lifespan 跑之前取，否则基线本身就是被污染的状态。
 
-    同时显式关掉「启动自动连接」（``broker_auto_connect``，生产默认开）：
-    否则每次跑测试都会去扫盘探测本机 QMT 并**真的连上用户券商**——
-    既拖慢用例，又会占用真实客户端会话、污染测试前提。
-    测试需要「有/无券商连接」时应自行显式建立前提，不得依赖环境残留。
+    同时显式关掉两类生产默认行为（否则会拖慢用例、占用真实资源、甚至放大
+    回归风险）：
+
+    - ``broker_auto_connect``（生产默认开）：否则每次跑测试都会去扫盘探测本机 QMT
+      并**真的连上用户券商**——既拖慢用例，又会占用真实客户端会话、污染测试前提；
+    - ``db_backup_enabled``（生产默认开）：否则每个用 ``app_client`` 的测试文件都会
+      在启动阶段触发一次完整 DB 备份（主库 585 MB × keep=10），**既极慢又无意义**，
+      更会在大库 + 持锁场景下放大 TD-25 的「备份冻死」回归。
+
+    测试需要「有/无券商连接」「有/无备份」时应自行显式建立前提，不得依赖环境残留。
     """
     global _PROCESS_STATE_BASELINE
     if _PROCESS_STATE_BASELINE is None:
@@ -71,6 +77,8 @@ def pytest_configure(config):  # noqa: ARG001 — pytest 钩子签名
     from core.config import settings
 
     settings.broker_auto_connect = False
+    # TD-25 #7：测试环境默认关闭 DB 备份，避免大库复制拖慢套件并放大回归
+    settings.db_backup_enabled = False
 
 
 @pytest.fixture(autouse=True)
