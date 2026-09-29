@@ -1,5 +1,13 @@
 # qmt_work · 多券商量化 Agent 平台
 
+> 本文档是 qmt_work 的**产品说明文档（Product Description）**，面向使用者与决策者介绍产品定位、能力、安装、使用与接入方式；开发者技术细节与专题指南见 [`docs/`](docs/README.md) 索引。
+
+**文档导航**
+- 产品说明（本文）：定位 · 能力 · 安装 · 快速开始 · 配置 · 运维 · FAQ
+- [项目规划](docs/项目规划.md)：后续演进方向
+- [项目宣传](docs/项目宣传.md)：产品亮点与适用人群
+- [接口文档](docs/API接口文档.md)：REST / MCP / WebSocket 完整清单
+
 基于 QMT / XTQuant 等多券商客户端的量化交易平台。同一进程内提供 **可视化 Web 界面 + MCP + FastAPI REST + WebSocket 实时推送**，可打包为**独立桌面客户端（EXE）**。
 
 所有行情 / 交易 / 账户接口均通过真实券商 SDK 调用，**零 mock**：未连接券商时端点返回 HTTP 503 + 可操作引导，绝不返回假数据、绝不用空列表冒充。
@@ -396,10 +404,12 @@ print(httpx.get(f"{BASE}/paper/account", headers=HEAD).json())
 print(httpx.get(f"{BASE}/paper/positions", headers=HEAD).json())
 ```
 
-更多专题文档见 [`docs/README.md`](docs/README.md)（完整索引，分「当前有效使用指南 / 项目方案与重构记录 / 归档」三档）。当前有效指南包括：
+更多专题文档见 [`docs/README.md`](docs/README.md)（完整索引）。当前有效指南包括：
 
 | 文档 | 内容 |
 |------|------|
+| `docs/项目规划.md` | 后续演进方向（产品规划 / Roadmap） |
+| `docs/项目宣传.md` | 产品宣传文档：定位、核心卖点、适用人群 |
 | `docs/API接口文档.md` | 接口使用文档（REST / MCP / WebSocket 完整清单，自动生成） |
 | `docs/BROKER_ONBOARDING.md` | 券商接入指南（新增券商 / 适配器约定） |
 | `docs/G2_公式DSL参考.md` | 公式选股 DSL 语法 |
@@ -550,7 +560,7 @@ qmt_work/
 ├─ .gitattributes        # 行尾由仓库表示强制（build_all.bat=CRLF，*.sh=LF；见下方「一键构建」）
 ├─ build_all.sh          # 一键构建（sh，默认 zip 便携版）
 ├─ build_all.bat         # 一键构建（Windows CMD）
-├─ docs/                 # 使用指南 + 方案 / 重构记录（索引见 docs/README.md）
+├─ docs/                 # 产品文档 + 使用指南 + 规划 / 宣传（索引见 docs/README.md）
 └─ README.md
 ```
 
