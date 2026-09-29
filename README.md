@@ -4,7 +4,7 @@
 
 所有行情 / 交易 / 账户接口均通过真实券商 SDK 调用，**零 mock**：未连接券商时端点返回 HTTP 503 + 可操作引导，绝不返回假数据、绝不用空列表冒充。
 
-- 版本：`0.3.6`（单一真源为仓库根 `VERSION`，构建时随包分发并由 `build_exe.py` 校验）
+- 版本：`0.3.8`（单一真源为仓库根 `VERSION`，构建时随包分发并由 `build_exe.py` 校验）
 - 许可证：Apache 2.0
 - 平台：Windows 10 / 11（迅投系券商依赖 xtquant 的 Windows 二进制，须与券商客户端**同机**运行）
 
@@ -46,7 +46,7 @@
 |------|------|
 | 可视化界面 | React + Vite + ECharts SPA，纯前端、前后端解耦；6 分组 / 43 页 + keep-alive 多标签工作区 |
 | MCP 接口 | FastMCP Streamable HTTP，Cursor / Claude Desktop 直连 |
-| REST API | FastAPI `/api/v1/*`，35 个路由模块（账户 / 行情 / 下单 / 回测 / 因子 / 再平衡 / 风控 / 配置…） |
+| REST API | FastAPI `/api/v1/*`，36 个路由模块（账户 / 行情 / 下单 / 回测 / 因子 / 再平衡 / 风控 / 配置…） |
 | 实时推送 | WebSocket，活跃券商只订阅一次，多客户端扇出；断线重连补发最近 30s 行情 |
 | 多账户网格 | 多券商 / 多账户统一看板，批量下单 / 撤单 / 重连 |
 | 回测引擎 | 向量化回测 + 参数扫描（与逐根信号一致），真实 K 线 |
@@ -400,6 +400,7 @@ print(httpx.get(f"{BASE}/paper/positions", headers=HEAD).json())
 
 | 文档 | 内容 |
 |------|------|
+| `docs/API接口文档.md` | 接口使用文档（REST / MCP / WebSocket 完整清单，自动生成） |
 | `docs/BROKER_ONBOARDING.md` | 券商接入指南（新增券商 / 适配器约定） |
 | `docs/G2_公式DSL参考.md` | 公式选股 DSL 语法 |
 | `docs/G4_统一数据面使用指南.md` | 统一数据面 / 多数据源 |
@@ -518,7 +519,7 @@ qmt_work/
 ├─ backend/              # FastAPI 统一后端（V10 重构：core/ 无依赖内核 + engines/ 引擎）
 │  ├─ run.py            # 启动入口（端口自动扫描 + 单实例锁 + AppContext 装配）
 │  ├─ app/              # 装配层：main / routes / services / gateway
-│  │  ├─ routes/        # 35 个 REST 路由模块（account/market/trade/backtest/broker/…）
+│  │  ├─ routes/        # 36 个 REST 路由模块（account/market/trade/backtest/broker/…）
 │  │  └─ gateway/       # 鉴权 / 限流 / 风控 / 审计 / 脱敏 / K 线缓存 / metrics / 日志告警
 │  ├─ core/             # 无依赖内核（context / crypto / db …）
 │  ├─ engines/          # 交易引擎（signal router / execution / backtest …）
@@ -597,7 +598,6 @@ qmt_work/
 |------|------|
 | 许可扫描（AGPL/GPL 零容忍） | `python backend/scripts/check_licenses.py` |
 | 能力漂移（REST agent-visible ↔ MCP tool） | `python backend/scripts/check_capability_drift.py` |
-| 前端 className 差集 | `python backend/scripts/check_frontend_classnames.py` |
 | 执行架构校验 | `python scripts/check_execution_architecture.py` |
 | 文档数字核对（测试数 / 组件数 / 注册页数） | `python scripts/ci_reconcile.py` |
 | 制品校验 | `python scripts/verify_artifacts.py` |
