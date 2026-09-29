@@ -408,7 +408,6 @@ print(httpx.get(f"{BASE}/paper/positions", headers=HEAD).json())
 | `docs/G8_NL选股使用指南.md` | 自然语言选股 |
 | `docs/DESIGN_SYSTEM.md` | 前端设计系统 |
 | `docs/多语言接入指南.md` | 多语言 / 多客户端接入 |
-| `docs/QMT量化Agent平台方案.md` | 平台总体方案 |
 | `docs/THIRD_PARTY_LICENSES.md` | 第三方依赖许可说明 |
 
 ---

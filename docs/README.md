@@ -20,7 +20,6 @@
 | [`G8_NL选股使用指南.md`](G8_NL选股使用指南.md) | 自然语言选股（NL 解析，非 LLM 对话） | 选股用户 |
 | [`DESIGN_SYSTEM.md`](DESIGN_SYSTEM.md) | 前端设计系统：色彩 / 间距 / 组件约定（对应 `frontend-next/src/design/`） | 前端开发者 |
 | [`TECH_DEBT.md`](TECH_DEBT.md) | 技术债 / 未决事项看板（每条可被一条测试或一个 `grep` 证伪，含 TD-09~TD-25 等门禁约束） | 全体 |
-| [`QMT量化Agent平台方案.md`](QMT量化Agent平台方案.md) | 平台总体方案（架构与能力定位的长期参考） | 新成员 |
 | [`qmt_work_扩展功能开发计划_修订版_2026-09-27.md`](qmt_work_扩展功能开发计划_修订版_2026-09-27.md) | 维护与功能扩展任务规划（按「零 mock / 写操作人工确认 / 单 PR 可回滚」拆分） | 全体 / 产品 |
 | [`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md) | 第三方依赖许可说明（含 `eltdx` Research-Only 禁商用声明） | 合规 / 发布 |
 
@@ -35,9 +34,6 @@
 | [`v0.3.8.md`](release-notes/v0.3.8.md) | R34：GitHub 发布→自动构建三处断链闭环 + 三遍深度审计 30 处修复 + 文档校准 |
 | [`v0.3.7.md`](release-notes/v0.3.7.md) | R32–R33：三遍收尾审计 6+1 处修复，五道门禁全绿 |
 | [`v0.3.6.md`](release-notes/v0.3.6.md) | R31：QMT 客户端升级后交易连不上 —— 严格连接校验根因闭环 + 前后端贯通 |
-| [`v0.3.5.md`](release-notes/v0.3.5.md) | R30：三遍链路审计与发布 |
-| [`v0.3.4.md`](release-notes/v0.3.4.md) | 功能架构梳理落地 |
-| [`v0.3.3.md`](release-notes/v0.3.3.md) | 早期发布说明 |
 
 ---
 

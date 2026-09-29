@@ -161,7 +161,7 @@ if profile.adapter == "mybroker":
 2. **子进程桥接（Bridge）**：当 ABI 不兼容且无兼容运行时时，`require_runtime_or_raise` 给出清晰可操作提示；若检测到兼容运行时（bundled 或系统），则通过 `BridgeAdapter` 拉起一个 **ABI 兼容的独立 Python 子进程** 加载 `xtquant`，经 IPC 与主后端通信。
 3. **SDK 缺失即报错**：`xtquant` 完全不可用（无兼容运行时）时抛 `BrokerSDKError`，提示用户确认 `client_path` 与客户端登录状态——**绝不静默退回进程内并在 `start()` 时才崩**。
 
-> 打包说明见 `ROADMAP_VERSION_COMPAT.md`。调试「EXE 起不来」多为测试方法假象（端口锁/残留实例），并非代码 bug——见该文档 §7.4 的正确验证法。
+> 版本兼容路线图与打包说明不随仓库发布；调试「EXE 起不来」多为测试方法假象（端口锁/残留实例），并非代码 bug——以 `scripts/` 下的正确验证流程为准。
 
 ---
 
