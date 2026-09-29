@@ -1,6 +1,6 @@
 # 第三方许可与合规清单
 
-> 建立日期：2026-08-30 · 对应方案 `docs/archive/qmt_work 终极整合优化改进方案（2026-08-30）·五参照系.md` 的 **G0 合规基线**
+> 建立日期：2026-08-30 · 对应方案「qmt_work 终极整合优化改进方案（2026-08-30）·五参照系」的 **G0 合规基线**（该方案稿属 transient 文档，已移出版外归档，不随仓库分发）
 >
 > 本文件是唯一权威来源。新增任何依赖前先在此登记；**AGPL / GPL / SSPL / 非商业类许可零容忍**（理由见第 4 节）。
 
@@ -46,8 +46,10 @@
 | python-dotenv | >=1.0 | BSD-3-Clause | 运行时 | ✅ | |
 | email-validator | — | MIT | 运行时 | ✅ | 缺失会导致 fastapi 导入 EmailStr 崩溃 |
 | psutil | — | BSD-3-Clause | 运行时 | ✅ | 本机 QMT 进程发现 |
-| numpy | >=1.24 | **BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0** | 运行时 | ✅ | 实测本机 2.5.2 |
-| pandas | >=2.0 | BSD-3-Clause | 运行时 | ✅ | 实测本机 3.0.5 |
+| numpy | >=1.24 | **BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0** | 运行时 | ✅ | requirements 钉 1.26.4 |
+| pandas | >=2.0 | BSD-3-Clause | 运行时 | ✅ | requirements 钉 2.2.3 |
+| openpyxl | >=3.1 | MIT | 运行时 | ✅ | Excel 导出（METADATA 声明 MIT，钉 3.1.5） |
+| et-xmlfile | >=2.0 | MIT | 运行时 | ✅ | openpyxl 传递依赖（钉 2.0.0） |
 | redis | >=5.0 | MIT | 运行时 | ✅ | 行情总线真路径 |
 | fakeredis | >=2.0 | BSD-3-Clause | 测试 | ✅ | 测试替身，不进产物 |
 | pytest | — | MIT | 测试 | ✅ | |
@@ -96,16 +98,18 @@ PyInstaller 本体是 GPL-2.0，但带有**明确的例外条款**：允许将�
 - 分发时需要随产物提供 PyInstaller 的 GPL 许可文本副本（业界惯例；若要做严谨合规，建议在 EXE 目录中附带 `PyInstaller-LICENSE.txt`）。
 - **未进入运行时依赖**（`pip install -r requirements.txt` 的生产部署不需要它）。
 
-### 3.4 前端 npm 依赖（`frontend/package.json`）
+### 3.4 前端 npm 依赖（`frontend-next/package.json`）
 
 | 包 | 许可 | 类别 | 商用 | 备注 |
 |---|---|---|---|---|
 | react | MIT | 运行时 | ✅ | |
 | react-dom | MIT | 运行时 | ✅ | |
-| echarts | **Apache-2.0** | 运行时 | ✅ | 图表核心，K 线 / 板块 / 资金流均依赖 |
-| electron-updater | MIT | 桌面壳 | ✅ | |
+| echarts | **Apache-2.0** | 运行时 | ✅ | 图表核心，板块 / 资金流图均依赖 |
+| klinecharts | **Apache-2.0** | 运行时 | ✅ | K 线图核心（v10，LICENSE 正文已人工核对） |
+| zustand | MIT | 运行时 | ✅ | 轻量状态管理（LICENSE 正文已人工核对） |
+| electron-updater | MIT | 桌面壳 | ✅ | 自动更新 |
 
-依赖项仅 4 个，许可面极干净。**新增图表库 / UI 库前务必先查许可** —— 部分金融图表库（如 TradingView Lightweight Charts 是 Apache-2.0，可用；但某些 K 线库为商用授权）不可直接引入。
+依赖项仅 6 个，许可面极干净。**新增图表库 / UI 库前务必先查许可** —— 部分金融图表库（如 TradingView Lightweight Charts 是 Apache-2.0，可用；但某些 K 线库为商用授权）不可直接引入。
 
 ---
 
@@ -134,3 +138,4 @@ PyInstaller 本体是 GPL-2.0，但带有**明确的例外条款**：允许将�
 | 日期 | 变更 | 依据 |
 |---|---|---|
 | 2026-08-30 | 初版建立。补 LICENSE(Apache-2.0)；登记后端 16 + 前端 4 个依赖；识别 eltdx 阻断级风险并完成软依赖化改造；记录 PyInstaller GPL 例外条款；确立借鉴隔离纪律 | G0 合规基线 |
+| 2026-09-29 | 前端依赖登记补全：+`klinecharts`(Apache-2.0)、+`zustand`(MIT)（均人工核对 LICENSE 正文）；后端补登 `openpyxl`/`et-xmlfile`(MIT)；路径修正 `frontend/` → `frontend-next/`；numpy/pandas 备注对齐 requirements 钉版 | 文档漂移审计 |
