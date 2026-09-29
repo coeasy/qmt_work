@@ -1,1 +1,0 @@
-import{j as g,Q as a}from"./index-DB67p1vw.js";const t={neutral:"",success:a.badgeSuccess,warning:a.badgeWarning,danger:a.badgeDanger,info:a.badgeInfo,up:a.badgeUp,down:a.badgeDown};function c({tone:n="neutral",children:e,className:s,title:o}){const r=[a.badge,t[n],s??""].filter(Boolean).join(" ");return g.jsx("span",{className:r,title:o,children:e})}export{c as B};

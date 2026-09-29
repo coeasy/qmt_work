@@ -19,6 +19,10 @@ backend/qmt_strategies/
 backend/data/
 # 前端构建产物（npm run build 生成）
 backend/static/
+# 构建前把旧 static 改名移开（避开 safe-delete 护栏）时产生的暂存目录，
+# 绝不应入库。（误入库一次：84 个 vite 产物文件，见 a896832 的后续修正。）
+backend/_static_prev_*/
+backend/_static_old_*/
 # exe 同目录自动生成的运行期配置
 smart_qmt_config.json
 qmt_work_config.json
