@@ -688,7 +688,7 @@
 | `_RWLock.write()` 无超时 ⇒ `db.close()` 停机永久卡住（TD-25 同族） | R34 (S) | `write(timeout=…)`；`close()` 有界获取，超时跳过 checkpoint |
 | `account_snapshot` / `moneyflow_cache` 无保留策略 ⇒ 主库无界膨胀 | R34 (T) | 90 天 / 30 天保留 + 迁移 28 补 `ts` 索引 |
 | 前端 `sectorStocks` 参数名 `code` ≠ 后端 `sector` ⇒ 静默错误数据 | R34 (U) | 参数名对齐；记入门禁盲区 |
-| CI 缺嵌入 Python 运行时却「构建成功」 | R34 (C1/C2) | `QMT_BUILD_REQUIRE_RUNTIMES=1` 硬闸门 + `fetch_runtimes --install-deps --strict` |
+| CI 缺嵌入 Python 运行时却「构建成功」 | R34 (C1/C2) | `QMT_BUILD_REQUIRE_RUNTIMES=1` 硬闸门 + `fetch_runtimes --with-deps --strict` |
 | `build-client.yml` 上传 `release/*`（实际产物在 `dist-electron`）⇒ 资产恒空 | R34 (C3) | 上传路径修正 |
 
 ---

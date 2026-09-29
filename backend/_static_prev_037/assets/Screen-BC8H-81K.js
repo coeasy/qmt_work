@@ -1,0 +1,1 @@
+import{j as o}from"./index-DB67p1vw.js";import{a as r}from"./ScreenPanels-OTuPa6X-.js";import"./vendor-BzUyE4GI.js";import"./echarts-C-jZp5YR.js";import"./Input-BvR31rQ_.js";import"./Badge-CP6krw01.js";import"./DataTable-Blq9CrY1.js";import"./time-C3z-NNjI.js";import"./domain.module-Dl4sf6Gt.js";function x(t){return o.jsx(r,{})}export{x as Screen,x as default};
