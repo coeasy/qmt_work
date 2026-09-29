@@ -37,7 +37,7 @@
 | `--chart-ma5` `--chart-ma10` `--chart-ma20` `--chart-ma60` | `#f59e0b` `#38bdf8` `#a78bfa` `#22c55e` | 均线配色 |
 
 浅色主题在 `[data-theme="light"]` 下覆盖同名令牌；**组件不得出现硬编码色值**
-（由 `check_frontend_classnames.py` 与令牌门禁共同校验）。
+（原由 `check_frontend_classnames.py` 与令牌门禁共同校验；该脚本已随旧前端 `frontend/` 退役而失效，见 §5，现仅令牌门禁生效）。
 
 ## 2. 涨跌色约定（A 股口径）
 

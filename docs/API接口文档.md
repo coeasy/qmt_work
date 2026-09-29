@@ -6,7 +6,6 @@
 
 > 鉴权、scope、错误语义、跨语言（Python / Node / curl）示例见 [`多语言接入指南.md`](多语言接入指南.md)；本文档只列端点/工具/事件本体。
 
-
 ## 规模速览
 
 | 接口面 | 数量 | 来源 |
@@ -22,25 +21,22 @@
 - **统一响应包裹**：`{ code, message, data }`，`code !== 0` 即错误。健康检查探针（`/live` `/health` `/ready` `/metrics`）额外带 `service/version`。
 - **错误归因**：错误 `message` 给出根因分类（未连接券商 / 柜台拒单 / 风控拦截 / 参数错误 / 内部异常），前端按分类给出不同引导，不做「网络错误」兜底。
 
----
-
 ## REST API（232 端点）
 
-所有路径前缀为 `/api/v1`。按资源分组；`M` 列方法：`G`=GET `P`=POST `U`=PUT `D`=DELETE `X`=PATCH。
-
+所有路径前缀为 `/api/v1`。按资源分组；组内先按方法（`G`=GET `P`=POST `U`=PUT `D`=DELETE `X`=PATCH）再按路径排序。
 
 ### account（账户）· 8 端点
 
 | M | 路径 | 标签 |
 |---|------|------|
 | G | `/api/v1/account/aggregate` | ops |
-| P | `/api/v1/account/batch/cancel` | ops |
-| P | `/api/v1/account/batch/order` | ops |
-| P | `/api/v1/account/batch/reconnect` | ops |
 | G | `/api/v1/account/grid` | ops |
 | G | `/api/v1/account/pnl` | ops |
 | G | `/api/v1/account/slippage` | ops |
 | G | `/api/v1/account/status` | ops |
+| P | `/api/v1/account/batch/cancel` | ops |
+| P | `/api/v1/account/batch/order` | ops |
+| P | `/api/v1/account/batch/reconnect` | ops |
 
 ### alerts（告警）· 6 端点
 
@@ -50,8 +46,8 @@
 | G | `/api/v1/alerts/rules` | ops |
 | P | `/api/v1/alerts/rules` | ops |
 | P | `/api/v1/alerts/rules/batch-delete` | ops |
-| D | `/api/v1/alerts/rules/{rid}` | ops |
 | P | `/api/v1/alerts/test` | ops |
+| D | `/api/v1/alerts/rules/{rid}` | ops |
 
 ### algo（algo）· 5 端点
 
@@ -71,9 +67,9 @@
 | P | `/api/v1/api-keys` | ops |
 | P | `/api/v1/api-keys/batch-delete` | ops |
 | P | `/api/v1/api-keys/clean-unused` | ops |
+| P | `/api/v1/api-keys/{kid}/rotate` | ops |
 | D | `/api/v1/api-keys/{kid}` | ops |
 | X | `/api/v1/api-keys/{kid}` | ops |
-| P | `/api/v1/api-keys/{kid}/rotate` | ops |
 
 ### audit（审计）· 2 端点
 
@@ -87,31 +83,31 @@
 | M | 路径 | 标签 |
 |---|------|------|
 | G | `/api/v1/backtest/jobs` | ops |
+| G | `/api/v1/backtest/jobs/{job_id}` | ops |
 | P | `/api/v1/backtest/jobs` | ops |
 | P | `/api/v1/backtest/jobs/batch-delete` | ops |
-| D | `/api/v1/backtest/jobs/{job_id}` | ops |
-| G | `/api/v1/backtest/jobs/{job_id}` | ops |
 | P | `/api/v1/backtest/sweep` | ops |
+| D | `/api/v1/backtest/jobs/{job_id}` | ops |
 
 ### brokers（券商连接）· 15 端点
 
 | M | 路径 | 标签 |
 |---|------|------|
 | G | `/api/v1/brokers` | ops |
-| P | `/api/v1/brokers` | ops |
 | G | `/api/v1/brokers/auto-detect` | ops |
-| P | `/api/v1/brokers/batch-delete` | ops |
 | G | `/api/v1/brokers/diagnostics` | ops |
-| P | `/api/v1/brokers/launch` | ops |
 | G | `/api/v1/brokers/profiles` | ops |
 | G | `/api/v1/brokers/runtimes` | ops |
+| G | `/api/v1/brokers/{conn_id}/health` | ops |
+| P | `/api/v1/brokers` | ops |
+| P | `/api/v1/brokers/batch-delete` | ops |
+| P | `/api/v1/brokers/launch` | ops |
 | P | `/api/v1/brokers/test` | ops |
 | P | `/api/v1/brokers/version-info` | ops |
-| D | `/api/v1/brokers/{conn_id}` | ops |
 | P | `/api/v1/brokers/{conn_id}/active` | ops |
 | P | `/api/v1/brokers/{conn_id}/connect` | ops |
 | P | `/api/v1/brokers/{conn_id}/disconnect` | ops |
-| G | `/api/v1/brokers/{conn_id}/health` | ops |
+| D | `/api/v1/brokers/{conn_id}` | ops |
 
 ### capabilities（能力自描述）· 3 端点
 
@@ -126,34 +122,34 @@
 | M | 路径 | 标签 |
 |---|------|------|
 | G | `/api/v1/config/paths` | ops |
-| U | `/api/v1/config/paths` | ops |
+| G | `/api/v1/config/risk` | ops |
+| G | `/api/v1/config/risk/daily` | ops |
+| G | `/api/v1/config/runtime` | ops |
+| G | `/api/v1/config/runtime/history` | ops |
+| G | `/api/v1/config/ui` | ops |
+| G | `/api/v1/config/ui/export` | ops |
 | P | `/api/v1/config/paths/db-backups/prune` | ops |
 | P | `/api/v1/config/paths/db-backups/run` | ops |
 | P | `/api/v1/config/paths/migrate-cold` | ops |
 | P | `/api/v1/config/paths/validate` | ops |
-| G | `/api/v1/config/risk` | ops |
-| U | `/api/v1/config/risk` | ops |
 | P | `/api/v1/config/risk/circuit` | ops |
-| G | `/api/v1/config/risk/daily` | ops |
-| G | `/api/v1/config/runtime` | ops |
-| U | `/api/v1/config/runtime` | ops |
-| G | `/api/v1/config/runtime/history` | ops |
 | P | `/api/v1/config/runtime/reset` | ops |
 | P | `/api/v1/config/runtime/rollback` | ops |
-| G | `/api/v1/config/ui` | ops |
-| U | `/api/v1/config/ui` | ops |
-| G | `/api/v1/config/ui/export` | ops |
 | P | `/api/v1/config/ui/import` | ops |
 | P | `/api/v1/config/ui/reset` | ops |
+| U | `/api/v1/config/paths` | ops |
+| U | `/api/v1/config/risk` | ops |
+| U | `/api/v1/config/runtime` | ops |
+| U | `/api/v1/config/ui` | ops |
 
 ### data（data）· 4 端点
 
 | M | 路径 | 标签 |
 |---|------|------|
-| P | `/api/v1/data/chain` | ops |
 | G | `/api/v1/data/providers` | ops |
 | G | `/api/v1/data/providers/health` | ops |
 | G | `/api/v1/data/source/diagnostics` | ops |
+| P | `/api/v1/data/chain` | ops |
 
 ### datahub（datahub）· 1 端点
 
@@ -180,12 +176,12 @@
 
 | M | 路径 | 标签 |
 |---|------|------|
-| D | `/api/v1/limitup/pool` | ops |
+| G | `/api/v1/limitup/status` | ops |
 | P | `/api/v1/limitup/pool` | ops |
 | P | `/api/v1/limitup/reset` | ops |
 | P | `/api/v1/limitup/start` | ops |
-| G | `/api/v1/limitup/status` | ops |
 | P | `/api/v1/limitup/stop` | ops |
+| D | `/api/v1/limitup/pool` | ops |
 
 ### live（live）· 1 端点
 
@@ -198,7 +194,6 @@
 | M | 路径 | 标签 |
 |---|------|------|
 | G | `/api/v1/market/analysis` | ops |
-| P | `/api/v1/market/analysis/run` | ops |
 | G | `/api/v1/market/analysis/scripts` | ops |
 | G | `/api/v1/market/board/constituents` | ops |
 | G | `/api/v1/market/board/kline` | ops |
@@ -209,46 +204,47 @@
 | G | `/api/v1/market/capital` | ops |
 | G | `/api/v1/market/chart-spec` | ops |
 | G | `/api/v1/market/coverage` | ops |
-| P | `/api/v1/market/crawl` | ops |
 | G | `/api/v1/market/datasets/snapshots` | ops |
 | G | `/api/v1/market/etfs` | ops |
-| P | `/api/v1/market/export` | ops |
 | G | `/api/v1/market/indicators` | ops |
 | G | `/api/v1/market/indicators/calc` | ops |
 | G | `/api/v1/market/indices` | ops |
 | G | `/api/v1/market/kline` | ops |
-| D | `/api/v1/market/kline/cache` | ops |
 | G | `/api/v1/market/kline/cache` | ops |
 | G | `/api/v1/market/kline/export` | ops |
-| P | `/api/v1/market/kline/export` | ops |
-| P | `/api/v1/market/kline/sync` | ops |
 | G | `/api/v1/market/kline/sync-status` | ops |
 | G | `/api/v1/market/l2` | ops |
 | G | `/api/v1/market/limitup` | ops |
 | G | `/api/v1/market/minutes` | ops |
 | G | `/api/v1/market/moneyflow` | ops |
 | G | `/api/v1/market/moneyflow/replay` | ops |
-| P | `/api/v1/market/moneyflow/snapshot` | ops |
 | G | `/api/v1/market/overview` | ops |
 | G | `/api/v1/market/periods` | ops |
-| P | `/api/v1/market/portfolio/aggregate` | ops |
 | G | `/api/v1/market/providers` | ops |
 | G | `/api/v1/market/quote` | ops |
-| P | `/api/v1/market/quotes` | ops |
 | G | `/api/v1/market/resolve` | ops |
 | G | `/api/v1/market/rotation` | ops |
 | G | `/api/v1/market/screen` | ops |
 | G | `/api/v1/market/screen/boards` | ops |
-| P | `/api/v1/market/screen/boards` | ops |
-| P | `/api/v1/market/screen/classic` | ops |
 | G | `/api/v1/market/screen/classic/picks` | ops |
-| P | `/api/v1/market/screen/expr` | ops |
-| P | `/api/v1/market/screen/nl` | ops |
 | G | `/api/v1/market/screen/strategies` | ops |
 | G | `/api/v1/market/search` | ops |
 | G | `/api/v1/market/session` | ops |
 | G | `/api/v1/market/sources` | ops |
 | G | `/api/v1/market/stock-info` | ops |
+| P | `/api/v1/market/analysis/run` | ops |
+| P | `/api/v1/market/crawl` | ops |
+| P | `/api/v1/market/export` | ops |
+| P | `/api/v1/market/kline/export` | ops |
+| P | `/api/v1/market/kline/sync` | ops |
+| P | `/api/v1/market/moneyflow/snapshot` | ops |
+| P | `/api/v1/market/portfolio/aggregate` | ops |
+| P | `/api/v1/market/quotes` | ops |
+| P | `/api/v1/market/screen/boards` | ops |
+| P | `/api/v1/market/screen/classic` | ops |
+| P | `/api/v1/market/screen/expr` | ops |
+| P | `/api/v1/market/screen/nl` | ops |
+| D | `/api/v1/market/kline/cache` | ops |
 
 ### metrics（指标）· 1 端点
 
@@ -261,9 +257,9 @@
 | M | 路径 | 标签 |
 |---|------|------|
 | G | `/api/v1/notifications` | ops |
+| G | `/api/v1/notifications/logs` | ops |
 | P | `/api/v1/notifications` | ops |
 | P | `/api/v1/notifications/batch-delete` | ops |
-| G | `/api/v1/notifications/logs` | ops |
 | P | `/api/v1/notifications/test` | ops |
 | D | `/api/v1/notifications/{nid}` | ops |
 
@@ -273,10 +269,10 @@
 |---|------|------|
 | G | `/api/v1/paper/account` | ops |
 | G | `/api/v1/paper/metrics` | ops |
-| P | `/api/v1/paper/order` | ops |
 | G | `/api/v1/paper/positions` | ops |
-| P | `/api/v1/paper/reset` | ops |
 | G | `/api/v1/paper/trades` | ops |
+| P | `/api/v1/paper/order` | ops |
+| P | `/api/v1/paper/reset` | ops |
 
 ### platform（platform）· 1 端点
 
@@ -306,10 +302,10 @@
 
 | M | 路径 | 标签 |
 |---|------|------|
-| P | `/api/v1/reconcile` | reconcile |
 | G | `/api/v1/reconcile/last` | reconcile |
-| P | `/api/v1/reconcile/wal/checkpoint` | reconcile |
 | G | `/api/v1/reconcile/wal/stats` | reconcile |
+| P | `/api/v1/reconcile` | reconcile |
+| P | `/api/v1/reconcile/wal/checkpoint` | reconcile |
 
 ### reference（reference）· 4 端点
 
@@ -336,15 +332,15 @@
 | M | 路径 | 标签 |
 |---|------|------|
 | G | `/api/v1/runtime/jobs` | ops |
-| P | `/api/v1/runtime/jobs` | ops |
 | G | `/api/v1/runtime/jobs/{job_id}` | ops |
-| P | `/api/v1/runtime/jobs/{job_id}/cancel` | ops |
 | G | `/api/v1/runtime/schedules` | ops |
-| P | `/api/v1/runtime/schedules` | ops |
-| D | `/api/v1/runtime/schedules/{schedule_id}` | ops |
 | G | `/api/v1/runtime/schedules/{schedule_id}` | ops |
-| U | `/api/v1/runtime/schedules/{schedule_id}` | ops |
+| P | `/api/v1/runtime/jobs` | ops |
+| P | `/api/v1/runtime/jobs/{job_id}/cancel` | ops |
+| P | `/api/v1/runtime/schedules` | ops |
 | P | `/api/v1/runtime/schedules/{schedule_id}/trigger` | ops |
+| U | `/api/v1/runtime/schedules/{schedule_id}` | ops |
+| D | `/api/v1/runtime/schedules/{schedule_id}` | ops |
 
 ### scheduler（scheduler）· 1 端点
 
@@ -356,8 +352,8 @@
 
 | M | 路径 | 标签 |
 |---|------|------|
-| P | `/api/v1/signal/confirm` | ops |
 | G | `/api/v1/signal/mode` | ops |
+| P | `/api/v1/signal/confirm` | ops |
 | P | `/api/v1/signal/mode` | ops |
 | P | `/api/v1/signal/submit` | ops |
 | P | `/api/v1/signal/webhook` | ops |
@@ -366,30 +362,30 @@
 
 | M | 路径 | 标签 |
 |---|------|------|
-| P | `/api/v1/strategies/generate` | ops |
 | G | `/api/v1/strategies/run` | ops |
+| G | `/api/v1/strategies/run/{run_id}` | ops |
+| G | `/api/v1/strategies/run/{run_id}/logs` | ops |
+| P | `/api/v1/strategies/generate` | ops |
 | P | `/api/v1/strategies/run` | ops |
 | P | `/api/v1/strategies/run/batch-delete` | ops |
 | P | `/api/v1/strategies/run/precheck` | ops |
-| D | `/api/v1/strategies/run/{run_id}` | ops |
-| G | `/api/v1/strategies/run/{run_id}` | ops |
-| G | `/api/v1/strategies/run/{run_id}/logs` | ops |
 | P | `/api/v1/strategies/run/{run_id}/start` | ops |
 | P | `/api/v1/strategies/run/{run_id}/stop` | ops |
 | P | `/api/v1/strategies/save` | ops |
+| D | `/api/v1/strategies/run/{run_id}` | ops |
 
 ### strategy-market（strategy-market）· 9 端点
 
 | M | 路径 | 标签 |
 |---|------|------|
 | G | `/api/v1/strategy-market/catalog` | ops |
+| G | `/api/v1/strategy-market/market` | ops |
+| G | `/api/v1/strategy-market/market/{id}` | ops |
 | P | `/api/v1/strategy-market/export` | ops |
 | P | `/api/v1/strategy-market/export-json` | ops |
 | P | `/api/v1/strategy-market/import` | ops |
 | P | `/api/v1/strategy-market/import-json` | ops |
 | P | `/api/v1/strategy-market/install` | ops |
-| G | `/api/v1/strategy-market/market` | ops |
-| G | `/api/v1/strategy-market/market/{id}` | ops |
 | P | `/api/v1/strategy-market/publish` | ops |
 
 ### sync（sync）· 1 端点
@@ -405,21 +401,21 @@
 | G | `/api/v1/target-portfolio/plans` | ops |
 | P | `/api/v1/target-portfolio/plans` | ops |
 | P | `/api/v1/target-portfolio/plans/batch-delete` | ops |
-| D | `/api/v1/target-portfolio/plans/{pid}` | ops |
 | P | `/api/v1/target-portfolio/sync` | ops |
+| D | `/api/v1/target-portfolio/plans/{pid}` | ops |
 
 ### trade（交易）· 10 端点
 
 | M | 路径 | 标签 |
 |---|------|------|
-| P | `/api/v1/trade/cancel` | ops |
 | G | `/api/v1/trade/conditions` | ops |
-| P | `/api/v1/trade/conditions` | ops |
-| P | `/api/v1/trade/conditions/{cid}/cancel` | ops |
 | G | `/api/v1/trade/deals` | ops |
-| P | `/api/v1/trade/order` | ops |
 | G | `/api/v1/trade/orders` | ops |
 | G | `/api/v1/trade/positions` | ops |
+| P | `/api/v1/trade/cancel` | ops |
+| P | `/api/v1/trade/conditions` | ops |
+| P | `/api/v1/trade/conditions/{cid}/cancel` | ops |
+| P | `/api/v1/trade/order` | ops |
 | P | `/api/v1/trade/precheck` | ops |
 | P | `/api/v1/trade/target` | ops |
 
@@ -427,19 +423,19 @@
 
 | M | 路径 | 标签 |
 |---|------|------|
-| P | `/api/v1/wal/checkpoint` | reconcile |
 | G | `/api/v1/wal/stats` | reconcile |
+| P | `/api/v1/wal/checkpoint` | reconcile |
 
 ### webhooks（Webhook）· 6 端点
 
 | M | 路径 | 标签 |
 |---|------|------|
 | G | `/api/v1/webhooks` | ops |
+| G | `/api/v1/webhooks/deliveries` | ops |
 | P | `/api/v1/webhooks` | ops |
 | P | `/api/v1/webhooks/batch-delete` | ops |
-| G | `/api/v1/webhooks/deliveries` | ops |
-| D | `/api/v1/webhooks/{sid}` | ops |
 | P | `/api/v1/webhooks/{sid}/test` | ops |
+| D | `/api/v1/webhooks/{sid}` | ops |
 
 ---
 
@@ -448,7 +444,6 @@
 FastMCP Streamable HTTP，接入点 `http://<host>:<port>/mcp`，携带 `X-API-Key`。工具集与 REST 的 `agent-visible` 端点保持同步（能力漂移门禁校验）。
 
 按前缀分组（前缀 = 能力域）：
-
 
 #### account_* · 1 个
 
