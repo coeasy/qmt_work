@@ -113,6 +113,9 @@ jobs:
         shell: bash
 
       # ---- Step 5: 兜底上传（-p always 可能因网络/权限丢资产，这里补一次）----
+      # ★ 通配符必须**按版本号收敛**：`dist-electron/` 里可能残留历史版本产物
+      #   （本地/复用 runner 时尤其如此），裸 `*.exe` 会把 0.3.5/0.3.6 等旧包
+      #   一并传到本次 Release 上，污染资产列表。
       - name: Upload release assets (fallback)
         if: ${{ github.event.release.tag_name != '' }}
         env:
@@ -120,14 +123,17 @@ jobs:
         shell: bash
         run: |
           tag="${{ github.event.release.tag_name }}"
+          ver="$(tr -d ' \r\n' < VERSION)"
           shopt -s nullglob
-          files=(frontend-next/dist-electron/*.exe frontend-next/dist-electron/*.zip frontend-next/dist-electron/latest.yml)
+          files=(frontend-next/dist-electron/*"$ver"*.exe
+                 frontend-next/dist-electron/*"$ver"*.zip
+                 frontend-next/dist-electron/latest.yml)
           if [ ${#files[@]} -eq 0 ]; then
-            echo "::error::dist-electron 下没有可上传的安装包产物"
+            echo "::error::dist-electron 下没有版本 $ver 的安装包产物"
             exit 1
           fi
           gh release upload "$tag" "${files[@]}" --clobber --repo "${{ github.repository }}"
-          echo "[upload] 已上传 ${#files[@]} 个资产到 $tag"
+          echo "[upload] 已上传 ${#files[@]} 个资产到 $tag（版本 $ver）"
 
       - name: Upload build manifest
         uses: actions/upload-artifact@v4

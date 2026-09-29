@@ -72,9 +72,16 @@ def main() -> int:
     if args.require_client and (not backend.exists() or not release.exists()):
         print("artifact verification failed: build outputs are missing", file=sys.stderr)
         return 1
-    if args.require_client and (not any(p.suffix.lower() == ".exe" for p in artifact_paths)
-                                or not any(p.suffix.lower() == ".zip" for p in artifact_paths)):
-        print("artifact verification failed: executable and zip are both required", file=sys.stderr)
+    # ★ 必须按**当前版本**判定，否则残留的旧版本产物（dist-electron 里可能同时躺着
+    #   0.3.5/0.3.6/… 的包）会让「有 exe 有 zip」在**本轮什么都没产出**时也判过。
+    #   版本真源：仓库根 VERSION（与 release.yml 的一致性闸门同源）。
+    version = _version()
+    client_paths = [p for p in artifact_paths if version and version in p.name]
+    if args.require_client and (not any(p.suffix.lower() == ".exe" for p in client_paths)
+                                or not any(p.suffix.lower() == ".zip" for p in client_paths)):
+        print(f"artifact verification failed: version {version} 的安装包与 zip 均为必需"
+              f"（dist-electron 内找到的 {version} 产物：{[p.name for p in client_paths] or '无'}）",
+              file=sys.stderr)
         return 1
     manifest = {
         "schema": "qmt_work.artifact-manifest.v1",
