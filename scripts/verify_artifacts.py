@@ -64,6 +64,10 @@ def components() -> list[dict[str, str]]:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--require-client", action="store_true")
+    parser.add_argument("--portable-only", action="store_true",
+                        help="只要求当前版本的便携 zip，不要求 NSIS Setup exe"
+                             "（build-client.yml 便携包流水线专用；release.yml "
+                             "两种产物都打，不加此参数维持 exe+zip 双闸）。")
     args = parser.parse_args()
     backend = ROOT / "backend" / "dist" / "qmt_work"
     release = ROOT / "frontend-next" / "dist-electron"
@@ -77,9 +81,11 @@ def main() -> int:
     #   版本真源：仓库根 VERSION（与 release.yml 的一致性闸门同源）。
     version = _version()
     client_paths = [p for p in artifact_paths if version and version in p.name]
-    if args.require_client and (not any(p.suffix.lower() == ".exe" for p in client_paths)
+    need_exe = not args.portable_only
+    if args.require_client and ((need_exe and not any(p.suffix.lower() == ".exe" for p in client_paths))
                                 or not any(p.suffix.lower() == ".zip" for p in client_paths)):
-        print(f"artifact verification failed: version {version} 的安装包与 zip 均为必需"
+        what = "安装包与 zip 均为必需" if need_exe else "便携 zip 为必需"
+        print(f"artifact verification failed: version {version} 的{what}"
               f"（dist-electron 内找到的 {version} 产物：{[p.name for p in client_paths] or '无'}）",
               file=sys.stderr)
         return 1

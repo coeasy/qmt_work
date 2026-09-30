@@ -148,7 +148,8 @@ jobs:
         shell: bash
 
       - name: Verify desktop artifacts and generate SBOM manifest
-        run: python scripts/verify_artifacts.py --require-client
+        # --portable-only：本流水线只打便携 zip（不打 NSIS Setup），双产物闸留给 release.yml
+        run: python scripts/verify_artifacts.py --require-client --portable-only
         shell: bash
 
       # 产物真目录是 dist-electron（electron-builder.yml 的 directories.output）。
