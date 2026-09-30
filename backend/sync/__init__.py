@@ -100,11 +100,9 @@ class SyncEngine:
         非事件循环上下文（同步单测、脚本直调）下静默跳过 —— 回填只是体验优化，
         任何情况下都不该让订阅失败。
         """
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            return
-        loop.create_task(self.seed_snapshot(codes))
+        # spawn_background 内置无事件循环保护（同步单测/脚本直调静默跳过）
+        from core.emit import spawn_background
+        spawn_background(self.seed_snapshot(codes), name="quote-seed-snapshot")
 
     async def seed_snapshot(self, codes: list[str]) -> int:
         """订阅成功后立刻拉一次全量快照，回填 latest_quotes 并广播。

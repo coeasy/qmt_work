@@ -8,7 +8,6 @@
 
 命中规则后：经 Notifier 推送（可限定 channel），写入 alerts_history，并维护冷却（cooldown_seconds）。
 """
-import asyncio
 import logging
 import time
 
@@ -54,8 +53,11 @@ class AlertEngine:
             "rule_id": rule["id"], "event": event_type, "message": body,
             "triggered_at": _now_iso()})
         if self._notifier:
-            asyncio.create_task(self._notifier.notify(
-                "alert.triggered", title, body, payload, channels=channels, _internal=True))
+            from core.emit import spawn_background
+            spawn_background(
+                self._notifier.notify(
+                    "alert.triggered", title, body, payload, channels=channels, _internal=True),
+                name="alert-notify")
         if self._on_event:
             # 唯一实现见 core/emit.py：on_event 常为 `ws_manager.broadcast`（async），
             # 直接同步调用只会创建协程、永不 await ⇒ 告警事件静默丢失。

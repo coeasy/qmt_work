@@ -217,7 +217,7 @@ def check_api_contract_drift() -> list[str]:
 
     backend = mod.load_backend_endpoints()
     backend_norm = mod.contract_normalized(backend)
-    frontend, _unresolved = mod.scan_frontend()
+    frontend, _unresolved, _fe_query = mod.scan_frontend()
 
     if len(backend) < 50:
         return [f"后端契约只解析到 {len(backend)} 个端点 —— 检查失效（疑契约文件被清空）"]
@@ -225,6 +225,17 @@ def check_api_contract_drift() -> list[str]:
         return [f"前端只解析到 {len(frontend)} 个端点 —— 正则已与代码形态脱节"]
 
     missing = sorted(k for k in frontend if k not in backend_norm)
+    # 参数级对账（R38）：前端查询参数名必须被后端签名认识（FastAPI 静默忽略未知参数
+    # ⇒ 200 + 默认值 = 看似正常的错误数据）。be_query 解析不到的端点不误报。
+    be_query = mod.backend_query_params()
+    for key, names in sorted(_fe_query.items()):
+        known = be_query.get(key)
+        if known is None:
+            continue
+        unknown = names - known
+        if unknown:
+            missing.append(f"{key} 查询参数漂移: {', '.join(sorted(unknown))}"
+                           f"（后端可认: {', '.join(sorted(known))}）")
     return [f"前端调用了后端不存在的端点：{k}（{', '.join(frontend[k])}）"
             for k in missing]
 

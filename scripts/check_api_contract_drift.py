@@ -49,6 +49,14 @@ CALL_RE = re.compile(
 )
 #: 模板字面量里的插值 ``${kid}`` → 路径参数占位 ``{kid}``
 INTERP_RE = re.compile(r"\$\{[^}]*\}")
+#: 调用点之后的查询参数窗口：``{ query: { a: 1, b: x } }``
+QUERY_OBJ_RE = re.compile(r"query:\s*\{([^{}]*)\}", re.S)
+QUERY_NAME_RE = re.compile(r"(\w+)\s*:")
+
+ROUTES_DIR = ROOT / "backend" / "app" / "routes"
+#: 后端签名里不算查询参数的名字/注解
+_SIG_EXCLUDE_NAMES = {"ctx", "body", "request", "response", "payload", "self"}
+_SIG_EXCLUDE_ANN = ("AppContext", "dict", "Dict", "Body", "Depends", "Request", "UploadFile")
 
 
 def load_backend_endpoints() -> set[str]:
@@ -77,10 +85,11 @@ def contract_normalized(endpoints: set[str]) -> set[str]:
     return out
 
 
-def scan_frontend() -> tuple[dict[str, list[str]], list[str]]:
-    """返回 ({归一化端点: [出处...]}, [无法静态解析的调用点...])。"""
+def scan_frontend() -> tuple[dict[str, list[str]], list[str], dict[str, set[str]]]:
+    """返回 ({归一化端点: [出处...]}, [无法静态解析的调用点...], {归一化端点: 查询参数名集合})。"""
     found: dict[str, list[str]] = {}
     unresolved: list[str] = []
+    query_params: dict[str, set[str]] = {}
     for ts in sorted(API_DIR.rglob("*.ts")):
         text = ts.read_text(encoding="utf-8")
         for m in CALL_RE.finditer(text):
@@ -90,10 +99,60 @@ def scan_frontend() -> tuple[dict[str, list[str]], list[str]]:
                 continue
             key = normalize(method, path)
             found.setdefault(key, []).append(f"{ts.name}:{text[:m.start()].count(chr(10)) + 1}")
+            # 查询参数名提取：路径内联 `?a=b` + 调用点后随的 { query: {...} }
+            names: set[str] = set()
+            if "?" in path:
+                qs = path.split("?", 1)[1]
+                for seg in INTERP_RE.sub("x", qs).split("&"):
+                    if seg:
+                        names.add(seg.split("=")[0])
+            tail = text[m.end():m.end() + 400]
+            qm = QUERY_OBJ_RE.search(tail)
+            if qm:
+                # 只在 query 对象与本次调用相邻（中间没有其他 http. 调用）时归属
+                if "http." not in text[m.end():m.end() + qm.start()]:
+                    names.update(QUERY_NAME_RE.findall(qm.group(1)))
+            if names:
+                query_params.setdefault(key, set()).update(names)
         # 形如 http.get(someVar) 的调用点
         for m in re.finditer(r"\bhttp\.(get|post|patch|put|delete)\s*(?:<[^<>]*>)?\s*\(\s*([A-Za-z_$][\w$.]*)", text):
             unresolved.append(f"{ts.name}: {m.group(1)} {m.group(2)}")
-    return found, unresolved
+    return found, unresolved, query_params
+
+
+def backend_query_params() -> dict[str, set[str]]:
+    """从路由处理函数**签名**提取查询参数名（FastAPI 口径：签名标量参数=查询参数）。
+
+    返回 {归一化端点: {参数名...}}。这补上「只核路径不核参数名」的盲区：
+    前端发 ``?code=`` 而后端签名读 ``sector`` 时，FastAPI 静默忽略未知参数、
+    返回 200 + 默认值 —— 看似正常实则错误数据（2026-09-29 code/sector 实锤类）。
+    """
+    out: dict[str, set[str]] = {}
+    if not ROUTES_DIR.exists():
+        return out
+    decl_re = re.compile(
+        r"""@router\.(get|post|put|delete|patch)\(\s*["']([^"']+)["'][^)]*\)\s*\n\s*async def\s+(\w+)\s*\(([^)]*)\)""",
+        re.S,
+    )
+    for py in sorted(ROUTES_DIR.rglob("*.py")):
+        text = py.read_text(encoding="utf-8")
+        for m in decl_re.finditer(text):
+            method, path, _fn, sig = m.group(1), m.group(2), m.group(3), m.group(4)
+            names: set[str] = set()
+            for part in sig.split(","):
+                part = part.strip()
+                if not part or "=" not in part and ":" not in part:
+                    continue
+                pname = part.split(":", 1)[0].split("=", 1)[0].strip().lstrip("*")
+                ann = part.split(":", 1)[1].split("=", 1)[0].strip() if ":" in part else ""
+                if pname in _SIG_EXCLUDE_NAMES or not pname:
+                    continue
+                if any(x in ann for x in _SIG_EXCLUDE_ANN):
+                    continue
+                names.add(pname)
+            if names:
+                out.setdefault(normalize(method, path), set()).update(names)
+    return out
 
 
 def main() -> int:
@@ -113,7 +172,19 @@ def main() -> int:
 
     backend = load_backend_endpoints()
     backend_norm = contract_normalized(backend)
-    frontend, unresolved = scan_frontend()
+    frontend, unresolved, fe_query = scan_frontend()
+    be_query = backend_query_params()
+
+    # ★ 参数级对账：前端发送的查询参数名必须存在于后端签名（否则 FastAPI
+    #   静默忽略 → 200 + 默认值 = 看似正常的错误数据）
+    param_drift: dict[str, set[str]] = {}
+    for key, names in sorted(fe_query.items()):
+        known = be_query.get(key)
+        if known is None:
+            continue  # 后端签名解析不到（POST body 形态等）→ 不误报
+        unknown = names - known
+        if unknown:
+            param_drift[key] = unknown
 
     # ★ 自检：两边都解析不出东西 ⇒ 检查是「永远绿」的
     if len(backend) < 50:
@@ -145,7 +216,17 @@ def main() -> int:
         print("\nAPI CONTRACT DRIFT DETECTED")
         return 1
 
+    if param_drift:
+        print("\n✗ 前端发送了后端签名**不认**的查询参数（FastAPI 静默忽略 → 200 + 默认值）：")
+        for k, unknown in sorted(param_drift.items()):
+            print(f"    {k}  未知参数: {', '.join(sorted(unknown))}   ← {', '.join(frontend[k])}")
+            if be_query.get(k):
+                print(f"      后端可认: {', '.join(sorted(be_query[k]))}")
+        print("\nAPI PARAM DRIFT DETECTED")
+        return 1
+
     print("\n✓ 前端调用的每个端点都能在后端契约里找到")
+    print(f"✓ 参数级对账通过（前端带查询参数的端点 {len(fe_query)} 个，全部命中后端签名）")
     return 0
 
 

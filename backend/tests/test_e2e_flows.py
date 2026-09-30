@@ -287,8 +287,16 @@ class Harness:
         self.manager = FakeManager(self.bridge)
         self.risk = FakeRisk()
 
-        def _on_event(evt):
-            self.events.append(evt)
+        def _on_event(evt, payload=None):
+            # 镜像 WSManager.broadcast 的双形态兼容（sync/__init__.py broadcast）：
+            #   - 引擎两参 dict 形态 emit_event(cb, {"type","data"}) → 原样收集；
+            #   - 三参标准形态 emit_event(cb, "alert", {...}) → 合成为 {"type","data"}。
+            # alert_engine 用三参形态，单参假回调会让事件被 emit_event 兜底吞掉
+            # （flow9 「告警未回推事件」的根因）。
+            if isinstance(evt, dict):
+                self.events.append(evt)
+            else:
+                self.events.append({"type": evt, "data": payload})
 
         self.router = SignalRouter(self.manager, risk=self.risk, db=self.db,
                                    wal=self.wal, notifier=FakeNotifier(),

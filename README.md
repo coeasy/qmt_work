@@ -12,7 +12,7 @@
 
 所有行情 / 交易 / 账户接口均通过真实券商 SDK 调用，**零 mock**：未连接券商时端点返回 HTTP 503 + 可操作引导，绝不返回假数据、绝不用空列表冒充。
 
-- 版本：`0.3.8`（单一真源为仓库根 `VERSION`，构建时随包分发并由 `build_exe.py` 校验）
+- 版本：`0.3.9`（单一真源为仓库根 `VERSION`，构建时随包分发并由 `build_exe.py` 校验）
 - 许可证：Apache 2.0
 - 平台：Windows 10 / 11（迅投系券商依赖 xtquant 的 Windows 二进制，须与券商客户端**同机**运行）
 
@@ -54,7 +54,7 @@
 |------|------|
 | 可视化界面 | React + Vite + ECharts SPA，纯前端、前后端解耦；6 分组 / 43 页 + keep-alive 多标签工作区 |
 | MCP 接口 | FastMCP Streamable HTTP，Cursor / Claude Desktop 直连 |
-| REST API | FastAPI `/api/v1/*`，36 个路由模块（账户 / 行情 / 下单 / 回测 / 因子 / 再平衡 / 风控 / 配置…） |
+| REST API | FastAPI `/api/v1/*`，35 个路由模块（账户 / 行情 / 下单 / 回测 / 因子 / 再平衡 / 风控 / 配置…） |
 | 实时推送 | WebSocket，活跃券商只订阅一次，多客户端扇出；断线重连补发最近 30s 行情 |
 | 多账户网格 | 多券商 / 多账户统一看板，批量下单 / 撤单 / 重连 |
 | 回测引擎 | 向量化回测 + 参数扫描（与逐根信号一致），真实 K 线 |
@@ -450,7 +450,7 @@ print(httpx.get(f"{BASE}/paper/positions", headers=HEAD).json())
 | `QMT_DB_BACKUP_KEEP` | 备份保留份数 | `10` |
 | `QMT_LOG_ALERT_WEBHOOK` | 日志告警 webhook（支持 `{url}|{secret}` HMAC 签名） | 空 |
 
-完整配置项（共 43 个 `QMT_*` 变量，含 TOTP 二次确认、信号 webhook、预交易风控、限流、K 线缓存 TTL 等）见 `backend/.env.example`。
+完整配置项（共 51 个激活 `QMT_*` 变量 + 4 个可选注释项，含 TOTP 二次确认、信号幂等窗口、预交易风控、限流、K 线缓存 TTL、备份体积上限等，与 `core/config.py` 字段一一对齐）见 `backend/.env.example`。
 
 ---
 
@@ -528,7 +528,7 @@ qmt_work/
 ├─ backend/              # FastAPI 统一后端（V10 重构：core/ 无依赖内核 + engines/ 引擎）
 │  ├─ run.py            # 启动入口（端口自动扫描 + 单实例锁 + AppContext 装配）
 │  ├─ app/              # 装配层：main / routes / services / gateway
-│  │  ├─ routes/        # 36 个 REST 路由模块（account/market/trade/backtest/broker/…）
+│  │  ├─ routes/        # 35 个 REST 路由模块（account/market/trade/backtest/broker/…）
 │  │  └─ gateway/       # 鉴权 / 限流 / 风控 / 审计 / 脱敏 / K 线缓存 / metrics / 日志告警
 │  ├─ core/             # 无依赖内核（context / crypto / db …）
 │  ├─ engines/          # 交易引擎（signal router / execution / backtest …）

@@ -40,6 +40,40 @@ import logging
 
 log = logging.getLogger("qmt_work.emit")
 
+#: fire-and-forget 任务的**强引用表**。asyncio 事件循环只保留任务弱引用
+#: （官方文档明示），裸 ``create_task(...)`` 的任务可能在跑完前被 GC 掉；
+#: 且任务若抛异常而无人收割，GC 时才冒「Task exception was never retrieved」。
+#: 所有 fire-and-forget 派发必须走 :func:`spawn_background`（R38 唯一实现纪律）。
+_TASKS: set[asyncio.Task] = set()
+
+
+def spawn_background(coro, *, name: str | None = None):
+    """派发后台协程任务的**唯一安全实现**。
+
+    - 持强引用防 GC（跑完即释放）；
+    - done 回调收割并记录异常（绝不静默）；
+    - 无运行中事件循环（同步单测 / 脚本直调）→ 显式 close() 并返回 None。
+    返回 Task 供测试断言；调用方无需保存引用。
+    """
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        coro.close()
+        return None
+    task = loop.create_task(coro, name=name)
+    _TASKS.add(task)
+
+    def _done(t: asyncio.Task) -> None:
+        _TASKS.discard(t)
+        if t.cancelled():
+            return
+        exc = t.exception()
+        if exc is not None:
+            log.warning("后台任务 %s 异常：%s", t.get_name(), exc)
+
+    task.add_done_callback(_done)
+    return task
+
 
 def emit_event(cb, *args, **kwargs):
     """调用事件回调，自动兼容同步/异步两种实现。返回值仅用于测试断言。"""
@@ -54,12 +88,8 @@ def emit_event(cb, *args, **kwargs):
     if not inspect.iscoroutine(res):
         return res
     try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        res.close()  # 无事件循环：关掉协程，避免 "coroutine was never awaited"
-        return None
-    try:
-        return loop.create_task(res)
+        # spawn_background 已内置：无循环 → close 协程；持强引用 + 收割异常
+        return spawn_background(res, name="emit-event")
     except Exception as exc:  # noqa: BLE001  循环正在关闭等极端情况
         log.warning("事件回调 %r 调度失败（已忽略）：%s",
                     getattr(cb, "__qualname__", cb), exc)

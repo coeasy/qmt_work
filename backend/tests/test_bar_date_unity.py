@@ -286,15 +286,20 @@ def _mk_syncer(store, *, stale_days=10):
 
 def test_sync_one_marks_stale_with_as_of(store):
     """拿到数据 ≠ 数据够新：as_of / stale 必须如实标注。"""
+    from core.clock import bar_date, local_now
+    # ★ 日期必须动态取「今天」：硬编码日期会随日历老化进入 stale_days(10) 窗口
+    #   （2026-09-30 实锤：写死 2026-09-18 的用例 12 天后开始恒红）。
+    today = bar_date(local_now())
+
     syncer = _mk_syncer(store)
 
     async def _fetch(code, period, adjust, count):
-        return [{"time": "2026-09-18", "close": 1}], "tencent"
+        return [{"time": today, "close": 1}], "tencent"
 
     syncer._fetch = _fetch  # type: ignore[assignment]
     out = asyncio.run(syncer.sync_one("600519.SH"))
     assert out.ok and not out.stale
-    assert out.as_of == "20260918"
+    assert out.as_of == today
 
 
 def test_sync_one_flags_year_old_data_as_stale(store):
@@ -327,11 +332,14 @@ def test_stale_days_zero_disables_the_gate(store):
 
 def test_sync_many_aggregates_stale_count(store):
     """汇总里要有 stale / as_of_max —— 光看 ok 看不出数据是陈的。"""
+    from core.clock import bar_date, local_now
+    today = bar_date(local_now())  # 动态「今天」，理由见 test_sync_one_marks_stale_with_as_of
+
     syncer = _mk_syncer(store)
 
     async def _fetch(code, period, adjust, count):
         if code == "600519.SH":
-            return [{"time": "2026-09-18", "close": 1}], "tencent"
+            return [{"time": today, "close": 1}], "tencent"
         return [{"time": "20250418", "close": 1}], "broker"
 
     syncer._fetch = _fetch  # type: ignore[assignment]
@@ -339,7 +347,7 @@ def test_sync_many_aggregates_stale_count(store):
     d = summary.to_dict()
     assert d["ok"] == 3
     assert d["stale"] == 2, f"应有 2 只陈旧，实际 {d['stale']}"
-    assert d["as_of_max"] == "20260918"
+    assert d["as_of_max"] == today
 
 
 def test_sync_runner_fails_when_everything_is_stale():

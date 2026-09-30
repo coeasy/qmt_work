@@ -5,7 +5,6 @@
 """
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 
@@ -63,13 +62,16 @@ def _replay_algos() -> None:
             continue
         already_sent = _sum_sent_volume(state.db, aid)
         try:
-            asyncio.create_task(state.algo_engine.submit(
-                payload.get("code", ""), payload.get("direction", "buy"),
-                int(payload.get("volume", 0)), payload.get("algo", "twap"),
-                int(payload.get("duration", 300)), int(payload.get("slices", 5)),
-                payload.get("price_type", "market"),
-                float(payload.get("limit_price", 0) or 0), payload.get("remark", ""),
-                already_sent=already_sent))
+            from core.emit import spawn_background
+            spawn_background(
+                state.algo_engine.submit(
+                    payload.get("code", ""), payload.get("direction", "buy"),
+                    int(payload.get("volume", 0)), payload.get("algo", "twap"),
+                    int(payload.get("duration", 300)), int(payload.get("slices", 5)),
+                    payload.get("price_type", "market"),
+                    float(payload.get("limit_price", 0) or 0), payload.get("remark", ""),
+                    already_sent=already_sent),
+                name=f"algo-replay-{aid}")
             replayed += 1
         except Exception as exc:  # noqa: BLE001
             log.warning("wal replay algo failed: %s", exc)
