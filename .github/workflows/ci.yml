@@ -13,10 +13,20 @@ concurrency:
 jobs:
   backend-tests:
     name: Backend tests (pytest)
-    runs-on: ubuntu-latest
+    # ★ 后端是 Windows-only 桌面应用（PyInstaller 打 Windows exe），测试用 Windows 路径
+    #   （`P:\...`、大小写不敏感）与本地时区（+08:00）。在 ubuntu 上跑会因「`\` 非分隔符 /
+    #   os.path.normcase 不降大小写 / 时区为 UTC」导致 test_broker_dedupe /
+    #   test_autoconnect / test_clock_unity 等必然失败。必须在 windows-latest 上跑，
+    #   且把本地时区设为中国时区，才能与开发机（win32 +08:00）一致。
+    runs-on: windows-latest
+    env:
+      # Windows runner 默认 cp1252 控制台：Python 打印中文（断言信息/构建日志）会
+      # UnicodeEncodeError 崩溃。强制 stdout/stderr 为 utf-8。
+      PYTHONIOENCODING: utf-8
     defaults:
       run:
         working-directory: backend
+        shell: bash
     steps:
       - uses: actions/checkout@v4
 
@@ -24,6 +34,12 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+
+      # 本地时区设为「中国标准时间」（+08:00），使 parse_iso 等时区相关断言与开发机一致。
+      - name: Set timezone to Asia/Shanghai (China Standard Time)
+        run: tzutil /s "China Standard Time"
+        shell: cmd
+        continue-on-error: true
 
       - name: Install backend dependencies
         run: |

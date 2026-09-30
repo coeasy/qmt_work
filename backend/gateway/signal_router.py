@@ -197,6 +197,19 @@ class SignalRouter:
             self._emit({"type": "signal_dry_run", "data": plan})
             return {"ok": True, **plan}
 
+        # ★ 未知连接闸门（统一 live / paper，修复 paper 模式静默兜底成成功）：
+        #   broker_id 非空但对应连接不存在 → 明确拒绝，绝不走 paper 物理旁路假装成交。
+        #   此前 paper 模式只经 PaperEngine 撮合、完全不校验连接，导致连一个不存在的
+        #   conn_id 都能返回 ok:1，违反「失败绝不包 code=0」契约
+        #   （test_batch_order_unknown_conn_zero_ok / test_batch_cancel_unknown_conn_all_failed）。
+        #   空 broker_id 视作「默认连接」（paper 默认账户路径合法），放行。
+        if sig.broker_id:
+            if self._manager.bridge(sig.broker_id) is None:
+                reason = f"连接不存在或未注册：{sig.broker_id}"
+                self._audit("signal.rejected", code, sig.__dict__, reason)
+                return {"ok": False, "reason": reason, "mode": self.mode,
+                        "broker_unavailable": True}
+
         # P2-4：清理超时的挂起确认令牌
         self._prune_pending()
 

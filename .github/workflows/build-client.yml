@@ -51,11 +51,21 @@ jobs:
 
   # D5：后端基线 —— ruff + pytest（逐文件跑，规避 Windows 同进程全量硬崩溃；
   # 契约测试在无后端环境自动 skip，不算失败）
+  # ★ 后端是 Windows-only 应用：测试用 Windows 路径（大小写不敏感）与 +08:00 时区，
+  #   必须在 windows-latest + 中国时区跑，否则 test_broker_dedupe / test_autoconnect /
+  #   test_clock_unity 等在 Linux/UTC 上必然失败。
   backend-checks:
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
+    env:
+      PYTHONIOENCODING: utf-8
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Set timezone to Asia/Shanghai (China Standard Time)
+        run: tzutil /s "China Standard Time"
+        shell: cmd
+        continue-on-error: true
 
       - name: Setup Python 3.11
         uses: actions/setup-python@v5
@@ -84,6 +94,10 @@ jobs:
   build-windows:
     needs: [frontend-checks, backend-checks]
     runs-on: windows-latest
+    env:
+      # Windows runner 默认 cp1252 控制台：构建脚本打印中文（断言信息/进度日志）会
+      # UnicodeEncodeError 崩溃。强制 utf-8。
+      PYTHONIOENCODING: utf-8
     steps:
       - name: Checkout
         uses: actions/checkout@v4

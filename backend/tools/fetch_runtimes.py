@@ -97,7 +97,7 @@ def _bootstrap_pip(exe: str) -> bool:
 
     if _ok():
         return True
-    print(f"  [pip] 引导 pip（ensurepip）...")
+    print("  [pip] 引导 pip（ensurepip）...")
     r = subprocess.run([exe, "-m", "ensurepip", "--upgrade", "--default-pip"],  # noqa: S603
                        check=False, capture_output=True, text=True)
     if r.returncode != 0:
