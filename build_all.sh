@@ -24,9 +24,15 @@
 #     publish 段决定（electron-builder 据此生成 resources/app-update.yml）。
 #     历史遗留的 QMT_UPDATE_URL 无任何消费者，已删除。
 #
-# 本脚本只删除【构建产物】（backend/dist/qmt_work 与 backend/dist/qmt_work.exe，
-# Electron 自身会重建 dist-electron/）。前端产物 backend/static 由 vite emptyOutDir
-# 自行清理，本脚本不做 rm。不触碰源码与 data/。
+# 本脚本只删除【构建产物】与【产物目录内的运行期状态】：
+#   - backend/dist/qmt_work（PyInstaller 产物）与其中的 data/ logs/ export/
+#     qmt_work_config.json —— 后者由 Step 4 自检原地跑后端产生，必须清掉，
+#     否则 electron-builder 会把 master.key / app.db 打进安装包（见下方
+#     purge_dist_runtime_state）。Electron 自身会重建 dist-electron/。
+#   - 源码目录与 backend/data/（开发态数据库）**绝不触碰**。
+# 前端产物 backend/static 由 vite emptyOutDir 自行清理，本脚本不做 rm。
+# 打包后还有一道硬核对 verify_no_runtime_state_in_package：包里出现密钥/库/配置/
+# 日志即直接 fail，不允许产出带运行期状态的安装包。
 # 沙箱环境下 PyInstaller 写文件可能被拦，请用 --dangerouslyDisableSandbox 运行本脚本。
 
 set -euo pipefail
@@ -205,6 +211,78 @@ clean_dist() {
     fi
     if [[ -d "$d" ]]; then rm -rf "$d" && log "已清理 $d"; fi
 }
+
+# ── 产物中的运行期状态（打包前必须清干净）──────────────────────────────
+# PyInstaller 产物目录里只要混进运行期文件，electron-builder 就会把它们**原样打进安装包**。
+# 其中最危险的是 data/master.key：
+#   ① 所有安装共享同一把密钥，而它正是构建者本机加密数据所用的密钥（密钥泄漏）；
+#   ② 真正干净的只读安装（Program Files）首次启动写不出密钥，本该直接崩在导入期，
+#      却因为「包里带了现成密钥」而被掩盖 —— 绿灯是另一个 bug 遮出来的。
+# 来源不是构建本身，而是**构建后自检**（Step 4）在原地跑了一次后端；
+# 于是「同一个 dist 再打一次包」就会把上一轮自检的密钥/库/日志封进安装包。
+# 2026-08-14 曾手工清过一次，因为没有在流水线里设防而于 2026-09-30 复发 —— 故在此固化。
+# 只删这几个运行期路径，绝不碰 _internal/ 与 exe 本体。
+dist_runtime_state_paths() {
+    printf '%s\n' data logs export kline_data qmt_work_config.json
+}
+
+# 清理一棵产物树里的运行期状态。两个调用对象：
+#   ① backend/dist/qmt_work       —— 本轮 PyInstaller 产物（自检会往这里写）
+#   ② dist-electron/win-unpacked/… —— 上一轮已打包的树（electron-builder 本应整体重建，
+#      但万一它只覆盖不清理，残留的密钥就会被封进新安装包）
+# 统一在这里清掉，使下面的硬核对结果确定、不会出现「上一轮的残留把本轮构建判死」。
+purge_runtime_state_in() {
+    local root="$1" p n=0
+    [[ -d "$root" ]] || return 0
+    while IFS= read -r p; do
+        if [[ -e "$root/$p" ]]; then
+            rm -rf "$root/$p" 2>/dev/null || true
+            if [[ -e "$root/$p" ]]; then
+                warn "无法清除 $root/$p（可能被占用）；安装包将混入运行期状态"
+            else
+                n=$((n + 1))
+            fi
+        fi
+    done < <(dist_runtime_state_paths)
+    if [[ "$n" != "0" ]]; then
+        info "  已清除运行期状态 $n 项：${root#$ROOT/}"
+    fi
+    return 0
+}
+
+purge_dist_runtime_state() {
+    purge_runtime_state_in "$BACKEND/dist/qmt_work"
+    purge_runtime_state_in "$FRONTEND/dist-electron/win-unpacked/resources/backend/qmt_work"
+    purge_runtime_state_in "$FRONTEND/dist-electron/win-unpacked/resources/backend/dist/qmt_work"
+    return 0
+}
+
+# 打包后的硬核对：安装包里**不允许**出现密钥、数据库、运行期配置与日志。
+# 不做这一步的话，泄漏只会在用户装完才发现，且表现是「所有安装共享一把密钥」——
+# 事后极难归因（0.3.9 即栽在这里）。
+verify_no_runtime_state_in_package() {
+    local packed="$FRONTEND/dist-electron/win-unpacked/resources/backend/qmt_work"
+    [[ -d "$packed" ]] \
+        || packed="$FRONTEND/dist-electron/win-unpacked/resources/backend/dist/qmt_work"
+    if [[ ! -d "$packed" ]]; then
+        warn "未找到包内后端目录，跳过运行期状态核对"
+        return 0
+    fi
+    local bad=() p
+    while IFS= read -r p; do
+        if [[ -e "$packed/$p" ]]; then bad+=("$p"); fi
+    done < <(dist_runtime_state_paths)
+    if (( ${#bad[@]} > 0 )); then
+        fail "安装包内混入运行期状态：${bad[*]}
+  包内后端目录：$packed
+  后果：data/master.key 混入 ⇒ 所有安装共享同一把密钥（且是构建者本机的密钥）；
+        app.db / qmt_work_config.json / logs 混入 ⇒ 出厂即带构建过程的数据与日志。
+  修法：清掉 $BACKEND/dist/qmt_work 下的上述路径与 $FRONTEND/dist-electron/win-unpacked，
+        再重跑：  bash build_all.sh --desktop-only --nsis"
+    fi
+    info "  包内无运行期状态（master.key / app.db / 配置 / 日志）"
+    return 0
+}
 # 前端产物由 vite 自行清理：frontend-next/vite.config.ts 已设 emptyOutDir: true，
 # vite 会整体清空 ../backend/static 再写入。此处不再 rm -rf —— 那既冗余，
 # 又会因文件数超阈值触发沙箱批量删除保护（实测 64 个分片被拦）。
@@ -311,6 +389,9 @@ fi
 
 # ---- Step 3: Electron 打包 ----
 log "Step 3/3: Electron 桌面壳打包"
+# ★ 必须在打包前清掉产物里的运行期状态（Step 4 自检会在原地跑后端并写入 data/ 等）。
+#   漏了这一步的后果见 purge_dist_runtime_state 上方注释。
+purge_dist_runtime_state
 cd "$FRONTEND"
 if [[ -f "$BACKEND/dist/qmt_work/qmt_work.exe" ]]; then
     log "检测到后端 EXE，将随包分发"
@@ -348,6 +429,8 @@ cd "$ROOT"
 log "Electron 打包完成 → $FRONTEND/dist-electron/"
 UNPACKED="$FRONTEND/dist-electron/win-unpacked/qmt_work.exe"
 [[ -f "$UNPACKED" ]] || fail "桌面壳产物缺失: $UNPACKED"
+# 包内运行期状态硬核对（密钥/库/配置/日志一律不许进安装包）
+verify_no_runtime_state_in_package
 
 # 包内静态资源完整性核对（白屏问题只能靠这一层发现）。
 # electron-builder 的 extraResources 把 ../backend/dist 的【内容】拷入 resources/backend，

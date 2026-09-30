@@ -612,6 +612,42 @@
 
 ---
 
+### TD-26 安装包内嵌**构建者主密钥**，且掩盖了「只读安装首次启动崩」（**R39 已闭环**，★ 发布阻断）
+
+- **现象**：`backend/dist/qmt_work/data/master.key` 出现在打包前的产物目录里，
+  electron-builder 把它一并封进 `qmt_work-Setup-0.3.9.exe`。同批还有 `app.db`、
+  `logs/`、`qmt_work_config.json`。
+- **根因 A（运行期状态混入产物）**：写这些文件的**不是构建**，而是**构建后自检**
+  （`build_all.sh` Step 4 / `client_start_test.py --target client`）——它在
+  `backend/dist/qmt_work/` 里**原地跑了一次后端**，而后端按 `exe_dir()` 在 exe 同目录
+  写 data/logs/config。**同一棵 dist 再打一次包**，上一轮自检的产物就被收进安装包。
+  本轮正是这样触发的：首次全量构建（09:18 自检）→ `latest.yml` 版本闸门未过、**只重跑
+  Step 3**（09:28）→ 09:18 写下的密钥被第二次打包带走。
+- **根因 B（被 A 掩盖的崩溃）**：`core/crypto.py` 把主密钥固定在 `exe_dir()/data/master.key`。
+  打包态 `exe_dir()` = `resources/backend/qmt_work/`，而桌面壳是**按资源目录只读**设计的
+  （`electron/main.cjs` 把 `QMT_DB_PATH` / `QMT_LOG_DIR` / `QMT_PORT_FILE` 全部重定向到
+  `userData`）。装到 `Program Files` 时该目录不可写 ⇒ 写密钥抛 `OSError` ⇒
+  **后端崩在 `core.crypto` 导入期**。此路径**从未被走通**，只因为根因 A 顺手把密钥
+  「带」进了包、命中的是「读回」分支 —— 典型的**「绿灯是另一个 bug 遮出来的」**。
+- **口径判据（一眼看穿）**：`run.py` 的单实例锁、`.qmt_work.port`、`wal.jsonl`、
+  `bars_cold.db` **全部跟随 `settings.db_path.parent`**，只有主密钥是例外。
+- **处置**：
+  1. `core/crypto.py`：主密钥改为 `<settings.db_path 父目录>/master.key`（口径统一）；
+     `:memory:` / 相对路径退回旧位置；旧位置存在时**复制**迁移（老密文可解、可降级回退）。
+  2. `build_all.sh` / `build_all.bat`：新增 `purge_dist_runtime_state`（打包前清
+     `backend/dist/qmt_work` 与上一轮 `win-unpacked` 的 `data/ logs/ export/ kline_data/
+     qmt_work_config.json`）+ `verify_no_runtime_state_in_package`（打包后**硬 fail**）。
+  3. `tests/test_crypto.py` 增 4 例护栏（路径跟随主库目录 / `:memory:` 回退 / 升级迁移 /
+     短文件重生成）。
+- **★ 历史教训**：同一缺陷 2026-08-14 已手工清过一次（当时把密钥从 `<exe>/_internal/data`
+  挪到 `exe_dir()/data`，以为「与 app.db 同目录」），但**只清产物、没在流水线设防** ⇒ 复发。
+  凡是「靠人记得手动清」的构建卫生规则，都必须落成脚本里的门禁。
+- **状态**：`已闭环`
+- **验证**：门禁 `.sh` / `.bat` **双分支实测**（污染→清理后通过；跳过清理→`exit 1`；
+  干净→通过）；产物目录仅剩 `_internal/` + `qmt_work.exe`；`test_crypto` 14 passed。
+
+---
+
 ## 二、本轮（R26–R29）闭环情况
 
 | 条目 | 对应方案项 | 验收判据 | 状态 |
@@ -703,7 +739,10 @@
 | **hot path 的缓冲/缓存必须有上限**（`deque(maxlen=…)` 或显式保留策略） | R34 (F)(T) | `grep -n "\.append(" backend/sync/__init__.py` 只应出现在有界容器上 |
 | **「零引用」≠「孤儿」**：判定前必须回查历史决策（`docs/*_第NN轮_*.md`），项目里存在**刻意的扩展点** | R34 (Y) | 报告 `PagePlaceholder.tsx` 即为反例 |
 | **契约门禁只核路径存在性，不核参数名/取值** —— 参数漂移是盲区，须人工比对签名 | R34 (U) | 尚无自动门禁（见 §建议 1） |
+| **靠人记得手动清 = 迟早复发**：构建卫生规则（尤其是「产物里不许有运行期状态」）必须落成脚本里的**清理 + 硬门禁**两步，不接受口头约定 | TD-26、TD-25 | `grep -n "purge_dist_runtime_state\|verify_no_runtime_state_in_package" build_all.sh build_all.bat` |
+| **`exe_dir()` 只用于「只读资源」定位**：任何**运行期可写**文件（密钥 / 库 / 锁 / 端口 / 日志）都必须跟随 `settings.db_path.parent` 或桌面壳注入的 userData 路径 | TD-26 | `grep -rn "exe_dir()" backend --include=*.py` 逐条确认不是可写文件 |
+| **绿灯要问「这条路径真的被执行到了吗」**：某个 bug 可能把另一条路径的失败遮住（TD-26 的只读写失败被「包里已带密钥」遮了整轮发布） | TD-26、TD-25 | 修复后必须**构造失败场景**再验一次，而不是只看通过 |
 
 ---
 
-*最后更新：2026-09-29（R34 第 34 轮：GitHub 发布→自动构建三处断链闭环 + 三遍深度审计 30 处修复 + 文档全面校准；新增 §五「通用纪律」——停机路径禁止无界等待、事件派发三参形态、常驻循环必须 try/except、hot path 缓冲必须有界、「零引用≠孤儿」）*
+*最后更新：2026-09-30（R39：发布阻断缺陷闭环 —— 安装包内嵌构建者主密钥 + 只读安装首次启动崩（两者互相掩盖）；主密钥口径统一为跟随主库目录；构建流水线新增运行期状态清理与包内硬门禁；新增 §五 三条纪律——构建卫生必须落成门禁、`exe_dir()` 只用于只读资源、绿灯要问路径是否真被执行）*

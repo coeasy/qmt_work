@@ -56,6 +56,11 @@ EXEMPT: dict[str, str] = {
     "signal": "**入站** webhook 由外部系统调用，前端不消费"
               "（出站 webhook 另由 /webhooks 页面承载；/signal/submit|mode|confirm 前端已覆盖）",
     "quote-bus": "行情总线统计，属运维诊断数据；如需观察应并入系统状态页，不单独立页",
+    # —— reference：能力已由 MCP 覆盖，前端不建页 ——
+    # 原前端 `services/api/system.ts::referenceApi` 是**死代码**（UI 无任何调用方），
+    # 已于 R38 删除；这 4 个端点仍由 MCP 工具对外提供，故登记豁免而不是删端点。
+    "reference": "MCP 工具 trading_calendar / sector_list / sector_stocks / financial_summary "
+                 "覆盖同一能力，前端不设页（仅 API/MCP；原前端 referenceApi 为死代码已删除）",
 }
 
 # ---------------------------------------------------------------------------

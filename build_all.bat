@@ -44,8 +44,12 @@ REM    QMT_NODE_DIR      node install dir used by npm (default: resolve below)
 REM  注：自动更新源由 frontend-next/electron-builder.yml 的 publish 段决定，
 REM      不是环境变量（旧的 QMT_UPDATE_URL 无消费者，已删除）。
 REM
-REM  Only backend/dist is deleted by this script. frontend-next static output is wiped
-REM  by vite itself (emptyOutDir: true). Source, config and data/ are never touched.
+REM  Only backend/dist is deleted by this script, plus the RUNTIME STATE that ends up
+REM  inside backend\dist\qmt_work (data\ logs\ export\ kline_data\ qmt_work_config.json)
+REM  - the post-build self-check runs the EXE in place and writes those, and
+REM  electron-builder would otherwise seal master.key / app.db into the installer.
+REM  frontend-next static output is wiped by vite itself (emptyOutDir: true).
+REM  Source and the dev database (backend\data) are never touched.
 REM ============================================================
 
 setlocal enabledelayedexpansion
@@ -232,9 +236,72 @@ REM otherwise the desktop app renders a white screen.
 powershell -NoProfile -Command ^
   "$h = Get-Content -Raw '%BACKEND%\static\index.html'; " ^
   "$m = [regex]::Match($h, '/assets/[A-Za-z0-9_.-]+\.js'); " ^
-  "if (-not $m.Success) { Write-Output '  no js entry reference found, skip check' } " ^
-  "elseif (Test-Path ('!PACKED!' + $m.Value)) { Write-Output ('  entry ' + $m.Value + ' present in package') } " ^
-  "else { Write-Output ('[warn] package is missing entry ' + $m.Value + ' - desktop may show a white screen') }"
+    "if (-not $m.Success) { Write-Output '  no js entry reference found, skip check' } " ^
+    "elseif (Test-Path ('!PACKED!' + $m.Value)) { Write-Output ('  entry ' + $m.Value + ' present in package') } " ^
+    "else { Write-Output ('[warn] package is missing entry ' + $m.Value + ' - desktop may show a white screen') }"
+goto :eof
+
+REM ---------- helper: purge runtime state from the packaged backend tree ----------
+REM  ★ Must run BEFORE electron-builder. The Step 4 self-check runs the built EXE in
+REM    place and it writes data\ (master.key / app.db), logs\ and qmt_work_config.json
+REM    into backend\dist\qmt_work; electron-builder then seals those files into the
+REM    installer. A shipped master.key means EVERY installation shares one key, and it
+REM    also hides a real crash: a clean read-only install (Program Files) cannot create
+REM    the key at all (core/crypto.py now keeps it next to the database in userData).
+REM    Cleaned by hand on 2026-08-14, regressed on 2026-09-30 because the pipeline had
+REM    no guard. Kept in sync with build_all.sh.
+:purge_dist_runtime_state
+REM two trees: this round's PyInstaller output, and the previous package output
+REM (electron-builder should rebuild win-unpacked wholesale, but if it only
+REM overwrites, a stale master.key would be sealed into the new installer).
+for %%r in (
+    "%BACKEND%\dist\qmt_work"
+    "%FRONTEND%\dist-electron\win-unpacked\resources\backend\qmt_work"
+    "%FRONTEND%\dist-electron\win-unpacked\resources\backend\dist\qmt_work"
+) do (
+    if exist "%%~r" (
+        for %%p in (data logs export kline_data qmt_work_config.json) do (
+            if exist "%%~r\%%p" (
+                if "%%p"=="qmt_work_config.json" (
+                    del /f /q "%%~r\%%p" >nul 2>nul
+                ) else (
+                    rmdir /s /q "%%~r\%%p" >nul 2>nul
+                )
+                if exist "%%~r\%%p" (
+                    echo [warn] cannot purge %%~r\%%p - installer may ship runtime state
+                ) else (
+                    echo [build] purged runtime state: %%~r\%%p
+                )
+            )
+        )
+    )
+)
+goto :eof
+
+REM ---------- helper: hard gate - no runtime state inside the package ----------
+REM Runs right after electron-builder. Fails the build instead of shipping an
+REM installer that carries the builder's key / database / config / logs.
+:verify_package_runtime_state
+set "PKG=%FRONTEND%\dist-electron\win-unpacked\resources\backend\qmt_work"
+if not exist "!PKG!" set "PKG=%FRONTEND%\dist-electron\win-unpacked\resources\backend\dist\qmt_work"
+if not exist "!PKG!" (
+    echo [warn] packaged backend dir not found, skip runtime-state check
+    goto :eof
+)
+set "BAD="
+for %%p in (data logs export kline_data qmt_work_config.json) do (
+    if exist "!PKG!\%%p" set "BAD=!BAD! %%p"
+)
+if defined BAD (
+    echo [error] runtime state leaked into the installer:!BAD!
+    echo         package dir: !PKG!
+    echo         a shipped master.key makes every installation share one key.
+    echo         fix: delete the paths above under backend\dist\qmt_work and
+    echo              frontend-next\dist-electron\win-unpacked, then re-run
+    echo              build_all.bat --desktop-only --nsis
+    exit /b 1
+)
+echo   package has no runtime state ^(master.key / app.db / config / logs^)
 goto :eof
 
 REM ---------- main flow resumes here ----------
@@ -302,6 +369,8 @@ if "%BACKEND_ONLY%"=="true" (
 
 REM ---------- Step 3: Electron packaging ----------
 echo [build] Step 3/3: Electron shell
+REM ★ purge runtime state BEFORE packaging (Step 4 self-check writes it back later).
+call :purge_dist_runtime_state
 cd /d "%FRONTEND%"
 
 if not exist "%BACKEND%\dist\qmt_work\qmt_work.exe" (
@@ -345,6 +414,9 @@ if not exist "dist-electron\win-unpacked\qmt_work.exe" (
     cd /d "%ROOT%"
     exit /b 1
 )
+REM hard gate: the installer must not carry key / database / config / logs
+call :verify_package_runtime_state
+if !errorlevel! neq 0 ( cd /d "%ROOT%" & exit /b 1 )
 
 cd /d "%ROOT%"
 call :verify_packaged_static
