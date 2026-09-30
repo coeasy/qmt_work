@@ -54,12 +54,25 @@ def test_signal_after_reset_reports_no_broker_not_circuit(app_client):
         ① 原因里不得出现「熔断」（reset 若失效 ⇒ 立刻变红）；
         ② 必须是**业务拒绝 400**（带真实原因），而不是笼统的「服务不可用 503」。
       503 是留给「券商没连上 / SDK 缺失」的，两者混用会让用户去查错方向。
+
+    ★★ 2026-10-01（R41）：显式把信号模式固定为 **live** 再提交，测后恢复。
+      此前依赖「本地开发库恰好转到过 live」的隐式残留：CI 全新库 signal.mode
+      默认 paper → paper 撮合直接 ok:true（code=0），用例在 CI 必红、本地必绿，
+      是环境隐式依赖。被测语义（熔断 reset 后回到业务拒绝）本就只对 live 链路
+      成立（require_account 资金/快照闸门），显式固定后与执行环境无关。
     """
-    app_client.post("/api/v1/config/risk/circuit", json={"action": "reset"})
-    r = app_client.post("/api/v1/signal/submit", json=_SIGNAL)
-    body = r.json()
-    msg = str(body.get("message") or "")
-    assert "熔断" not in msg, f"熔断残留：{msg}"
-    assert body.get("code") == 400, \
-        f"解除熔断后应回到业务拒绝（400 + 真实原因），实得 {r.text[:200]}"
-    assert msg, "业务拒绝必须带原因，否则用户无从排查"
+    orig = (app_client.get("/api/v1/signal/mode").json().get("data") or {}) \
+        .get("mode")
+    app_client.post("/api/v1/signal/mode", json={"mode": "live"})
+    try:
+        app_client.post("/api/v1/config/risk/circuit", json={"action": "reset"})
+        r = app_client.post("/api/v1/signal/submit", json=_SIGNAL)
+        body = r.json()
+        msg = str(body.get("message") or "")
+        assert "熔断" not in msg, f"熔断残留：{msg}"
+        assert body.get("code") == 400, \
+            f"解除熔断后应回到业务拒绝（400 + 真实原因），实得 {r.text[:200]}"
+        assert msg, "业务拒绝必须带原因，否则用户无从排查"
+    finally:
+        # 恢复原持久化模式，不污染本地开发库（paper 为全新环境的安全默认）
+        app_client.post("/api/v1/signal/mode", json={"mode": orig or "paper"})
