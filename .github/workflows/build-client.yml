@@ -139,7 +139,12 @@ jobs:
         working-directory: frontend-next
         env:
           QMT_BUILD_REQUIRE_RUNTIMES: "1"
-        run: npm run dist:portable
+        # --publish never：本流水线只做构建校验 + upload-artifact，不发布 Release。
+        #   electron-builder.yml 配了 publish(provider: github)，在 CI 里它会检测到
+        #   发布意图并索要 GH_TOKEN——没给就在 zip 打包最后一步 exit 1
+        #   （"GitHub Personal Access Token is not set"）。发布走 release.yml
+        #   （-p always + GH_TOKEN），这里显式关掉。
+        run: npm run build && npm run backend:build && npx electron-builder --win zip --publish never
         shell: bash
 
       - name: Verify desktop artifacts and generate SBOM manifest
