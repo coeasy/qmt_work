@@ -648,6 +648,166 @@
 
 ---
 
+### TD-27 指标「生产者缺失」：6 个 `record_*` 从未被调用，`/metrics` 照样输出 0（**R40 已闭环**）
+
+- **症状**：`/metrics` 里 `qmt_paper_orders_total` / `qmt_api_latency_ms_*` /
+  `qmt_runtime_mode` / `qmt_errors_total` / `qmt_ws_messages_total` **永远为空或 0**。
+  监控面板上这些是「一切正常」的样子，而真相是**没有任何代码写过它们**。
+- **根因**：`gateway/metrics.py` 的 `record_*`（生产者）与 `render()`（消费者）之间
+  没有任何契约约束。模块 docstring 只写了一句「用法：在关键路径调用 `record_*`」——
+  **约定写在注释里，就没有人核**。实测 `record_paper_order` / `record_request_duration_ms` /
+  `record_runtime_mode` / `record_error` / `record_ws_message` / `record_ws_clients`
+  六个方法在整个仓库（含 `.venv`）**只出现一次**，即定义处。
+- **同族的另一半**：一个「内存 trace 环形缓冲」（`record_trace` + `recent_traces`）
+  生产者和消费者**都**缺席（没有任何路由/前端读它），属于**半落地功能** ——
+  留着等于承诺一个不存在的排障能力。
+- **处置**：
+  1. **接线**（各 1~3 行，均放在既有分支之后，不改任何业务判定）：
+     `record_paper_order` → `signal_router._paper`；`record_runtime_mode` →
+     `BrokerManager._safe_start` / `connect`（经 **注入回调** `runtime_mode_fn`，
+     维持「`xtquant_client` 不得反向依赖 `gateway`」的分层纪律）；
+     `record_error("http")` → 全局 500 处理器；`record_ws_message` → WS 接收循环；
+     `record_request_duration_ms` → 新增 `api_latency_middleware`（**只统计 `/api/v1/`**，
+     否则 p95 会被前端静态资源下载带偏）。
+  2. **删除半落地/冗余成员**：trace 环形缓冲整体移除（`record_trace` /
+     `recent_traces` / `_recent_traces` / `_TRACE_CAP`）；`record_ws_clients` 移除
+     （与 `/metrics` 路由传 live snapshot 重复 ⇒ 同一个 gauge 两个来源迟早不一致）。
+  3. **门禁**：新增 `tests/test_metrics_wiring.py`（8 例）—— 从 `Metrics` 上取**全部**
+     `record_*`，在**产线**代码（**排除 `tests/`**：测试自己调用一次就把门禁刷绿，
+     是这类护栏最容易犯的错）里逐个核对；反向用 `render()` 的**真实输出**核对
+     「每个被渲染的 `qmt_*` 都必须声明生产者」。另有自证用例防止扫描器静默失效。
+- **同类清理**：`connectors/transports/__init__.py::register_transport`（零调用的
+  第二注册入口，已删除并声明 `_TRANSPORTS` 为唯一注册表）、
+  `gateway/db_backup.py::_size_str`（零调用私有方法，已删除）。
+- **状态**：`已闭环`
+- **验证**：`test_metrics_wiring.py` 8 passed；相关 9 个测试文件 155 passed；
+  `ruff --select=F,E9` 全绿。
+
+---
+
+### TD-28 新功能把 `bigqmt_bridge.py` 顶过 50KB ⇒ **CI 上的 Gate 4 变红**（**R41 已闭环**）
+
+- **症状**：`scripts/check_execution_architecture.py` 退出码 1：
+  `backend\connectors\bigqmt_bridge.py: 51.8KB (> 50KB，请按职责拆分)`。
+  该门禁**接在 `.github/workflows/ci.yml:85`** —— 也就是说这一条会让整条流水线变红。
+- **根因**：R40 给桥加「存活判据」（4 个常量 + 探测方法 + 一长段说明）时，
+  只想着把**假绿灯**讲清楚，没有回头量文件体积。Gate 4 的上限正是为「多个关注点
+  挤在一个文件里」设的（历史上 `registry.py` 64KB、`market.py` 54KB 都是这么来的），
+  而本文件当时确实同时装着**两类关注点**：
+  ① 双槽位契约 / 事件泵 / 行情订阅对账 / 存活判据（**桥本体**）；
+  ② canonical op → 旧 `XTQuantGateway` shape 的适配（**gateway 面**）。
+- **处置**：按关注点拆出 `connectors/bigqmt_gateway.py`（`_BigQmtGateway` +
+  它专属的三个 shape 助手 `_split_instrument` / `_snapshot_to_legacy` / `_raw_of`）。
+  拆分判据不是行数而是**依赖方向**：那三个助手在桥本体内**零引用**（已 grep 证实），
+  而桥本体自己的两个助手（`_call_with_optional_timeout` / `_canonical_to_ws`）
+  在 gateway 面里同样零引用 —— 两个模块可以**单向依赖**（bridge → gateway），
+  不产生环。`bigqmt_bridge.py` 51.8KB → **40.6KB**。
+- **★ 为什么不是「把注释删短一点绕过」**：上限是「关注点混杂」的代理指标，
+  删注释只会把指标变绿、把问题留下；下一次加功能又被顶穿，且失去一次真正的分层。
+- **状态**：`已闭环`
+- **验证**：Gate 4 退出码 0（`execution architecture gate: OK`）；
+  `test_bigqmt_bridge_face.py` **33 passed**、`test_bigqmt_bridge_integration.py`
+  **19 passed**（拆分**零行为变化** —— 测试文件只把 `_BigQmtGateway` 的 import
+  指向新的规范模块，两套面仍由同一个文件一起对账）；
+  `verify_arch_gates_falsifiable.py` 14/14 证伪通过、源码字节级还原。
+
+---
+
+### TD-29 「冻结基线」门禁的**匹配过宽** + 基线腐烂：常量/类型导入被算成「单例引用」（**R41 已闭环**）
+
+- **症状**：`backend/scripts/check_appcontext.py` 退出码 1，报 12 个「NEW direct
+  state import」。其中 `tests/test_trade_chain_contract.py` **根本没碰单例** ——
+  它只写了一句 `from core.state import MSG_NO_BROKER`（一个消息**常量**）。
+- **根因（两层）**：
+  1. **匹配过宽**：实现是正则 `from core\.state import .*`，「从 `core.state`
+     取任何东西」都算违规 ⇒ `AppState`（类型注解）、`MSG_NO_BROKER`（常量）
+     一并被点名。过宽匹配有两重害：把无关文件逼进基线（基线里于是混着
+     「其实没碰单例」的条目，**谎话化**）；真出现**单例**漂移时反而不显眼。
+     本仓既有标准是「**AST 全量扫描，无正则糊弄**」（同目录的
+     `check_execution_architecture.py` 开篇即此语），此门禁是唯一的例外。
+  2. **基线腐烂**：门禁**不在 CI 上**，于是没人跑 ⇒ 基线停在很早以前。
+     12 条新增里**有 1 条是产线代码**：`gateway/easytrader_facade.py` 直接
+     `from core.state import state`。又一次「不接在 CI 上的门禁等于没有门禁」。
+- **处置**：
+  1. 改为 **AST 判定**：只认「取到可变单例 `state` 这个名字」（含 `as` 别名、
+     含多名字列表），其余 `core.state` 成员一律不算。副产品：3 条**假阳性**
+     基线条目（`app/bootstrap/lifecycle.py`、`tests/test_lifecycle*.py`）自动收敛。
+  2. 产线那一条**真违规**改为走规约访问器：`router` 属性改用
+     `core.context.active_context_or_none()`，与路由层的 `Depends(get_ctx)`
+     **同源**（不再把「装配已完成的单例」当隐式假设），`FacadeError` 行为不变。
+  3. 其余 11 条全是**测试**文件（含 `tests/conftest.py` 要快照/还原单例的 48 个槽位）
+     ⇒ `--update` 显式接纳，并把「扫描范围**刻意含 `tests/`**」写进模块 docstring，
+     避免下一个人以为那是 bug 又去放宽。
+- **状态**：`已闭环`
+- **验证**：门禁 `baseline=42 current=42 new=0 converged=0` → **PASS**；
+  `test_connector_composition.py` 17 passed、`test_state_context_unity.py` 12 passed；
+  `ruff` 全绿。
+
+---
+
+### TD-30 版本一致性闸门**漏掉 `package-lock.json`**：根包版本漂了 4 个版本没人发现（**R41 已闭环**）
+
+- **症状**：升版到 `0.4.0` 时，`frontend-next/package.json` 是 `0.4.0`，而
+  `frontend-next/package-lock.json` 的根包版本仍停在 **`0.3.6`** —— 差了 4 个版本，
+  跨了 `0.3.7 / 0.3.8 / 0.3.9 / 0.3.10 / 0.4.0` 五次升版都没人发现。
+- **根因**：`release.yml` 的版本一致性闸门核的是
+  **`tag = VERSION = package.json`** 三处（`VERSION` 为单一真源），
+  `package-lock.json` **不在**核查范围内。而 `npm ci`（CI 与构建脚本都用它）
+  **不会**因根包 `version` 与 `package.json` 不一致而失败 —— 于是这条漂移既不报错、
+  也没有任何门禁会看见，属于「**没人核 = 迟早说错话**」的同族。
+- **处置**：
+  1. 升 `0.4.1` 时把 `package-lock.json` 的两处根包 `version`（顶层 + `packages[""]`）
+     与 `VERSION` / `package.json` 一并对齐；
+  2. 记入本板，作为「版本一致性闸门应扩面到 lock 文件」的依据。
+- **★ 为什么不顺手改 `release.yml`**：Release 工作流的改动只能在真实发布时验证，
+  而本轮不具备该验证条件（本地无 `gh`、PAT 缺 Contents 写权限）。
+  **宁可在文档里诚实标注缺口，也不要塞一条没被验证过的 CI 检查进去** ——
+  本仓已有「没接 CI 的门禁会腐烂」（TD-29）与「绿灯是另一个 bug 遮出来的」（TD-26）
+  两次教训，加一条未验证的闸门只会制造第三例。
+- **状态**：`已闭环`（漂移已纠正；闸门扩面作为**待办**留在本节）
+- **证伪方式**：`grep -n '"version"' frontend-next/package-lock.json | head -2` 与
+  `cat VERSION`、`grep -n '"version"' frontend-next/package.json | head -1` 三处必须相等。
+
+---
+
+### TD-31 后端上浮的诊断字段**前端一个都没消费**：「现在可用吗」在界面上问不出来（**R41 已闭环**）
+
+- **症状**：R40 为修「假绿灯」在 `connector_probe()` 里专门上浮了
+  `available` / `agent_unresponsive` / `liveness_failures` / `last_agent_ok_age_s`
+  四个字段（注释写着「让『曾经连上』与『现在可用』在诊断里可区分」），
+  但 `frontend-next/` 里 **grep 命中数为 0** —— 连 TypeScript 类型都没声明它们。
+  用户在诊断面板上看到的仍是「已连接」，问不出「**现在**还可用吗」。
+- **根因**：与 **TD-27 同族**的「生产者/消费者不配对」，只是换了一条链路：
+  - 后端：`connector_probe()` 是**生产者**；
+  - 前端：`bigqmtProbe.ts::describeBigQmtProbe` 是**消费者**（它把探针输出压成界面结论）；
+  - 两者之间**没有任何门禁**。`check_api_contract_drift.py` 只核**路径 + 查询参数**
+    （后端路由签名 ↔ 前端 `query:{}`），**不核响应载荷的字段**；于是「后端多算了几个
+    字段、前端不知道」这种漂移全绿通过。
+  - 对比：TD-27 是因为「约定写在注释里」，这一条是因为「**载荷字段不在任何门禁的
+    视野里**」—— 同一个病，两种成因。
+- **处置**：
+  1. `services/api/broker.ts` 的 `BigQmtProbe` 补上四个字段的**类型声明**（含 `null`
+     语义：`last_agent_ok_age_s = null` 表示**从未成功**，与「掉线」不是一回事）；
+  2. `bigqmtProbe.ts` 新增 `livenessTone` / `livenessLabel` / `available` /
+     `lastAgentOkAgeS`，判定分三态并写清为什么：
+     `warn`（连续无应答 ⇒ 不可用，并区分「曾经可用」与「从未可用」）/ `ok` / `unknown`
+     （**agent 从未应答时不能报红**，否则刚打开面板或本来就没启动策略时一片假红）；
+  3. `Brokers.tsx` 在「根因」行后新增「可用性」行，且 `bigQmtProbeHint` 必须兜底
+     —— 否则提示行为空，用户以为一切正常（这一点由用例锁死）；
+  4. 新增 8 条用例（`tests/bigqmtProbe.test.ts`），其中一条专门断言
+     **「agent 元数据看着完全正常（目录一致、两个泵都在跑）但 `available=false` 时
+     必须判 warn 而不是 ok」** —— 那一格就是假绿灯本体。
+- **★ 未做的部分（诚实登记）**：**没有**给 `check_api_contract_drift.py` 加
+  「载荷字段级」对账。原因：响应体是运行期构造的 dict（`connector_probe` 里几十个
+  分支），静态推导字段集合需要引入一整套类型标注约定，成本远超本轮收益；
+  故只用**测试**锁住这一个面板，并把「载荷字段级对账」登记为待办
+  （与 TD-30 的「闸门扩面」同性质：宁可不做，不做未经验证的闸门）。
+- **状态**：`已闭环`（本面板已对齐；载荷字段级门禁作为待办留在本节）
+- **证伪方式**：`grep -rn "agent_unresponsive" frontend-next/src` 必须有命中；
+  `npx vitest run tests/bigqmtProbe.test.ts` 全绿。
+
+---
+
 ## 二、本轮（R26–R29）闭环情况
 
 | 条目 | 对应方案项 | 验收判据 | 状态 |
@@ -742,7 +902,9 @@
 | **靠人记得手动清 = 迟早复发**：构建卫生规则（尤其是「产物里不许有运行期状态」）必须落成脚本里的**清理 + 硬门禁**两步，不接受口头约定 | TD-26、TD-25 | `grep -n "purge_dist_runtime_state\|verify_no_runtime_state_in_package" build_all.sh build_all.bat` |
 | **`exe_dir()` 只用于「只读资源」定位**：任何**运行期可写**文件（密钥 / 库 / 锁 / 端口 / 日志）都必须跟随 `settings.db_path.parent` 或桌面壳注入的 userData 路径 | TD-26 | `grep -rn "exe_dir()" backend --include=*.py` 逐条确认不是可写文件 |
 | **绿灯要问「这条路径真的被执行到了吗」**：某个 bug 可能把另一条路径的失败遮住（TD-26 的只读写失败被「包里已带密钥」遮了整轮发布） | TD-26、TD-25 | 修复后必须**构造失败场景**再验一次，而不是只看通过 |
+| **没接在 CI 上的门禁会腐烂**：基线停更、假阳性堆积，最后连「它是红的」都没人知道。要么挂进 `ci.yml`，要么明确标注为本地工具 | TD-29、Gate 1（曾恒红数月） | `grep -n "python .*scripts/" .github/workflows/ci.yml` 逐个核对是否都在 |
+| **触碰「阈值/计数」类门禁后，必须实测门禁本身**：加功能要量文件体积，加用例要同步 `EXPECTED_TESTS` + README 两处计数 —— 这类门禁的红不是「代码坏了」，却同样会让流水线红 | TD-28、TD-27 | `python scripts/check_execution_architecture.py` + `python scripts/ci_reconcile.py` 均退出码 0 |
 
 ---
 
-*最后更新：2026-09-30（R39 发布阻断缺陷闭环 —— 安装包内嵌构建者主密钥 + 只读安装首次启动崩（两者互相掩盖）；主密钥口径统一为跟随主库目录；构建流水线新增运行期状态清理与包内硬门禁；新增 §五 三条纪律——构建卫生必须落成门禁、`exe_dir()` 只用于只读资源、绿灯要问路径是否真被执行。**R40：以 v0.4.0 作为新的公开发布版本线（代码同源 v0.3.10），与带缺陷的 0.3.9 切割；发布本身验证「版本一致性闸门 + 包内无运行期状态硬门禁 + CI 自动构建上传资产」链路可用**）*
+*最后更新：2026-09-30（R39 发布阻断缺陷闭环 —— 安装包内嵌构建者主密钥 + 只读安装首次启动崩（两者互相掩盖）；主密钥口径统一为跟随主库目录；构建流水线新增运行期状态清理与包内硬门禁；新增 §五 三条纪律——构建卫生必须落成门禁、`exe_dir()` 只用于只读资源、绿灯要问路径是否真被执行。**R40：以 v0.4.0 作为新的公开发布版本线（代码同源 v0.3.10），与带缺陷的 0.3.9 切割；发布本身验证「版本一致性闸门 + 包内无运行期状态硬门禁 + CI 自动构建上传资产」链路可用**；**R41：修复「新功能顶穿文件体积上限」导致 CI Gate 4 变红（`bigqmt_bridge` 按职责拆出 `bigqmt_gateway`），并修掉 `check_appcontext` 的过宽匹配（正则→AST）与基线腐烂 —— 后者暴露出一条产线代码仍在直取 `core.state.state`，已改走 `core.context` 规约访问器；升版 v0.4.1（v0.4.0 的 tag 已推在更早提交上，且其说明声明「非功能新增」），并发现版本一致性闸门漏核 `package-lock.json`（根包版本漂在 0.3.6 已久之）**）*

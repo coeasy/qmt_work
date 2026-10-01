@@ -66,7 +66,11 @@ def register_broker_tools(mcp):
         b = state.broker_manager.active_bridge()
         if not b:
             return {"connected": False, "detail": "未连接任何券商客户端"}
-        return b.gateway.test_connection()
+        # ★ 经 ``b.call`` 而不是直接 ``b.gateway.test_connection()``：
+        #   gateway 形态随连接类型而定 —— xtquant 是真适配器（同步），
+        #   大 QMT 桥是 ``_BigQmtGateway``（async）。直接同步调用在后者会拿到
+        #   未 await 的协程并原样返回，工具输出变成一串协程对象。
+        return await b.call(b.gateway.test_connection)
 
 
 def build_mcp(risk) -> FastMCP:

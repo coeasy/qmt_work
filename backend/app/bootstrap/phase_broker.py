@@ -331,6 +331,10 @@ async def setup(app: FastAPI) -> dict:
         from gateway.metrics import get_metrics
         state.broker_manager.metrics_fn = (
             lambda conn_id, ev: get_metrics().record_conn_event(conn_id, ev))
+        # 运行时模式指标（in_process / bridge）：同样由 app 层注入。
+        # 它此前**从未被写入**过 —— /metrics 里 qmt_runtime_mode 永远是空的。
+        state.broker_manager.runtime_mode_fn = (
+            lambda conn_id, mode: get_metrics().record_runtime_mode(conn_id, mode))
     except Exception:  # noqa: BLE001
         pass
     state.broker_manager.load_persisted()

@@ -3,11 +3,22 @@
 
 **Gate 1 — 真实下单入口不得绕过 ExecutionService。**
 - 扫描 ``app / gateway / tools / engines / mcp_server / connectors``；
-- **白名单语义**：任何 ``*.place_order(...)`` 直调均视为绕过执行链，除非 receiver
-  本身就是执行服务（receiver 文本含 "execution"，如 ``ExecutionService(...)`` /
-  ``self._execution`` / ``get_execution_service()``）；
+- **白名单语义**：任何 ``*.place_order(...)`` 直调均视为绕过执行链，除非满足其一：
+  1. receiver 本身就是执行服务（文本含 "execution"，如 ``ExecutionService(...)`` /
+     ``self._execution`` / ``get_execution_service()``）；
+  2. 是**端口实现层的内层转发**（见 ``_is_authorized_port_hop``）。
 - 旧启发式（receiver ∈ {gateway, adapter} 或以 .gateway 结尾）会漏掉
   ``self._adapter.place_order`` 等形态，已废弃。
+
+★★ 为什么必须承认「内层转发」（2026-10-01，R39）：``ExecutionService`` 调用的**就是**
+端口对象（``port = _port_for_bridge(bridge)`` ⇒ ``port.place_order(...)``），而端口对象
+（``_BigQmtGateway`` / ``BigQmtBridge``）内部再到 transport/connector 的那一跳是
+**被授权的**，不是旁路。旧白名单只认 receiver 含 "execution"，于是大 QMT 桥一落地就把
+本门禁顶成**恒红**（实测退出码 1），而它**接在 ``.github/workflows/ci.yml`` 上** ——
+一条永远红、且没人再看的门禁等于没有门禁（真出现旁路时同样没人会注意）。
+⇒ 精确开这个口子：目录 + 方法名 + 类名**三个条件同时**成立才算内层转发；
+  任意一条不满足（例如在 ``app/`` 里、或把方法改名叫 ``sneaky_buy``）照旧拦截。
+  这条判据由 ``scripts/verify_arch_gates_falsifiable.py`` 的 G1-A/B/C 三例证伪。
 
 **Gate 2 — ``app/routes/`` 不得直连 DB（P0-1）。**
 路由层的职责是「参数校验 + 编排」；SQL 一旦混进路由：
@@ -105,6 +116,52 @@ def _receiver_allowed(receiver: str) -> bool:
     return "execution" in receiver.lower()
 
 
+#: 端口/桥接**实现层**的目录（相对 ``backend``）。只有这些目录里的纯转发算内层一跳。
+_PORT_LAYER_DIRS = frozenset({"connectors", "xtquant_client"})
+
+#: 端口实现层的类名特征（与 ``ExecutionService`` 的 ``port`` 概念一一对应）。
+_PORT_CLASS_RE = re.compile(r"(bridge|gateway|adapter|port)", re.IGNORECASE)
+
+#: 端口契约里**纯转发**的方法名 —— 只有它们允许内层调 ``place_order``。
+_PORT_HOP_METHODS = frozenset({"place_order", "place_order_async"})
+
+
+def _parents(tree: ast.AST) -> dict[ast.AST, ast.AST]:
+    """子节点 → 父节点（``ast.walk`` 不给父指针，需要它来找外层函数/类）。"""
+    out: dict[ast.AST, ast.AST] = {}
+    for node in ast.walk(tree):
+        for child in ast.iter_child_nodes(node):
+            out[child] = node
+    return out
+
+
+def _is_authorized_port_hop(rel: Path, node: ast.Call,
+                            parents: dict[ast.AST, ast.AST]) -> bool:
+    """这个 ``.place_order`` 调用是不是**端口实现层的内层转发**。
+
+    三条件**同时**成立才放行（缺一即视为旁路）：
+      ① 文件在端口实现层目录（``connectors/`` / ``xtquant_client/``）；
+      ② 最近的外层函数名就是 ``place_order`` —— 即**纯转发**，没有夹带新逻辑；
+      ③ 最近的外层类名含 bridge/gateway/adapter/port。
+
+    ★ 为什么不是「凡是 connectors 都放行」：那等于把门禁从「拦住一切」改成
+      「什么都拦不住」—— 有人新写一个 ``def buy_now(self): self._c.place_order(...)``
+      就再也没人管。条件 ② 正是拦它的。
+    """
+    if not rel.parts or rel.parts[0] not in _PORT_LAYER_DIRS:
+        return False
+    fn = cls = None
+    cur = parents.get(node)
+    while cur is not None and (fn is None or cls is None):
+        if fn is None and isinstance(cur, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            fn = cur.name
+        if cls is None and isinstance(cur, ast.ClassDef):
+            cls = cur.name
+        cur = parents.get(cur)
+    return (fn in _PORT_HOP_METHODS and cls is not None
+            and bool(_PORT_CLASS_RE.search(cls)))
+
+
 def _is_db_receiver(receiver: str) -> bool:
     """判断一个表达式是否「像数据库句柄」。
 
@@ -137,15 +194,20 @@ def _gate_place_order() -> list[str]:
             except SyntaxError as exc:
                 violations.append(f"cannot parse {path.relative_to(ROOT)}: {exc}")
                 continue
+            parents = _parents(tree)
+            rel = path.relative_to(BACKEND)
             for node in ast.walk(tree):
                 if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
                     continue
                 if node.func.attr != "place_order":
                     continue
                 receiver = ast.unparse(node.func.value)
-                if not _receiver_allowed(receiver):
-                    violations.append(
-                        f"{path.relative_to(ROOT)}:{node.lineno}: {receiver}.place_order")
+                if _receiver_allowed(receiver):
+                    continue
+                if _is_authorized_port_hop(rel, node, parents):
+                    continue
+                violations.append(
+                    f"{path.relative_to(ROOT)}:{node.lineno}: {receiver}.place_order")
     return violations
 
 

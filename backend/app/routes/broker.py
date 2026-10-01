@@ -157,6 +157,13 @@ async def broker_diagnostics(deep: bool = False, ctx: AppContext = Depends(get_c
                     _runtime_plan_for, conn.cfg.client_path)
             except Exception:  # noqa: BLE001
                 entry["runtime_plan"] = None
+        # 大 QMT 桥连接：附探针面（transport/agent 元数据/事件语义与延迟上界）。
+        # 只读本地缓存，不做 IO —— 诊断面不得把事件循环或桥拖住。
+        if conn.cfg.connector_key:
+            try:
+                entry["bigqmt"] = conn.adapter.connector_probe()
+            except Exception as exc:  # noqa: BLE001
+                entry["bigqmt"] = {"error": str(exc)}
         payload["connections"].append(entry)
     return ok(payload)
 
@@ -170,6 +177,28 @@ def _runtime_plan_for(client_path: str):
         return None
 
 
+def _validate_connector_key(connector_key: str, bridge_dir: str) -> str:
+    """校验大 QMT 连接器 key 及其必填参数。
+
+    返回空串 = 通过（含「未启用桥接」）；否则返回给用户的 400 文案。
+    零 mock 纪律：未知 key / 缺 bridge_dir 一律拒绝，绝不悄悄装配一个假连接器。
+    """
+    if not connector_key:
+        return ""
+    try:
+        from connectors.registry import describe
+        profile = describe(connector_key)
+    except Exception:
+        return (f"未知 connector_key：{connector_key}。可用组合见 "
+                "connectors/registry.py（如 qmt.big.bridge.file / .redis / .zmq）")
+    transport = str((profile or {}).get("transport") or "")
+    if transport in ("file", "redis", "zmq") and not (bridge_dir or "").strip():
+        return (f"连接器 {connector_key}（transport={transport}）必须提供 "
+                "bridge_dir：file=桥接目录绝对路径（与大 QMT 端 agent_config.json "
+                "完全一致）；redis=连接串；zmq=地址（如 tcp://127.0.0.1:5555）")
+    return ""
+
+
 @router.get("/brokers/profiles")
 async def broker_profiles(ctx: AppContext = Depends(get_ctx)):
     """获取brokers / profiles（GET /brokers/profiles）。"""
@@ -181,7 +210,11 @@ async def broker_profiles(ctx: AppContext = Depends(get_ctx)):
                 "supported_periods": p.supported_periods,
                 "sdk_required": p.sdk_required, "min_version": p.min_version,
                 "note": p.note, "is_custom": p.id not in builtin,
-                "status": getattr(p, "status", "active")} for p in registry.list()])
+                "status": getattr(p, "status", "active"),
+                # M4.1：路径 A 一等公民 —— 前端「直连大客户端」时据此预填
+                # userdata 目录（默认路径是极速版 userdata_mini，两者不同根不行）。
+                "full_client_path": getattr(p, "full_client_path", "")}
+               for p in registry.list()])
 
 @router.get("/brokers")
 async def list_brokers(ctx: AppContext = Depends(get_ctx)):
@@ -209,8 +242,18 @@ async def add_broker(body: dict, ctx: AppContext = Depends(get_ctx)):
     target = _resolve_account(body.get("client_path", ""), body.get("account_id", ""),
                               body.get("account_type", "STOCK"))
     broker_id = body.get("broker_id") or ""
+    connector_key = str(body.get("connector_key", "") or "").strip()
+    bridge_dir = str(body.get("bridge_dir", "") or "").strip()
+    auth_token = str(body.get("auth_token", "") or "")
+    bad = _validate_connector_key(connector_key, bridge_dir)
+    if bad:
+        return err(400, bad)
+    if not connector_key and not (body.get("client_path", "") or "").strip() \
+            and not body.get("conn_id"):
+        # 非桥接连接必须有客户端路径（编辑既有连接时路径可暂缺，由库里旧值兜底）。
+        return err(400, "client_path 不能为空（大 QMT 桥接连接请改填 connector_key + bridge_dir）")
     # 券商通用化：未知券商放行（create_adapter 会降级到通用迅投 XTP 适配器）
-    if not get_profile(broker_id) and broker_id:
+    if not get_profile(broker_id) and broker_id and not connector_key:
         from xtquant_client.registry import hotplug_profile
         try:
             hotplug_profile({
@@ -245,7 +288,8 @@ async def add_broker(body: dict, ctx: AppContext = Depends(get_ctx)):
         account_id=target["account_id"], account_type=target["account_type"],
         session_id=int(body.get("session_id", 0) or 0),
         min_version=body.get("min_version", ""),
-        active=bool(body.get("active", False)))
+        active=bool(body.get("active", False)),
+        connector_key=connector_key, bridge_dir=bridge_dir, auth_token=auth_token)
     try:
         # 阶段 0-D（C7）：add_connection(autoconnect=True) 会同步拉起子进程 + 握手
         # （最坏 _ping 90s 超时），放线程池执行，避免冻结 FastAPI 事件循环。
@@ -287,13 +331,28 @@ async def test_broker(body: dict, ctx: AppContext = Depends(get_ctx)):
     """创建/提交brokers / test（POST /brokers/test）。"""
     target = _resolve_account(body.get("client_path", ""), body.get("account_id", ""),
                               body.get("account_type", "STOCK"))
+    connector_key = str(body.get("connector_key", "") or "").strip()
+    bridge_dir = str(body.get("bridge_dir", "") or "").strip()
+    bad = _validate_connector_key(connector_key, bridge_dir)
+    if bad:
+        return err(400, bad)
     cfg = ConnectionConfig(
         conn_id=body.get("conn_id", ""), broker_id=body.get("broker_id", ""),
         client_path=body.get("client_path", ""),
         client_mode=body.get("client_mode", "auto") or "auto",
         account_id=target["account_id"], account_type=target["account_type"],
         session_id=int(body.get("session_id", 0) or 0),
-        min_version=body.get("min_version", ""))
+        min_version=body.get("min_version", ""),
+        connector_key=connector_key, bridge_dir=bridge_dir,
+        auth_token=str(body.get("auth_token", "") or ""))
+    if connector_key:
+        # 桥接连接「探测」= 组一个临时连接做一次 PROBE（不落库、不置 active）。
+        try:
+            probe = await asyncio.to_thread(
+                ctx.broker_manager.probe_transient, cfg)
+        except BrokerError as exc:
+            return err(503, str(exc))
+        return ok(probe)
     # 阶段 0-D（C7）：test_connection 会临时拉起子进程（最坏 90s 超时），须放线程池。
     res = await asyncio.to_thread(ctx.broker_manager.test_connection, cfg)
     if isinstance(res, dict):
@@ -396,8 +455,12 @@ async def batch_remove_brokers(body: dict, ctx: AppContext = Depends(get_ctx)):
         try:
             ctx.broker_manager.remove(conn_id)
             removed.append(conn_id)
-        except (KeyError, ConnectionError, RuntimeError) as exc:
-            # 单条删除失败：继续处理剩余项，整体不阻断
+        except Exception as exc:  # noqa: BLE001
+            # 单条删除失败：继续处理剩余项，整体不阻断。
+            # ★ 宽口径：``remove()`` 会触达 bridge/client 的关闭路径，可能抛出
+            #   连接器异常层级（ConnectorError / TransportError / UnsupportedOp）。
+            #   它们继承 ``BrokerError`` 而非 ``RuntimeError``，窄口径会漏接
+            #   ⇒ 一条坏连接把整批删除请求打成 500。
             log.warning("删除连接 %s 失败，已跳过：%s", conn_id, exc)
     ctx.db.audit("broker", "broker.batch_remove", f"#{len(removed)}", {"ids": removed}, "ok")
     return ok({"removed": removed, "deleted": len(removed)})
@@ -410,6 +473,22 @@ async def broker_health(conn_id: str, ctx: AppContext = Depends(get_ctx)):
     s = ctx.health_monitor.status(conn_id)
     if s is None:
         return err(404, f"未知连接：{conn_id}")
+    # M2.7 闭环：桥接连接在健康结论之外附探针面（读 transport 缓存，零 IO）。
+    # 四类根因（bridge_dir 两端不一致 / token 错 / 注入函数缺失 / agent 未运行）
+    # 必须在这一面可区分，而不是让用户翻 QMT 日志。
+    if ctx.broker_manager is not None:
+        for conn in ctx.broker_manager.all_connections():
+            if conn.cfg.conn_id != conn_id:
+                continue
+            probe = getattr(conn.adapter, "connector_probe", None)
+            if callable(probe):
+                try:
+                    s = dict(s)
+                    s["bigqmt"] = probe()
+                except Exception as exc:  # noqa: BLE001  诊断附差不许影响健康主结论
+                    s = dict(s)
+                    s["bigqmt"] = {"error": str(exc)}
+            break
     return ok(s)
 
 

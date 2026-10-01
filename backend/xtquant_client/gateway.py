@@ -55,7 +55,19 @@ class XTQuantGateway(ABC):
         raise BrokerError("get_instrument_detail 未实现")
 
     @abstractmethod
-    def place_order(self, code: str, direction: str, price_type: str, price: float, volume: int) -> dict: ...
+    def place_order(self, code: str, direction: str, price_type: str,
+                    price: float, volume: int,
+                    strategy_name: str = "", remark: str = "") -> dict:
+        """下单。
+
+        ★ ``strategy_name`` / ``remark`` 不是可选项：**每一个真实实现**都收
+          （``base.BrokerAdapter`` / ``adapters._BridgeAdapter`` /
+          ``bridge_client.BridgeClientAdapter`` / 大 QMT 的 ``_BigQmtGateway``），
+          ``XtQuantV1.prepare()`` 也每次都带这两个键。这里曾把它们漏掉，
+          导致本 ABC 声明的签名比实现**窄** —— 按 ABC 写代码就会踩
+          ``TypeError: unexpected keyword argument 'remark'``（被
+          ``InProcessTransport`` 归成 ``SignatureMismatch`` 装配 bug）。
+        """
 
     @abstractmethod
     def cancel_order(self, order_id: str) -> dict: ...

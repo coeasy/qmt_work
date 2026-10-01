@@ -735,7 +735,8 @@ EXTRA_COLUMNS: dict[str, tuple[str, ...]] = {
     # audit_log：D4 hash 链防篡改
     "audit_log": ("prev_hash", "hash"),
     # broker_connections：客户端模式（auto 自动推断 / mini 极速版 / full 完整版大客户端）
-    "broker_connections": ("client_mode",),
+    #   + 大 QMT 连接器（connector_key/bridge_dir/auth_token，路径 B：agent 隔离 + 文件/redis/zmq 桥）
+    "broker_connections": ("client_mode", "connector_key", "bridge_dir", "auth_token"),
     # condition_orders：A3 跨日续作与到期 + 阶段 2 拒单次日重试 + P1-5 盘中重试/终态核销
     "condition_orders": ("valid_days", "expire_at", "last_check_date", "expired_at",
                          "retry_date", "retry_count", "intraday_retry", "next_retry_at",

@@ -61,6 +61,14 @@ def register_error_handlers(app: FastAPI) -> None:
     async def _unhandled_exc(request: Request, exc: Exception):
         log.exception("unhandled exception on %s %s: %s",
                       request.method, request.url.path, exc)
+        # qmt_errors_total 的生产者（scope=http）。此前该计数器**零写入**，
+        # /metrics 里的 qmt_errors_total 恒为空 —— 而「最近有没有 500」正是
+        # 上线后第一个要看的数。指标失败不得影响错误响应本身。
+        try:
+            from gateway.metrics import get_metrics
+            get_metrics().record_error("http")
+        except Exception:  # noqa: BLE001
+            pass
         if not request.url.path.startswith(_API_PREFIX):
             return JSONResponse({"detail": "Internal Server Error"}, status_code=500)
         return JSONResponse(_envelope(500, "服务器内部错误"), status_code=500)

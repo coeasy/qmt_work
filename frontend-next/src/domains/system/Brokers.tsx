@@ -12,8 +12,9 @@ import {
   Spinner,
 } from "@/design/primitives";
 import { brokerApi } from "@/services/api";
-import type { AutoDetectCandidate, BrokerDiagnostics } from "@/services/api";
+import type { AutoDetectCandidate, BigQmtProbe, BrokerDiagnostics } from "@/services/api";
 import { useBrokerStore } from "@/stores/broker";
+import { bigQmtProbeHint, describeBigQmtProbe } from "./bigqmtProbe";
 import s from "./brokers.module.css";
 
 /**
@@ -22,6 +23,64 @@ import s from "./brokers.module.css";
  */
 function isRecommended(c: AutoDetectCandidate): boolean {
   return c.running && !!c.default_account_id;
+}
+
+/**
+ * 大 QMT 桥的探针面板。
+ *
+ * 为什么必须渲染而不是把整块 JSON 丢出来：大小 QMT 的差异**不在「能不能连」，
+ * 而在「哪一层断了」**——agent 没运行 / bridge_dir 两端不一致 / 注入函数缺失 /
+ * trading_enabled 关闭 / 行情泵没跑 / 事件泵没跑，这六种情况的界面表现都是
+ * 「连接成功但没有数据」，用户完全无法区分。
+ *
+ * 判定逻辑全部在 `bigqmtProbe.ts`（纯函数，可直接单测）；此处只负责展示。
+ */
+function BigQmtProbeBlock({ probe }: { probe: BigQmtProbe }) {
+  if (probe.error) {
+    return <div className={s.err}>大 QMT 探针读取失败：{probe.error}</div>;
+  }
+  const v = describeBigQmtProbe(probe);
+  const hint = bigQmtProbeHint(v);
+
+  return (
+    <div className={s.diagConnSub}>
+      <div>
+        大 QMT 桥：传输 <b>{v.transport}</b> · 事件语义 <b>{v.eventSemantics}</b>
+        {v.latencyLabel}
+      </div>
+      {hint ? <div className={s.err}>根因：{hint}</div> : null}
+      {/* 存活面：「现在可用吗」—— 必须排在「连接过没有」之前。文件桥没有连接，
+          旧实现里 agent 死掉后标志仍为真，界面会一直显示「已连接」（假绿灯）。 */}
+      <div className={v.livenessTone === "warn" ? s.err : undefined}>
+        可用性：{v.livenessLabel}
+      </div>
+      <div>
+        {v.headline} · {v.dirLabel} · 回调 {v.callbackBound ? "已绑定" : "未绑定"}
+        {v.directionUnknown > 0
+          ? ` · 方向未知 ${v.directionUnknown} 次（勿据此判定买卖）`
+          : ""}
+        {v.clockOffsetMs ? ` · 时钟偏移 ${v.clockOffsetMs}ms` : ""}
+      </div>
+      <div>
+        能力面：{v.capabilityLine}
+        {v.opsDrift ? <b>（契约漂移）</b> : null}
+      </div>
+      {/* 两个「泵」是独立失败点：行情泵没跑 → 界面永远空白；
+          事件泵没跑 → 成交回报永远到不了前端。 */}
+      <div>
+        事件泵 <b>{v.pumpLabel}</b>
+        {v.localBridgeDir ? ` · 本机桥目录 ${v.localBridgeDir}` : ""}
+        {v.dirTone === "warn" && v.agentBridgeDir
+          ? ` · agent 桥目录 ${v.agentBridgeDir}`
+          : ""}
+      </div>
+      {/* 行情订阅对账面：第 ⑦ 类故障（agent 不知道要转发什么）——
+          价格永远停在种子值，而连接/健康/日志全是绿的。 */}
+      <div className={v.quoteTone === "warn" ? s.err : undefined}>
+        行情订阅：{v.quoteLabel}
+      </div>
+    </div>
+  );
 }
 
 /**
@@ -70,6 +129,21 @@ export function Brokers() {
   const [clientPath, setClientPath] = useState("");
   const [accountId, setAccountId] = useState("");
   const [accountType, setAccountType] = useState("STOCK");
+  /**
+   * 接入模式：direct = xtquant 直连（极速版/完整版大客户端）；
+   * bridgeFile/bridgeRedis/bridgeZmq = 大 QMT 内置策略桥接（路径 B）。
+   * 提交时映射为后端 connector_key（空 = 直连）。
+   */
+  const [accessMode, setAccessMode] = useState("direct");
+  const [bridgeDir, setBridgeDir] = useState("");
+  const [bridgeToken, setBridgeToken] = useState("");
+  const ACCESS_MODES: Record<string, string> = {
+    direct: "",
+    bridgeFile: "qmt.big.bridge.file",
+    bridgeRedis: "qmt.big.bridge.redis",
+    bridgeZmq: "qmt.big.bridge.zmq",
+  };
+  const isBridge = accessMode !== "direct";
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
   /**
@@ -170,8 +244,17 @@ export function Brokers() {
   };
 
   const onAdd = async () => {
-    if (!brokerId || !clientPath || !accountId) {
-      setMsg("券商 / 客户端路径 / 资金账号均为必填");
+    const connectorKey = ACCESS_MODES[accessMode] ?? "";
+    if (!brokerId || !accountId) {
+      setMsg("券商 / 资金账号均为必填");
+      return;
+    }
+    if (!connectorKey && !clientPath) {
+      setMsg("直连模式必须填客户端路径（大 QMT 桥接请切换接入模式）");
+      return;
+    }
+    if (connectorKey && !bridgeDir) {
+      setMsg("大 QMT 桥接模式必须填桥接参数（file=桥目录 / redis=连接串 / zmq=tcp 地址）");
       return;
     }
     setBusy(true);
@@ -185,6 +268,8 @@ export function Brokers() {
         ...(editingId ? { conn_id: editingId } : {}),
         broker_id: brokerId, client_path: clientPath,
         account_id: accountId, account_type: accountType,
+        connector_key: connectorKey,
+        ...(connectorKey ? { bridge_dir: bridgeDir, auth_token: bridgeToken } : {}),
       });
       const wasEdit = !!editingId;
       setClientPath("");
@@ -206,17 +291,29 @@ export function Brokers() {
   };
 
   const onTest = async () => {
-    if (!brokerId || !clientPath) {
-      setMsg("探测需要券商与客户端路径");
+    const connectorKey = ACCESS_MODES[accessMode] ?? "";
+    if (!brokerId || (!connectorKey && !clientPath)) {
+      setMsg("探测需要券商 +（直连的客户端路径 或 桥接参数）");
+      return;
+    }
+    if (connectorKey && !bridgeDir) {
+      setMsg("桥接探测需要桥接参数（与大 QMT 端 agent 配置一致）");
       return;
     }
     setBusy(true);
     setMsg("");
     try {
-      const res = await brokerApi.test({ broker_id: brokerId, client_path: clientPath });
+      const res = await brokerApi.test({
+        broker_id: brokerId, client_path: clientPath,
+        connector_key: connectorKey,
+        ...(connectorKey ? { bridge_dir: bridgeDir, auth_token: bridgeToken } : {}),
+      });
       setMsg(
         res.ok
-          ? `探测通过（运行时模式：${res.runtime_mode ?? "未知"}）`
+          ? connectorKey
+            ? `桥接探测通过（transport=${res.transport ?? "?"}，事件语义 ${res.event_semantics ?? "?"}，` +
+              `延迟上界 ${res.max_latency_ms ?? 0}ms，agent ${String((res.agent as { ver?: string } | undefined)?.ver ?? "?")}）`
+            : `探测通过（运行时模式：${res.runtime_mode ?? "未知"}）`
           : `探测失败：${res.reason ?? "未知原因"}${
               res.suggestions?.length ? `；建议：${res.suggestions.join(" / ")}` : ""
             }`,
@@ -393,14 +490,51 @@ export function Brokers() {
               }))}
             />
           </FormRow>
-          <FormRow label="客户端路径">
-            <Input
-              value={clientPath}
-              onChange={(e) => setClientPath(e.target.value)}
-              placeholder="如 C:/qmt/userdata_mini"
-              mono
+          <FormRow label="接入模式">
+            <Select
+              value={accessMode}
+              onChange={(e) => setAccessMode(e.target.value)}
+              options={[
+                { value: "direct", label: "xtquant 直连（极速版/完整版大客户端）" },
+                { value: "bridgeFile", label: "大 QMT 桥接 · 文件（零部署，秒级）" },
+                { value: "bridgeRedis", label: "大 QMT 桥接 · Redis（低延迟，需本机 relay）" },
+                { value: "bridgeZmq", label: "大 QMT 桥接 · ZMQ（同机极速）" },
+              ]}
             />
           </FormRow>
+          {isBridge ? (
+            <>
+              <FormRow label="桥接参数">
+                <Input
+                  value={bridgeDir}
+                  onChange={(e) => setBridgeDir(e.target.value)}
+                  placeholder="file=桥目录（须与大 QMT 端 agent_config.json 完全一致）；redis=redis://127.0.0.1:6379/0；zmq=tcp://127.0.0.1:5555"
+                  mono
+                />
+              </FormRow>
+              <FormRow label="桥接令牌">
+                <Input
+                  value={bridgeToken}
+                  onChange={(e) => setBridgeToken(e.target.value)}
+                  placeholder="与 agent 端 auth_token 一致（留空=不校验，仅调试）"
+                  mono
+                />
+              </FormRow>
+              <div className={s.itemSub}>
+                桥接模式无需客户端路径：资金账号仍必填（将随请求传给大 QMT 端 agent）。
+                部署步骤见 backend/agent_bigqmt/DEPLOY.md。
+              </div>
+            </>
+          ) : (
+            <FormRow label="客户端路径">
+              <Input
+                value={clientPath}
+                onChange={(e) => setClientPath(e.target.value)}
+                placeholder="如 C:/qmt/userdata_mini（极速版）或 userdata（完整版）"
+                mono
+              />
+            </FormRow>
+          )}
           <FormRow label="资金账号">
             <Input value={accountId} onChange={(e) => setAccountId(e.target.value)} mono />
           </FormRow>
@@ -672,6 +806,7 @@ export function Brokers() {
                     {c.runtime_plan && (
                       <div className={s.diagConnSub}>桥接方案：{JSON.stringify(c.runtime_plan)}</div>
                     )}
+                    {c.bigqmt && <BigQmtProbeBlock probe={c.bigqmt} />}
                   </div>
                 ))
               )}

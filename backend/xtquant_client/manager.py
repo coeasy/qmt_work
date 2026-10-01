@@ -14,9 +14,10 @@ from dataclasses import dataclass, field
 
 from core.db import get_db
 
-from .base import BrokerAdapter, brief_error
+from .base import BrokerAdapter, BrokerNotConnectedError, brief_error
 from .gateway import XTQuantBridge
 from .registry import create_adapter, get_profile
+from connectors.transport import TransportError
 from core.clock import now_iso
 
 log = logging.getLogger("qmt_work.manager")
@@ -143,6 +144,12 @@ class ConnectionConfig:
     session_id: int = 0
     min_version: str = ""
     active: bool = False
+    # 大 QMT 连接器（路径 B：agent 隔离 + 文件/redis/zmq 桥）。
+    # 为空 = 进程内 xtquant（Mini/Full 大客户端）；非空 = 经 connectors 层走 agent 桥。
+    # connector_key 形如 qmt.big.bridge.file / .redis / .zmq（见 connectors/registry.py）。
+    connector_key: str = ""
+    bridge_dir: str = ""      # 文件桥目录 / redis 连接串 / zmq 地址（按 transport 复用此字段）
+    auth_token: str = ""      # 桥鉴权 token（可选）
 
 
 @dataclass
@@ -164,6 +171,8 @@ class BrokerManager:
         self._lock = threading.Lock()
         # V10 A4：连接事件指标回调（app 层注入；xtquant_client 不反向依赖 gateway）
         self.metrics_fn = None
+        #: 运行时模式指标回调（同一注入纪律）：``(conn_id, mode) -> None``。
+        self.runtime_mode_fn = None
 
     # ---------------- 持久化加载 ----------------
     def load_persisted(self) -> None:
@@ -176,7 +185,10 @@ class BrokerManager:
                     client_path=r.get("client_path", ""), client_mode=r.get("client_mode", "") or "auto",
                     account_id=r.get("account_id", ""),
                     account_type=r.get("account_type", "STOCK"), session_id=int(r.get("session_id", 0) or 0),
-                    min_version=r.get("min_version", "") or "", active=bool(r.get("active", False)))
+                    min_version=r.get("min_version", "") or "", active=bool(r.get("active", False)),
+                    connector_key=r.get("connector_key", "") or "",
+                    bridge_dir=r.get("bridge_dir", "") or "",
+                    auth_token=r.get("auth_token", "") or "")
                 if not cfg.conn_id:
                     continue
                 self._build(cfg, connect=False)
@@ -208,8 +220,11 @@ class BrokerManager:
         groups: dict[tuple, list[str]] = {}
         for cid, conn in list(self._conns.items()):
             c = conn.cfg
+            # connector_key/bridge_dir 进身份键：大 QMT 桥连接没有 client_path，
+            # 若不纳入，两条指向**不同桥目录**的同账号连接会被误合并。
             key = (c.broker_id or "", _norm_path(c.client_path),
-                   str(c.account_id or ""), c.account_type or "")
+                   str(c.account_id or ""), c.account_type or "",
+                   c.connector_key or "", _norm_path(c.bridge_dir))
             groups.setdefault(key, []).append(cid)
 
         removed: list[dict] = []
@@ -254,16 +269,80 @@ class BrokerManager:
 
 
     # ---------------- 增删改连 ----------------
+    def _build_bigqmt_bridge(self, cfg: ConnectionConfig):
+        """装配大 QMT 桥（路径 B）：connector_key → GenericConnector → BigQmtBridge。
+
+        零 mock：key 未知 / 必填参数缺失一律抛 ``BrokerError``（由上层转 503），
+        绝不构造一个「假可用」的连接器。Bridge 同时充当 ``adapter`` 与 ``bridge``
+        （BrokerManager 同一对象），因此 ``BigQmtBridge`` 必须同时提供同步生命周期
+        与异步网关两套契约。
+        """
+        from connectors.bigqmt_bridge import BigQmtBridge
+        from connectors.registry import resolve
+        from xtquant_client.base import BrokerError
+
+        key = (cfg.connector_key or "").strip()
+        if not key:
+            raise BrokerError("大 QMT 连接缺少 connector_key")
+        opts: dict = {}
+        if cfg.auth_token:
+            opts["auth_token"] = cfg.auth_token
+        # 三种跨进程传输的必填参数复用 bridge_dir 字段承载：
+        #   .file  → bridge_dir（桥接目录）；.redis → redis_url；.zmq → zmq_addr
+        if key.endswith(".file"):
+            opts["bridge_dir"] = cfg.bridge_dir
+        elif key.endswith(".redis"):
+            opts["redis_url"] = cfg.bridge_dir
+        elif key.endswith(".zmq"):
+            opts["zmq_addr"] = cfg.bridge_dir
+        try:
+            connector = resolve(key, **opts)
+        except (ValueError, KeyError) as exc:
+            raise BrokerError(f"大 QMT 连接器装配失败（{key}）：{exc}") from exc
+        return BigQmtBridge(connector, cfg.conn_id, name=cfg.name, connector_key=key)
+
+    def probe_transient(self, cfg: ConnectionConfig) -> dict:
+        """一次性桥接探测（POST /brokers/test 的桥接分支）：不落库、不置 active。
+
+        失败按异常上抛（BrokerError → 路由层 503），成功返回结构化画像。
+        传输层异常（agent 未运行 / PROBE 超时 / 缺依赖）翻译为
+        ``BrokerNotConnectedError`` —— 失败语义表规定「agent 不可达 → 503 + 三类
+        排查项」，若让 ``TransportError`` 裸穿到路由会变成 500（真机联调实测）。
+        """
+        bridge = self._build_bigqmt_bridge(cfg)
+        try:
+            try:
+                res = bridge.test_connection()
+            except TransportError as exc:
+                # 含 MissingDependency（redis/pyzmq 缺失，其文案自带安装指引）
+                raise BrokerNotConnectedError(str(exc)) from exc
+            out = dict(res) if isinstance(res, dict) else {"detail": str(res)}
+            out["ok"] = True
+            out["runtime_mode"] = "bigqmt_bridge"
+            out.update(bridge.connector_probe())
+            return out
+        finally:
+            try:
+                bridge.close()
+            except Exception:  # noqa: BLE001
+                pass
+
     def _build(self, cfg: ConnectionConfig, connect: bool) -> Connection:
         if not cfg.conn_id:
             cfg.conn_id = uuid.uuid4().hex[:12]
         if not cfg.name:
             prof = get_profile(cfg.broker_id)
-            cfg.name = prof.name if prof else cfg.broker_id
-        adapter = create_adapter(cfg.broker_id, cfg.client_path, cfg.account_id,
-                                 cfg.account_type, cfg.session_id, cfg.min_version,
-                                 cfg.client_mode, metrics_fn=self.metrics_fn)
-        conn = Connection(cfg=cfg, adapter=adapter, bridge=XTQuantBridge(adapter))
+            cfg.name = prof.name if prof else (cfg.broker_id or "大 QMT (Agent)")
+        if cfg.connector_key:
+            # 路径 B：agent 隔离 + 文件/redis/zmq 桥（大 QMT）。
+            # adapter 与 bridge 复用同一个 BigQmtBridge（它同时实现两套契约）。
+            bridge = self._build_bigqmt_bridge(cfg)
+            conn = Connection(cfg=cfg, adapter=bridge, bridge=bridge)
+        else:
+            adapter = create_adapter(cfg.broker_id, cfg.client_path, cfg.account_id,
+                                     cfg.account_type, cfg.session_id, cfg.min_version,
+                                     cfg.client_mode, metrics_fn=self.metrics_fn)
+            conn = Connection(cfg=cfg, adapter=adapter, bridge=XTQuantBridge(adapter))
         self._conns[cfg.conn_id] = conn
         if connect:
             self._safe_start(cfg.conn_id)
@@ -272,29 +351,70 @@ class BrokerManager:
     def _safe_start(self, conn_id: str) -> None:
         """同步启动适配器（spawn 子进程 + 握手）。
 
-        不做异步泵（那需要一个可靠运行的事件循环）——行情泵由应用主事件循环的
-        `ensure_pump` 统一托管，避免在一次性/线程池 loop 上创建导致事件无法投递。
+        不做异步泵（那需要一个可靠运行的事件循环）。泵的启动有两条正规路径：
+
+        * ``phase_broker._start_one`` → ``await conn.bridge.start()``（连接时）；
+        * ``phase_watchdogs._pump_guard`` → ``conn.bridge.start_pump_on(loop)``
+          （每 2s 兜底，覆盖「晚到连接」与「泵意外退出」）。
+
+        ★ 这里曾被写成「行情泵由 ``ensure_pump`` 统一托管」——但 ``ensure_pump``
+          全仓**没有任何调用点**（孤儿），而且它对大 QMT 桥会 ``await`` 一个同步
+          ``start()``。现已删除该孤儿方法，真源就是上面两条路径。
         """
         conn = self._conns.get(conn_id)
         if not conn:
             log.warning("_safe_start: 未知连接 %r", conn_id)
             return
         try:
-            conn.adapter.start()  # 幂等：子进程已在运行则复用
+            if conn.cfg.connector_key:
+                # 大 QMT：同步校验 agent 可达性（BigQmtBridge.connect_sync 内部 asyncio.run）
+                conn.adapter.connect_sync()
+            else:
+                conn.adapter.start()  # 幂等：子进程已在运行则复用
             conn.connected = conn.adapter.is_connected()
             if conn.connected and self._active_id is None:
                 self._active_id = conn_id
+            self._note_runtime_mode(conn)
         except Exception as exc:  # noqa: BLE001
             conn.connected = False
             conn.last_error = brief_error(exc, 500)
             log.error("_safe_start %r 失败: %s", conn_id, exc)
 
-    async def ensure_pump(self, conn_id: str) -> None:
-        """在（应用主）事件循环上确保连接的行情泵已启动（幂等）。"""
-        conn = self._conns.get(conn_id)
-        if conn is None:
+    # ---------------- 运行时模式指标（注入式，禁止反向依赖 gateway） ----------------
+    @staticmethod
+    def _runtime_mode_of(conn) -> str:
+        """该连接**实际使用**的运行时模式，取值必须落在指标词表内。
+
+        * 大 QMT（``connector_key``）恒为 ``bridge`` —— 它字面上就是跨进程 agent 桥；
+        * mini 由 **ABI 运行时方案**决定（``select_runtime``：主后端 ABI 与券商
+          xtquant 兼容 ⇒ ``in_process``；否则起桥接子进程 ⇒ ``bridge``）；
+        * 方案算不出来（未填 client_path / 无兼容运行时）⇒ 如实 ``unknown``，**不猜**。
+        """
+        if getattr(conn.cfg, "connector_key", ""):
+            return "bridge"
+        try:
+            from .runtime import xtp_runtime_plan
+
+            plan = xtp_runtime_plan(conn.cfg.client_path or "")
+        except Exception:  # noqa: BLE001  指标绝不能影响连接
+            return "unknown"
+        return str((plan or {}).get("mode") or "unknown")
+
+    def _note_runtime_mode(self, conn) -> None:
+        """把「这条连接跑在 in_process 还是 bridge」记进 ``qmt_runtime_mode``。
+
+        为什么要有它：该指标此前**从未被写入过**（``record_runtime_mode`` 零调用），
+        于是 ``/metrics`` 里那一行永远是空的 —— 而运维最需要它的场景恰恰是
+        「ABI 不兼容被静默切到桥接子进程」这类排障。指标失败一律吞掉：绝不让
+        观测手段反过来打断连接建立。
+        """
+        fn = self.runtime_mode_fn
+        if fn is None:
             return
-        await conn.bridge.start()  # 幂等：gateway 已运行则复用，泵已存在则跳过
+        try:
+            fn(conn.cfg.conn_id, self._runtime_mode_of(conn))
+        except Exception:  # noqa: BLE001
+            pass
 
     def add_connection(self, cfg: ConnectionConfig, autoconnect: bool = True) -> Connection:
         with self._lock:
@@ -313,47 +433,55 @@ class BrokerManager:
         # 这是"无法连接正在运行的QMT客户端"反馈的核心：用户已开客户端但 SDK
         # 仍报"未登录"——根因是 client_path 填错或 client_path 指向 userdata_mini
         # 但 xtquant 在子目录。先用 discovery 做一次轻量探测，把根因提前给到用户。
-        try:
-            from .discovery import discover
-            from .xtp import probe_environment
-            client_path = conn.cfg.client_path or ""
-            probe = probe_environment(client_path, light=True)
-            # 路径不存在 / xtquant 未定位：提前抛错（带结构化诊断），避免 SDK 在子进程内阻塞
-            if not probe.get("client_exists"):
-                raise RuntimeError(
-                    f"客户端路径不存在：{client_path}\n"
-                    f"→ 请在「券商连接」页确认路径，"
-                    f"通常为 ...\\客户端根\\userdata_mini（极速版）或 userdata（完整版）目录。")
-            if not probe.get("xtquant_found"):
-                # 进一步：扫描本机是否有运行中的 QMT 客户端，提示用户参考
-                try:
-                    cands = discover()
-                    running = [c.get("root", "") for c in cands if c.get("running")]
-                    hint = ""
-                    if running:
-                        hint = (f"\n→ 已在本机发现运行中的 QMT 客户端：{', '.join(running[:3])}。"
-                                f"请确认「客户端路径」与之一致（极速版填 userdata_mini，"
-                                f"完整版大客户端填 userdata）。")
-                    else:
-                        hint = "\n→ 未发现运行中的 QMT 客户端；请先启动并登录客户端。"
+        # ★ 大 QMT（connector_key）无 client_path，跳过此专属探测（其连通性由
+        #   BigQmtBridge.connect_sync 校验 agent 可达性）。
+        if not conn.cfg.connector_key:
+            try:
+                from .discovery import discover
+                from .xtp import probe_environment
+                client_path = conn.cfg.client_path or ""
+                probe = probe_environment(client_path, light=True)
+                # 路径不存在 / xtquant 未定位：提前抛错（带结构化诊断），避免 SDK 在子进程内阻塞
+                if not probe.get("client_exists"):
                     raise RuntimeError(
-                        f"在「{client_path}」中未找到 xtquant SDK（xtquant/ 目录）。"
-                        f"→ 请确认 client_path 指向客户端根或其数据目录"
-                        f"（极速版 userdata_mini / 完整版 userdata）。{hint}")
-                except RuntimeError:
-                    raise
-                except Exception:
-                    raise RuntimeError(
-                        f"在「{client_path}」中未找到 xtquant SDK（xtquant/ 目录）。"
-                        f"→ 请确认 client_path 指向客户端根或其数据目录"
-                        f"（极速版 userdata_mini / 完整版 userdata）。") from None
-        except RuntimeError:
-            # 探测发现的根因已包含可操作指引，直接透出
-            raise
-        except Exception as exc:  # noqa: BLE001  探测本身失败不阻断，但记录以便排障
-            log.warning("connect 预探测失败（回退到 SDK 报错兜底）: %s", exc)
-        conn.adapter.start()
+                        f"客户端路径不存在：{client_path}\n"
+                        f"→ 请在「券商连接」页确认路径，"
+                        f"通常为 ...\\客户端根\\userdata_mini（极速版）或 userdata（完整版）目录。")
+                if not probe.get("xtquant_found"):
+                    # 进一步：扫描本机是否有运行中的 QMT 客户端，提示用户参考
+                    try:
+                        cands = discover()
+                        running = [c.get("root", "") for c in cands if c.get("running")]
+                        hint = ""
+                        if running:
+                            hint = (f"\n→ 已在本机发现运行中的 QMT 客户端：{', '.join(running[:3])}。"
+                                    f"请确认「客户端路径」与之一致（极速版填 userdata_mini，"
+                                    f"完整版大客户端填 userdata）。")
+                        else:
+                            hint = "\n→ 未发现运行中的 QMT 客户端；请先启动并登录客户端。"
+                        raise RuntimeError(
+                            f"在「{client_path}」中未找到 xtquant SDK（xtquant/ 目录）。"
+                            f"→ 请确认 client_path 指向客户端根或其数据目录"
+                            f"（极速版 userdata_mini / 完整版 userdata）。{hint}")
+                    except RuntimeError:
+                        raise
+                    except Exception:
+                        raise RuntimeError(
+                            f"在「{client_path}」中未找到 xtquant SDK（xtquant/ 目录）。"
+                            f"→ 请确认 client_path 指向客户端根或其数据目录"
+                            f"（极速版 userdata_mini / 完整版 userdata）。") from None
+            except RuntimeError:
+                # 探测发现的根因已包含可操作指引，直接透出
+                raise
+            except Exception as exc:  # noqa: BLE001  探测本身失败不阻断，但记录以便排障
+                log.warning("connect 预探测失败（回退到 SDK 报错兜底）: %s", exc)
+        # 大 QMT 校验 agent 可达性；xtquant 启动适配器（二者统一经此处拉起）
+        if conn.cfg.connector_key:
+            conn.adapter.connect_sync()
+        else:
+            conn.adapter.start()
         conn.connected = conn.adapter.is_connected()
+        self._note_runtime_mode(conn)
         # 用户点了「连接」= 意图明确要它保持连接：内存与 DB 的 active 必须同义
         # （内存 `cfg.active` 决定健康监控是否自愈，DB 决定下次启动是否自动拉起）。
         if conn.connected and not conn.cfg.active:
@@ -439,6 +567,16 @@ class BrokerManager:
                 res = dict(conn.adapter.test_connection())
                 res["version_profile"] = _version_profile(conn.adapter)
                 return res
+        # 大 QMT：直接解析连接器并探测（不走 create_adapter 的 xtquant 路径）
+        if cfg.connector_key:
+            try:
+                bridge = self._build_bigqmt_bridge(cfg)
+                res = dict(bridge.test_connection())
+                res["version_profile"] = bridge.version_profile()
+                return res
+            except Exception as exc:  # noqa: BLE001
+                log.warning("test_connection 大 QMT 探测失败: %s", exc)
+                return {"connected": False, "detail": str(exc)}
         tmp = None
         try:
             # create_adapter 在 ABI 不兼容且无兼容运行时时会抛 BrokerSDKError；
@@ -541,8 +679,13 @@ class BrokerManager:
                 # 残留标为**无效连接** —— 这类条目静默占满列表、永远连不上，
                 # 且会让用户误以为「配了很多连接却都不可用」。
                 # 单次 stat，轮询（15s）成本可忽略。
-                "path_exists": bool(conn.cfg.client_path)
+                # ★ 大 QMT（connector_key）无 client_path，按「桥可达性」判定，
+                #   此处统一记 True，避免被误标为无效（真实可达性由 connect/心跳体现）。
+                "path_exists": (not conn.cfg.connector_key)
+                and bool(conn.cfg.client_path)
                 and os.path.isdir(conn.cfg.client_path),
+                "connector_key": conn.cfg.connector_key or "",
+                "bridge_dir": conn.cfg.bridge_dir or "",
                 # 高频轮询路径：只取缓存画像，避免 ~47s 同步探测冻结事件循环
                 "version_profile": _version_profile(conn.adapter, allow_block=False),
             })
@@ -557,10 +700,12 @@ class BrokerManager:
             db.execute(
                 "UPDATE broker_connections SET name=?, broker_id=?, client_path=?, "
                 "client_mode=?, account_id=?, account_type=?, session_id=?, "
-                "min_version=?, active=? WHERE conn_id=?",
+                "min_version=?, active=?, connector_key=?, bridge_dir=?, auth_token=? "
+                "WHERE conn_id=?",
                 (cfg.name, cfg.broker_id, cfg.client_path, cfg.client_mode or "auto",
                  cfg.account_id, cfg.account_type, cfg.session_id, cfg.min_version,
-                 1 if cfg.active else 0, cfg.conn_id))
+                 1 if cfg.active else 0, cfg.connector_key or "",
+                 cfg.bridge_dir or "", cfg.auth_token or "", cfg.conn_id))
         else:
             db.insert("broker_connections", {
                 "conn_id": cfg.conn_id, "name": cfg.name, "broker_id": cfg.broker_id,
@@ -568,6 +713,9 @@ class BrokerManager:
                 "account_id": cfg.account_id,
                 "account_type": cfg.account_type, "session_id": cfg.session_id,
                 "min_version": cfg.min_version, "active": 1 if cfg.active else 0,
+                "connector_key": cfg.connector_key or "",
+                "bridge_dir": cfg.bridge_dir or "",
+                "auth_token": cfg.auth_token or "",
                 "created_at": now_iso()})
 
     def _persist_active(self, exclusive: bool = True) -> None:
@@ -607,6 +755,10 @@ class BrokerManager:
         want = (broker_id or "", _norm_path(client_path), str(account_id or ""))
         for conn in self._conns.values():
             c = conn.cfg
+            # 大 QMT 桥连接无 client_path：不参与「路径身份」匹配，
+            # 否则多条空路径的桥连接会互相误复用。
+            if c.connector_key:
+                continue
             if (c.broker_id or "", _norm_path(c.client_path),
                     str(c.account_id or "")) == want:
                 return conn

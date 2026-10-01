@@ -305,6 +305,10 @@ export interface BrokerConnection {
   active?: boolean;
   connected?: boolean;
   client_path?: string;
+  /** 大 QMT 连接器组合键（qmt.big.bridge.file/.redis/.zmq）；空 = xtquant 直连 */
+  connector_key?: string;
+  /** 桥接参数（file=桥目录 / redis=连接串 / zmq=tcp 地址） */
+  bridge_dir?: string;
   /**
    * 后端判定：client_path 是否真实存在（manager.status_list）。
    * false = 指向不存在目录的历史/测试残留，永远连不上，界面须显式标记并可一键清理。

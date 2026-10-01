@@ -1,0 +1,31 @@
+{
+  "_comment": "复制为 agent_config.json 后修改。本文件是【客户端（大 QMT 内置 Python 策略端）】的配置；所有带『对称』标注的字段必须与 qmt_work 后端新建连接时填的对应项逐字符一致，否则表现为『一直超时』而非『配置错误』。详见 DEPLOY.md。",
+
+  "_field_reference": {
+    "bridge_dir": "【必填·对称】桥接目录绝对路径。必须与 qmt_work 新建连接（key=qmt.big.bridge.file）时填的 bridge_dir 完全一致（日常排障第一名：两边不一致时表现为一直超时）。QMT 策略进程与 qmt_work 后端进程都须对该目录有读写权限。",
+    "transport": "【固定·对称】本 stdlib agent 仅支持 'file'。redis/zmq 是后端侧可选 transport，但客户端内置 Python 3.6 标准库无法引入 redis/pyzmq 第三方库，需改用独立 agent 变体；配成非 file 会被 agent 警告并按 file 运行。",
+    "auth_token": "【强烈建议·对称】令牌。与 qmt_work 连接端填的 auth_token 逐字符一致；留空=不校验（任意本机进程都能向 bridge_dir 写请求，仅限本机隔离调试，生产必须配置）。",
+    "trading_enabled": "【安全阀】默认 false。PROBE 诊断通过、确认两端连通后再置 true 并重启策略，才允许真实下单。",
+    "poll_interval_ms": "【可调】轮询间隔（毫秒）。越小事件/回报延迟越低（推荐 300~1000）。过小会抬高 QMT 主循环占用，过大会抬高成交回报延迟。",
+    "account_id": "【可选·对称】默认资金/持仓/委托/成交查询使用的账号；单条请求里带 account_id 时以请求为准。多账户客户端至少保证『请求带 account_id』或『此处填默认账号』其一。",
+    "passorder": "【覆盖·按券商】下单参数枚举覆盖。不同券商/版本 QMT 枚举不同；PROBE 诊断正常但下单报参数错误时先试改这里（也可直接改代码 _DEFAULT_PASSORDER，但配置覆盖优先）。"
+  },
+
+  "bridge_dir": "C:/Users/<你的用户名>/qmt_work/bigqmt_bridge",
+  "transport": "file",
+  "auth_token": "请填写与 qmt_work 连接端一致的令牌",
+  "trading_enabled": false,
+  "poll_interval_ms": 500,
+  "account_id": "",
+
+  "passorder": {
+    "_comment": "不同券商 QMT 版本枚举不一致；PROBE 诊断正常但下单失败时先试改这里。下列为常见默认值，请以你的券商 QMT 实际枚举为准。",
+    "opType_buy": 23,
+    "opType_sell": 24,
+    "orderType": 1101,
+    "prType_limit": 11,
+    "prType_market": 5,
+    "quickTrade": 2,
+    "strategyName": "qmt_work"
+  }
+}

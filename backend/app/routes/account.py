@@ -5,7 +5,15 @@ import time
 
 from fastapi import APIRouter, Depends
 
-from app.routes._common import BrokerError, _call, _need, err, no_broker, ok
+from app.routes._common import (
+    BrokerError,
+    _call,
+    _need,
+    bridge_call,
+    err,
+    no_broker,
+    ok,
+)
 from app.services import account_store
 from app.services.positions import enrich_positions
 from gateway.execution import get_execution_service
@@ -52,10 +60,10 @@ async def account_aggregate(ctx: AppContext = Depends(get_ctx)):
     orders = deals = 0
     for c in conns:
         try:
-            acc = await c.bridge.call(c.adapter.get_account)
-            pos = await c.bridge.call(c.adapter.get_positions)
-            o = await c.bridge.call(c.adapter.get_orders)
-            d = await c.bridge.call(c.adapter.get_deals)
+            acc = await bridge_call(c, c.adapter.get_account)
+            pos = await bridge_call(c, c.adapter.get_positions)
+            o = await bridge_call(c, c.adapter.get_orders)
+            d = await bridge_call(c, c.adapter.get_deals)
         except BrokerError as exc:
             accounts.append({"conn_id": c.cfg.conn_id, "name": c.cfg.name,
                              "broker": c.adapter.broker_name, "error": str(exc)})
@@ -176,11 +184,16 @@ async def _account_row(conn, ctx: AppContext) -> tuple[dict, list[dict]]:
     if not conn.connected:
         base["error"] = conn.last_error or "未连接"
         return base, []
+    # ★ 一律经 ``bridge_call`` 而不是直接 ``conn.adapter.X()``：
+    #   对 miniQMT/xtquant，它把**同步** adapter 方法丢进线程池；
+    #   对大 QMT 桥，adapter 就是桥本身、方法为 **async**，它直接 await。
+    #   直接同步调用会让大 QMT 连接在这一页拿到未 await 的协程 / AttributeError，
+    #   而且慢查询会把事件循环卡住（本页是看板，会一次拉 4 个查询）。
     try:
-        acc = conn.adapter.get_account()
-        pos = conn.adapter.get_positions()
-        o = conn.adapter.get_orders()
-        d = conn.adapter.get_deals()
+        acc = await bridge_call(conn, conn.adapter.get_account)
+        pos = await bridge_call(conn, conn.adapter.get_positions)
+        o = await bridge_call(conn, conn.adapter.get_orders)
+        d = await bridge_call(conn, conn.adapter.get_deals)
     except BrokerError as exc:
         base["error"] = str(exc)
         return base, []

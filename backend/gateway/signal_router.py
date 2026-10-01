@@ -418,6 +418,10 @@ class SignalRouter:
                  sig.volume, fill.get("order_id"))
         from gateway.metrics import get_metrics
         get_metrics().record_order(sig.side, "paper")
+        # 模拟盘专项计数。``record_paper_order`` 此前**零调用** ⇒
+        # ``qmt_paper_orders_total`` 在 /metrics 里恒为空（看起来像「没有模拟盘委托」）。
+        # 与上一行不重复：一个按 side/status 汇总，一个只统计模拟盘。
+        get_metrics().record_paper_order(sig.side)
         return {"ok": True, "mode": "paper", "recorded": True,
                 "signal": sig.__dict__, **fill}
 

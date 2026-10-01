@@ -174,8 +174,16 @@ async def shutdown(app: FastAPI) -> None:
     for conn in state.broker_manager.all_connections():
         try:
             await conn.bridge.stop()
-        except (ConnectionError, RuntimeError, OSError) as exc:
-            # bridge 子进程可能在父进程退出前已自杀；不阻断
+        except Exception as exc:  # noqa: BLE001
+            # bridge 子进程可能在父进程退出前已自杀；不阻断。
+            #
+            # ★ 必须是宽口径 ``Exception``，不能收窄成 ``(ConnectionError,
+            #   RuntimeError, OSError)``：连接器异常层级（ConnectorError /
+            #   TransportError / UnsupportedOp）继承自 ``BrokerError`` 而**不是**
+            #   ``RuntimeError``。窄口径会让一次传输故障在**停机路径**上抛出，
+            #   使整个优雅停机中断（正是 TD-25 要消灭的「关不掉」族事故）。
+            #   这里 ``CancelledError`` 是 BaseException，不受 Exception 影响，
+            #   停机取消仍能正常传播。
             log.debug("bridge %s 关停异常（已忽略）：%s", conn.id, exc)
 
     # 17. DB（启动顺序里 db 是第一个，停机必须最后）——P0-10

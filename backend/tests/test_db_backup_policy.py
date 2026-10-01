@@ -388,6 +388,159 @@ def test_degraded_path_still_detects_real_writes(tmp_path):
         conn.close()
 
 
+# ------------------------------------ 跨「折叠成功 / 失败」两种口径的指纹比较（A12）
+
+def _stub_wal(b, monkeypatch, *, normalized: bool, pre_wal: int):
+    """把 ``_normalize_wal`` / ``_wal_size`` 钉死，**确定性地**造出指定口径的指纹。
+
+    ★ 为什么要打桩，而不是「真的让检查点 busy」：能否拿到 busy 取决于平台与时序
+    （必须恰好有活跃读者），拿不到就只能把断言跳过 —— 那个分支于是**永远不会被
+    覆盖**，正是本项目反复踩到的「绿灯是另一个 bug 遮出来的」。这里直接钉死两个
+    输入，让「旧指纹=降级 / 新指纹=归一化」这个**组合**必然出现。
+    """
+    monkeypatch.setattr(b, "_normalize_wal", lambda: normalized)
+    monkeypatch.setattr(b, "_wal_size", lambda: pre_wal)
+
+
+def test_degraded_then_normalized_fingerprint_still_skips(tmp_path, monkeypatch):
+    """★★ A12：旧指纹是**降级**口径、新指纹是**归一化**口径时，仍须认出「同一状态」。
+
+    缺陷现场（2026-10-01 实测）：备份时 ``_normalize_wal()`` 因活跃读者 busy 而失败
+    ⇒ 指纹记成 ``{'db': [...], 'wal': [11021032, ...]}``（文件形态）；
+    下一次判定时折叠成功 ⇒ 指纹是 ``{'db': [...], 'wal': [0]}``。
+    两者**形状不同** ⇒ 旧代码的 ``cur != old`` **恒为不等** ⇒ 判定「源已变化」
+    ⇒ 每次「立即备份」都白复制一份整库（实测主库 1.3 GB）。
+
+    这类缺陷之所以危险：它**没有红**。跳过失效只表现为「多写一次盘」，日志/健康
+    灯全绿，只有磁盘占用翻倍时才被察觉。
+    """
+    _, b = _mk(tmp_path)
+
+    _stub_wal(b, monkeypatch, normalized=False, pre_wal=45352)
+    old = b._source_fingerprint()
+    assert b._is_normalized(old) is False, old
+    assert old["pre_wal"] == 45352, old
+
+    _stub_wal(b, monkeypatch, normalized=True, pre_wal=45352)
+    cur = b._source_fingerprint()
+    assert b._is_normalized(cur) is True, cur
+    assert cur["wal"] == [0], cur
+
+    assert b._same_logical_state(old, cur, 45352) is True, (
+        "同一批帧（字节数未变）跨折叠形态必须判为同一逻辑状态，"
+        f"否则每次点击白复制整库：old={old} cur={cur}")
+
+
+def test_degraded_then_normalized_but_new_write_still_backs_up(tmp_path, monkeypatch):
+    """★ 上一条的**反向护栏**：跨形态**不能**退化成「无条件跳过」。
+
+    降级口径下 ``-wal`` 大小**单调递增**（追加写只变长，唯一的归零动作是我们的
+    截断、而那会体现在 ``pre_wal`` 上），所以归一化前的字节数变了 ⇒ 一定有新提交
+    ⇒ **必须**备份。这条写错的方向是「静默丢备份」，不可恢复。
+    """
+    _, b = _mk(tmp_path)
+    _stub_wal(b, monkeypatch, normalized=False, pre_wal=45352)
+    old = b._source_fingerprint()
+    _stub_wal(b, monkeypatch, normalized=True, pre_wal=60000)
+    cur = b._source_fingerprint()
+    assert b._same_logical_state(old, cur, 60000) is False, (
+        f"-wal 从 45352 长到 60000 = 有新提交，必须备份：old={old} cur={cur}")
+
+
+def test_normalized_then_degraded_is_undecidable_so_backs_up(tmp_path, monkeypatch):
+    """★ 旧指纹=归一化、新指纹=降级 ⇒ **无法判定**，保守备份。
+
+    此时折叠失败意味着 ``-wal`` 里可能混着「上次之后的新提交」，而我们没有任何
+    与折叠无关的信号能证伪它。风险不对称：多备份只浪费磁盘，漏备份不可恢复。
+    """
+    _, b = _mk(tmp_path)
+    _stub_wal(b, monkeypatch, normalized=True, pre_wal=0)
+    old = b._source_fingerprint()
+    _stub_wal(b, monkeypatch, normalized=False, pre_wal=45352)
+    cur = b._source_fingerprint()
+    assert b._same_logical_state(old, cur, 45352) is False
+
+
+def test_normalized_pair_with_pending_wal_is_a_new_commit(tmp_path, monkeypatch):
+    """★ 守住 A11：同口径（都归一化）下，折叠前有帧 = 上次之后确有提交 ⇒ 必须备份。
+
+    这条防的是「为了让跨形态比对能过，顺手把 A11 一起阉掉」—— 那会直接退回静默丢备份。
+    """
+    _, b = _mk(tmp_path)
+    _stub_wal(b, monkeypatch, normalized=True, pre_wal=0)
+    old = b._source_fingerprint()
+    cur = b._source_fingerprint()
+    assert b._same_logical_state(old, cur, 0) is True, "无任何变化必须跳过"
+    assert b._same_logical_state(old, cur, 8192) is False, (
+        "折叠前 -wal 有帧 = 有新提交 ⇒ 必须备份（A11）")
+
+
+def test_same_shape_comparison_ignores_the_pending_marker(tmp_path, monkeypatch):
+    """★★ 同形态比较**不能**把 ``pre_wal`` 计进去（A12 的自身回退护栏）。
+
+    这是修 A12 时**自己踩的坑**：把 ``pre_wal`` 一起塞进指纹 dict 之后，同形态分支的
+    ``cur == old`` 会去比「折叠前 ``-wal`` 有没有帧」—— 而这两次本来就可以不同
+    （备份那一刻 ``-wal`` 里有帧、判定时已经空，逻辑数据一字未改）⇒ **每次判断都算
+    「变了」**，跳过彻底失效，每次点击白复制一份整库。比原缺陷更糟。
+
+    ⇒ ``pre_wal`` / ``norm`` 是**标记**不是**形态**，只允许跨形态比较时使用。
+    """
+    _, b = _mk(tmp_path)
+    _stub_wal(b, monkeypatch, normalized=True, pre_wal=45352)
+    old = b._source_fingerprint()      # 备份时：折叠前 -wal 里有帧
+    _stub_wal(b, monkeypatch, normalized=True, pre_wal=0)
+    cur = b._source_fingerprint()      # 判定时：-wal 已空（同一逻辑状态）
+    assert old["pre_wal"] == 45352 and cur["pre_wal"] == 0, "前置不成立：标记应当不同"
+    assert b._shape(old) == b._shape(cur), "前置不成立：文件形态应当相同"
+    assert b._same_logical_state(old, cur, 0) is True, (
+        "pre_wal 只是标记、不是文件形态，不得参与同形态比较（否则跳过永远失效）")
+
+
+def test_is_normalized_understands_legacy_fingerprints():
+    """★ 旧指纹（``norm`` 键引入之前落盘的）只能靠 ``wal == [0]`` 的形状判。
+
+    那一形状**只可能**由归一化成功产生（代码里唯一写 ``[0]`` 的地方）⇒ 判 True。
+    兼容它，升级后才不会把老用户的历史指纹一律判成「降级」而白白多备份一次。
+    """
+    assert DBBackup._is_normalized({"db": [4096, 1], "wal": [0]}) is True
+    assert DBBackup._is_normalized({"db": [4096, 1], "wal": [45352, 2]}) is False
+    assert DBBackup._is_normalized({}) is False
+    assert DBBackup._is_normalized(None) is False
+    assert DBBackup._is_normalized({"wal": None}) is False
+
+
+def test_skip_chain_survives_a_real_checkpoint(tmp_path):
+    """★★ 端到端（**不打桩**）：一次真检查点之后的重复备份仍须跳过。
+
+    与上面打桩用例互补：打桩保证**分支**被覆盖，这条保证**真实文件形态**下也成立。
+    折叠成功与否取决于平台是否给了 busy 检查点，两种走向都必须满足「不重复备份」。
+    """
+    dbp, conn, b = _wal_db(tmp_path)
+    holder = sqlite3.connect(str(dbp))
+    try:
+        # 先提高「降级口径」的出现概率：用活跃读者挡住 TRUNCATE 检查点
+        holder.execute("BEGIN")
+        holder.execute("SELECT count(*) FROM t").fetchall()
+        assert b.backup_once("t1") is not None
+        fp1, name1 = b._read_fp()
+        assert name1, fp1
+        holder.rollback()
+        holder.close()
+        # 释放读者后折叠大概率成功 ⇒ 形成跨形态比较
+        assert b.backup_once("t2") is None, (
+            "无新写入时，跨折叠形态也必须跳过；"
+            f"fp1={fp1}\n  cur={b._source_fingerprint()}")
+        assert b.last_status["action"] == "skipped", b.last_status
+        assert len(_backup_files(tmp_path)) == 1
+        if not DBBackup._is_normalized(fp1):
+            # 真走到了跨形态分支：显式记下来，否则本用例会悄悄退回成 A5 的同形态版本
+            assert DBBackup._is_normalized(b._source_fingerprint()), (
+                "降级之后的判定应当已归一化，本用例没有覆盖跨形态分支")
+    finally:
+        holder.close()
+        conn.close()
+
+
 # --------------------------------------------------------------- 保留策略
 
 def test_count_cap_applies_without_budget(tmp_path):
@@ -638,21 +791,42 @@ def _isolated_backup(tmp_path, monkeypatch):
 
 
 @pytest.fixture
-def _live_db_backup(tmp_path, monkeypatch):
-    """备份器盯**应用正在写的那个主库**，但备份落到临时目录。
+def _live_db_backup(tmp_path, monkeypatch, app_client):
+    """备份器盯**应用正在写的那个主库** —— 但把「主库」整体换到 tmp 里的小库。
 
-    ★ 为什么必须这样：端点在备份成功后要写一条**审计行**，而审计行写的是
-    `ctx.db` 那个库。若备份器盯的是另一个库（`_isolated_backup` 那种做法），
-    审计行就影响不到指纹 —— 测试会因为「两个库不是同一个」而**假通过**，
-    而真实环境里连点两次「立即备份」会重复复制整库（实测踩过）。
+    ★ 为什么必须让两边盯**同一个库**：端点在备份成功后要写一条**审计行**，而审计行
+    写的是 ``ctx.db`` 那个库。若备份器盯的是另一个库（``_isolated_backup`` 那种做法），
+    审计行就影响不到指纹 ⇒ 测试**假通过**，而真实环境里连点两次「立即备份」会重复
+    复制整库（实测踩过）。
+
+    ★★ 为什么不能直接用 ``settings.db_path``（2026-10-01，A14）：本机主库实测
+    **1.4 GB**，而备份是**整库全量复制**，两个用例各复制 2 次 ⇒ 本文件**一轮**就往
+    pytest 临时目录写 **约 5.6 GB**。实测它把 C: 顶到 100%，随后同文件里**毫不相干**
+    的 4 个 WAL 用例集体以 ``[WinError 112] 磁盘空间不足`` 变红 —— 又一次
+    「磁盘满让测试假失败」，失败原因还与被测逻辑毫无关系（排查时会一路怀疑到指纹
+    逻辑上去）。
+
+    ⇒ 把 ``ctx.db`` 与备份器**一起**换到 tmp 里的小库：保真度不变（仍是同一个库、
+      审计行仍会写进被备份的那个库），占用从 GB 级降到 KB 级。
     """
     from app.routes import config as cfg_routes
-    from core.config import settings
+    from core.context import get_ctx
+    from core.db import DB
 
-    inst = DBBackup(settings.db_path, keep=10, max_total_mb=0.0, min_keep=2,
-                    backups_dir=tmp_path / "backups")
+    live_path = tmp_path / "live.db"
+    live_db = DB(live_path)          # 真 SQLite，跑一遍迁移，schema 与生产同源
+    ctx = get_ctx()
+    monkeypatch.setattr(ctx, "db", live_db)   # 应用「正在写的库」= 被备份的库
+    inst = DBBackup(live_path, keep=10, max_total_mb=0.0, min_keep=2,
+                    backups_dir=tmp_path / "backups", db=live_db)
     monkeypatch.setattr(cfg_routes, "_backup_view", lambda ctx: inst)
-    return inst, tmp_path
+    try:
+        yield inst, tmp_path
+    finally:
+        try:
+            live_db.close()
+        except Exception:  # noqa: BLE001  关不掉只是临时目录残留，不该影响用例结论
+            pass
 
 
 def test_paths_db_exposes_backups_block(app_client):
@@ -707,15 +881,19 @@ def test_run_endpoint_skip_chain_survives_its_own_audit_row(app_client, _live_db
     inst, _ = _live_db_backup
     recorded_fp, recorded_name = inst._read_fp()   # 备份那一刻记下的指纹
     r2 = _post(app_client, "/config/paths/db-backups/run")
-    # ★ 诊断增强（2026-09-21）：本用例实测**偶发**为红（同一次改动下 3 跑 1 红）。
-    #   跳过判据用的指纹是主库 / -wal 的 (size, mtime_ns)，而**一次纯粹的 WAL
-    #   检查点**就会改变这两个值却不改变任何逻辑数据 —— 于是「主库没变」被误判成
-    #   「变了」。把两份指纹打出来，下次偶发为红时能**一眼看出**是哪一边变了，
-    #   不必再靠复现去猜（此前只报一个 action，等于把 flake 藏起来）。
-    diag = (f"记下的指纹(备份时) = {recorded_fp}  备份名={recorded_name}\n"
+    # ★ 诊断增强（2026-10-01 修订）：本用例曾**偶发**为红（同一次改动下 3 跑 1 红）。
+    #   当时的注释把原因归给「纯 WAL 检查点也会改变 (size, mtime_ns)」，并建议
+    #   「把这种差异当成良性」—— **写反了**。真因是：备份那次折叠**失败**（有读者
+    #   持快照 ⇒ TRUNCATE 拿不到独占），指纹记成了**文件形态**；判定那次折叠成功，
+    #   指纹是**归一化形态**。两种形态形状不同，旧代码的 ``cur != old`` 恒为不等
+    #   ⇒ 误判「源已变化」。纯检查点造成的形态差异由 ``_same_logical_state`` 处理，
+    #   **不再**使跳过失效；若这里仍看到两份指纹不等，说明确实发生了新写入。
+    diag = (f"记下的指纹(备份时) = {recorded_fp}"
+            f"  [归一化={DBBackup._is_normalized(recorded_fp)}]"
+            f"  备份名={recorded_name}\n"
             f"  当前指纹(判定时)   = {inst._source_fingerprint()}\n"
-            "  两者不等即说明两次调用之间主库 / -wal 被写过；"
-            "注意纯 WAL 检查点也会造成这种差异（无逻辑数据变化）")
+            "  两者不等即说明两次调用之间主库 / -wal 被**真写入**过"
+            "（纯检查点的形态差异已由 _same_logical_state 兜住，不再算变化）")
     assert r2["data"]["action"] == "skipped", (
         "连点两次「立即备份」必须跳过第二次 —— 否则每次点击白复制一份整库；"
         f"实测得到 {r2['data']['action']}：{r2['data'].get('message')}\n  {diag}")

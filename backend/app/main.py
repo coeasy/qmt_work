@@ -9,6 +9,7 @@
   本文件仅负责 FastAPI 构建、include_router、中间件挂接；不再承担 lifespan 业务逻辑。
 """
 import logging
+import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -28,6 +29,20 @@ from mcp_server import build_mcp
 
 setup_logging()
 log = logging.getLogger("qmt_work")
+
+
+def _record_api_latency(path: str, started: float) -> None:
+    """把一次 API 请求的耗时写进直方图（非 ``/api/v1/`` 直接跳过；绝不抛）。"""
+    if not path.startswith("/api/v1/"):
+        return
+    try:
+        from gateway.metrics import get_metrics
+
+        get_metrics().record_request_duration_ms(
+            (time.perf_counter() - started) * 1000.0)
+    except Exception:  # noqa: BLE001  指标失败绝不能影响请求本身
+        pass
+
 
 risk = RiskManager(
     max_amount=settings.risk_max_amount,
@@ -334,6 +349,28 @@ def create_app() -> FastAPI:
         ct = resp.headers.get("content-type", "")
         if ct.startswith("text/") and "charset" not in ct.lower():
             resp.headers["content-type"] = ct + "; charset=utf-8"
+        return resp
+
+    # API 延迟直方图的生产者（P2 可观测性）。
+    #
+    # ★ 为什么补这一个中间件：``record_request_duration_ms`` 此前**零调用**，
+    #   而 /metrics 照样输出 ``qmt_api_latency_ms_bucket/count/sum`` —— 全是 0。
+    #   那比「没有这个指标」更坏：监控面板上它长得像「接口都很快」。
+    #
+    # ★ 只统计 ``/api/v1/``：指标名就叫 qmt_api_latency_ms，若把前端静态资源
+    #   也算进去，p95 会被 assets 下载带偏 —— 那不是 API 的延迟。
+    # ★ 注册在最后 ⇒ 位于最外层 ⇒ 量到的是**端到端**耗时（含其它中间件）。
+    @app.middleware("http")
+    async def api_latency_middleware(request, call_next):
+        started = time.perf_counter()
+        try:
+            resp = await call_next(request)
+        except Exception:
+            # 失败请求的耗时同样是有效信号（超时/崩溃往往最慢），记完原样抛出，
+            # 让全局异常处理器继续按信封返回 500。
+            _record_api_latency(request.scope.get("path", ""), started)
+            raise
+        _record_api_latency(request.scope.get("path", ""), started)
         return resp
 
     # ---- 主前端：frontend-next 已退役旧 frontend/，构建产物落在 backend/static，

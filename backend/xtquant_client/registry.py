@@ -31,6 +31,9 @@ class BrokerProfile:
     name: str
     adapter: str
     default_client_path: str = ""
+    # 路径 A（xtquant 直连大客户端）的数据目录候选：完整版用 userdata。
+    # 由 BROKER_PROFILES 统一定义派生，不在各处手写 —— 手写路径必漂移。
+    full_client_path: str = ""
     supported_account_types: list[str] = field(default_factory=lambda: ["STOCK"])
     supported_periods: list[str] = field(
         default_factory=lambda: ["1m", "5m", "15m", "30m", "60m", "1d", "1w", "1mon"])
@@ -110,6 +113,21 @@ BROKER_PROFILES: list[BrokerProfile] = [
         note="需 pip install gm 并登录掘金终端（路线图）",
         status="planned"),
 ]
+
+
+def _derive_full_client_paths() -> None:
+    """active 档案的 default_client_path 以 userdata_mini 结尾 ⇒ 派生同根 userdata。
+
+    ★ 刻意「派生」而非逐条手写：两条路径**必须同源同根**才互备；手写一处笔误
+      就会让直连大客户端连到别的目录（排障成本远高于这次派生）。
+    """
+    for p in BROKER_PROFILES:
+        if p.status == "active" and p.default_client_path.endswith("userdata_mini"):
+            p.full_client_path = (p.default_client_path[:-len("userdata_mini")]
+                                  + "userdata")
+
+
+_derive_full_client_paths()
 
 _PROFILE_MAP = {p.id: p for p in BROKER_PROFILES}
 

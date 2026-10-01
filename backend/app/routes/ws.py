@@ -23,9 +23,22 @@ async def ws_endpoint(ws: WebSocket, ctx: AppContext = Depends(get_ctx)):
             await ws.close(code=4401, reason="unauthorized: missing/invalid token")
             return
         cid = await ctx.ws_manager.connect(ws)   # connect 内已发送首帧全量快照
+        # 指标对象在循环外解析一次：``qmt_ws_messages_total`` 的生产者在此。
+        # ★ 它此前**零写入** —— render 里那一行永远输出 0，运维看到的是
+        #   「没有客户端发消息」，而不是「这个计数器根本没人写」。
+        try:
+            from gateway.metrics import get_metrics
+            metrics = get_metrics()
+        except Exception:  # noqa: BLE001  指标不可用时连接必须照常工作
+            metrics = None
         try:
             while True:
                 raw = await ws.receive_text()
+                if metrics is not None:
+                    try:
+                        metrics.record_ws_message()
+                    except Exception:  # noqa: BLE001  计数失败不得丢消息
+                        pass
                 await ctx.ws_manager.handle_client_message(cid, raw)
         except WebSocketDisconnect:
             ctx.ws_manager.disconnect(cid)

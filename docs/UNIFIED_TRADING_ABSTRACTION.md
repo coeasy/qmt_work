@@ -1,6 +1,7 @@
 # 统一交易接口抽象：可行性论证与方案横向对比
 
 > 版本：v1.0（2026-10-01）
+> **执行口径见 `docs/UNIVERSAL_BROKER_PLATFORM_FINAL_PLAN_V4.md`**（本文第 6 节的落地路径已被 V4 Phase 0-4 取代；本文的价值保留为「六方案加权对比」的选型论证）。
 > 姊妹文档：`docs/BIG_QMT_COMPAT_PLAN.md`（大 QMT 兼容实施方案，本文第 7 节给出对它的 4 处修正）
 > 问题：是否可以像 easytrader 一样抽象一套统一接口，让大小 QMT 及未来客户端共用同一套下单逻辑？是否存在更好的方案？
 
@@ -286,7 +287,7 @@ class CapabilityPort(Protocol):
 
 - **AST 门禁**：禁止 `app/routes/`、`engines/`、`gateway/`（除 `signal_router.py`/`execution.py`）出现 `adapter.place_order` / `bridge.gateway.*` / `manager.bridge(...).call(` 直接调用 → 现有 `scripts/check_execution_architecture.py` 的 Gate 体系扩展一条即可。
 - **逃生舱**（借鉴 easytrader 的诚实）：确需方言原生能力时，走显式 `CallNativePort.native_call(op, params)`，**必须经过 WAL + 审计**（区别于 easytrader 的 `user.trader` 无痕逃逸）。
-- **契约回归**：端口面变更 ⇒ `tests/test_connector_ports.py` 结构化断言 + `gen_contracts.py` 基线重生成 + `scripts/ci_reconcile.py::EXPECTED_TESTS` 重算（`--fix`），README 两处计数同步。
+- **契约回归**：端口面变更 ⇒ `tests/test_connector_ports.py` 结构化断言 + `gen_contracts.py` 基线重生成 + `scripts/ci_reconcile.py::EXPECTED_TESTS` 重算（`--update`），README 两处计数同步。
 
 ---
 

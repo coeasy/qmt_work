@@ -4,6 +4,7 @@
 统一从此处导入 ok/err/_need/_call 与共享符号，避免循环依赖、保持单一真相来源。
 """
 import asyncio
+import inspect
 import logging
 
 # Request / WebSocketDisconnect 本模块未直接使用，但下游路由（如 routes/signal.py）
@@ -76,6 +77,32 @@ async def _call(b, fn, *args, timeout: float = 12.0):
         return err(503, f"券商响应超时（>{int(timeout)}s），请检查券商客户端是否已连接并登录")
     except BrokerError as exc:
         return err(503, str(exc))
+
+
+async def bridge_call(conn, fn, *args, **kwargs):
+    """在**任意连接形态**上调用适配器方法（大小 QMT 通吃）。
+
+    为什么要统一走这里，而不是直接 ``conn.adapter.X()``：
+
+    * miniQMT/xtquant：``adapter`` 的方法是**同步**的，直接调用会占住事件循环
+      （本页一次拉 4 个查询，慢查询会把整个后端卡住）；``bridge.call`` 把它
+      丢进线程池并发执行。
+    * 大 QMT 桥：``adapter is bridge``，方法是 **async** 的；直接同步调用会拿到
+      一个未 await 的协程对象（既没报错也没数据 —— 典型的静默失效），
+      ``bridge.call`` 会正确 await。
+
+    同时对 ``bridge is None`` 的装配（测试替身 / 极简装配）保持可用：
+    退回直接调用，并用 ``inspect.isawaitable`` 吃下协程，语义与有桥时一致。
+    本文件里 ``getattr(conn, "bridge", None)`` 的既有写法说明 None 是允许状态，
+    因此这条兜底是契约的一部分，不是测试专用分支。
+    """
+    b = getattr(conn, "bridge", None)
+    if b is not None:
+        return await b.call(fn, *args, **kwargs)
+    result = fn(*args, **kwargs)
+    if inspect.isawaitable(result):
+        return await result
+    return result
 
 
 def _ws_authorized(ws: WebSocket) -> bool:

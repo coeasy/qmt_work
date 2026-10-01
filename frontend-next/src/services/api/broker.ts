@@ -3,10 +3,16 @@ import type { BrokerConnection, BrokerProfile } from "@/shared/types";
 
 export interface BrokerTestResult {
   ok: boolean;
-  runtime_mode?: "inproc" | "bridge";
+  runtime_mode?: "inproc" | "bridge" | "bigqmt_bridge" | string;
   reason?: string;
   runtime_source?: string;
   suggestions?: string[];
+  /** 桥接探测附加面（connector_probe）：transport / agent 元数据 / 事件语义 */
+  connector_key?: string;
+  transport?: string;
+  agent?: Record<string, unknown>;
+  event_semantics?: string;
+  max_latency_ms?: number;
 }
 
 export interface VersionProfile {
@@ -71,6 +77,90 @@ export interface AutoDetectResult {
   count: number;
 }
 
+/**
+ * 大 QMT 桥的探针面（后端 `BigQmtBridge.connector_probe()`）。
+ *
+ * 字段与后端**逐一对齐**，不做可选化猜测 —— 这一面存在的唯一目的就是排障，
+ * 猜出来的字段名会让「诊断面板显示了但读的是不存在的东西」这种假绿灯再现。
+ *
+ * 排障四分法（后端已把结论算进 `root_cause`，前端**不要**自己重新判定）：
+ *   ① agent 未运行          → `agent` 为空
+ *   ② bridge_dir 两端不一致 → `bridge_dir_match === false`
+ *   ③ 注入函数缺失          → `agent.funcs` 为空
+ *   ④ token 不匹配          → 能收到响应即已排除该可能
+ */
+export interface BigQmtProbe {
+  /** 连接器 key，如 qmt.big.bridge.file */
+  connector_key?: string;
+  /** file / redis / zmq */
+  transport?: string;
+  /** 本连接器能翻译的 canonical op 清单（由 dialect 自报） */
+  supported_ops?: string[];
+  /** agent 上报的元数据（进程内 Python 版本、注入函数、桥目录、订阅数…） */
+  agent?: {
+    ver?: string;
+    py?: string;
+    funcs?: string[];
+    trading_enabled?: boolean;
+    bridge_dir?: string;
+    uptime_s?: number;
+    /** agent 侧已实现的 wire action 清单；与本端 supported_ops 数量对不上＝契约漂移 */
+    actions?: string[];
+    /** 回调是否**真的**被终端调用过（空定义 ≠ 可用） */
+    callback_bound?: boolean;
+    callback_hits?: number;
+    /** 买卖方向仲裁落 unknown 的次数（>0 说明方向字段不可信，勿用于风控） */
+    direction_unknown?: number;
+    subscribed?: number;
+    ascii_only?: boolean;
+  };
+  /** agent 回报的桥目录（与本机配置比对用；比对结论见 bridge_dir_match） */
+  agent_bridge_dir?: string;
+  /** 本机配置的桥目录 */
+  local_bridge_dir?: string;
+  /** 两端是否同一目录；null = agent 从未回报（**未知**，不是「不一致」） */
+  bridge_dir_match?: boolean | null;
+  /** 后端算好的单一根因结论；空串 = 未发现问题 */
+  root_cause?: string;
+  /** agent 已实现的 action 清单（= agent.actions 的上浮副本） */
+  actions?: string[];
+  callback_bound?: boolean;
+  direction_unknown?: number;
+  subscribed?: number;
+  ascii_only?: boolean;
+  /** 两端时钟偏移（ms）：写请求的 ttl 判定依赖它，偏移过大会误拒 */
+  clock_offset_ms?: number;
+  /** 事件泵是否在跑 —— 与「握手成功」是两件事 */
+  pump_running?: boolean;
+  // ---- 存活面：区分「曾经连上」与「现在可用」----
+  // ★ 后端刻意把这几个**原始量**一并上浮，而不是只给一个 connected 布尔：文件桥
+  //   没有「连接」可言（它只是两个目录），唯一的诚实判据是一次真实请求/应答往返。
+  //   前端若只显示「已连接」，用户就问不出「**现在**还可用吗」——而 agent 死掉后
+  //   旧实现里那个标志会永远是真（历史 bug，见 TD/`BIG_QMT_COMPAT_PLAN.md` §9.6.2）。
+  /** 连续探活无应答次数（任何一次成功往返即清零） */
+  liveness_failures?: number;
+  /** agent 连续无应答 ⇒ 后端 `is_connected()` 已据此返回 false */
+  agent_unresponsive?: boolean;
+  /** 距上一次**成功往返**多少秒；`null` = 从未成功过（「从未」≠「掉线」） */
+  last_agent_ok_age_s?: number | null;
+  /** 后端 `is_connected()` 的当前结论（「现在可用」）—— 界面以它为准 */
+  available?: boolean;
+  /** 本端期望 agent 转发行情的标的数（意图） */
+  quote_wanted?: number;
+  /** 已**确认下发成功**给 agent 的标的数；长期小于 quote_wanted = 订阅未生效 */
+  quote_applied?: number;
+  /** agent 自报的已订阅数（最近一次响应信封的缓存，可能滞后一拍） */
+  quote_agent_subscribed?: number;
+  /** 最近一次订阅下发失败的原因；空串 = 未失败 */
+  quote_sync_error?: string;
+  /** 事件语义（PUSH / POLL_DIFF / PUSH_WITH_GAP / NONE） */
+  event_semantics?: string;
+  /** 事件延迟上界（ms）；超时守护据此撤单，缺失会让守护误撤 */
+  max_latency_ms?: number;
+  /** 探针自身失败时的兜底（后端保证诊断附差不影响健康主结论） */
+  error?: string;
+}
+
 /** 单条连接的诊断条目（`/brokers/diagnostics` 的 connections 元素） */
 export interface BrokerDiagConnection {
   conn_id: string;
@@ -89,6 +179,8 @@ export interface BrokerDiagConnection {
   pump_running?: boolean;
   /** 仅 deep=1：该 client_path 的 ABI 桥接方案 */
   runtime_plan?: Record<string, unknown> | null;
+  /** 大 QMT 桥连接：探针面（transport/agent/事件语义与延迟上界） */
+  bigqmt?: BigQmtProbe;
 }
 
 /**
@@ -142,6 +234,15 @@ export const brokerApi = {
     conn_id?: string;
     /** 后端默认 true：建连即拉起子进程握手（routes/broker.py 的 add_broker） */
     autoconnect?: boolean;
+    /**
+     * 大 QMT 连接器组合键（路径 B）。空 = 走 xtquant 直连（mini/full 极速/完整版）。
+     * 合法值由后端校验（如 qmt.big.bridge.file / .redis / .zmq）。
+     */
+    connector_key?: string;
+    /** 桥接参数：file=桥目录（须与大 QMT 端 agent_config.json 完全一致）；redis=连接串；zmq=tcp 地址 */
+    bridge_dir?: string;
+    /** 桥鉴权 token（须与大 QMT 端一致；留空=不校验，仅调试） */
+    auth_token?: string;
   }) => http.post<BrokerConnection & { reused?: boolean }>("/brokers", body),
 
   remove: (connId: string) => http.del<{ ok: boolean }>(`/brokers/${connId}`),
@@ -177,8 +278,17 @@ export const brokerApi = {
 
   setActive: (connId: string) => http.post<{ ok: boolean }>(`/brokers/${connId}/active`),
 
-  /** 环境探测：与 connect 同源（都要跑适配器 start()），超时同样必须给足。 */
-  test: (body: { broker_id: string; client_path: string }) =>
+  /** 环境探测：与 connect 同源（都要跑适配器 start()），超时同样必须给足。
+   * 带 connector_key 时后端走桥接一次性 PROBE 分支（不落库）。 */
+  test: (body: {
+    broker_id: string;
+    client_path: string;
+    connector_key?: string;
+    bridge_dir?: string;
+    auth_token?: string;
+    account_id?: string;
+    account_type?: string;
+  }) =>
     http.post<BrokerTestResult>("/brokers/test", body, { timeout: 120_000 }),
 
   /**

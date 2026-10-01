@@ -229,6 +229,13 @@ def _backup_view(ctx: AppContext):
     拿不到（如单测里未跑 bootstrap）时按当前配置新建一个只读视图：占用统计仍然
     正确，只是 `last.action` 恒为 idle。**不返回 None** —— 界面上「备份占用」这一栏
     不能因为拿不到实例就整块消失（那就又变成不可见了）。
+
+    ★ 必须把**应用的写连接**一起带上（``db=ctx.db``）：没有它，``DBBackup`` 只能
+      自己开一条新连接去做 ``PRAGMA wal_checkpoint(TRUNCATE)``，而截断需要独占
+      访问 —— 应用正在服务请求时必然拿到 ``busy != 0``，指纹于是降级成另一种
+      文件形态，「连点两次立即备份」就会白复制两份整库（实测 1.3GB × 2）。
+      bootstrap 的正式实例本来就传了 ``db=state.db``（``phase_misc``），这里补上
+      是为了让**兜底路径**与正式路径行为一致，不留下「同一条链路两种行为」。
     """
     inst = getattr(ctx, "db_backup", None)
     if inst is not None:
@@ -237,6 +244,7 @@ def _backup_view(ctx: AppContext):
     return DBBackup(
         settings.db_path, keep=settings.db_backup_keep,
         interval=settings.db_backup_interval,
+        db=getattr(ctx, "db", None),
         max_total_mb=settings.db_backup_max_total_mb,
         min_keep=settings.db_backup_min_keep)
 

@@ -149,9 +149,6 @@ class DBBackup:
         except OSError:
             return 0
 
-    def _size_str(self, p: Path) -> str:
-        return human_size(self._size_of(p))
-
     def _files(self) -> list[Path]:
         """现有备份，**新 → 旧**排序。
 
@@ -220,17 +217,26 @@ class DBBackup:
             return False
         busy = int(row[0]) if row else 1
         if busy != 0:
+            # ★ 这条必须留下来：归一化失败会把指纹降级成**另一种形态**，两层后果
+            #   （A11 误判「有新提交」+ 形态不可比）都极难从表面现象倒推 ——
+            #   没有 busy/log 原始值就只能靠猜（此前该缺陷表现为「偶发为红」）。
+            log.debug("备份指纹：WAL 归一化未成功（busy=%s，checkpoint 返回 %s），"
+                      "指纹降级为文件形态", busy, row)
             return False
         try:
-            return self._wal_path().stat().st_size == 0
+            size = self._wal_path().stat().st_size
         except OSError:
             return True  # -wal 不存在 = 已被清掉，等价于归零
+        if size:
+            log.debug("备份指纹：checkpoint 报告成功但 -wal 仍有 %d 字节，判定未归一化",
+                      size)
+        return size == 0
 
     def _source_fingerprint(self) -> dict:
-        """主库当前指纹。
+        """主库当前指纹（**带形态自述**，供跨形态比较）。
 
-        归一化**成功**时 = 主库 ``(size, mtime_ns)``（``wal`` 只留 ``[0]`` 作痕迹）；
-        归一化**失败**时 = 主库与 ``-wal`` 各自的 ``(size, mtime_ns)``（旧口径）。
+        归一化**成功**时 = 主库 ``(size, mtime_ns)`` + ``wal=[0]`` + ``norm=True``；
+        归一化**失败**时 = 主库与 ``-wal`` 各自的 ``(size, mtime_ns)`` + ``norm=False``。
 
         mtime 用 ns 精度：秒级精度下「同一秒内写库 + 备份」会被误判成未变化，
         从而漏掉一次真备份。
@@ -246,7 +252,16 @@ class DBBackup:
         在「原地 UPDATE + 与上次备份同 tick」时会**完全不变** ⇒ 静默丢备份。
         所以「是否已被覆盖」的判定**不能只看本方法**，必须由 ``_covered_by()``
         再叠加一个与文件时间无关的信号（归一化**前** ``-wal`` 是否有帧）。详见其 docstring。
+
+        ★★ 另加两个**非文件形态**的键（2026-10-01，A12）：
+          * ``norm``：本次归一化**是否成功**。两类口径的文件形态不同，拿它们做
+            ``==`` 是**无意义**的（形状必然不等）—— 必须先看这个标记再决定怎么比。
+            这一点曾被写错：旧注释假定「降级口径交给下面的 ``!=`` 比较处理即可」，
+            而跨形态比较**恒为不等** ⇒ 每次「立即备份」都白复制一份整库。
+          * ``pre_wal``：归一化**之前**的 ``-wal`` 字节数。跨形态比较时，它是唯一
+            能证明「还是那批帧、没有新提交」的判据（折叠只写页、不改字节数）。
         """
+        pre_wal = self._wal_size()          # ★ 必须早于 _normalize_wal()（它会归零）
         normalized = self._normalize_wal()
         fp: dict = {}
         for tag, suffix in (("db", ""), ("wal", "-wal")):
@@ -259,7 +274,36 @@ class DBBackup:
         if normalized:
             # -wal 已归零；只留 size（恒 0）作「确实归一化过」的痕迹，剔除 mtime
             fp["wal"] = [0]
+        fp["norm"] = bool(normalized)
+        fp["pre_wal"] = int(pre_wal)
         return fp
+
+    @staticmethod
+    def _is_normalized(fp: dict) -> bool:
+        """该指纹是否**归一化成功**口径（``-wal`` 已折叠）。
+
+        兼容本键引入之前写下的旧指纹（没有 ``norm``）：靠 ``wal == [0]`` 的形状判
+        —— 那一形状**只可能**由归一化成功产生（代码里唯一写 ``[0]`` 的地方）。
+        """
+        if not isinstance(fp, dict):
+            return False
+        if "norm" in fp:
+            return bool(fp.get("norm"))
+        return fp.get("wal") == [0]
+
+    #: 指纹里**不代表文件形态**的键：只供**跨形态**比较使用，绝不能进 ``==``。
+    #: ★ 踩过的坑（2026-10-01）：把 ``pre_wal`` 一起塞进指纹 dict 后，同形态分支的
+    #:   ``cur == old`` 会去比「折叠前 -wal 有没有帧」—— 而这两次本来就可以不同
+    #:   （备份那一刻 -wal 里有帧、判定时已经空），于是**每次判断都算「变了」**，
+    #:   跳过彻底失效（比原缺陷更糟：每次点击白复制一份整库）。形态与标记必须分开比。
+    _NON_SHAPE_KEYS = ("norm", "pre_wal")
+
+    @classmethod
+    def _shape(cls, fp: dict) -> dict:
+        """只留**文件形态**部分（``db`` / ``wal`` 的 size+mtime），供同形态比较。"""
+        if not isinstance(fp, dict):
+            return {}
+        return {k: v for k, v in fp.items() if k not in cls._NON_SHAPE_KEYS}
 
     def _fp_file(self) -> Path:
         return self.backups_dir / _FP_FILE
@@ -333,22 +377,63 @@ class DBBackup:
         补上的信号**与文件时间无关**：``_normalize_wal()`` 会把已提交数据并回主库
         并把 ``-wal`` 归零，所以「**归一化前** ``-wal`` > 0」⇔「自上次归一化以来
         确有提交」。空操作检查点不会留下帧 ⇒ 不会误报（A5 的跳过语义完好）。
+
+        ★★ 但 A11 的推理有一个**前提**（2026-10-01，A12 实测补上）：上次记录的指纹
+        必须是**归一化成功**口径。只有当「上次归一化后 ``-wal`` 为 0」成立时，
+        「这次归一化前 ``-wal`` > 0」才只能来自**上次之后的新提交**。若上次归一化
+        **失败**（``-wal`` 非零的残留还在），那批帧本来就在 —— 此时 A11 会把
+        「同一批旧帧」误判成「有新提交」而**每次点击都白复制一份整库**。
+        且两种口径的文件形态不同，跨形态 ``!=`` **恒为不等**，比较本身也无意义。
+        故判定必须先分形态，见 ``_same_logical_state``。
         """
         old, name = self._read_fp()
         if not old or not name:
             return ""
-        pending = self._wal_size()          # ★ 必须早于下面的归一化，否则恒为 0
-        cur = self._source_fingerprint()
-        if pending > 0 and cur.get("wal") == [0]:
-            # 归一化成功（-wal 已归零）且归一化前还有帧 ⇒ 一定有新提交。
-            # 归一化**失败**时 cur 是降级口径（含 -wal 的 size/mtime），
-            # 那种情况交给下面的 != 比较处理即可，不必在这里下结论。
-            return ""
-        if cur != old:
-            return ""
         if not (self.backups_dir / name).is_file():
             return ""  # 记录的那份已被清理 ⇒ 覆盖关系失效，必须重新备份
-        return name
+        pending = self._wal_size()          # ★ 必须早于下面的归一化，否则恒为 0
+        cur = self._source_fingerprint()
+        return name if self._same_logical_state(old, cur, pending) else ""
+
+    def _same_logical_state(self, old: dict, cur: dict, pre_wal: int) -> bool:
+        """两份指纹是否表示**同一逻辑状态**（含跨「折叠成功/失败」两种形态）。
+
+        ``pre_wal`` = 本次归一化**之前**的 ``-wal`` 字节数（由 ``_covered_by`` 在读
+        指纹前取，不能从 ``cur`` 里拿：``cur`` 可能被调用方钉死成常量）。
+
+        三种形态组合各有各的正确判法，**不能**统一用 ``==``：
+        """
+        old_norm = self._is_normalized(old)
+        cur_norm = self._is_normalized(cur)
+
+        if old_norm and cur_norm:
+            # 同口径（都是折叠后的规范态）：A11 的推理在这里成立。
+            # 归一化前 -wal 有帧 + 归一化成功 ⇒ 一定存在上次之后的新提交。
+            if pre_wal > 0:
+                return False
+            # 无待折叠帧 ⇒ 主库 (size, mtime_ns) 即逻辑全量，比**形态**即可
+            # （``norm`` / ``pre_wal`` 是标记不是形态，见 ``_NON_SHAPE_KEYS``）。
+            return self._shape(cur) == self._shape(old)
+
+        if not old_norm and not cur_norm:
+            # 两边都降级：口径一致，直接比形态（含 -wal 的 size/mtime，真写入必然改变）。
+            return self._shape(cur) == self._shape(old)
+
+        if not old_norm and cur_norm:
+            # 上次折叠**失败**（留下一批未折叠帧）→ 这次折叠成功。
+            # ★ 此时两边形状必然不同，**不能**比 mtime：把 -wal 折进主库要写页，
+            #   mtime 一定变；也**不能**比主库 size —— 折叠可能让主库文件增长
+            #   （逻辑页数 ≥ 折叠前的物理大小），size 变了逻辑数据却一字未改。
+            #   唯一与折叠无关的判据是「还是那批帧吗」：归一化**之前**的 ``-wal``
+            #   字节数一致 ⇒ 没有追加任何新提交 ⇒ 逻辑内容未变 ⇒ 允许跳过。
+            #   （回退口径下的 ``-wal`` 大小**单调递增**：追加写只会变长，我们的
+            #     截断是唯一把它归零的动作，而那会体现在 ``pre_wal`` 上。）
+            # 旧指纹可能没有 ``pre_wal`` 键 ⇒ None≠int ⇒ 判「变过」⇒ 保守备份。
+            return old.get("pre_wal") == pre_wal
+
+        # old 归一化成功、cur 降级（本次折叠失败）：无法知道 -wal 里是否混入了
+        # 新提交 ⇒ **无法判定**，保守备份（宁可多备份，绝不漏备份）。
+        return False
 
     # ---------------- 保留策略 ----------------
     def _plan(self, files: list[Path]) -> tuple[list[Path], list[Path]]:

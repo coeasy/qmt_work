@@ -6,9 +6,97 @@
 """
 from __future__ import annotations
 
+import logging
+import os
 from typing import Any, Optional
 
 from core.quote_fields import pick_order_ref_price
+
+log = logging.getLogger("qmt_work.gateway.execution")
+
+#: V4 Phase 0-c **灰度接线开关**：0=走既有 bridge 路径（默认，行为完全不变）；
+#: 1=走 canonical 端口路径（SignalRouter → ExecutionPort → Dialect×Transport）。
+#: 只接受这两个值：任何拼写错误都会被当作「未启用」而不是悄悄换一条路径。
+_QMT_USE_PORTS = os.environ.get("QMT_USE_PORTS", "0").strip() in ("1", "true", "True")
+
+
+def _split_instrument(code: str):
+    """``600036.SH`` → InstrumentId(code=600036, exchange=SH)。"""
+    from connectors.ports import InstrumentId
+
+    base, _, ex = (code or "").partition(".")
+    return InstrumentId(code=base, exchange=ex.upper())
+
+
+def _port_for_bridge(bridge):
+    """灰度期内把 bridge 提升为 canonical ExecutionPort；开关关闭时返回 None。
+
+    提升是**纯适配**：转发给同一个 adapter 的同一个方法，不新增任何 SDK 调用，
+    也不改变调用顺序。
+
+    ★ 开关为 1 时**禁止静默回退**：gateway 缺失就抛错。
+    「管理员以为在跑端口层、实际跑的是旧路径」是一种特别坏的假绿灯 ——
+    它会让接线验证的结论失真（该项目已两次栽在绿灯被另一个 bug 遮出来）。
+    要恢复旧路径，只有显式把 ``QMT_USE_PORTS`` 置回 0 这一条路。
+    """
+    if not _QMT_USE_PORTS:
+        return None
+    gateway = getattr(bridge, "gateway", None)
+    if gateway is None:
+        from connectors.ports import ConnectorError
+
+        raise ConnectorError(
+            "QMT_USE_PORTS=1 但该 bridge 未提供 gateway —— 端口层无法装配。"
+            "若仍需旧路径，请把环境变量 QMT_USE_PORTS 置为 0")
+    try:
+        from connectors.dialects import get_dialect
+        from connectors.generic import GenericConnector
+        from connectors.transports import InProcessTransport
+
+        dialect = get_dialect("xtquant.v1")
+        write_ops = frozenset(getattr(dialect, "write_ops", ()) or ())
+        transport = InProcessTransport(gateway, bridge=bridge,
+                                       write_ops=write_ops or None)
+        return GenericConnector(dialect=dialect, transport=transport,
+                                connector_id="qmt.mini")
+    except Exception:  # noqa: BLE001
+        # 装配失败必须显式失败（不能静默降级 —— 那正是假绿灯的来源）。
+        log.exception("[ports] 端口装配失败")
+        raise
+
+
+def _make_order_request(code: str, direction: str, price_type: str, price: float,
+                        volume: int, strategy_name: str, remark: str):
+    """构造 canonical 下单请求（price_type/direction 已在更上游校验）。"""
+    from connectors.ports import OrderRequest
+
+    return OrderRequest(
+        instrument=_split_instrument(code),
+        side=str(direction or "").lower(),
+        order_type=str(price_type or "limit").lower(),
+        price=float(price or 0.0),
+        quantity=int(volume or 0),
+        strategy_name=strategy_name or "",
+        remark=remark or "",
+        # 幂等锚点：上层若已生成，应在此透传；留空则由 SingleFlight 的第一道防线兜住。
+        client_order_id="",
+    )
+
+
+def _snapshot_to_legacy(snap) -> dict:
+    """OrderSnapshot → 既有下游期望的下单回执 dict。
+
+    刻意保留 ``code: 0`` 兼容位：下游 WAL/审计/emit 都以此为成功判据，
+    灰度期**不改变任何下游契约**，只是把来源换成 canonical 快照。
+    """
+    data = dict(snap.raw or {})
+    data.setdefault("order_id", snap.broker_order_id)
+    data["ok"] = bool(snap.accepted)
+    data["status"] = snap.status
+    data["code"] = 0
+    if snap.client_order_id:
+        data["client_order_id"] = snap.client_order_id
+    return data
 
 
 class ExecutionService:
@@ -99,6 +187,24 @@ class ExecutionService:
         # 作为保护价传给柜台，绝不能传原始 price（市价单 price=0 会被柜台判为
         # 废单）。risk_price 已通过真实行情校验：限价单时等于用户原始价，市价单时
         # 为最新价（见 _risk_price）。未知价场景在上方已被拒绝，不会走到这里。
+        port = _port_for_bridge(bridge)
+        if port is not None:
+            # V4 Phase 0-c：经 canonical ExecutionPort 下单（灰度）。
+            # 估价/风控已在上方完成，此处只是把「送达」交给端口层。
+            request = _make_order_request(code, direction, price_type, risk_price,
+                                          volume, strategy_name, remark)
+            try:
+                snap = await port.place_order(request)
+            except Exception as exc:  # noqa: BLE001
+                log.error("[ports] 下单失败（order=%s）: %s", code, exc)
+                self._audit("order.failed", code, params, f"[ports] {exc}")
+                raise
+            result = _snapshot_to_legacy(snap)
+            result.setdefault("order_id", snap.broker_order_id)
+            self._audit(audit_action, code, params,
+                        f"[ports] order_id={snap.broker_order_id}")
+            return result
+
         result: Any = await bridge.call_locked(
             bridge.gateway.place_order, code, direction, price_type, risk_price,
             volume, strategy_name, remark)
@@ -113,6 +219,14 @@ class ExecutionService:
         return result
 
     async def cancel_order(self, bridge, order_id: str, *, action: str = "order.cancel") -> dict:
+        port = _port_for_bridge(bridge)
+        if port is not None:
+            snap = await port.cancel_order(order_id)
+            result = {"ok": bool(snap.accepted), "order_id": snap.broker_order_id,
+                      "status": snap.status, "code": 0}
+            self._audit(action if result["ok"] else f"{action}.failed",
+                        order_id, {}, f"[ports] status={snap.status}")
+            return result
         result = await bridge.call_locked(bridge.gateway.cancel_order, order_id)
         if isinstance(result, dict):
             # 关键正确性修复（P0-12）：以网关返回的 ok 为准。旧实现读取不存在的

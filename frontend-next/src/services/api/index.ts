@@ -47,6 +47,8 @@ export type {
   AutoDetectAccount,
   AutoDetectCandidate,
   AutoDetectResult,
+  BigQmtProbe,
+  BrokerDiagConnection,
   BrokerDiagnostics,
   BrokerTestResult,
   VersionProfile,
