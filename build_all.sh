@@ -534,6 +534,14 @@ else
     info "跳过自检（--no-verify）"
 fi
 
+# ★ 自检（Step 4/4.5）会在原地再跑一次后端，把 data/、qmt_work_config.json 等运行期状态
+#   写回发布包 —— 而上面 line 433 的 verify_no_runtime_state_in_package 在自检【之前】跑，
+#   拦不到这次污染。于是「433 行 verify 通过」≠「最终发出去的包干净」，正是
+#   「绿灯是另一个 bug 遮出来的」陷阱（0.3.9 即栽在出厂包带构建机 master.key）。
+#   故自检全部结束后，对最终产物再做一次清场 + 硬核对，确保发出去的包确实无运行期状态。
+purge_dist_runtime_state
+verify_no_runtime_state_in_package
+
 echo ""
 echo "========================================="
 echo " 构建完成"

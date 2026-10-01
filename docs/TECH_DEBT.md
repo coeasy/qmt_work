@@ -806,6 +806,27 @@
 - **证伪方式**：`grep -rn "agent_unresponsive" frontend-next/src` 必须有命中；
   `npx vitest run tests/bigqmtProbe.test.ts` 全绿。
 
+### TD-32 构建自检在「包内运行期状态硬门禁」之后跑，把污染写回发布包（**R42 已闭环**）
+
+- **症状**：`build_all.sh` 的 `verify_no_runtime_state_in_package`（line 433）在**打包后、
+  自检前**执行并通过；但 Step 4 自检 / Step 4.5 MCP 冒烟会**原地再启动一次打包态后端**，
+  把 `data/`、`qmt_work_config.json` 等运行期状态写回
+  `dist-electron/win-unpacked/resources/backend/qmt_work`。于是「433 行 verify 通过」
+  **≠**「最终发出去的包干净」——中间目录 `win-unpacked` 被污染，而真正发布的 `zip`
+  因在打包阶段（425 行）就已生成，反而**没有被污染**（侥幸干净）。
+- **根因**：`verify` 的时序放在了**自检之前**，没有覆盖「自检自身产生的污染」。
+  这正是 TD-26「绿灯是另一个 bug 遮出来的」的构建侧翻版：433 行的绿灯把
+  「自检写回的污染」遮掉了，且只有当有人直接抽查 `win-unpacked` 时才暴露。
+- **处置**：在自检块结束（`fi`）之后、「构建完成」之前，补一道
+  `purge_dist_runtime_state` + `verify_no_runtime_state_in_package`（见 build_all.sh
+  尾部注释）。这样 FINAL 产物在落盘前一定被再清一次并复验，自检污染不再逃逸。
+- **状态**：`已闭环`（脚本已加尾部清场+复验；本次构建的 `qmt_work-0.4.1.zip` 经
+  全量扫描确认无 `master.key`/`app.db`/`qmt_work_config.json`/应用 `data/`/`logs/`；
+  中间目录 `win-unpacked` 已手动清场）。
+- **证伪方式**：`grep -n "purge_dist_runtime_state" build_all.sh` 应在自检块之后还有
+  **第二处**调用（尾部）；重跑 `bash build_all.sh --portable` 后
+  `find dist-electron/win-unpacked -name master.key -o -name qmt_work_config.json` 应为空。
+
 ---
 
 ## 二、本轮（R26–R29）闭环情况
@@ -908,3 +929,5 @@
 ---
 
 *最后更新：2026-09-30（R39 发布阻断缺陷闭环 —— 安装包内嵌构建者主密钥 + 只读安装首次启动崩（两者互相掩盖）；主密钥口径统一为跟随主库目录；构建流水线新增运行期状态清理与包内硬门禁；新增 §五 三条纪律——构建卫生必须落成门禁、`exe_dir()` 只用于只读资源、绿灯要问路径是否真被执行。**R40：以 v0.4.0 作为新的公开发布版本线（代码同源 v0.3.10），与带缺陷的 0.3.9 切割；发布本身验证「版本一致性闸门 + 包内无运行期状态硬门禁 + CI 自动构建上传资产」链路可用**；**R41：修复「新功能顶穿文件体积上限」导致 CI Gate 4 变红（`bigqmt_bridge` 按职责拆出 `bigqmt_gateway`），并修掉 `check_appcontext` 的过宽匹配（正则→AST）与基线腐烂 —— 后者暴露出一条产线代码仍在直取 `core.state.state`，已改走 `core.context` 规约访问器；升版 v0.4.1（v0.4.0 的 tag 已推在更早提交上，且其说明声明「非功能新增」），并发现版本一致性闸门漏核 `package-lock.json`（根包版本漂在 0.3.6 已久之）**）*
+
+*最后更新：2026-10-01（**R42**：构建脚本 `build_all.sh` 的「包内运行期状态硬门禁」原本跑在自检之前，被自检原地重启后端产生的污染遮出绿灯（TD-32）；已在自检块之后补尾部 `purge_dist_runtime_state` + `verify_no_runtime_state_in_package`，确保 FINAL 产物落盘前复验；本次重构建的 `qmt_work-0.4.1.zip` 经全量扫描确认无 `master.key`/`app.db`/`qmt_work_config.json`/应用 `data/`/`logs/`，发布条件达成。）*
