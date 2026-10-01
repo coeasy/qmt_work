@@ -171,6 +171,37 @@ WS_CHANNEL_DESC = {
 }
 
 
+# 附录：大小 QMT 接入与接口差异（随文档重生保留，引用独立说明文档）。
+# 不在契约统计范围，纯说明性，避免「接口文档」缺大小 QMT 差异而被误用。
+APPENDIX_MD = [
+    "## 附录：大小 QMT 接入与接口差异",
+    "",
+    "> 完整、逐步的操作指引、故障排查与速查表见 [`QMT_大小版本使用说明.md`](QMT_大小版本使用说明.md)。本节只给接口层面的关键差异，随契约文档重生自动保留。",
+    "",
+    "### 两种接入形态",
+    "",
+    "- **直连（direct）**：小 QMT（`userdata_mini`）与大 QMT 直连 full（`userdata`）共用 `xtquant.v1` dialect，经进程内 SDK 或子进程桥送达柜台。前端接入模式留空即直连。",
+    "- **大 QMT 策略桥（路径 B）**：`bridgeFile` / `bridgeRedis` / `bridgeZmq` 对应 `qmt.big.bridge.file/redis/zmq`，走 `bigqmt.v1` dialect，经大 QMT 内置 Python 策略脚本（bundle `python/qmt_work_agent.py`）桥接。这是券商封掉外部直连后的兜底通道。",
+    "",
+    "### 与券商相关的接口差异",
+    "",
+    "| 能力 | 直连（小 / 大 full） | 大 QMT 策略桥（路径 B） |",
+    "|------|---------------------|------------------------|",
+    "| 下单 / 撤单 | `POST /api/v1/trade/order` 等，底层 `order_stock` | 同接口，底层 `passorder` / `cancel` |",
+    "| 资金 / 持仓 / 委托 / 成交 | `query_*` | `get_trade_detail_data` 族（经桥） |",
+    "| 实时行情 | xtdata（58610） | `ContextInfo.get_full_tick`（58610） |",
+    "| 行情订阅（WS `quotes`） | 原生回调，毫秒级 | 文件桥无回调：事件泵每秒对账合成（`SUB_QUOTE` → agent 轮询 diff → `events.ndjson` → WS），秒级 |",
+    "| 存活判据 | 连接对象状态 | `connector_probe()` 返回 `available` / `agent_unresponsive` / `liveness_failures` / `last_agent_ok_age_s`，以真实往返为准（文件残留 ≠ 在跑） |",
+    "",
+    "### 必读约束",
+    "",
+    "- 小 QMT **只有直连**，没有「策略桥」「注册树」概念；大 QMT 策略须写入客户端注册树（GUI 动作），光放 `.py` 文件不生效。",
+    "- 交易连接被封时日志特征 `pid X not allowed, return` + `connect ret error-1`（授权串 PID 白名单）；行情 `xtdata` 通常仍正常。平台无法改写，须引导找券商或切路径 B。",
+    "- 所有接口零 mock，未连券商返回 503，被拒返回 400，失败绝不包 `code=0`。",
+    "",
+]
+
+
 def load_json(path):
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
@@ -305,6 +336,7 @@ def main():
     out.append("")
     out.append("能力自描述运行期端点：`GET /api/v1/capabilities`（REST 总览）、`GET /api/v1/capabilities/mcp`（MCP 工具分组计数）。桌面客户端「系统 → MCP 工具」页可浏览并一键复制。")
     out.append("")
+    out.extend(APPENDIX_MD)
 
     text = "\n".join(out)
     with open(OUT, "w", encoding="utf-8") as f:

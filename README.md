@@ -7,6 +7,7 @@
 - [项目规划](docs/项目规划.md)：后续演进方向
 - [项目宣传](docs/项目宣传.md)：产品亮点与适用人群
 - [接口文档](docs/API接口文档.md)：REST / MCP / WebSocket 完整清单
+- [大小 QMT 使用说明](docs/QMT_大小版本使用说明.md)：大/小 QMT 概念差异、直连与策略桥部署步骤、接口/能力差异对照、故障排查与速查表
 
 基于 QMT / XTQuant 等多券商客户端的量化交易平台。同一进程内提供 **可视化 Web 界面 + MCP + FastAPI REST + WebSocket 实时推送**，可打包为**独立桌面客户端（EXE）**。
 
