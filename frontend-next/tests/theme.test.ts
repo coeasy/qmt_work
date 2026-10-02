@@ -49,18 +49,19 @@ afterEach(() => {
 });
 
 describe("主题偏好 · 默认与系统跟随", () => {
-  it("无持久化记录时默认浅色 + 晨曦白背景（不跟随系统）", async () => {
+  it("无持久化记录时默认深色 + 极夜黑纯黑背景（不跟随系统）", async () => {
     setSystemDark(true);
     const store = await freshStore();
-    expect(store.getState().themePref).toBe("light");
-    expect(store.getState().theme).toBe("light");
-    expect(store.getState().activeSkin).toBe("light");
+    expect(store.getState().themePref).toBe("dark");
+    expect(store.getState().theme).toBe("dark");
+    expect(store.getState().activeSkin).toBe("midnight");
 
     setSystemDark(false);
     const lightStore = await freshStore();
-    expect(lightStore.getState().themePref).toBe("light");
-    expect(lightStore.getState().theme).toBe("light");
-    expect(lightStore.getState().activeSkin).toBe("light");
+    // 默认与系统无关：系统浅色时仍是深色 + 极夜黑（首次进入不给惊喜）
+    expect(lightStore.getState().themePref).toBe("dark");
+    expect(lightStore.getState().theme).toBe("dark");
+    expect(lightStore.getState().activeSkin).toBe("midnight");
   });
 
   it("显式选择 跟随系统(auto) 时按系统主题解析", async () => {
@@ -111,12 +112,13 @@ describe("主题偏好 · 持久化与迁移", () => {
     expect(store.getState().theme).toBe("light");
   });
 
-  it("老版本 theme 值非法时回退默认（浅色）", async () => {
+  it("老版本 theme 值非法时回退默认（深色 + 极夜黑）", async () => {
     setSystemDark(false);
     localStorage.setItem(KEY, JSON.stringify({ theme: "solarized" }));
     const store = await freshStore();
-    expect(store.getState().themePref).toBe("light");
-    expect(store.getState().theme).toBe("light");
+    expect(store.getState().themePref).toBe("dark");
+    expect(store.getState().theme).toBe("dark");
+    expect(store.getState().activeSkin).toBe("midnight");
   });
 
   it("setThemePref 立即改写 DOM 并落盘", async () => {
@@ -134,26 +136,26 @@ describe("主题偏好 · 持久化与迁移", () => {
     expect(reloaded.getState().theme).toBe("light");
   });
 
-  it("toggleTheme 基于当前生效主题取反（默认浅色 → 深色 → 浅色）", async () => {
-    setSystemDark(true);
+  it("toggleTheme 基于当前生效主题取反（默认深色 → 浅色 → 深色）", async () => {
+    setSystemDark(false);
     const store = await freshStore();
+    expect(store.getState().theme).toBe("dark");
+
+    store.getState().toggleTheme();
     expect(store.getState().theme).toBe("light");
+    expect(store.getState().themePref).toBe("light");
 
     store.getState().toggleTheme();
     expect(store.getState().theme).toBe("dark");
     expect(store.getState().themePref).toBe("dark");
-
-    store.getState().toggleTheme();
-    expect(store.getState().theme).toBe("light");
-    expect(store.getState().themePref).toBe("light");
   });
 
-  it("损坏的 localStorage 内容不会抛错，回退默认（浅色）", async () => {
+  it("损坏的 localStorage 内容不会抛错，回退默认（深色）", async () => {
     setSystemDark(false);
     localStorage.setItem(KEY, "{ 这不是 JSON");
     const store = await freshStore();
-    expect(store.getState().themePref).toBe("light");
-    expect(store.getState().theme).toBe("light");
+    expect(store.getState().themePref).toBe("dark");
+    expect(store.getState().theme).toBe("dark");
   });
 });
 
@@ -177,5 +179,31 @@ describe("涨跌配色", () => {
     store.getState().setThemePref("light");
     expect(document.documentElement.dataset.updown).toBe("green-up");
     expect(document.documentElement.dataset.theme).toBe("light");
+  });
+});
+
+describe("皮肤 id 迁移（2026-10 中性化更名）", () => {
+  it("旧 id 本地落盘后仍解析到当前皮肤，且写入 DOM 的是新 id", async () => {
+    setSystemDark(true);
+    localStorage.setItem(KEY, JSON.stringify({ themePref: "dark", skin: "tongdaxin" }));
+    const store = await freshStore();
+    expect(store.getState().activeSkin).toBe("midnight");
+
+    store.getState().init();
+    // ★ 必须是新 id：写旧 id 会让 CSS 选择器全部落空 ⇒ 「选了皮肤但背景没变」
+    expect(document.documentElement.dataset.skin).toBe("midnight");
+  });
+
+  it("三个旧 id 全部可迁移（不仅仅是默认那个）", async () => {
+    setSystemDark(true);
+    for (const [oldId, newId] of [
+      ["tongdaxin", "midnight"],
+      ["dazhihui", "graphite"],
+      ["ths", "obsidian"],
+    ] as const) {
+      localStorage.setItem(KEY, JSON.stringify({ themePref: "dark", skin: oldId }));
+      const store = await freshStore();
+      expect(store.getState().activeSkin).toBe(newId);
+    }
   });
 });

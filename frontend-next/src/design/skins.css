@@ -5,11 +5,13 @@
    ★ accent / up / down / success / warning / danger **不由皮肤决定** ——
      涨跌色必须独立于皮肤，否则用户换个底色就会把「红涨绿跌」悄悄改掉。
      这些语义色统一由 [data-theme] 提供（见 tokens.css）。
-   应用方式：<html data-skin="tongdaxin">；自定义皮肤走 JS 内联变量，不在这里定义。
+   应用方式：<html data-skin="midnight">；自定义皮肤走 JS 内联变量，不在这里定义。
+   2026-10 id 中性化：tongdaxin→midnight / dazhihui→graphite / ths→obsidian，
+   旧值由 skins.ts 的 LEGACY_SKIN_IDS 迁移（用户在旧版选过的皮肤不会失效）。
    ========================================================================== */
 
-/* --- 极夜黑 --- 纯黑底 + 极淡层级（id 沿用 tongdaxin，见 skins.ts 命名纪律） */
-[data-skin="tongdaxin"] {
+/* --- 极夜黑 --- 纯黑底 + 极淡层级（默认皮肤，见 skins.ts DEFAULT_SKIN_ID） */
+[data-skin="midnight"] {
   --bg-0: #000000;
   --bg-1: #080808;
   --bg-2: #101010;
@@ -29,7 +31,7 @@
 }
 
 /* --- 石墨黑 --- 近黑微冷灰，面板略带灰，反光屏更柔和 */
-[data-skin="dazhihui"] {
+[data-skin="graphite"] {
   --bg-0: #0a0a0c;
   --bg-1: #101013;
   --bg-2: #18181c;
@@ -49,7 +51,7 @@
 }
 
 /* --- 曜石黑 --- 极深蓝黑，长盯盘不易疲劳 */
-[data-skin="ths"] {
+[data-skin="obsidian"] {
   --bg-0: #020305;
   --bg-1: #080a0d;
   --bg-2: #11151a;

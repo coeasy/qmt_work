@@ -5,6 +5,7 @@ import {
   SKIN_TOKEN_KEYS,
   deriveSkinTokens,
   isDarkColor,
+  normalizeSkinId,
   presetById,
 } from "@/design/skins";
 
@@ -13,8 +14,9 @@ import {
  * 主题与涨跌色通过 <html> 的 data-* 属性驱动，设计令牌自动生效。
  *
  * ★ 主题三态：`auto`（跟随系统）/ `dark` / `light`。
- *   - 首次进入（无持久化记录）默认 `light` + `晨曦白` 背景 —— 新用户第一眼
- *     更容易看清界面结构；要深色在「设置 · 界面偏好」一键切换，选择会被记住。
+ *   - 首次进入（无持久化记录）默认 `dark` + `极夜黑` 纯黑背景 —— 主场景是盯盘，
+ *     深色底整体亮度低、长时间看盘更省眼；且配合下面的 no-FOUC 预热脚本，
+ *     首屏**不会**先闪一下浅色。要浅色在「设置 · 界面偏好」一键切换，选择被记住。
  *   - 用户在状态栏或设置页显式选择后可以切到 `跟随系统` / `浅色` / 其它皮肤，
  *     pref 落盘，此后按用户选择生效。
  *   - `auto` 模式下监听系统主题变化并实时切换（如夜间自动转深色）。
@@ -82,7 +84,7 @@ export function accentTokens(hex: string): Record<string, string> {
 const ACCENT_KEYS = ["--accent", "--accent-hover", "--accent-dim"];
 export const ACCENT_RE = /^#[0-9a-f]{6}$/i;
 
-/** 读取系统主题；matchMedia 在极老环境或 SSR 下可能缺失，兜底 light（与默认浅色一致） */
+/** 读取系统主题；matchMedia 在极老环境或 SSR 下可能缺失，兜底 dark（与默认黑色底一致） */
 function systemTheme(): Theme {
   try {
     return window.matchMedia(DARK_QUERY).matches ? "dark" : "light";
@@ -100,13 +102,17 @@ function isTheme(t: unknown): t is Theme {
 }
 
 function load(): Persisted {
+  // ★ 两个兜底分支的 customBg **必须写同一个值**。
+  //   此前 fallback 写浅灰 ``#f2f4f8``、JSON 解析分支写黑 ``#0a0a0a`` —— 同一个字段
+  //   两个默认值，导致「首次安装」与「设置过别的偏好（如涨跌色）之后」看到的自定义
+  //   预览色不一致，且没有任何一处解释这个差异。默认既已定为深色���这里统一深色。
   const fallback: Persisted = {
-    themePref: "light",
+    themePref: "dark",
     updown: "red-up",
     dataPanelTab: "watchlist",
     dataPanelOpen: true,
     skin: DEFAULT_SKIN_ID,
-    customBg: "#f2f4f8",
+    customBg: "#0a0a0a",
     customTokens: {},
     accent: "",
   };
@@ -115,8 +121,8 @@ function load(): Persisted {
     if (!raw) return fallback;
     const p = JSON.parse(raw) as Partial<Persisted> & { theme?: unknown };
     // 迁移：旧版本写的是已解析的 theme，没有 themePref；
-    // 非法 / 缺失的 theme 回退到新默认（浅色 + 晨曦白），而非 auto
-    let themePref: ThemePref = "light";
+    // 非法 / 缺失的 theme 回退到新默认（深色 + 极夜黑），而非 auto
+    let themePref: ThemePref = "dark";
     if (p.themePref === "auto" || isTheme(p.themePref)) themePref = p.themePref;
     else if (isTheme(p.theme)) themePref = p.theme;
     return {
@@ -127,7 +133,8 @@ function load(): Persisted {
           ? p.dataPanelTab
           : "watchlist",
       dataPanelOpen: p.dataPanelOpen !== false,
-      skin: typeof p.skin === "string" ? p.skin : "",
+      // 旧皮肤 id（第三方软件名）归一到中性 id —— 用户升级后皮肤照旧生效
+      skin: normalizeSkinId(typeof p.skin === "string" ? p.skin : "") || DEFAULT_SKIN_ID,
       customBg: typeof p.customBg === "string" && p.customBg ? p.customBg : "#0a0a0a",
       customTokens: {},
       // 非法 accent 直接回退空串（用 CSS 默认），绝不写半个颜色进 DOM
@@ -156,7 +163,12 @@ export function resolveSkin(
     return tone === theme ? { active: CUSTOM_SKIN_ID, tokens } : { active: "", tokens: null };
   }
   const preset = presetById(skin);
-  return preset && preset.tone === theme ? { active: skin, tokens: null } : { active: "", tokens: null };
+  // ★ 返回 ``preset.id`` 而不是入参 ``skin``：入参可能是**旧 id**（已落盘在 localStorage
+  //   或服务器外观配置里）。写 ``data-skin="旧id"`` 会让 CSS 选择器全部落空 ⇒ 用户看到
+  //   的是「选了皮肤但背景没变」，且没有任何报错。归一在出口完成，最简单也最不容易漏。
+  return preset && preset.tone === theme
+    ? { active: preset.id, tokens: null }
+    : { active: "", tokens: null };
 }
 
 function apply(p: Persisted): Theme {
@@ -266,7 +278,10 @@ export const useUiStore = create<UiState>((set, get) => ({
   },
 
   setSkin(id) {
-    const preset = presetById(id);
+    // 归一到当前 id：入参可能来自**服务器上的旧外观配置**（那里存的是字符串，
+    // 前端升级后才知道它过期了）。不归一的话这个值会被一路落盘下去。
+    const canonical = normalizeSkinId(id);
+    const preset = presetById(canonical);
     // 选皮肤顺带把明暗切到它的方向：皮肤与明暗是两个正交概念，
     // 但错配（深色皮肤 + 浅色主题）没有意义，这里替用户对齐，省一次操作。
     const themePref: ThemePref = preset ? preset.tone : get().themePref;

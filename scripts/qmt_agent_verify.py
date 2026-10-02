@@ -161,12 +161,14 @@ def evaluate(data):
             "与后端连接配置是否**逐字符一致**")
 
     # ---- 1. 策略是否在跑（以心跳新鲜度为准）----
+    heartbeat_age = None   # 心跳年龄（秒）；None = 没有心跳数据（从未启动 / 文件不存在）
     if not status:
         bad("没有 agent_status.json —— 策略从未成功启动过",
             "先看上面的「是否已登记」：未登记就先做一次导入；已登记仍无心跳，"
             "说明策略没被运行起来（在「模型交易」里点运行，或勾上自动运行）")
     else:
         age = (time.time() * 1000 - float(status.get("ts", 0))) / 1000.0
+        heartbeat_age = age
         details["alive"] = age <= STALE_S
         details["trading_enabled"] = bool(status.get("trading_enabled"))
         if age <= STALE_S:
@@ -194,24 +196,43 @@ def evaluate(data):
             bad("bridge_dir 不可写: %s" % (w["detail"] if w else "未测"),
                 "QMT 进程对该目录无权限（常见于装在 Program Files）；把 bridge_dir "
                 "换到用户目录，两侧同步改")
+        # ★ 措辞纪律（与 agent 侧同源，见 qmt_api._need 注释）：
+        #   probe_result.json 是**某一次运行**的快照。策略当前没在跑时它必然陈旧，
+        #   此时只能说「陈旧快照里未见 X」——**绝不能**据此断言当前终端没有该能力
+        #   （那正是 "未解析到 ≠ 终端没有" 这条纪律要防的事）。
+        #   因此陈旧时的缺项降级为提示（`lines`），不计入致命 `problems`。
+        probe_stale = (heartbeat_age is None) or (heartbeat_age > STALE_S)
+        details["probe_stale"] = probe_stale
+        if probe_stale:
+            lines.append("  [!] probe_result.json 是**陈旧快照**（心跳距今 %s）—— "
+                         "它只反映历史上那一次运行，不代表当前 bundle 的能力"
+                         % ("未知" if heartbeat_age is None else "%.0fs" % heartbeat_age))
         details["injected"] = probe.get("injected", [])
         details["ctx_methods"] = probe.get("ctx_methods", [])
-        good("注入函数 %d 个: %s" % (len(details["injected"]),
-                                     ", ".join(sorted(details["injected"])[:12]) or "(空)"))
+        good("注入函数 %d 个: %s%s" % (len(details["injected"]),
+                                     ", ".join(sorted(details["injected"])[:12]) or "(空)",
+                                     "（陈旧快照）" if probe_stale else ""))
         good("ContextInfo 方法面 %d 个: %s" % (
             len(details["ctx_methods"]), ", ".join(details["ctx_methods"]) or "(空)"))
 
         missing_t = [f for f in NEED_FOR_TRADE if f not in details["injected"]]
         missing_q = [f for f in NEED_FOR_QUERY if f not in details["injected"]]
         if missing_t:
-            bad("未捕获交易函数: %s" % ", ".join(missing_t),
-                "① 确认运行的入口是 python/qmt_work_agent.py（单文件态）而不是子目录里的旧文件；"
-                "② 该券商版本可能不开交易函数注入")
+            if probe_stale:
+                lines.append("  [!] 陈旧快照里未见交易函数: %s —— **不能据此断言当前终端没有**；"
+                             "注册并运行策略后重跑本工具才会得到真实数据" % ", ".join(missing_t))
+            else:
+                bad("未捕获交易函数: %s" % ", ".join(missing_t),
+                    "① 确认运行的入口是 python/qmt_work_agent.py（单文件态）而不是子目录里的旧文件；"
+                    "② 该券商版本可能不开交易函数注入")
         else:
             good("交易函数已捕获（passorder/cancel）")
         if missing_q:
-            bad("未捕获 get_trade_detail_data —— 资金/持仓/委托/成交查询全不可用",
-                "确认跑的是单文件 agent；若仍缺失，多半是该终端版本模型研究环境不下发交易函数")
+            if probe_stale:
+                lines.append("  [!] 陈旧快照里未见 get_trade_detail_data —— 同样不代表当前缺失，需运行后重测")
+            else:
+                bad("未捕获 get_trade_detail_data —— 资金/持仓/委托/成交查询全不可用",
+                    "确认跑的是单文件 agent；若仍缺失，多半是该终端版本模型研究环境不下发交易函数")
         else:
             good("查询函数已捕获（get_trade_detail_data）")
 

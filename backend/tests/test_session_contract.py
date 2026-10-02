@@ -363,3 +363,45 @@ def test_snapshot_phase_by_hour(hour, expected):
     """阶段划分：盘前 / 盘中 / 午休 / 盘中 / 已收盘 —— 五档必须都能区分出来。"""
     snap = session_snapshot(_at(date(2026, 9, 18), hour=hour))
     assert snap["phase"] == expected, snap
+
+
+# ---------------------------------------------------------------------------
+# V11 R15 · expected_bar_date：日线「本该已有」的最新交易日
+# ---------------------------------------------------------------------------
+def _ts(y, m, d, h, minute=0):
+    from datetime import datetime
+    return datetime(y, m, d, h, minute)
+
+
+def test_expected_bar_date_before_ready_hour_is_previous_trading_day():
+    """收盘后但早于 ready_hour（18:00）：数据源多半还没更新当日 K 线 ⇒ 参照上一交易日。
+
+    这条是定时选股「每天白跑一次全市场补数」的根治点。
+    """
+    from app.sync.calendar import expected_bar_date
+
+    # 2026-09-18 是周五（交易日），16:20 尚未到 18:00
+    got = expected_bar_date(_ts(2026, 9, 18, 16, 20))
+    assert got == "20260917"          # 上一交易日（周四）
+
+
+def test_expected_bar_date_after_ready_hour_is_today():
+    """过了 ready_hour，当日数据就应当存在 ⇒ 参照今天，落后的就是真落后。"""
+    from app.sync.calendar import expected_bar_date
+
+    assert expected_bar_date(_ts(2026, 9, 18, 19, 5)) == "20260918"
+
+
+def test_expected_bar_date_on_non_trading_day_is_previous_trading_day():
+    """周末 / 节假日永远不会要求当天的数据。"""
+    from app.sync.calendar import expected_bar_date
+
+    assert expected_bar_date(_ts(2026, 9, 19, 20, 0)) == "20260918"   # 周六 → 周五
+    assert expected_bar_date(_ts(2026, 9, 20, 20, 0)) == "20260918"   # 周日 → 周五
+
+
+def test_expected_bar_date_ready_hour_zero_is_strict():
+    """ready_hour=0 ⇒ 严格口径（交易日就要当天），保留给已确认源即时更新的部署。"""
+    from app.sync.calendar import expected_bar_date
+
+    assert expected_bar_date(_ts(2026, 9, 18, 9, 30), ready_hour=0) == "20260918"

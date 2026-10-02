@@ -123,3 +123,53 @@ def test_job_id_is_recorded(monkeypatch, tmp_db):
     _patch(monkeypatch, bars_map={"600519.SH": _BARS})
     _run(monkeypatch, tmp_db, strategies=["turtle_trade"])
     assert picks_mod.latest_run()["job_id"] == "job-x"
+
+
+# ---------------------------------------------------------------------------
+# V11 R15：多策略并行 + 失败隔离 + freshness 判据
+# ---------------------------------------------------------------------------
+def test_strategy_failure_does_not_discard_other_results(monkeypatch, tmp_db):
+    """一条策略炸了，其余策略的结果必须照常落库，且失败要**点名**。
+
+    串行 + 默认 gather 的原实现会把第一个异常直接抛出 ⇒ 前面算好的策略结果全部作废，
+    用户只看到「作业失败」，既不知道坏的是哪条策略，也拿不到好策略的命中。
+    """
+    monkeypatch.setattr(
+        "app.sync.calendar.expected_bar_date", lambda *a, **k: "20260918")
+    calls = []
+
+    def _fake_run_classic(bars_by_code, strategy_id, params=None, limit=0, names=None):
+        calls.append(strategy_id)
+        if strategy_id == "ma_volume":
+            raise RuntimeError("策略内部错误：除零")
+        return [{"code": "600519.SH", "strategy": strategy_id, "close": 10.9}]
+
+    monkeypatch.setattr("app.screener.classic.run_classic", _fake_run_classic)
+    _patch(monkeypatch, bars_map={"600519.SH": _BARS})
+
+    res = _run(monkeypatch, tmp_db,
+               strategies=["turtle_trade", "ma_volume"], auto_backfill=False)
+    # 好策略的结果保住了
+    assert res["results"]["turtle_trade"]
+    assert "ma_volume" not in res["results"]
+    # 坏策略被点名，而不是悄悄消失
+    assert res["strategy_failures"] and "ma_volume" in res["strategy_failures"][0]
+    assert "除零" in res["strategy_failures"][0]
+    assert set(calls) == {"turtle_trade", "ma_volume"}, "两条策略都应被真正调用"
+
+
+def test_expect_date_uses_data_readiness_not_calendar_today(monkeypatch, tmp_db):
+    """收盘后、数据源尚未更新当日 K 线时，不应判「落后」而触发无谓补数。
+
+    ``expected_bar_date`` 在 ready_hour 之前返回**上一交易日**；若这里仍按
+    「今天必须是今天」判定，每天 16:15 的定时选股都会先跑一次全市场同步，
+    补完依然拿不到当天数据 —— 白跑一遍，还把真正的落后信号淹没在噪声里。
+    """
+    monkeypatch.setattr(
+        "app.sync.calendar.expected_bar_date", lambda *a, **k: "20260917")
+    _patch(monkeypatch, bars_map={"600519.SH": _BARS})   # 最后一根 2026-09-18
+
+    res = _run(monkeypatch, tmp_db, strategies=["ma_volume"])
+    assert res["expect_bar_date"] == "20260917"
+    assert res["data_lag"] is False, "已超过预期日 → 不该判落后"
+    assert res["auto_backfill"] == "", "数据够新时不应触发补数"

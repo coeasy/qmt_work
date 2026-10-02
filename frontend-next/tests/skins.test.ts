@@ -98,13 +98,13 @@ describe("自定义背景色 → 成套令牌", () => {
 describe("皮肤与明暗方向的匹配", () => {
   it("★不变量：错配（深色皮肤 + 浅色主题）必须退回主题默认，不写内联令牌", () => {
     // 通达信黑是深色皮肤，配浅色主题 → 不生效
-    const mismatched = resolveSkin("tongdaxin", "#000000", "light");
+    const mismatched = resolveSkin("midnight", "#000000", "light");
     expect(mismatched.active).toBe("");
     expect(mismatched.tokens).toBeNull();
 
     // 同一皮肤配深色主题 → 生效（预设走 CSS，不需要内联令牌）
-    const matched = resolveSkin("tongdaxin", "#000000", "dark");
-    expect(matched.active).toBe("tongdaxin");
+    const matched = resolveSkin("midnight", "#000000", "dark");
+    expect(matched.active).toBe("midnight");
     expect(matched.tokens).toBeNull();
   });
 
@@ -135,8 +135,8 @@ describe("预设皮肤自洽性", () => {
 
   it("提供通达信 / 大智慧 / 同花顺 风格的经典黑底", () => {
     const ids = PRESETS.map((p) => p.id);
-    expect(ids).toContain("tongdaxin"); // 极夜黑
-    expect(ids).toContain("dazhihui"); // 大智慧黑
+    expect(ids).toContain("midnight"); // 极夜黑
+    expect(ids).toContain("graphite"); // 石墨黑
     expect(ids).toContain("light"); // 浅色：明暗另一端
   });
 });

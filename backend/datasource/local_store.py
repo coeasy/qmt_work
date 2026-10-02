@@ -353,6 +353,40 @@ class LocalStore:
                     out[str(r["code"])] = str(r["m"])
         return out
 
+    def latest_dt_map(self, codes: Sequence[str], period: str = "1d",
+                      adjust: str = "") -> Dict[str, str]:
+        """每只标的的**最近一根** K 线日期（``{code: dt}``；无数据的 code 不出现）。
+
+        与 :meth:`earliest_dt_map` 对称，用途相反：全量回补用「最早一根」当断点游标，
+        **增量同步用「最近一根」判断这只票是不是已经够新**（V11 R15）。
+
+        为什么放在这里做**批量**：逐只调用 :meth:`latest_dt` 在全市场（5000+ 只）
+        量级是 5000 次往返 —— 「跳过已最新标的」省下的 RPC 会被查询自己的开销吃掉。
+        一次 ``GROUP BY`` 拿回来才能让这个优化真的成立。
+
+        读失败时返回 ``{}``（= 全都当作不知道，全部重跑）—— 宁可多做功，不可漏同步。
+        """
+        if not codes:
+            return {}
+        out: Dict[str, str] = {}
+        try:
+            uniq = [str(c) for c in dict.fromkeys(codes) if c]
+            for i in range(0, len(uniq), 500):
+                part = uniq[i:i + 500]
+                ph = ",".join("?" for _ in part)
+                rows = self._db.query(
+                    f"SELECT code, MAX(dt) AS m FROM local_bars "
+                    f"WHERE period=? AND adjust=? AND code IN ({ph}) "
+                    f"GROUP BY code",
+                    (period, adjust, *part))
+                for r in rows:
+                    if r.get("m"):
+                        out[str(r["code"])] = str(r["m"])
+        except Exception as exc:  # noqa: BLE001 表不存在 / 库锁
+            log.warning("读取本地最新 K 线日期失败（将全部重跑）：%s", exc)
+            return {}
+        return out
+
     def latest_bar_dt(self) -> Optional[str]:
         """全市场 K 线最近一根日期（选股溯源 as_of 之用）。表不存在返回 None。"""
         try:

@@ -219,6 +219,66 @@ def test_verify_script_passes_on_fresh_heartbeat(tmp_path):
     assert details["alive"] is True
 
 
+def test_verify_stale_probe_must_not_accuse_missing_funcs(tmp_path):
+    """陈旧 probe 不得被当成「当前能力缺失」（TD-33）。
+
+    策略没在跑时 probe_result.json 必然是历史快照。曾据此断言「未捕获 cancel」并计入
+    致命 problems —— 违反 qmt_api._need「只能说未捕获，不能断言终端没有」的措辞纪律：
+    注入函数只有在鲜活运行时才由 capture_qmt_injected_funcs(globals()) 决定。
+    """
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import qmt_agent_verify as verify
+
+    bridge = tmp_path / "bridge"
+    (bridge / "req").mkdir(parents=True)
+    (bridge / "resp").mkdir(parents=True)
+    (bridge / "probe_result.json").write_text(json.dumps({
+        "steps": [{"name": "bridge_dir_write", "ok": True, "detail": "ok"}],
+        "injected": ["passorder", "get_trade_detail_data"],   # 陈旧快照里没有 cancel
+        "ctx_methods": [],
+    }), encoding="utf-8")
+    stale_ms = int(__import__("time").time() - 3600) * 1000   # 1 小时前的心跳
+    (bridge / "agent_status.json").write_text(json.dumps({
+        "ts": stale_ms, "uptime_s": 1, "py": "3.6.8",
+        "agent_ver": "1.1.0", "trading_enabled": False,
+    }), encoding="utf-8")
+
+    ok, lines, details = verify.evaluate(verify.collect(str(bridge)))
+    assert details["probe_stale"] is True
+    assert details["alive"] is False
+    # 关键：陈旧证据只能降级为提示，绝不能计入致命 problems
+    assert not any("未捕获交易函数" in p for p in details["problems"])
+    assert any("陈旧快照" in ln for ln in lines)
+
+
+def test_verify_fresh_probe_still_flags_missing_funcs(tmp_path):
+    """对照组：心跳新鲜且 probe 里确实没有 cancel ⇒ 必须照常报致命。
+
+    与上一条成对存在 —— 否则「放宽陈旧判定」可能被误扩到鲜活场景，把真缺陷放过。
+    """
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import qmt_agent_verify as verify
+
+    bridge = tmp_path / "bridge"
+    (bridge / "req").mkdir(parents=True)
+    (bridge / "resp").mkdir(parents=True)
+    (bridge / "probe_result.json").write_text(json.dumps({
+        "steps": [{"name": "bridge_dir_write", "ok": True, "detail": "ok"}],
+        "injected": ["passorder", "get_trade_detail_data"],
+        "ctx_methods": [],
+    }), encoding="utf-8")
+    now_ms = int(__import__("time").time() * 1000)
+    (bridge / "agent_status.json").write_text(json.dumps({
+        "ts": now_ms, "uptime_s": 5, "py": "3.6.8",
+        "agent_ver": "1.1.0", "trading_enabled": False,
+    }), encoding="utf-8")
+
+    ok, lines, details = verify.evaluate(verify.collect(str(bridge)))
+    assert details["probe_stale"] is False
+    assert details["alive"] is True
+    assert any("未捕获交易函数" in p for p in details["problems"])
+
+
 # ---------------------------------------------------------------------------
 # 4. 源码编码（QMT 官方口径 GBK）
 # ---------------------------------------------------------------------------

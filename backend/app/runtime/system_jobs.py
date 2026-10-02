@@ -79,6 +79,10 @@ def _sync_bars_runner(params: dict) -> Runner:
             "as_of_min": summary.get("as_of_min") or "",
             # 断点续传跳过数：中断后重跑这个数会明显变大
             "skipped_complete": int(summary.get("skipped_complete") or 0),
+            # 增量跳过数（V11 R15）：本地日线已达「预期交易日」的标的数。
+            # 与 skipped_complete 含义不同，必须分别呈现 —— 前者是历史已补齐，
+            # 后者是这次「压根不用问源」，是日常同步最大的省流来源。
+            "skipped_fresh": int(summary.get("skipped_fresh") or 0),
             "errors": errs[:20],
             "errors_truncated": max(0, len(errs) - 20),
         }
@@ -316,16 +320,20 @@ def _classic_screen_runner(params: dict) -> Runner:
         #   到半年前）照样一路跑完并报成功，用户看到「今天没选出票」，真相却是
         #   「数据根本没到位」。现在发现落后就**先补历史再选**。
         #
-        # ⚠️ 判据是「落后于最近交易日」，不是「非空」—— 「非空 ≠ 够新」（V11）：
+        # ⚠️ 判据是「落后于**本该已有**的那个交易日」，不是「非空」—— 「非空 ≠ 够新」（V11）：
         #   券商本地库可能只到一年前却照样非空。
-        from datetime import date as _date
-
         from app.screener.picks import bars_last_date as _last_date_of
-        from app.sync.calendar import prev_trading_day as _prev_trading_day
-        from core.clock import bar_date as _bar_date
+        from app.sync.calendar import expected_bar_date
 
         _rep = job.get("report") or (lambda *a, **k: None)
-        expect_date = _bar_date(_prev_trading_day(_date.today(), include_self=True))
+        # ★ 改用 ``expected_bar_date()`` 而不是「今天若交易日就要今天的数据」
+        #   （``prev_trading_day(include_self=True)``）。后者在收盘后到数据源更新前的
+        #   这段时间里永远判「落后」⇒ 每天 16:15 的定时选股都会先触发一次全市场补数，
+        #   补完再取**依然**是昨天的数据 ⇒ 每天白跑一遍（且真正的落后信号被噪声淹没）。
+        #   ready_hour 默认 18:00，之前只要求「上一交易日」。详见该函数文档。
+        _rh = params.get("ready_hour")
+        expect_date = (expected_bar_date() if _rh is None
+                       else expected_bar_date(ready_hour=int(_rh)))
         last_date = _last_date_of(bars_map) if bars_map else ""
         # 默认开启；显式传 auto_backfill=False 才关（用 `is not False` 而非布尔真值，
         # 避免 0 / "" 这类 falsy 配置被当成「没传」而静默改变行为）。
@@ -372,14 +380,38 @@ def _classic_screen_runner(params: dict) -> Runner:
                 "请先运行「定时更新日线」任务或连接券商数据源后再试"
                 + (f"；降级原因：{report.degraded_reason}" if report.degraded_reason else ""))
 
-        results: dict[str, list] = {}
-        for i, sid in enumerate(strategies):
-            # 全池逐只形态识别是纯 CPU ⇒ 必须移出事件循环
-            _rep0(35 + int(60 * i / max(1, len(strategies))),
-                  f"形态识别 {i + 1}/{len(strategies)}：{sid}")
-            results[sid] = await _asyncio.to_thread(
+        # ★ 多策略**并行**：形态识别是纯 CPU（逐只遍历 K 线），彼此不共享可写状态
+        #   （``run_classic`` 只读 ``bars_by_code``，产出各自的新列表）⇒ 可以安全地各占
+        #   一个线程池线程。串行跑 N 个策略就要付 N 倍的墙钟时间；默认两条策略、勾到
+        #   六条时差距是 3 倍，而同一份 K 线已经在内存里，放着多核不用没有道理。
+        #   注意 to_thread 保持不变 —— 只是从「逐个 await」变成「一起 gather」，
+        #   事件循环依然不被 CPU 占住（这是和多线程忙等最大的区别）。
+        _rep0(36, f"形态识别 {len(strategies)} 个策略并行计算中…")
+
+        async def _one(sid: str):
+            return await _asyncio.to_thread(
                 run_classic, bars_map, sid, params.get("classic_params"), limit,
                 uni.get("names") or {})
+
+        # return_exceptions：**一个策略炸了不能连累其他策略的结果**。
+        # 默认 gather 会把第一个异常直接抛出 ⇒ 前面算好的、本来能落库的若干策略结果
+        # 全部作废，用户看到整作业失败却找不到是哪条策略的锅。
+        # 这里改成「逐条报告、坏的单独报错」—— 坏的那条仍要让作业失败，
+        # 但**保留成功策略的结果**，且在报错里点名是哪条策略。
+        _outs = await _asyncio.gather(*[_one(s) for s in strategies],
+                                      return_exceptions=True)
+        results: dict[str, list] = {}
+        failures: list[str] = []
+        for sid, out in zip(strategies, _outs):
+            if isinstance(out, BaseException):
+                log.warning("策略 %s 计算失败：%s", sid, out)
+                failures.append(f"{sid}: {out}")
+                continue
+            results[sid] = out
+        if failures and not results:
+            raise RuntimeError("全部经典策略计算失败 —— " + "；".join(failures))
+        if failures:
+            _rep0(95, f"{len(failures)}/{len(strategies)} 个策略失败，其余结果照常落库")
         _rep0(96, "结果落库…")
 
         total_hits = sum(len(v) for v in results.values())
@@ -412,6 +444,9 @@ def _classic_screen_runner(params: dict) -> Runner:
             # ★ 数据新鲜度：选股依据的是哪一天、本该是哪一天、是否自动补过。
             #   没有这三项时，「命中 0 只」与「数据没到位」在界面上长得一模一样。
             "expect_bar_date": expect_date,
+            # 部分策略失败的**点名清单**（见上：失败不再吞掉其余策略的结果，
+            # 但必须让用户知道少算了哪些 —— 否则「命中变少」会被当成行情不好）。
+            "strategy_failures": failures,
             # 「日期未知」也算落后（与上面的补数判据同口径）：宁可说「无法确认」，
             # 也不能把一个空的 bar_date 报告成「数据是最新的」。
             "data_lag": bool(expect_date and (not last_date or last_date < expect_date)),
@@ -474,8 +509,13 @@ DEFAULT_SCHEDULES: tuple[dict, ...] = (
         #   窗口增量是幂等合并，缩短回看**不会**丢历史（旧数据不删除）。
         # - mode=incremental：日常维护只要「够新」；需要把历史一次性补齐时，
         #   到「离线数据」页点「全量回补」（mode=full），不要塞进每日调度。
+        # - skip_fresh=true（V11 R15）：本地最近一根已达「预期交易日」的标的直接跳过。
+        #   每天定时跑的价值在于把**新的一天**拉回来，而不是把已入库的几千只重问一遍；
+        #   开启后日常同步从「每只都打一次源」降到「只问还没更新的那几只」，实测收益
+        #   等价于把 RPC 调用量压到个位数百分比。注意它对 index/code 的配置无关，
+        #   只看本地库真实的最近一根 ⇒ 无需额外游标表，中断重跑也天然自增式补漏。
         "params": {"period": "1d", "adjust": "qfq", "mode": "incremental",
-                   "concurrency": 4, "lookback": 120},
+                   "concurrency": 4, "lookback": 120, "skip_fresh": True},
     },
     {
         "id": "sch-default-classic-screen",

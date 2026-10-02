@@ -588,7 +588,7 @@ STALE_FAIL_RATIO = 0.9
 
 
 def sync_runner(params: dict) -> Runner:
-    """全市场日线同步任务（params: {limit, concurrency, lookback, adjust}）。"""
+    """全市场日线同步任务（params: {limit, concurrency, lookback, adjust, ...}）。"""
 
     async def _run(job: dict) -> dict:
         from app.sync.bars import STALE_DAYS_DEFAULT, BarsSyncer
@@ -621,6 +621,11 @@ def sync_runner(params: dict) -> Runner:
             # incremental 处理 —— **绝不静默变全量**（那是几小时的作业）。
             mode=str(params.get("mode") or "incremental"),
             full_years=int(params.get("full_years") or 0) or 12,
+            # 增量跳过已最新标的（V11 R15）：默认**关闭**（保持每只都问源的原行为），
+            # 由调用方显式开启 —— 默认调度已开。采用 ``is not False`` 之外的**真值判断**
+            # 是刻意的：这是一个「要花代价换取省流」的开关，0/"" 这类 falsy 配置
+            # 就应当按「没要求」处理，而不是悄悄替用户打开。
+            skip_fresh=bool(params.get("skip_fresh")),
         )
         attempts = max(1, int(params.get("max_attempts") or 1))
         summary = None
@@ -642,7 +647,13 @@ def sync_runner(params: dict) -> Runner:
         # 第二次跑全量时所有标的的本地历史都已覆盖目标起点，全被跳过。
         # 这不是空转，`skipped_complete` 就是证据。若不排除，重跑全量必报
         # 「股票池为空」的假失败。
-        if not result.get("total") and not result.get("skipped_complete"):
+        #
+        # ⚠️ 同理（V11 R15）：开启 ``skip_fresh`` 后，若全市场日线都已是最新，
+        # 合法结果同样是 ``total=0`` —— 这次什么都**不需要**拉。把它当空转报错，
+        # 等于惩罚刚刚省下的全部 RPC：每天傍晚定时同步会天天报「未获取到任何股票」，
+        # 而数据其实一天不落。两个跳过计数都是「有据可查的有效结果」，与真空转区分。
+        if (not result.get("total") and not result.get("skipped_complete")
+                and not result.get("skipped_fresh")):
             raise RuntimeError(
                 "日线同步未获取到任何股票（股票池为空）——"
                 "请检查数据源是否可用，或连接券商后重试")

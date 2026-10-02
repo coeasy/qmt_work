@@ -31,38 +31,56 @@ export interface SkinDef {
  *   的复刻版」。配色取向可以对标，名字必须是自己的 —— 故这里全部用中性色名。
  *
  * 六套预设（五深一浅）：
- * - 极夜黑：纯黑底，最深、对比最强；
+ * - 极夜黑：纯黑底，最深、对比最强（**默认**）；
  * - 石墨黑：近黑微冷灰，屏幕反光环境下更舒适；
  * - 曜石黑：极深蓝黑，长盯盘最不刺眼；
  * - 石板蓝 / 墨绿：低饱和冷/暖调，介于两者之间；
- * - 晨曦白：浅色底，明亮环境 / 投影演示（**默认**）。
+ * - 晨曦白：浅色底，明亮环境 / 投影演示。
  *
- * ★ 默认为什么是浅色：深色是盯盘场景的老习惯，但对**第一次打开软件**的人来说，
- *   浅色更容易读清界面结构（面板边界、分组、次要文字）；要深色随时可在
- *   「设置 · 界面偏好 · 背景配色」一键切换，选择会被记住。
+ * ★ 默认为什么是**黑色**：本产品的主场景是盯盘 —— 长时间对着行情表，深色底整体
+ *   亮度低，视觉疲劳显著小于浅色，「红涨绿跌」在深底上的辨识度也更好。明亮环境
+ *   或投影演示想换浅色，在「设置 · 界面偏好 · 背景配色」一键切换并被记住。
+ *
+ * ★ 历史版本把 id 写成了第三方软件名，与本节纪律自相矛盾 —— 已改为中性色名，
+ *   旧值由 :data:`LEGACY_SKIN_IDS` 兜底迁移：**用户在旧版选过的皮肤不会因为升级失效**
+ *   （id 同时存在于 localStorage 与服务器外观配置里，用户看不见它却会承担后果）。
  *
  * 每套皮肤自带明暗方向（tone），选中时一并切换 `data-theme`，
  * 避免「深色皮肤 + 浅色主题」这类错配。
  */
-export const DEFAULT_SKIN_ID = "light";
+export const DEFAULT_SKIN_ID = "midnight";
+
+/**
+ * 旧 id → 新 id 迁移表（见上：2026-10 id 中性化更名）。
+ *
+ * 为什么必须由代码兜一层而不是让用户重选：皮肤 id 既写进 localStorage
+ * （``qmt.ui.v1``），也会经「应用到服务器」存到后端外观配置。只改 skins.css 的
+ * 选择器会让这两处的旧 id **全部失配** ⇒ 用户升级后发现自己选的黑色皮肤变成了
+ * 默认白底，而界面上没有任何提示说明发生了什么。
+ */
+export const LEGACY_SKIN_IDS: Record<string, string> = {
+  tongdaxin: "midnight",
+  dazhihui: "graphite",
+  ths: "obsidian",
+};
 
 export const PRESETS: SkinDef[] = [
   {
-    id: "tongdaxin",
+    id: "midnight",
     label: "极夜黑",
     tone: "dark",
     hint: "纯黑底，对比最强，暗光环境最省眼",
     swatch: "#000000",
   },
   {
-    id: "dazhihui",
+    id: "graphite",
     label: "石墨黑",
     tone: "dark",
     hint: "近黑微冷灰，反光屏更柔和",
     swatch: "#0a0a0c",
   },
   {
-    id: "ths",
+    id: "obsidian",
     label: "曜石黑",
     tone: "dark",
     hint: "极深蓝黑，长时间盯盘不易疲劳",
@@ -114,7 +132,17 @@ export const SKIN_TOKEN_KEYS = [
 ] as const;
 
 export function presetById(id: string): SkinDef | undefined {
-  return PRESETS.find((p) => p.id === id);
+  if (!id) return undefined;
+  // 旧 id 迁移放在**唯一入口**这里，而不是散落各消费方：
+  // ui.ts(resolveSkin/load) 与 Settings.tsx(显示 + 提交到服务器) 都经由本函数解析，
+  // 于是「旧 id 还能用」这件事只有一处实现，不会某条路径忘了迁移。
+  const canonical = LEGACY_SKIN_IDS[id] ?? id;
+  return PRESETS.find((p) => p.id === canonical);
+}
+
+/** 把任意（可能过期的）皮肤 id 归一到当前有效 id；无法识别时原样返回。 */
+export function normalizeSkinId(id: string): string {
+  return presetById(id)?.id ?? id;
 }
 
 // ---------------------------------------------------------------------------

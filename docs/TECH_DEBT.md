@@ -925,9 +925,69 @@
 | **绿灯要问「这条路径真的被执行到了吗」**：某个 bug 可能把另一条路径的失败遮住（TD-26 的只读写失败被「包里已带密钥」遮了整轮发布） | TD-26、TD-25 | 修复后必须**构造失败场景**再验一次，而不是只看通过 |
 | **没接在 CI 上的门禁会腐烂**：基线停更、假阳性堆积，最后连「它是红的」都没人知道。要么挂进 `ci.yml`，要么明确标注为本地工具 | TD-29、Gate 1（曾恒红数月） | `grep -n "python .*scripts/" .github/workflows/ci.yml` 逐个核对是否都在 |
 | **触碰「阈值/计数」类门禁后，必须实测门禁本身**：加功能要量文件体积，加用例要同步 `EXPECTED_TESTS` + README 两处计数 —— 这类门禁的红不是「代码坏了」，却同样会让流水线红 | TD-28、TD-27 | `python scripts/check_execution_architecture.py` + `python scripts/ci_reconcile.py` 均退出码 0 |
+| **诊断工具不能拿「陈旧快照」断言当前能力**：probe / 心跳类证据必须带**新鲜度**；陈旧时只能说「陈旧数据里未见」，绝不可写成当前缺陷（应有 `probe_stale` 标记并降级为提示） | TD-33（`qmt_agent_verify` 曾用 6.4h 前的 probe 断言「缺 `cancel`」） | `python scripts/qmt_agent_verify.py --json` 的 `probe_stale` 字段；与 `qmt_api._need` 措辞纪律同源 |
+| **路径 / 文件名参与比对前必须归一**：后缀重复拼接（`.py.py`）会把「文件已就位」误判成「文件缺失」 | TD-33（`qmt_strategy_list_probe` 曾把已部署 bundle 报为缺失） | `scripts/qmt_strategy_list_probe.py --target <xxx.py>` 应显示「文件就位: 是」 |
 
 ---
 
 *最后更新：2026-09-30（R39 发布阻断缺陷闭环 —— 安装包内嵌构建者主密钥 + 只读安装首次启动崩（两者互相掩盖）；主密钥口径统一为跟随主库目录；构建流水线新增运行期状态清理与包内硬门禁；新增 §五 三条纪律——构建卫生必须落成门禁、`exe_dir()` 只用于只读资源、绿灯要问路径是否真被执行。**R40：以 v0.4.0 作为新的公开发布版本线（代码同源 v0.3.10），与带缺陷的 0.3.9 切割；发布本身验证「版本一致性闸门 + 包内无运行期状态硬门禁 + CI 自动构建上传资产」链路可用**；**R41：修复「新功能顶穿文件体积上限」导致 CI Gate 4 变红（`bigqmt_bridge` 按职责拆出 `bigqmt_gateway`），并修掉 `check_appcontext` 的过宽匹配（正则→AST）与基线腐烂 —— 后者暴露出一条产线代码仍在直取 `core.state.state`，已改走 `core.context` 规约访问器；升版 v0.4.1（v0.4.0 的 tag 已推在更早提交上，且其说明声明「非功能新增」），并发现版本一致性闸门漏核 `package-lock.json`（根包版本漂在 0.3.6 已久之）**）*
 
 *最后更新：2026-10-01（**R42**：构建脚本 `build_all.sh` 的「包内运行期状态硬门禁」原本跑在自检之前，被自检原地重启后端产生的污染遮出绿灯（TD-32）；已在自检块之后补尾部 `purge_dist_runtime_state` + `verify_no_runtime_state_in_package`，确保 FINAL 产物落盘前复验；本次重构建的 `qmt_work-0.4.1.zip` 经全量扫描确认无 `master.key`/`app.db`/`qmt_work_config.json`/应用 `data/`/`logs/`，发布条件达成。）*
+
+*同期补充（**TD-33 · 2026-10-01**：两个「**诊断工具本身会说谎**」的缺陷，与假绿灯同族，都是在未有鲜活运行时强行下结论）
+- ① `scripts/qmt_strategy_list_probe.py` 无条件给 `--target` 拼接 `.py` ⇒ 传入已是 `.py` 的路径会变成 `xxx.py.py`，
+  把「已部署的 bundle（52 KB）」误报成「文件就位：**否**」；同时用带后缀的名字去注册列表比对 ⇒ 「已注册」恒为否。
+  已改：后缀归一 + 查表一律用**基名**，两种传参（策略名 / 文件路径）均正确。
+- ② `scripts/qmt_agent_verify.py` 在**策略根本没在跑**（心跳过期 6.4h）时，仍拿那份陈旧 `probe_result.json`
+  断言「未捕获交易函数: `cancel`」并计入致命 `problems` —— 违反本项目自己写下的纪律
+  （`qmt_api._need`：只能说「未捕获」，**不能断言终端没有**；`capture_qmt_injected_funcs(globals())` 只对鲜活运行时有效）。
+  已改：引入 `heartbeat_age` / `probe_stale`，陈旧时降级为 `[!]` 提示并显式标注「不代表当前缺失」。
+- ③ 清理历史无效文档 5 份：`atst*` 三份（基准代码属**另一项目** `coeasy/atst`，外部零引用）、
+  `ARCHITECTURE_V3`（自述已被 V4 取代）、`qmt_work_扩展功能任务规划`（上轮漏删的无日期旧规划）；
+  V4 内两处提及已改写为「内容并入本文 / 实体已删除」，其余全仓无残留引用。
+- ④ 结构性结论：**大 QMT 能否运行取决于「注册树」而非文件是否拷贝**——本轮实测 bundle 文件就位 52 KB 但
+  「已注册:否 / 心跳过期」，桥链路无法启动。这是 QMT 客户端侧限制（注册树需 GUI 动作，自动注册三重证据不可行），
+  非平台代码缺陷；平台侧 readiness 已由 1922 用例 + 29/29 客户端自检 + `probe_stale` 诚实标注共同保证。*
+
+### TD-34（R15，2026-10-02）：定时补数的三种「隐形浪费」+ 界面默认值与预热脚本漂移
+- **① 每天一次的全市场无效补数（根因：判「数据落后」用的是日历今日，不是数据可得日）**。
+  收盘后数据源约 17:00–18:00 才稳定吐出当日 K 线；`classic_screen` 原先的 freshness 判据写的是
+  `bar_date or prev_trading_day`（即「今天，若不是交易日就退回上一交易日」）。于是交易日 16:15 触发定时选股时
+  `expect_bar_date` = 今天，而本地最新 dt 永远是昨天 → `data_lag=True` → 触发 `auto_backfill` 全市场重扫 →
+  数据源还没吐当日数据 → 补完仍是昨天 → 第二天重复。这是一次**每天必现、且永不可能成功**的全市场 RPC。
+  已修：新增唯一口径 `app.sync.calendar.expected_bar_date(ready_hour=18)` —— 交易日且已过 `ready_hour` 才是今天，
+  否则一律是上一交易日；周末/节假日由 R26 日历保证。`ready_hour` 可经任务参数覆盖。
+  口径收敛后 `system_jobs.py` 删掉了三处内联局部导入（`from datetime import date` / `prev_trading_day` / `bar_date`），
+  调用点全仓唯一 —— 口径再分叉只能靠 grep 抓得到一处。
+- **② 增量同步没有「已最新」短路，每天把全市场问一遍源**。已修：`BarsSyncer(skip_fresh=True)` +
+  `LocalStore.latest_dt_map()`（单次聚合查询 `MAX(dt) GROUP BY code`，500 码分批）+ `expected_bar_date` 比对。
+  返回体新增 `skipped_fresh`，与历史补断点续传的 `skipped_complete` **含义分离、分别呈现**（不可相加、不可合并），
+  并在 `system_jobs._detail()` 里两个都透出。默认「定时更新日线」schedule 已开启 `skip_fresh=True`。
+  失败语义：`latest_dt_map` 查询抛错 → 返回 `{}` → 全部当作「不知道」→ **全部重跑**（宁可多问，不可漏同步）。
+- **③ 单点任务级异常吞掉整批成果（`asyncio.gather` 的默认行为）**。已修两处，都用 `return_exceptions=True` +
+  异常点名单列：`BarsSyncer.sync_many`（一只标的抛 `CancelledError` 只记它自己 `failed=1`，其余 `ok`/`bars` 全保留落库）、
+  `system_jobs.classic_screen` 的多策略计算（改为并行 + 失败策略从 `results` 剔除并在 `strategy_failures` 点名，
+  **只有全部失败**才向上抛）。附带修掉一个连带误报：`sync_runner` 的空股票护栏原来只判 `total`，
+  「全市场已最新 → total=0」会被报成「未获取到任何股票」——惩罚刚省下的 RPC；现改为三个字段同时为空才算失败。
+- **④ 界面默认值三处漂移（同一字段三个默认值，其中两处是错的）**。已修：
+  `ui.ts` fallback 与 JSON 分支的 `customBg` 不一致（`#f2f4f8` vs `#0a0a0a`，后者才对，浅色背景不该出现在深色兜底里）；
+  `theme-boot.js` 注释声称「回退到新默认（深色）」而代码实际回退 `"light"`；皮肤 id `tongdaxin`/`dazhihui`/`ths`
+  用的是第三方行情软件名，与 `skins.ts` 自己的注释「不使用第三方行情软件名称」自相矛盾。
+  现统一为：默认 `theme=dark` + `skin=midnight`（极夜黑 #000000），皮肤 id 中性化更名（`tongdaxin→midnight`、
+  `dazhihui→graphite`、`ths→obsidian`），并保留 `LEGACY_SKIN_IDS` 映射（`skins.ts` 与 `theme-boot.js` 各一份，
+  必须同步）——**老用户 localStorage 与服务器外观配置里的旧 id 仍可读回并自动迁移**，不为零件改名买单。
+  `normalizeSkinId()` 同时用在读取与 `setSkin` 写入两侧；`resolveSkin` 出口也归一到新 id，
+  否则旧 id 会让 `skins.css` 的 `[data-skin="midnight"]` 选择器全部落空 → 「选了皮肤但背景没变」。
+- **⑤ 教训：给 `sync_many` 加 `skipped_fresh` 参数会打断所有替身**。首次实现时我把它加进了函数签名，
+  立刻打断 `test_sync_bars_broker_fallback.py` 里 `async def _fake_sync_many(codes, progress_cb=None, skipped_complete=0)`
+  这个测试替身（`TypeError`，1 failed / 77 passed）。改走**实例状态** `self._skipped_fresh`
+  （`sync_stock_list` 入口复位、`sync_many` 汇总时取用），签名零改动。**这是本项目反复出现的「假绿灯家族」
+  的对称面：接口加参数看似无害，实际是全局契约变更；替代方案永远是「自己的派生值自己携带」**
+  （与 TD-31「后端多算字段前端零消费」同族，都是「改一面不看另一面」）。
+- 新增用例 10 个（后端 1912 → 1922，已同步 `scripts/ci_reconcile.py` + README 两处 + V4 §10.5）：
+  `test_sync_bars.py` ×4（整批韧性 / `_filter_fresh` 三种分支 / `skip_fresh` 默认关闭不改变既有语义）、
+  `test_classic_screen_runner.py` ×2（策略失败点名不废其余结果 / `expect_date` 用数据可得日不触发补数）、
+  `test_session_contract.py` ×4（`expected_bar_date` 四个边界：ready 前 / ready 后 / 周末 / `ready_hour=0` 严格模式）。
+  前端 `theme.test.ts` 新增 2 例锁定旧 id 迁移（`tongdaxin → midnight` 且 `document.documentElement.dataset.skin` 同步），
+  `tsc --noEmit` 与 `npm run test:serial` 50 文件 498 用例全绿。*
+

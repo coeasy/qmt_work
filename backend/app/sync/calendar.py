@@ -27,6 +27,15 @@ from typing import List
 
 log = logging.getLogger("qmt_work.sync.calendar")
 
+#: 日线数据「通常已稳定可得」的钟点（24 小时制，本机时区）。
+#:
+#: 收盘（15:00）之后数据源还要落盘 / 批量重算，实测券商本地库与在线源普遍在
+#: 17:00—18:00 之间才稳定。取 18 是为了在「不要白跑补数」与「不要用过旧的参照日」
+#: 之间取平衡：更早会把当日已就绪的数据误判为落后（每天白跑一次全市场同步），
+#: 更晚则会让「当天数据缺失」这件事延迟到晚上才被发现。
+#: 由 :func:`expected_bar_date` 使用；部署若确认数据源即时更新，可传 0 走严格口径。
+DEFAULT_READY_HOUR = 18
+
 # 法定节假日（休市日，含周末连休中落在交易日段的日期无影响，全量列出便于查询）。
 HOLIDAYS: set[str] = {
     # 2024
@@ -232,6 +241,38 @@ def next_trading_day(d: date, *, include_self: bool = False) -> date:
     return cur
 
 
+def expected_bar_date(now=None, ready_hour: int = DEFAULT_READY_HOUR) -> str:
+    """「日线本该已有」的最新交易日（``YYYYMMDD``）—— freshness 判定的唯一口径。
+
+    ## 为什么不直接用 ``prev_trading_day(today, include_self=True)``
+
+    那是**日历**口径，不是**数据**口径。它在今天是交易日时永远返回今天，于是
+    「16:15 已收盘但数据源（券商/在线源）还没更新当日 K 线」会被判定成
+    「数据落后」⇒ 每天定时选股都会先触发一次全市场补数，而补完再取，**依然拿不到**
+    当天数据 ⇒ 每天都做一次白工，且把真正的落后信号淹没在噪声里。
+
+    真实约束：A 股日线一般在收盘后 1~3 小时内才在数据源侧稳定（券商本地库落盘、
+    在线源批量重算）。因此在 ``ready_hour``（默认 18:00）之前，**当日**数据尚不
+    应被要求存在 —— 应当参照的是**上一个已收盘交易日**。
+
+    - 今天是交易日 且 现在 >= ready_hour → 今天；
+    - 今天是交易日 但 现在 <  ready_hour → 上一交易日；
+    - 今天非交易日（周末/节假日）→ 上一交易日。
+
+    ``ready_hour`` 传 0 可退回「有交易日就要当天数据」的严格口径（测试 / 已确认
+    源即时更新的部署可用）。
+    """
+    from core.clock import local_now
+
+    now = now or local_now()
+    today = now.date()
+    hour = int(ready_hour or 0)
+    if hour <= 0 or (is_trading_day_exact(today) and now.hour >= hour):
+        if is_trading_day_exact(today):
+            return today.strftime("%Y%m%d")
+    return prev_trading_day(today, include_self=False).strftime("%Y%m%d")
+
+
 def session_snapshot(now=None) -> dict:
     """当前交易会话的权威快照（``GET /market/session`` 的唯一数据来源）。
 
@@ -297,4 +338,6 @@ __all__ = [
     # 权威判定与参照交易日（V11 R14）
     "has_exchange_calendar", "is_trading_day_exact",
     "prev_trading_day", "next_trading_day", "session_snapshot",
+    # 「日线本该已有」的最新交易日（V11 R15：freshness 判定唯一口径）
+    "expected_bar_date", "DEFAULT_READY_HOUR",
 ]

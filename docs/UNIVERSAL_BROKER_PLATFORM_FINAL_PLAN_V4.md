@@ -1,10 +1,10 @@
 # qmt_work 通用证券客户端统一适配平台 —— 最终规划方案
 
 > **版本**：V4.0（终稿，2026-10-01）
-> **谱系**：V3 愿景稿（`docs/QMT_UNIVERSAL_BROKER_PLATFORM_ARCHITECTURE_V3.md`）
+> **谱系**：V3 愿景稿（内容已并入本文、实体已删除：`docs/QMT_UNIVERSAL_BROKER_PLATFORM_ARCHITECTURE_V3.md`）
 > 　　　　→ 并入 `docs/UNIFIED_TRADING_ABSTRACTION.md`（选型论证，结论：方案 C）
 > 　　　　→ 并入 `docs/BIG_QMT_COMPAT_PLAN.md`（首个落地案例：大 QMT）
-> **本文定位**：**唯一执行口径**。三份前序文档分别退居「愿景」「论证」「案例」角色，凡与本文冲突，以本文为准。
+> **本文定位**：**唯一执行口径**。前序文档分别退居「论证」「案例」角色（愿景稿已并入本文），凡与本文冲突，以本文为准。
 > **已开工标记**：第 10 节记录 P0-a 已落地的代码与门禁同步（非纸面计划）。
 
 ---
@@ -523,7 +523,7 @@ await user.position()                                  # → canonical 快照
 
 **不变量守护**：A1~A6 全程未触碰 INV-1/2/3；A3 的 UNKNOWN 一等公民与零 mock 纪律（业务失败→400 / 传输故障→503）保持一致；A4 的修正直接堵住「假绿灯放行真单」的合规风险。
 
-**测试增量**：自 §10.5 基线以来（R40 两轮 + R41 复核）使全仓 `EXPECTED_TESTS` 由 1757 增至 **1910**、`test_*.py` 由 158 增至 **167**（已在 `scripts/ci_reconcile.py` 与 `README.md` 两处同步）。新增/强化集中在 5 个文件：
+**测试增量**：自 §10.5 基线以来（R40 两轮 + R41 复核）使全仓 `EXPECTED_TESTS` 由 1757 增至 **1922**、`test_*.py` 由 158 增至 **167**（已在 `scripts/ci_reconcile.py` 与 `README.md` 两处同步）。新增/强化集中在 5 个文件：
 
 | 文件 | 用例数 | 本轮新增覆盖 |
 |---|---|---|
@@ -656,7 +656,8 @@ await user.position()                                  # → canonical 快照
 
 | 文档 | 角色 | 状态 |
 |---|---|---|
-| `docs/QMT_UNIVERSAL_BROKER_PLATFORM_ARCHITECTURE_V3.md` | 愿景稿 | 归档（被本文取代） |
+| `docs/QMT_UNIVERSAL_BROKER_PLATFORM_ARCHITECTURE_V3.md` | 愿景稿 | 已删除（内容并入本文） |
+| `docs/QMT_大小版本使用说明.md` | 大小 QMT 差异与逐步操作说明 | 有效（本文架构的用户侧展开） |
 | `docs/UNIFIED_TRADING_ABSTRACTION.md` | 选型论证（六方案加权） | 有效（论证部分） |
 | `docs/BIG_QMT_COMPAT_PLAN.md` | 首个落地案例（大 QMT） | 有效（实施细则），其 4 处设计已被修正 §9 |
 | **本文** | **执行口径** | **V4.0 终稿** |

@@ -191,6 +191,11 @@ class SyncSummary:
     #: 全量模式下因「本地历史已覆盖到目标起点」而**跳过**的标的数。
     #: 这就是断点续传的可见证据：中断后重跑，这个数会明显变大。
     skipped_complete: int = 0
+    #: 增量模式下因「本地已有最近一根」而**跳过**的标的数（V11 R15）。
+    #:
+    #: 必须与 ``skipped_complete`` **分开计**：前者是「历史已补齐」、后者是「已经够新」，
+    #: 混成一个 skipped 会让用户看不出这次到底做了什么（界面上两者含义完全不同）。
+    skipped_fresh: int = 0
     #: ★ 本批**真正写进** ``local_bars.batch_id`` 的批次号（``bars-<hex>``）。
     #:
     #: 为什么必须暴露出来：数据集快照（``dataset_snapshots``）要按批次回查
@@ -210,6 +215,7 @@ class SyncSummary:
             "as_of_max": self.as_of_max, "as_of_min": self.as_of_min,
             "mode": self.mode, "paged": self.paged,
             "skipped_complete": self.skipped_complete,
+            "skipped_fresh": self.skipped_fresh,
             "batch_id": self.batch_id,
         }
 
@@ -250,6 +256,7 @@ class BarsSyncer:
         mode: str = "incremental",
         full_years: int = FULL_YEARS_DEFAULT,
         full_count: int = FULL_COUNT_DEFAULT,
+        skip_fresh: bool = False,
     ):
         self._store = store or get_store()
         self._fetch = fetch_bars or self._default_fetch
@@ -270,6 +277,12 @@ class BarsSyncer:
         self._source = (provider_id or "auto").strip() or "auto"
         self._batch_id = batch_id or f"bars-{uuid.uuid4().hex}"
         self._sem = asyncio.Semaphore(self._concurrency)
+        #: ``incremental`` 下跳过「本地已有最新一根」的标的（V11 R15）。
+        #: 默认关闭 = 保持「每只都问一次源」的原行为；定时/调度场景显式开启。
+        self._skip_fresh = bool(skip_fresh)
+        #: ``skip_fresh`` 本次实际跳过的只数（由 :meth:`_filter_fresh` 产出，
+        #: 在 :meth:`sync_many` 汇总时取用后清零）。
+        self._skipped_fresh = 0
 
     # ------------------------------------------------------------------
     # 抓取
@@ -376,6 +389,43 @@ class BarsSyncer:
                 if not have.get(c) or str(have[c]) > target]
         return need, len(codes) - len(need)
 
+    def _fresh_target(self) -> str:
+        """增量「已经够新」的判定基准日（``YYYYMMDD``）。
+
+        走 :func:`app.sync.calendar.expected_bar_date` 而不是「今天」—— 收盘后数据源
+        普遍要到傍晚才更新当日 K 线，在这个窗口里要求今天的数据只会每天白跑一次
+        全市场同步（详见 calendar.expected_bar_date 的取舍说明）。
+        """
+        from app.sync.calendar import expected_bar_date
+        return expected_bar_date()
+
+    def _filter_fresh(self, codes: Sequence[str]) -> tuple[list, int]:
+        """筛掉「本地最近一根已达当日/上一交易日」的标的；``(待同步, 已跳过数)``。
+
+        ★ 与 :meth:`_filter_backfilled` 同 philosophy：**数据即游标**。判据是库里真实的
+        最近一根，而不是「上次跑到哪」的进度表 —— 后者崩一次就白记，前者永远与事实一致。
+
+        ★ 三个必须如此的边界：
+        1. **跳过逻辑只对 incremental 开放**。全量回补（`full`）要补的是**历史区间**，
+           只看最近一根就跳过会把「昨天补齐、前年还空着」的标的永久漏掉。
+        2. **判断失败一律全量重跑**并如实返回 ``0``。读不到就不敢说它够新 —— 少报跳过
+           数只是多花一次 RPC，漏同步是数据静默停更。
+        3. ``target`` 为空（日历异常）时**不启用跳过**：不能拿一个未知日期当判定线。
+
+        注意：这里「跳过」只在**本次**生效。下一次目标日推进（新交易日）时又会自然
+        重跑 —— 这正是日常定时同步想要的行为：每天只增量拉新的一天。
+        """
+        target = self._fresh_target()
+        if not target:
+            return list(codes), 0
+        try:
+            have = self._store.latest_dt_map(list(codes), self._period, self._adjust)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("增量跳过：读取本地最新日期失败（将全量重跑）：%s", exc)
+            return list(codes), 0
+        need = [c for c in codes if not have.get(c) or str(have[c]) < target]
+        return need, len(codes) - len(need)
+
     # ------------------------------------------------------------------
     # 核心
     # ------------------------------------------------------------------
@@ -431,6 +481,12 @@ class BarsSyncer:
         目标起点而跳过**的标的数。它必须以参数传入并原样写进汇总 —— 否则
         「跳过了 4000 只、只跑了 300 只」在结果里完全看不见，用户会以为同步
         坏了（或以为全市场只有 300 只）。
+
+        ★ 增量跳过的 ``skipped_fresh`` **不加进签名**而是走 :attr:`_skipped_fresh`
+        实例状态：跳过数是本同步器自己筛出来的，外部无从知晓，让它当参数只会给
+        调用方（含测试替身）一次签名破坏却拿不到任何好处 —— 历史教训：加一个参数
+        会让所有 ``async def _fake_sync_many(codes, progress_cb, skipped_complete)``
+        替身就地 TypeError。自己的派生值，自己携带。
         """
         started = now_iso()
         t0 = time.perf_counter()
@@ -445,7 +501,23 @@ class BarsSyncer:
                 progress_cb(done, total, code)
             return out
 
-        outcomes = await asyncio.gather(*[_tracked(c) for c in codes])
+        # ★ ``return_exceptions=True`` 是硬要求，不是风格选择。
+        #
+        #   ``sync_one`` 内部虽然吞掉了抓取/落库异常，但它的**外层**（`bars_last_date`、
+        #   `AsyncIOSemaphore`、 cooperative cancel）仍然可能抛出 / 被取消。默认 gather
+        #   遇第一个异常就整体抛出 ⇒ **已经跑完的几千只结果全部丢弃**，调用方既拿不到
+        #   汇总也拿不到分批错误，任务状态直接变 failed 且不留证据（「同步跑了半小时，
+        #   日志里只剩一句 traceback」）。
+        #   这里把异常**降级为单只失败**（真正的 ROI：坏一只不拖垮一大批）。
+        raw_outcomes = await asyncio.gather(
+            *[_tracked(c) for c in codes], return_exceptions=True)
+        outcomes: list[SyncOutcome] = []
+        for code, out in zip(codes, raw_outcomes):
+            if isinstance(out, BaseException):
+                log.warning("sync %s 任务级异常：%s", code, out)
+                outcomes.append(SyncOutcome(code=code, error=f"任务异常：{out}"))
+            else:
+                outcomes.append(out)
         ok = [o for o in outcomes if o.ok]
         failed = [o for o in outcomes if not o.ok]
         summary = SyncSummary(
@@ -468,6 +540,9 @@ class BarsSyncer:
             #   历史**并未**补齐 —— 界面与报告必须如实说出来。
             paged=(self._mode == "full" and any(o.paged for o in ok)),
             skipped_complete=int(skipped_complete or 0),
+            # 用完即清：避免上一批的跳过数串到下一批报告里（「这次没跳过」会说谎成
+            # 「这次跳了很多」，而用户正是据此判断要不要手动补同步的）。
+            skipped_fresh=int(self._skipped_fresh or 0),
             # 批次号随汇总返回：调用方（EOD / 同步任务）发布数据集快照时要用它
             # 回查 local_bars，否则算出来的 row_count 恒为 0。
             batch_id=self._batch_id,
@@ -534,10 +609,24 @@ class BarsSyncer:
         #   不该被跳过数稀释成「前 N 只里再挑几只」。
         #   中断后重跑，已补齐的自动跳过 ⇒ 不需要额外的游标表，也不会与真实进度不一致。
         skipped = 0
+        self._skipped_fresh = 0
         if self._mode == "full":
             codes, skipped = self._filter_backfilled(codes)
             if not codes and skipped:
                 log.info("全量回补：%d 只标的本地历史均已覆盖目标起点，无需回补", skipped)
+        elif self._skip_fresh:
+            pending = len(codes)
+            codes, self._skipped_fresh = self._filter_fresh(codes)
+            skipped_fresh = self._skipped_fresh
+            if not codes and skipped_fresh:
+                log.info("增量同步：%d 只标的本地日线已达 %s，全部跳过",
+                         skipped_fresh, self._fresh_target())
+            elif skipped_fresh:
+                # ★ 显式报「应跑/实跑」：汇总的 total 是**实际拉取**的只数，跳过数由
+                #   skipped_fresh 单列。两个数都在，界面才既能显示「省了多少 RPC」，
+                #   又不会把「实拉 24 只」误读成「全市场只有 24 只」。
+                log.info("增量同步：应同步 %d 只 → 实拉 %d 只（跳过已最新 %d 只）",
+                         pending, len(codes), skipped_fresh)
         return await self.sync_many(codes, progress_cb=progress_cb,
                                     skipped_complete=skipped)
 

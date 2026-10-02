@@ -217,3 +217,71 @@ def test_default_fetch_passes_configured_source(monkeypatch, store):
     assert _providers(store, "600005.SH") == ["baostock"]
     # 同步路径必须带上新鲜度门槛，否则「非空但陈旧」的源会永远霸占链路（V11 R13）
     assert seen["min_date"], "同步必须传 min_date，否则券商陈旧历史不会被降级"
+
+
+# ---- V11 R15：整批韧性 + 增量跳过已最新 --------------------------------------
+def test_sync_many_survives_task_level_exception(store):
+    """一只任务级异常不得丢弃其余标的的结果（此处原为 gather 默认行为）。
+
+    ``sync_one`` 只兜住了抓取与落库，但协程仍可能因信号量/，`bars_last_date`
+    之外的路径抛出。默认 ``gather`` 会把异常整体抛出 ⇒ 已跑完的几千只结果全丢，
+    任务只剩一句 traceback 而没有汇总 —— 静默丢成果，比为单只失败更糟。
+    """
+    real_sync_one = BarsSyncer.sync_one
+
+    async def _flaky(self, code):
+        if code == "BOOM":
+            raise asyncio.CancelledError("模拟任务被取消")   # BaseException 分支
+        return await real_sync_one(self, code)
+
+    s = BarsSyncer(store=store, fetch_bars=_fetch_ok)
+    s.sync_one = _flaky.__get__(s, BarsSyncer)              # type: ignore[assignment]
+    summary = asyncio.run(s.sync_many(["600519.SH", "BOOM", "000001.SZ"]))
+    assert summary.total == 3
+    assert summary.ok == 2
+    assert summary.failed == 1
+    assert summary.errors[0]["code"] == "BOOM"
+    assert store.count_bars("600519.SH", adjust="qfq") == 3   # 成果没被吞掉
+
+
+class _StubLatestStore:
+    """只提供 latest_dt_map 的最小替身（隔离「跳过」筛选逻辑）。"""
+
+    def __init__(self, mapping):
+        self._map = mapping
+
+    def latest_dt_map(self, codes, period="1d", adjust=""):
+        return {c: self._map[c] for c in codes if c in self._map}
+
+
+def test_filter_fresh_skips_up_to_date(monkeypatch):
+    """本地最近一根已达预期交易日 ⇒ 跳过；落后的保留。"""
+    monkeypatch.setattr("app.sync.calendar.expected_bar_date", lambda *a, **k: "20260910")
+    store = _StubLatestStore({"A": "20260910", "B": "20260909", "C": "20260910"})
+    s = BarsSyncer(store=store, skip_fresh=True)
+    need, skipped = s._filter_fresh(["A", "B", "C"])
+    assert need == ["B"]
+    assert skipped == 2
+
+
+def test_filter_fresh_read_failure_means_full_rerun(monkeypatch):
+    """读不到本地最新日期时**全量重跑**并如实返回 0 —— 宁可多做，不可漏同步。"""
+    monkeypatch.setattr("app.sync.calendar.expected_bar_date", lambda *a, **k: "20260910")
+
+    class _Boom:
+        def latest_dt_map(self, codes, period="1d", adjust=""):
+            raise RuntimeError("database is locked")
+
+    s = BarsSyncer(store=_Boom(), skip_fresh=True)
+    need, skipped = s._filter_fresh(["A", "B"])
+    assert need == ["A", "B"] and skipped == 0
+
+
+def test_filter_fresh_disabled_without_skip_fresh(monkeypatch):
+    """默认必须保持「每只都问源」的原行为，不能悄悄改变既有语义。"""
+    monkeypatch.setattr("app.sync.calendar.expected_bar_date", lambda *a, **k: "20260910")
+    store = _StubLatestStore({"A": "20260910"})
+    s = BarsSyncer(store=store)
+    assert s._skip_fresh is False
+    # 直接调 _filter_fresh 仍然有效，但 sync_stock_list 不会自动启用它
+    assert s._filter_fresh(["A"])[0] == []

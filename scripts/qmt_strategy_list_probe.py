@@ -186,16 +186,24 @@ def main(argv=None):
 
     # ---- 目标策略三态判定（给自动化消费）----
     tgt = args.target
-    tgt_file = os.path.join(sdir, tgt + ".py")
-    print("\n目标策略 %r 判定:" % tgt)
+    # ★ target 既可能是「策略名」（qmt_work_agent），也可能是「文件名/路径」
+    #   （python/qmt_work_agent.py 或绝对路径）。两种情况必须分别归一，否则：
+    #   ① 无条件拼 ".py" → "xxx.py.py" ⇒ 「文件就位」误判为否（文件明明在）；
+    #   ② 拿带后缀的 tgt 去注册列表查 ⇒ 「已注册」恒为否（列表里存的是无后缀策略名）。
+    _base = tgt[:-3] if tgt.endswith(".py") else tgt
+    if tgt.endswith(".py"):
+        tgt_file = tgt if (os.path.isabs(tgt) or os.sep in tgt or "/" in tgt) else os.path.join(sdir, tgt)
+    else:
+        tgt_file = os.path.join(sdir, _base + ".py")
+    print("\n目标策略 %r 判定:" % _base)
     print("  文件就位   : %s" % ("是 (%d B)" % os.path.getsize(tgt_file)
                                  if os.path.exists(tgt_file) else "否"))
-    print("  已注册     : %s" % ("是" if tgt in listed_names else
+    print("  已注册     : %s" % ("是" if _base in listed_names else
                                  "否 ← 这就是模型交易里看不到它的原因"))
-    print("  自动运行   : %s" % ("是" if autorun.get(tgt, (False,))[0] else "否"))
-    if tgt not in listed_names:
+    print("  自动运行   : %s" % ("是" if autorun.get(_base, (False,))[0] else "否"))
+    if _base not in listed_names:
         print("\n  → 拷贝文件不会注册。必须走会写注册树的 UI 动作:")
-        print("     A) 「模型研究」→ 策略区右键 → 导入本地策略/本地.rzrk导入，选 %s.py" % tgt)
+        print("     A) 「模型研究」→ 策略区右键 → 导入本地策略/本地.rzrk导入，选 %s" % tgt_file)
         print("     B) 「我的」→ 新建策略 → Python 策略 → 粘贴代码 → 编译")
         print("     注册后重启客户端，本工具第二次运行应显示「已注册: 是」。")
 
