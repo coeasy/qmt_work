@@ -26,6 +26,39 @@ function isRecommended(c: AutoDetectCandidate): boolean {
 }
 
 /**
+ * 快速模板：让新用户在「接入模式」下拉里不用自己猜「我这种情况该选哪个」。
+ * 点模板按钮只填 accessMode（券商 id 由独立下拉控制，模板不越权），
+ * 用户仍然要填资金账号 / clientPath / bridgeDir —— 那部分信息我们不知道。
+ *
+ * 三大场景：
+ *   ① 大 QMT 桥接（推荐）：绝大多数大 QMT 用户的唯一选择，路径 B（策略桥）
+ *   ② 小 QMT 极速版：券商给了「极速版 / MiniQMT」的时候
+ *   ③ 大 QMT 直连：完整版 QMT 且未被授权封禁（少数券商场景）
+ *
+ * 导出以便 `tests/brokerTemplates.test.ts` 静态校验（模板不能被后续改动悄悄删掉）。
+ */
+export const QUICK_TEMPLATES = [
+  {
+    id: "qmt-big-bridge",
+    label: "大 QMT 桥接（推荐）",
+    accessMode: "bridgeFile" as const,
+    hint: "零部署、秒级延迟。绝大多数大 QMT 用户的唯一选择——先跑 deploy_qmt_work_agent.bat。",
+  },
+  {
+    id: "qmt-mini-direct",
+    label: "小 QMT 极速版",
+    accessMode: "direct" as const,
+    hint: "券商给了「极速版 / MiniQMT」时用；客户端路径填 userdata_mini。",
+  },
+  {
+    id: "qmt-big-direct",
+    label: "大 QMT 直连",
+    accessMode: "direct" as const,
+    hint: "完整版 QMT 且未被授权封禁时用；客户端路径填 userdata。多数券商已封禁此模式。",
+  },
+] as const;
+
+/**
  * 大 QMT 桥的探针面板。
  *
  * 为什么必须渲染而不是把整块 JSON 丢出来：大小 QMT 的差异**不在「能不能连」，
@@ -232,6 +265,13 @@ export function Brokers() {
     } finally {
       setBusy(false);
     }
+  };
+
+  /** 套用快速模板：只填 accessMode，其余字段留空由用户填。 */
+  const applyTemplate = (t: (typeof QUICK_TEMPLATES)[number]) => {
+    setAccessMode(t.accessMode);
+    setConnErr("");
+    setMsg(`已套用「${t.label}」：${t.hint}`);
   };
 
   /** 把探测结果填进下方手动表单，供用户确认后自行提交 */
@@ -478,6 +518,34 @@ export function Brokers() {
         }
       >
         <div className={s.form}>
+          {!editingId && (
+            <div
+              style={{
+                display: "flex",
+                gap: 6,
+                padding: 8,
+                background: "var(--panel-2, rgba(255,255,255,0.02))",
+                border: "1px dashed var(--border)",
+                borderRadius: "var(--radius)",
+                flexWrap: "wrap",
+                alignItems: "center",
+                fontSize: "var(--font-sm)",
+              }}
+            >
+              <span style={s.itemSub ? { opacity: 0.7 } : {}}>快速模板：</span>
+              {QUICK_TEMPLATES.map((t) => (
+                <Button
+                  key={t.id}
+                  size="sm"
+                  variant="ghost"
+                  title={t.hint}
+                  onClick={() => applyTemplate(t)}
+                >
+                  {t.label}
+                </Button>
+              ))}
+            </div>
+          )}
           <FormRow label="券商">
             <Select
               value={brokerId}

@@ -128,6 +128,77 @@ def _dump_registry(qmt):
             print("                   → 客户端在跑，整文件被字节区间锁；退出客户端后重跑即可")
 
 
+def main_json(args):
+    """机器可读输出（供 diag_qmt_work_agent.bat 汇总 diag_report.json 用）。
+
+    原有 ``main`` 面向人类排障（彩色对齐、诊断文案、下一步指引），此处面向
+    程序消费（诊断工具链 / CI / 前端）。两者共享同一批 ``_listed`` / ``_autorun``
+    / ``_file_state`` 纯函数，避免口径分叉。
+
+    输出字段：
+      ok / qmt_dir / strategy_dir / log
+      target / target_file / file_present / file_size
+      registered / autorun                     目标策略在注册树里的三态
+      listed_count / autorun_count             注册树整体规模
+      missing_in_list / extra_in_list          目录 vs 列表差异（供交叉验证）
+    """
+    import json as _json
+
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import qmt_agent_deploy as dep
+
+    qmt = dep.find_qmt_dir(args.qmt_dir)
+    if not qmt:
+        _json.dump({"ok": False, "error": "未找到 QMT 安装目录",
+                    "hint": "用 --qmt-dir 指定 QMT 目录"},
+                   sys.stdout, ensure_ascii=False)
+        return 1
+
+    sdir = os.path.join(qmt, "python")
+    log = _newest_log(qmt)
+    if not log:
+        _json.dump({"ok": False, "qmt_dir": qmt,
+                    "error": "未找到日志文件（QMT 从未启动过？）"},
+                   sys.stdout, ensure_ascii=False)
+        return 1
+
+    listed = _listed(log)
+    autorun = _autorun(log)
+    listed_names = set(listed.values())
+
+    # target 既可能是策略名也可能是文件名/路径（历史教训：无条件拼 .py 会 ".py.py"）
+    _base = args.target[:-3] if args.target.endswith(".py") else args.target
+    tgt_file = os.path.join(sdir, _base + ".py")
+    file_present = os.path.exists(tgt_file)
+    file_size = os.path.getsize(tgt_file) if file_present else 0
+
+    files = sorted(glob.glob(os.path.join(sdir, "*.py")))
+    dir_names = [os.path.splitext(os.path.basename(p))[0] for p in files]
+    missing_in_list = [n for n in dir_names if n not in listed_names]
+    extra_in_list = sorted(listed_names - set(dir_names))
+
+    registered = _base in listed_names
+    autorun_flag = bool(autorun.get(_base, (False,))[0])
+
+    _json.dump({
+        "ok": registered,
+        "qmt_dir": qmt,
+        "strategy_dir": sdir,
+        "log": log,
+        "target": _base,
+        "target_file": tgt_file,
+        "file_present": file_present,
+        "file_size": file_size,
+        "registered": registered,
+        "autorun": autorun_flag,
+        "listed_count": len(listed),
+        "autorun_count": len(autorun),
+        "missing_in_list": missing_in_list,
+        "extra_in_list": extra_in_list,
+    }, sys.stdout, ensure_ascii=False)
+    return 0 if registered else 2
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="QMT 策略列表证据探针")
     ap.add_argument("--qmt-dir", default=None)
@@ -135,7 +206,12 @@ def main(argv=None):
                     help="要给出三态判定的策略名（默认 %s）" % _TARGET)
     ap.add_argument("--dump-registry", action="store_true",
                     help="顺带探测注册树文件可读性/格式")
+    ap.add_argument("--json", action="store_true",
+                    help="机器可读输出（供 diag_qmt_work_agent.bat 汇总 diag_report.json）")
     args = ap.parse_args(argv)
+
+    if args.json:
+        return main_json(args)
 
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import qmt_agent_deploy as dep

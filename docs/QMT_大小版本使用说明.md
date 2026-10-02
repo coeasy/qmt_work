@@ -1,7 +1,8 @@
 # 大小 QMT 使用说明（qmt_work 量化交易网关）
 
-> 版本：v1.1（2026-10-02）——新增 §10（定时任务的数据新鲜度语义 & 界面默认深色外观）
+> 版本：v1.1（2026-10-02）——新增 §10（定时任务的数据新鲜度语义 & 界面默认深色外观）  
 > 姊妹文档：
+>
 > - `docs/BIG_QMT_COMPAT_PLAN.md`（大 QMT 兼容支持方案，可行性论证）
 > - `docs/UNIFIED_TRADING_ABSTRACTION.md`（统一交易接口抽象，选型论证）
 > - `docs/BROKER_ONBOARDING.md`（券商接入指南，代码层）
@@ -15,11 +16,11 @@
 
 绝大多数困惑来自一个事实：**「QMT」不是一个东西，而是两条形态差异极大的产品线**。先对号入座，再跳到对应章节。
 
-| 你手上的客户端 | 俗称 | 进程 / 目录 | qmt_work 里的叫法 | 本文章节 |
-|---|---|---|---|---|
-| 券商给的「极速版 / MiniQMT」 | 小 QMT | `XtMiniQmt.exe` + `userdata_mini/` | **直连（direct）** | §3 |
-| 券商给的「完整版 QMT / 大 QMT」 | 大 QMT（完整版） | QMT 主程序 + `userdata/` | **直连 full（direct）** 或 **策略桥（路径 B）** | §4 / §5 |
-| 同一安装目录里两套目录都在 | 大小合一安装 | 同根下 `userdata/` + `userdata_mini/` | 见 §2.4 特别说明 | §2.4 |
+| 你手上的客户端               | 俗称         | 进程 / 目录                            | qmt_work 里的叫法                       | 本文章节    |
+| --------------------- | ---------- | ---------------------------------- | ----------------------------------- | ------- |
+| 券商给的「极速版 / MiniQMT」   | 小 QMT      | `XtMiniQmt.exe` + `userdata_mini/` | **直连（direct）**                      | §3      |
+| 券商给的「完整版 QMT / 大 QMT」 | 大 QMT（完整版） | QMT 主程序 + `userdata/`              | **直连 full（direct）** 或 **策略桥（路径 B）** | §4 / §5 |
+| 同一安装目录里两套目录都在         | 大小合一安装     | 同根下 `userdata/` + `userdata_mini/` | 见 §2.4 特别说明                         | §2.4    |
 
 **一句话决策树：**
 
@@ -38,16 +39,16 @@
 
 ## 1. 概念与本质差异
 
-| 维度 | 小 QMT（极速版 / MiniQMT） | 大 QMT（完整版） |
-|---|---|---|
-| 交易进程 | `XtMiniQmt.exe` 独立进程，生成 `userdata_mini/` | QMT 主程序，生成 `userdata/` |
-| 外部 xtquant 直连 | 支持（正被 PID 白名单收紧） | 部分券商同样收紧（同一授权串体系 `mdl_auth_xttrader/xtdata_strict_connection_check`） |
-| 内置 Python | **无**（外部 Python 直接 `import xtquant` 调 SDK） | **有**（内置 Python 3.6.x，策略脚本被挂载执行） |
-| 内部交易 API | 经 xtquant SDK：`XtQuantTrader.order_stock` / `cancel` / `query_*` | 注入策略命名空间的全局函数：`passorder` / `cancel` / `get_trade_detail_data`，以及 `ContextInfo` 方法族 |
-| 行情 | xtdata 经 miniquote 端口 **58610** | `ContextInfo.get_full_tick` / `get_market_data` / `download_history_data`；**大窗口 58600 仅交易，行情 RPC 仍须 miniquote 58610** |
-| 回调 | `XtQuantTraderCallback` 推送（on_order / on_trade） | 部分有回调（如两融），普通股票账户常需**轮询 diff 合成** |
-| 版本碎片 | xtquant pyd 按 ABI 编译（cp36~cp312） | 内置 Python 老旧（3.6），无 `shared_memory`，部分函数依赖客户端版本 |
-| 「策略」概念 | **无**（不存在策略注册树） | **有**（客户端持久化注册树，策略须写入注册树才会出现在列表） |
+| 维度            | 小 QMT（极速版 / MiniQMT）                                             | 大 QMT（完整版）                                                                                                            |
+| ------------- | ---------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| 交易进程          | `XtMiniQmt.exe` 独立进程，生成 `userdata_mini/`                         | QMT 主程序，生成 `userdata/`                                                                                                |
+| 外部 xtquant 直连 | 支持（正被 PID 白名单收紧）                                                 | 部分券商同样收紧（同一授权串体系 `mdl_auth_xttrader/xtdata_strict_connection_check`）                                                  |
+| 内置 Python     | **无**（外部 Python 直接 `import xtquant` 调 SDK）                       | **有**（内置 Python 3.6.x，策略脚本被挂载执行）                                                                                      |
+| 内部交易 API      | 经 xtquant SDK：`XtQuantTrader.order_stock` / `cancel` / `query_*` | 注入策略命名空间的全局函数：`passorder` / `cancel` / `get_trade_detail_data`，以及 `ContextInfo` 方法族                                   |
+| 行情            | xtdata 经 miniquote 端口 **58610**                                  | `ContextInfo.get_full_tick` / `get_market_data` / `download_history_data`；**大窗口 58600 仅交易，行情 RPC 仍须 miniquote 58610** |
+| 回调            | `XtQuantTraderCallback` 推送（on_order / on_trade）                  | 部分有回调（如两融），普通股票账户常需**轮询 diff 合成**                                                                                     |
+| 版本碎片          | xtquant pyd 按 ABI 编译（cp36~cp312）                                 | 内置 Python 老旧（3.6），无 `shared_memory`，部分函数依赖客户端版本                                                                       |
+| 「策略」概念        | **无**（不存在策略注册树）                                                  | **有**（客户端持久化注册树，策略须写入注册树才会出现在列表）                                                                                      |
 
 **最关键的三条结论（后续所有配置的前提）：**
 
@@ -67,10 +68,10 @@ qmt_work 对内用「Dialect（方言）× Transport（传输）」正交拆分�
 
 ### 2.2 统一客户端契约层（Dialect × Transport）
 
-| 形态 | Dialect（方言） | Transport（传输） | 对应前端接入模式 |
-|---|---|---|---|
-| 小 QMT 直连 / 大 QMT 直连 full | `xtquant.v1` | InProcess（进程内 SDK）/ SubprocessBridge（ABI 不匹配时子进程桥） | `direct`（空 connector_key） |
-| 大 QMT 策略桥（路径 B） | `bigqmt.v1` | `file`（文件）/ `redis`（队列）/ `zmq`（同机极速） | `bridgeFile` / `bridgeRedis` / `bridgeZmq` |
+| 形态                       | Dialect（方言）  | Transport（传输）                                      | 对应前端接入模式                                   |
+| ------------------------ | ------------ | -------------------------------------------------- | ------------------------------------------ |
+| 小 QMT 直连 / 大 QMT 直连 full | `xtquant.v1` | InProcess（进程内 SDK）/ SubprocessBridge（ABI 不匹配时子进程桥） | `direct`（空 connector_key）                  |
+| 大 QMT 策略桥（路径 B）          | `bigqmt.v1`  | `file`（文件）/ `redis`（队列）/ `zmq`（同机极速）               | `bridgeFile` / `bridgeRedis` / `bridgeZmq` |
 
 > 技术细节（可跳过）：`xtquant.v1` 把 canonical op 映射到 `XtQuantAdapter` 方法名（`place_order` 等）；`bigqmt.v1` 把 canonical op 映射到大 QMT agent 的 wire action（`PLACE` / `CANCEL_ORDER` / `QUERY_*` 等）。两者最终都汇入同一套 `SignalRouter` / `ExecutionService` / 账户页 / 事件泵，上层代码零改动。
 
@@ -78,12 +79,12 @@ qmt_work 对内用「Dialect（方言）× Transport（传输）」正交拆分�
 
 在「券商连接」页，接入模式 `accessMode` 的取值与后端 `connector_key` 映射如下：
 
-| 前端接入模式 | 提交到后端的 connector_key | 含义 |
-|---|---|---|
-| `direct`（默认，留空） | ``（空） | xtquant 直连：小 QMT 填 `userdata_mini`，大 QMT 填 `userdata` |
-| `bridgeFile` | `qmt.big.bridge.file` | 大 QMT 策略桥，文件传输（零部署，秒级） |
-| `bridgeRedis` | `qmt.big.bridge.redis` | 大 QMT 策略桥，Redis 传输（<50ms，需装 Redis） |
-| `bridgeZmq` | `qmt.big.bridge.zmq` | 大 QMT 策略桥，ZMQ 传输（同机极速） |
+| 前端接入模式          | 提交到后端的 connector_key   | 含义                                                    |
+| --------------- | ---------------------- | ----------------------------------------------------- |
+| `direct`（默认，留空） | \`\`（空）                | xtquant 直连：小 QMT 填 `userdata_mini`，大 QMT 填 `userdata` |
+| `bridgeFile`    | `qmt.big.bridge.file`  | 大 QMT 策略桥，文件传输（零部署，秒级）                                |
+| `bridgeRedis`   | `qmt.big.bridge.redis` | 大 QMT 策略桥，Redis 传输（<50ms，需装 Redis）                    |
+| `bridgeZmq`     | `qmt.big.bridge.zmq`   | 大 QMT 策略桥，ZMQ 传输（同机极速）                                |
 
 ### 2.4 大小合一安装的特别说明
 
@@ -101,7 +102,20 @@ qmt_work 对内用「Dialect（方言）× Transport（传输）」正交拆分�
 
 券商的「极速版 / MiniQMT」客户端，且**外部 xtquant 直连未被 PID 白名单封死**（即 `import xtquant; XtQuantTrader().connect()` 能成功，交易连接不返 `rc=-1`）。
 
-### 3.2 部署步骤
+### 3.2 快速上手（3 步，约 1 分钟）
+
+小 QMT 不需要跑 .bat 脚本，也不需要 QMT 里手工导入策略——它本身就是直连模式，前端填 3 个字段就完事。
+
+1. 打开前端「券商连接」页 → 点模板按钮 **「小 QMT 极速版」**（自动填接入模式 = `direct`）
+2. 填 4 个字段：
+   - **券商** = 你的券商（下拉里选）
+   - **客户端路径** = 极速版根目录（如 `C:/QMT/userdata_mini`）
+   - **资金账号** + **账户类型**
+3. 点「添加连接」→ 观察「已有连接」列表出现 `连接成功` 记录
+
+> **前置**：券商的「极速版」必须已安装且能正常登录。若 `connect` 返 `rc=-1`（PID 白名单封死），小 QMT **在 qmt_work 里无法接入**——只能找券商放开，或改用大 QMT 完整版走 §5 的策略桥路径。
+
+### 3.3 详细部署步骤（展开版）
 
 1. 安装券商极速版客户端，记下 `userdata_mini` 所在根目录（例如 `C:/QMT/userdata_mini`）。
 2. 打开 qmt_work 前端 →「券商连接」页。
@@ -112,7 +126,7 @@ qmt_work 对内用「Dialect（方言）× Transport（传输）」正交拆分�
    - **资金账号** / **账户类型**：`STOCK`（普通）/ `CREDIT`（信用）/ `OPTION`（期权）/ `FUTURES`（期货）。
 5. 点「添加连接」——后端默认建连即自动连接（autoconnect），连接会持久化，之后每次启动自动重连。
 
-### 3.3 能力与限制
+### 3.4 能力与限制
 
 - **支持**：实时行情、历史 K 线、交易（下单/撤单）、资金、持仓、当日委托、当日成交；经 `XtQuantTraderCallback` **回调推送**委托/成交事件到前端。
 - **限制**：受券商授权串 `mdl_auth_xttrader/xtdata_strict_connection_check` + `no_pid_check=0` 的 PID 白名单约束。一旦券商收紧，外部直连 `connect` 返 `rc=-1`（日志 `quant session N, pid X not allowed`），此时小 QMT **在 qmt_work 里无法接入**（小 QMT 没有策略桥兜底），只能引导找券商放开，或改用大 QMT 完整版走路径 B。
@@ -125,15 +139,26 @@ qmt_work 对内用「Dialect（方言）× Transport（传输）」正交拆分�
 
 你拿到的是「完整版 QMT」，且希望像小 QMT 一样从外部 Python 直连它。qmt_work 已把 `client_mode=full` 做成一等公民：`ConnectionConfig` → `registry.create_adapter` → `XTPQuantAdapter.start()` → `_effective_trade_dir()` 会在 `userdata` 与 `userdata_mini` 候选目录间互备降级。
 
-### 4.2 部署步骤
+> **⚠️ 但绝大多数券商已封禁大 QMT 直连**：`connect` 返 `rc=-1`（日志 `quant session N, pid X not allowed`）。这条路径通常只在 3–5 家券商上还活着，实测请先试 30 秒，失败则**立刻切到 §5 策略桥路径**，别浪费时间。
+
+### 4.2 快速上手（3 步，约 1 分钟）
+
+1. 打开前端「券商连接」页 → 点模板按钮 **「大 QMT 直连」**（自动填接入模式 = `direct`）
+2. 填 4 个字段：
+   - **券商** = 你的券商
+   - **客户端路径** = 完整版根下的 `userdata`（**不是 `userdata_mini`**，如 `C:/QMT/userdata`）
+   - **资金账号** + **账户类型**
+3. 点「添加连接」→ 若 30 秒内未连接成功（多为 `rc=-1` PID 白名单）→ 切换到 §5.2.0 大 QMT 桥接路径
+
+### 4.3 详细部署步骤（展开版）
 
 与小 QMT 直连几乎一致，唯一区别是**客户端路径指到 `userdata`**（不是 `userdata_mini`）：
 
 1. 接入模式选 **`direct`（直连）**。
 2. **客户端路径**填 `C:/QMT/userdata`（完整版根下的 `userdata`）。
-3. 其余（券商 / 资金账号 / 账户类型）同 §3.2。
+3. 其余（券商 / 资金账号 / 账户类型）同 §3.3。
 
-### 4.3 限制
+### 4.4 限制
 
 大 QMT 直连与小 QMT 直连**共用同一套授权串体系**。若券商对大 QMT 也开启了 PID 白名单，`connect` 同样返 `rc=-1`，此时应切换到 §5 的「策略桥（路径 B）」。
 
@@ -163,31 +188,41 @@ qmt_work 后端（py3.11+）
 
 ### 5.2 部署步骤
 
-#### 5.2.0 快速上手（Windows 双击，约 2 分钟）
+#### 5.2.0 快速上手（Windows 双击 + 前端连桥，约 5 分钟）
 
-Windows 用户**推荐走这条路径**：脚本自动找 QMT 目录、生成 bundle、生成 config 模板、打开资源管理器选中 bundle，你只需在 QMT 里点一下「导入本地策略」。
+Windows 用户**推荐走这条路径**：脚本自动找 QMT 目录、生成 bundle、生成 config 模板、打开资源管理器选中 bundle，前端有「大 QMT 桥接」模板按钮一键填模式。你只需在 QMT 里点一下「导入本地策略」，其它字段照着 `agent_config.json` 抄。
 
 1. **双击 `deploy_qmt_work_agent.bat`**（仓库根目录）
    - 自动探测 QMT 目录（先试 `P:\stock\gd_qmt` / `D:\QMT` / `C:\QMT` / 「国投证券QMT交易端」等常见路径；找不到再手动输入）
    - 生成单文件 bundle `qmt_work_agent.py` + 一份 `.txt` 副本（备用路径 B 粘贴用）
    - 若 `agent_config.json` 不存在则从模板拷贝，存在则保留用户原配置
    - 打开资源管理器并**直接选中** bundle 文件，方便下一步拖选
+   - **同时记下 `agent_config.json` 里的两个字段**（下一步要用）：`bridge_dir` 和 `auth_token`
 2. **在 QMT 里导入策略**（约 30 秒，唯一不可自动化的步骤）
    - **路径 A（推荐）**：「模型研究」→ 策略区 → 右键 → 「导入本地策略」/「本地.rzrk导入」→ 选上一步打开的 `qmt_work_agent.py`
    - **路径 B（备用，QMT「导入本地策略」被券商禁时才用）**：「我的」→ 新建策略 → Python 策略 → 全选删除模板 → 记事本双击 `qmt_work_agent.txt` 全选复制粘贴 → 点「编译」保存（编译/保存才会登记进注册树）
 3. **关闭并重启 QMT**（注册树落盘要重启才生效）
-4. **双击 `diag_qmt_work_agent.bat`** 验证
+4. **双击 `diag_qmt_work_agent.bat`** 验证 QMT 端
    - 应显示：`已注册: 是`、`心跳新鲜`、`registered: true`、`alive: true`
    - 想让策略随 QMT 自动拉起：在「模型交易」里选中策略 → 勾选「自动运行」（记进 `UiSettingConfig`，QMT 每次启动会自动拉起）
+   - 报告自动写入 `output/diag_report.json`（排障日志分享 / 开发者定位用）
+5. **在前端连桥**（约 1 分钟）
+   - 打开前端「券商连接」页 → 点顶部模板按钮 **「大 QMT 桥接（推荐）」**（自动填接入模式 = `bridgeFile`）
+   - 填 4 个字段：
+     - **券商** = QMT（下拉里选）
+     - **桥接参数** = `agent_config.json` 里的 `bridge_dir`（**完整绝对路径**，两端必须一致）
+     - **桥接令牌** = `agent_config.json` 里的 `auth_token`
+     - **资金账号** + **账户类型**（股票/信用/期权/期货）
+   - 点「添加连接」→ 后端启动桥接子进程握手，「已有连接」列表里出现一条 `连接成功` 记录即完成
 
-> **为什么这 4 步里的第 2 步不能自动化？** —— 「导入本地策略」是 QMT 客户端 GUI 对话框（原生 Win32，不是 CEF webview，CDP 摸不到）；注册树是加密容器（XTF1），逆向写有写坏现有 35 条策略的风险。这三重证据见 §5.2.1 步骤 3。
+> **为什么这 5 步里的第 2 步不能自动化？** —— 「导入本地策略」是 QMT 客户端 GUI 对话框（原生 Win32，不是 CEF webview，CDP 摸不到）；注册树是加密容器（XTF1），逆向写有写坏现有 35 条策略的风险。这三重证据见 §5.2.1 步骤 3。
 
 ---
 
 #### 5.2.1 详细展开版（6 步）
 
-> 前置：你已安装大 QMT 完整版，且能用它的客户端打开「策略」相关界面。
-> Windows 用户走上面「快速上手 4 步」即可，本节是展开版供排障参考。
+> 前置：你已安装大 QMT 完整版，且能用它的客户端打开「策略」相关界面。  
+> Windows 用户走上面「快速上手 5 步」即可，本节是展开版供排障参考。
 
 **步骤 1 · 生成 bundle**
 
@@ -221,6 +256,7 @@ python scripts/qmt_agent_deploy.py deploy --target <你的大QMT根>
 
 > 为什么不能自动注册？三重证据：①注册树运行期整文件字节区间锁（`ReadFile` 返 Win32 33 / Python `PermissionError`），运行期无法安全改写；②全 `config/` 文本文件按已知策略名 GBK 字节搜 = 零命中（无明文后门）；③`.rzrk` 导入包同为加密容器。逆向写入 = 写坏 35 条策略的风险，故不支持。
 
+
 **步骤 4 · 启用自动运行**
 
 在大 QMT 客户端开启 `tryAutoRunStrategy`（登录自动拉起），或直接手动「运行」该策略。观察日志出现 `automatic run` 即表示已拉起。
@@ -237,11 +273,11 @@ python scripts/qmt_agent_deploy.py deploy --target <你的大QMT根>
 
 ### 5.3 三种传输对比与选型
 
-| 传输 | 延迟 | 部署成本 | 稳定性 | 何时用 |
-|---|---|---|---|---|
-| `file`（默认） | 秒级（轮询间隔） | 零（只需共享目录） | 高（组件最少） | **首选兜底**，没装 Redis/ZMQ 时 |
-| `redis` | <50ms | 需装 Redis 或 pyzmq | 高 | 多策略并发、低延迟需求 |
-| `zmq` | 同机极速 | 需装 pyzmq | 高 | 单机同进程、极致低延迟 |
+| 传输         | 延迟       | 部署成本             | 稳定性     | 何时用                     |
+| ---------- | -------- | ---------------- | ------- | ----------------------- |
+| `file`（默认） | 秒级（轮询间隔） | 零（只需共享目录）        | 高（组件最少） | **首选兜底**，没装 Redis/ZMQ 时 |
+| `redis`    | <50ms    | 需装 Redis 或 pyzmq | 高       | 多策略并发、低延迟需求             |
+| `zmq`      | 同机极速     | 需装 pyzmq         | 高       | 单机同进程、极致低延迟             |
 
 单一配置键切换，**协议不变**，三种传输共用同一份 `BrokerAdapter` 映射。
 
@@ -255,13 +291,13 @@ is_connected() = self._connected and not self._agent_unresponsive
 
 前端「券商连接」页对每条桥接连接展示存活标签（来自后端 `connector_probe()` 的字段）：
 
-| 字段 | 含义 | 前端呈现 |
-|---|---|---|
-| `available` | 桥整体可用 | 基础连通 |
-| `agent_unresponsive` | agent 心跳超时（策略可能已崩） | warn / 断开 |
-| `liveness_failures` | 连续存活探测失败次数 | 重试计数 |
-| `last_agent_ok_age_s` | 距上次成功往返的秒数 | 「X 秒前正常」 |
-| `livenessLabel` / `hint` | 综合判定的可读标签与建议 | 连接卡片上的状态条 |
+| 字段                       | 含义                 | 前端呈现      |
+| ------------------------ | ------------------ | --------- |
+| `available`              | 桥整体可用              | 基础连通      |
+| `agent_unresponsive`     | agent 心跳超时（策略可能已崩） | warn / 断开 |
+| `liveness_failures`      | 连续存活探测失败次数         | 重试计数      |
+| `last_agent_ok_age_s`    | 距上次成功往返的秒数         | 「X 秒前正常」  |
+| `livenessLabel` / `hint` | 综合判定的可读标签与建议       | 连接卡片上的状态条 |
 
 > 典型「假绿灯」陷阱：文件残留 `agent_status.json` 还在，但策略进程已崩、心跳不再刷新 → 旧文件让面板显示「已连接」，实际已死。以 `last_agent_ok_age_s` 与真实往返为准，不要只看文件存在。
 
@@ -273,33 +309,33 @@ is_connected() = self._connected and not self._agent_unresponsive
 
 ### 5.6 工具链速查
 
-| 工具 | 用途 |
-|---|---|
-| **`deploy_qmt_work_agent.bat`** | **Windows 双击**：一键部署（自动找 QMT → 生成 bundle + config → 打开资源管理器 → 打印下一步指引） |
-| **`diag_qmt_work_agent.bat`** | **Windows 双击**：一键诊断（跑 probe + verify + inspect 三合一，输出结构化状态） |
-| `scripts/qmt_agent_deploy.py {deploy\|register\|check\|config\|inspect} [--reveal] [--txt]` | 部署 / 登记 / 检查 / 配置 / 检视 bundle（`--txt` 额外产一份 .txt 副本供路径 B 粘贴） |
-| `scripts/gen_qmt_agent_bundle.py [--out X.py] [--txt] [--embed-config CFG]` | 从 `backend/agent_bigqmt/` 生成单文件 bundle |
-| `scripts/qmt_strategy_list_probe.py --target X [--qmt-dir ...]` | 探查策略注册树里是否已登记 |
-| `scripts/qmt_agent_verify.py [--json]` | 注册态 + 心跳一起判（是否真在跑），JSON 输出可直接给程序消费 |
-| `scripts/qmt_cef_cdp.py` | CEF 面板 CDP 诊断 |
-| `scripts/check_bigqmt_agent_py36.py` | G3 校验：bundle 入口捕获的注入函数名字面量是否 ≤3（必须走 `capture_qmt_injected_funcs(globals())`） |
+| 工具                                                                                          | 用途                                                                           |
+| ------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| **`deploy_qmt_work_agent.bat`**                                                             | **Windows 双击**：一键部署（自动找 QMT → 生成 bundle + config → 打开资源管理器 → 打印下一步指引）        |
+| **`diag_qmt_work_agent.bat`**                                                               | **Windows 双击**：一键诊断（跑 probe + verify + inspect 三合一，输出结构化状态）                  |
+| `scripts/qmt_agent_deploy.py {deploy\|register\|check\|config\|inspect} [--reveal] [--txt]` | 部署 / 登记 / 检查 / 配置 / 检视 bundle（`--txt` 额外产一份 .txt 副本供路径 B 粘贴）                 |
+| `scripts/gen_qmt_agent_bundle.py [--out X.py] [--txt] [--embed-config CFG]`                 | 从 `backend/agent_bigqmt/` 生成单文件 bundle                                       |
+| `scripts/qmt_strategy_list_probe.py --target X [--qmt-dir ...]`                             | 探查策略注册树里是否已登记                                                                |
+| `scripts/qmt_agent_verify.py [--json]`                                                      | 注册态 + 心跳一起判（是否真在跑），JSON 输出可直接给程序消费                                           |
+| `scripts/qmt_cef_cdp.py`                                                                    | CEF 面板 CDP 诊断                                                                |
+| `scripts/check_bigqmt_agent_py36.py`                                                        | G3 校验：bundle 入口捕获的注入函数名字面量是否 ≤3（必须走 `capture_qmt_injected_funcs(globals())`） |
 
 ### 5.7 常见部署错误 → 解决方案
 
-| 症状 | 根因 | 解决 |
-|---|---|---|
-| 「模型交易」里看不到 `qmt_work_agent` | 注册树未登记（bundle 已拷贝但未在 QMT GUI 里做导入动作） | 走 §5.2.0 步骤 2：QMT「模型研究」右键「导入本地策略」→ 选 `qmt_work_agent.py` → 重启 QMT |
-| `qmt_agent_verify` 报「心跳已过期 Xs（阈值 45s）」 | 策略未在跑（未启动 / 已崩 / 未启动 autorun） | ①在 QMT「模型交易」手工点「运行」启动一次；②想自动拉起就勾「自动运行」（记进 `UiSettingConfig`）；③确认 `agent_config.json` 路径正确 |
-| `qmt_agent_verify` 报 `registered: false` | 同上（注册树未登记） | 同「模型交易里看不到」 |
-| `qmt_agent_verify` 报 `probe_stale: true` | 上面结论只是「陈旧快照里未见」，不代表当前缺失 | 先让策略真正启动一次（生成新的 `probe_result.json`），再跑 verify |
-| 桥连不上但前端无错 | `agent_config.json` 里 `bridge_dir` 与前端桥接参数不一致（**日常排障第一名**） | 两处必须**完全一致**，包括绝对/相对路径与斜杠方向 |
-| `trading_enabled: false` | 默认下单关闭（安全默认） | 编辑 `agent_config.json` 改为 `true`，重启策略 |
-| `inspect` 报「配置文件被独占锁定」/ `PermissionError` | QMT 正在运行持有文件锁 | 关 QMT 再跑 inspect；`--force` 只跳过运行判定，**不做锁规避** |
-| 「导入本地策略」菜单灰色 / 找不到 | 券商禁用了 .rzrk 导入 | 改走路径 B：新建策略 → 粘贴 `qmt_work_agent.txt` 全部内容 → 编译 |
-| 策略启动但报 `NameError` / `ModuleNotFoundError` | bundle 生成失败或编码问题 | 跑 `python scripts/check_bigqmt_agent_py36.py`；确保用 `gen_qmt_agent_bundle.py` 生成的 bundle 而非手改 |
-| 策略启动即退出、无日志 | `agent_config.json` JSON 语法错 | 用 `python -c "import json; json.load(open('agent_config.json'))"` 校验；模板见 `backend/agent_bigqmt/agent_config.example.json` |
-| 端口 `8086` 拒绝连接（跑 CEF CDP 时） | QMT 未开「CEF 调试」或客户端版本不支持 | 关闭 CEF 诊断路径，改用 `qmt_agent_verify`；`qmt_cef_cdp.py` 需要 QMT 客户端以调试模式启动 |
-| 心跳一直 stale 但「模型交易」里显示运行中 | handlebar 未触发（无行情推进，常见于收盘后或策略未订阅） | 这是**误判活死**的常见来源 —— 心跳新鲜度只是判据之一，不能单独作为唯一判据（TD 系列根因）。用 `is_connected()` 的「现在可用」语义判 |
+| 症状                                         | 根因                                                         | 解决                                                                                                                        |
+| ------------------------------------------ | ---------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| 「模型交易」里看不到 `qmt_work_agent`                | 注册树未登记（bundle 已拷贝但未在 QMT GUI 里做导入动作）                       | 走 §5.2.0 步骤 2：QMT「模型研究」右键「导入本地策略」→ 选 `qmt_work_agent.py` → 重启 QMT                                                         |
+| `qmt_agent_verify` 报「心跳已过期 Xs（阈值 45s）」     | 策略未在跑（未启动 / 已崩 / 未启动 autorun）                              | ①在 QMT「模型交易」手工点「运行」启动一次；②想自动拉起就勾「自动运行」（记进 `UiSettingConfig`）；③确认 `agent_config.json` 路径正确                                 |
+| `qmt_agent_verify` 报 `registered: false`   | 同上（注册树未登记）                                                 | 同「模型交易里看不到」                                                                                                               |
+| `qmt_agent_verify` 报 `probe_stale: true`   | 上面结论只是「陈旧快照里未见」，不代表当前缺失                                    | 先让策略真正启动一次（生成新的 `probe_result.json`），再跑 verify                                                                            |
+| 桥连不上但前端无错                                  | `agent_config.json` 里 `bridge_dir` 与前端桥接参数不一致（**日常排障第一名**） | 两处必须**完全一致**，包括绝对/相对路径与斜杠方向                                                                                               |
+| `trading_enabled: false`                   | 默认下单关闭（安全默认）                                               | 编辑 `agent_config.json` 改为 `true`，重启策略                                                                                     |
+| `inspect` 报「配置文件被独占锁定」/ `PermissionError`  | QMT 正在运行持有文件锁                                              | 关 QMT 再跑 inspect；`--force` 只跳过运行判定，**不做锁规避**                                                                              |
+| 「导入本地策略」菜单灰色 / 找不到                         | 券商禁用了 .rzrk 导入                                             | 改走路径 B：新建策略 → 粘贴 `qmt_work_agent.txt` 全部内容 → 编译                                                                           |
+| 策略启动但报 `NameError` / `ModuleNotFoundError` | bundle 生成失败或编码问题                                           | 跑 `python scripts/check_bigqmt_agent_py36.py`；确保用 `gen_qmt_agent_bundle.py` 生成的 bundle 而非手改                               |
+| 策略启动即退出、无日志                                | `agent_config.json` JSON 语法错                               | 用 `python -c "import json; json.load(open('agent_config.json'))"` 校验；模板见 `backend/agent_bigqmt/agent_config.example.json` |
+| 端口 `8086` 拒绝连接（跑 CEF CDP 时）                | QMT 未开「CEF 调试」或客户端版本不支持                                    | 关闭 CEF 诊断路径，改用 `qmt_agent_verify`；`qmt_cef_cdp.py` 需要 QMT 客户端以调试模式启动                                                      |
+| 心跳一直 stale 但「模型交易」里显示运行中                   | handlebar 未触发（无行情推进，常见于收盘后或策略未订阅）                          | 这是**误判活死**的常见来源 —— 心跳新鲜度只是判据之一，不能单独作为唯一判据（TD 系列根因）。用 `is_connected()` 的「现在可用」语义判                                          |
 
 ---
 
@@ -307,15 +343,15 @@ is_connected() = self._connected and not self._agent_unresponsive
 
 qmt_work 对上层暴露的接口（行情 / 交易 / 账户 / 持仓 / 订阅 / 历史 K 线）在大小 QMT 下的支撑情况：
 
-| 能力 | 小 QMT 直连 / 大 QMT 直连 full | 大 QMT 策略桥（路径 B） |
-|---|---|---|
-| 下单 / 撤单 | ✅ xtquant `order_stock` | ✅ `passorder` / `cancel` |
-| 资金 / 持仓 / 委托 / 成交查询 | ✅ `query_*` | ✅ `get_trade_detail_data` 族 |
-| 实时行情 | ✅ xtdata（58610） | ✅ `ContextInfo.get_full_tick`（58610） |
-| 历史 K 线 | ✅ `download_history_data` | ✅ `ContextInfo.get_market_data` / `download_history_data` |
-| 委托/成交事件推送 | ✅ 回调（`XtQuantTraderCallback`） | ⚠️ **文件桥不支持回调式订阅**：`subscribe_quote` 只记录意图，由事件泵每秒对账（`SUB_QUOTE` → agent 轮询 diff → `events.ndjson` → WS） |
-| 订阅行情 | ✅ 原生回调 | ⚠️ 同上，经事件泵对账合成（秒级，非毫秒级） |
-| 两融 / 期权 / 期货 | 取决于券商档案 `capabilities` | 取决于 agent 注入函数集（能力协商） |
+| 能力                  | 小 QMT 直连 / 大 QMT 直连 full      | 大 QMT 策略桥（路径 B）                                                                                         |
+| ------------------- | ----------------------------- | ------------------------------------------------------------------------------------------------------- |
+| 下单 / 撤单             | ✅ xtquant `order_stock`       | ✅ `passorder` / `cancel`                                                                                |
+| 资金 / 持仓 / 委托 / 成交查询 | ✅ `query_*`                   | ✅ `get_trade_detail_data` 族                                                                             |
+| 实时行情                | ✅ xtdata（58610）               | ✅ `ContextInfo.get_full_tick`（58610）                                                                    |
+| 历史 K 线              | ✅ `download_history_data`     | ✅ `ContextInfo.get_market_data` / `download_history_data`                                               |
+| 委托/成交事件推送           | ✅ 回调（`XtQuantTraderCallback`） | ⚠️ **文件桥不支持回调式订阅**：`subscribe_quote` 只记录意图，由事件泵每秒对账（`SUB_QUOTE` → agent 轮询 diff → `events.ndjson` → WS） |
+| 订阅行情                | ✅ 原生回调                        | ⚠️ 同上，经事件泵对账合成（秒级，非毫秒级）                                                                                 |
+| 两融 / 期权 / 期货        | 取决于券商档案 `capabilities`        | 取决于 agent 注入函数集（能力协商）                                                                                   |
 
 **关于「大 QMT 文件桥的行情订阅」要特别注意**（曾是最典型的「假绿灯」）：文件桥没有回调式订阅通道，所以 `subscribe_quote` 只把意图写进内存、**真正的 `SUB_QUOTE` 下发由事件泵每秒对账完成**。若对账逻辑没发出 `SUB_QUOTE`，agent 的订阅集恒为空，`quote_events` 恒返回 0，事件泵每秒空转，界面价格永远停在种子值——而连接状态 / 健康检查 / 订阅日志**全绿**。判活务必以「真实行情是否在动」+ `last_agent_ok_age_s` 为准，不要只看状态灯。
 
@@ -360,10 +396,10 @@ qmt_work 对上层暴露的接口（行情 / 交易 / 账户 / 持仓 / 订阅 /
 ### 7.6 三步自测大 QMT（推荐流程）
 
 1. **发版**：`gen_qmt_agent_bundle.py`（生成单文件 bundle）或 `qmt_agent_deploy.py deploy`（部署 + 校验一步到位），落到 `<QMT>/python/qmt_work_agent.py`。
-2. **看文件**：`qmt_strategy_list_probe.py --target <QMT>/python/qmt_work_agent.py`
-   —— `--target` 既可传**策略名**（`qmt_work_agent`）也可传**文件名 / 路径**（过去拼 `.py` 时会误报「文件就位:否」，现已修正）。
+2. **看文件**：`qmt_strategy_list_probe.py --target <QMT>/python/qmt_work_agent.py`  
+   —— `--target` 既可传**策略名**（`qmt_work_agent`）也可传**文件名 / 路径**（过去拼 `.py` 时会误报「文件就位:否」，现已修正）。  
    正常应见「文件就位: **是**」；「已注册」通常为**否**，因为拷贝文件不会写注册树。
-3. **注册并运行**：在 QMT 客户端做一次写注册树的 UI 动作（§5.3），运行策略。
+3. **注册并运行**：在 QMT 客户端做一次写注册树的 UI 动作（§5.3），运行策略。  
    再跑 `qmt_agent_verify.py`，当它显示心跳新鲜且 `probe_stale: false` 时，才算**真正闭环**。
 
 > 这三步是判定「大 QMT 到底能不能跑」的唯一可靠口径：**文件在 ≠ 已注册，注册了 ≠ 在运行，运行过 ≠ 现在还在跑**。
@@ -380,13 +416,13 @@ qmt_work 对上层暴露的接口（行情 / 交易 / 账户 / 持仓 / 订阅 /
 
 ## 9. 一页速查（Cheat Sheet）
 
-| 我要… | 选哪种 | 前端接入模式 | 客户端路径 / 桥参数 |
-|---|---|---|---|
-| 极速版能直连 | 小 QMT 直连 | `direct` | `userdata_mini` |
-| 完整版能直连 | 大 QMT 直连 full | `direct` | `userdata` |
-| 完整版被封直连 | 大 QMT 策略桥（兜底） | `bridgeFile`（零部署） | 桥目录 |
-| 完整版要低延迟 | 大 QMT 策略桥 | `bridgeRedis` / `bridgeZmq` | Redis 串 / ZMQ 地址 |
-| 只有极速版且被封 | **无法接入** | — | 引导找券商放开授权 |
+| 我要…      | 选哪种           | 前端接入模式                      | 客户端路径 / 桥参数      |
+| -------- | ------------- | --------------------------- | ---------------- |
+| 极速版能直连   | 小 QMT 直连      | `direct`                    | `userdata_mini`  |
+| 完整版能直连   | 大 QMT 直连 full | `direct`                    | `userdata`       |
+| 完整版被封直连  | 大 QMT 策略桥（兜底） | `bridgeFile`（零部署）           | 桥目录              |
+| 完整版要低延迟  | 大 QMT 策略桥     | `bridgeRedis` / `bridgeZmq` | Redis 串 / ZMQ 地址 |
+| 只有极速版且被封 | **无法接入**      | —                           | 引导找券商放开授权        |
 
 > 记住三条铁律：①小 QMT 只有直连、没有策略桥；②大 QMT 策略须写注册树（GUI 动作），丢文件不生效；③连没连上以真实往返 + 心跳新鲜度为准，不以文件残留为准。
 
@@ -407,11 +443,11 @@ qmt_work 对上层暴露的接口（行情 / 交易 / 账户 / 持仓 / 订阅 /
 
 定时选股（`classic_screen`）判断「数据是否落后」用唯一口径 `app.sync.calendar.expected_bar_date()`：
 
-| 当前时刻 | 期望的 K 线日期 |
-|---|---|
-| 交易日 且 已过 `ready_hour`（默认 18 点） | **今天**（当日收盘数据已发布） |
-| 交易日 但 未过 `ready_hour` | **上一交易日**（当日数据源约 17:00–18:00 才稳定，不等） |
-| 非交易日（周末/节假日） | **上一交易日** |
+| 当前时刻                           | 期望的 K 线日期                            |
+| ------------------------------ | ------------------------------------ |
+| 交易日 且 已过 `ready_hour`（默认 18 点） | **今天**（当日收盘数据已发布）                    |
+| 交易日 但 未过 `ready_hour`          | **上一交易日**（当日数据源约 17:00–18:00 才稳定，不等） |
+| 非交易日（周末/节假日）                   | **上一交易日**                            |
 
 **为什么必须有 `ready_hour`**：收盘后数据源并不立即吐出当日数据。若口径写成「日历今日」，那么每天 16:15 的定时选股都会判「落后」→ 触发一次全市场补数 → 补完拿到的仍是昨天的数据 → 第二天重复。**这是每天一次的全市场无效 RPC**。`ready_hour` 让判断落在「数据真已经可得」的那一天上，补数从「每天一次」降为「只在真的落后时」。
 
@@ -421,10 +457,10 @@ qmt_work 对上层暴露的接口（行情 / 交易 / 账户 / 持仓 / 订阅 /
 
 `sync_bars` 任务（含「定时更新日线」）的返回体里有两个**含义不同**的跳过计数，分别呈现、不可相加：
 
-| 字段 | 含义 | 何时非 0 |
-|---|---|---|
-| `skipped_complete` | 历史已补到起点、**本次压根不用问源** | `backfill_from` 有值时，`bars` 已存在该标的且起点不晚于回补起点 |
-| `skipped_fresh` | 本次的增量目标日 **已经是最新**，不用再问源 | 任务参数带 `skip_fresh: true`（默认「定时更新日线」已开启） |
+| 字段                 | 含义                       | 何时非 0                                       |
+| ------------------ | ------------------------ | ------------------------------------------- |
+| `skipped_complete` | 历史已补到起点、**本次压根不用问源**     | `backfill_from` 有值时，`bars` 已存在该标的且起点不晚于回补起点 |
+| `skipped_fresh`    | 本次的增量目标日 **已经是最新**，不用再问源 | 任务参数带 `skip_fresh: true`（默认「定时更新日线」已开启）     |
 
 两者共同的效果：**全市场已经最新时，返回 `total=0` 且两个跳过数之和覆盖全部标的——这是成功，不是失败。** 判定任务是否空转必须同时看这三个字段；只判 `total == 0` 会把刚省下来的几万次 RPC 误报成「未获取到任何股票」。
 
@@ -438,4 +474,3 @@ qmt_work 对上层暴露的接口（行情 / 交易 / 账户 / 持仓 / 订阅 /
 - **多策略选股**：N 个策略并行计算，失败的那个从结果里剔除、在 `strategy_failures` 里**点名**（形如 `ma_volume: 策略内部错误：除零`），其余策略结果照常落库。只有**全部**失败才向上抛错。
 
 > 历史教训（R15）：这两处原来是「整批一损俱损」——一只标的抛 `CancelledError` 会让 `asyncio.gather` 把整批结果连同已完成的部分一起丢弃。
-

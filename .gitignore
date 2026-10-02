@@ -10,6 +10,8 @@ venv/
 backend/build/
 backend/dist/
 backend/logs/
+# 运行期日志/诊断报告快照（deploy / diag .bat 输出，不入库）
+logs/
 # 多运行时桥接的嵌入式 Python（由 tools/fetch_runtimes.py 下载，不入库）
 backend/runtimes/
 # 策略生成器输出目录（tools/strategy_gen.py 生成，不入库）

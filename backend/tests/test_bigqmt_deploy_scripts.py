@@ -169,11 +169,19 @@ def test_gen_bundle_writes_txt_copy_when_requested():
 # --------------------------------------------------------------------------
 
 def test_usage_has_quickstart_section():
-    """USAGE §5.2.0 必须存在「快速上手」入口，否则新用户看不到 4 步路径。"""
+    """USAGE §5.2.0 必须存在「快速上手」入口，否则新用户看不到 5 步路径（含前端连桥）。"""
     text = USAGE_MD.read_text(encoding="utf-8")
     assert "5.2.0 快速上手" in text, "USAGE 缺 5.2.0 快速上手小节"
     assert "deploy_qmt_work_agent.bat" in text, "USAGE 未提及 deploy_qmt_work_agent.bat"
     assert "diag_qmt_work_agent.bat" in text, "USAGE 未提及 diag_qmt_work_agent.bat"
+    # 快速上手必须是 5 步（不是 4 步）—— 缺第 5 步「前端连桥」会让新用户部署完就以为能用
+    assert "5.2.1 详细展开版" in text or "5.2.1" in text, "USAGE 缺 §5.2.1 详细展开版"
+    quickstart = text.split("5.2.1", 1)[0]
+    for step in ["1. **双击", "2. **在 QMT", "3. **关闭并重启", "4. **双击", "5. **在前端"]:
+        assert step in quickstart, f"快速上手缺步骤: {step}"
+    # 第 5 步必须提到「大 QMT 桥接（推荐）」模板按钮 —— 与前端 Brokers.tsx 里的模板一一对应
+    assert "大 QMT 桥接（推荐）" in quickstart, (
+        "快速上手第 5 步未提「大 QMT 桥接（推荐）」模板 —— 用户不知道点哪个按钮")
 
 
 def test_usage_tool_table_lists_bat_scripts():

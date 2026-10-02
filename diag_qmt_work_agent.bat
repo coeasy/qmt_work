@@ -86,6 +86,17 @@ echo ============================================================
 "%PYTHON%" "%~dp0scripts\qmt_agent_deploy.py" inspect --force --qmt-dir "%QMT_DIR%"
 echo.
 
+REM ---------------- [4/4] 结构化 JSON 报告 ----------------
+echo ============================================================
+echo  [4/4] 生成结构化诊断报告 diag_report.json
+echo ============================================================
+"%PYTHON%" "%~dp0scripts\qmt_diag_report.py" --qmt-dir "%QMT_DIR%" --out "%~dp0output\diag_report.json"
+echo.
+echo  报告文件: %~dp0output\diag_report.json
+echo  用途：排障日志分享 / 开发者定位 / CI 汇总。包含：
+echo    timestamp / qmt_dir / probe / verify / inspect / problems[]
+echo.
+
 REM ---------------- 判读要点 ----------------
 echo ============================================================
 echo  判读要点（对照上面输出）
