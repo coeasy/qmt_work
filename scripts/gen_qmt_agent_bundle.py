@@ -246,6 +246,10 @@ def main(argv=None):
     ap.add_argument("--encoding", default="utf-8",
                     choices=["utf-8", "gbk", "gb18030"],
                     help="输出源码编码（QMT 官方口径为 gbk；不可表示时退回 utf-8）")
+    ap.add_argument("--txt", action="store_true",
+                    help="同目录额外产一份 .txt 副本（内容与 .py 完全相同，后缀改为 .txt）。"
+                         "用途：QMT「新建策略 → 粘贴代码」路径 —— 记事本双击打开 .txt 比 IDE 打开 .py "
+                         "快得多，剪贴板粘贴 52 KB 稳得多。默认关闭（主路径 A「导入本地策略」用 .py 即可）。")
     args = ap.parse_args(argv)
 
     embed = None
@@ -276,6 +280,13 @@ def main(argv=None):
         fh.write(text)
     print("[OK] 已写出: %s (%d bytes, encoding=%s)"
           % (out, os.path.getsize(out), enc))
+    if args.txt:
+        # 路径 B 辅助：同内容 .txt 副本，记事本双击打开粘贴更顺手
+        out_txt = os.path.splitext(out)[0] + ".txt"
+        with io.open(out_txt, "w", encoding=enc, newline="\n") as fh:
+            fh.write(text)
+        print("[OK] 已写出 .txt 副本（供路径 B 粘贴用）: %s (%d bytes)"
+              % (out_txt, os.path.getsize(out_txt)))
     return 0
 
 

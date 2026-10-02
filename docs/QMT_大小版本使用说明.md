@@ -161,9 +161,33 @@ qmt_work 后端（py3.11+）
 - **自动验证**：bundle 启动即写 `probe_result.json`（自检）+ `agent_status.json`（心跳，每 10s）。**心跳新鲜度才是「策略在跑」的判据**——文件残留 ≠ 活着（可能已崩，见 §7.2）。
 - **自动拉起**：在 QMT 客户端开启 `tryAutoRunStrategy`，每次登录自动拉起策略。
 
-### 5.2 部署步骤（详细）
+### 5.2 部署步骤
+
+#### 5.2.0 快速上手（Windows 双击，约 2 分钟）
+
+Windows 用户**推荐走这条路径**：脚本自动找 QMT 目录、生成 bundle、生成 config 模板、打开资源管理器选中 bundle，你只需在 QMT 里点一下「导入本地策略」。
+
+1. **双击 `deploy_qmt_work_agent.bat`**（仓库根目录）
+   - 自动探测 QMT 目录（先试 `P:\stock\gd_qmt` / `D:\QMT` / `C:\QMT` / 「国投证券QMT交易端」等常见路径；找不到再手动输入）
+   - 生成单文件 bundle `qmt_work_agent.py` + 一份 `.txt` 副本（备用路径 B 粘贴用）
+   - 若 `agent_config.json` 不存在则从模板拷贝，存在则保留用户原配置
+   - 打开资源管理器并**直接选中** bundle 文件，方便下一步拖选
+2. **在 QMT 里导入策略**（约 30 秒，唯一不可自动化的步骤）
+   - **路径 A（推荐）**：「模型研究」→ 策略区 → 右键 → 「导入本地策略」/「本地.rzrk导入」→ 选上一步打开的 `qmt_work_agent.py`
+   - **路径 B（备用，QMT「导入本地策略」被券商禁时才用）**：「我的」→ 新建策略 → Python 策略 → 全选删除模板 → 记事本双击 `qmt_work_agent.txt` 全选复制粘贴 → 点「编译」保存（编译/保存才会登记进注册树）
+3. **关闭并重启 QMT**（注册树落盘要重启才生效）
+4. **双击 `diag_qmt_work_agent.bat`** 验证
+   - 应显示：`已注册: 是`、`心跳新鲜`、`registered: true`、`alive: true`
+   - 想让策略随 QMT 自动拉起：在「模型交易」里选中策略 → 勾选「自动运行」（记进 `UiSettingConfig`，QMT 每次启动会自动拉起）
+
+> **为什么这 4 步里的第 2 步不能自动化？** —— 「导入本地策略」是 QMT 客户端 GUI 对话框（原生 Win32，不是 CEF webview，CDP 摸不到）；注册树是加密容器（XTF1），逆向写有写坏现有 35 条策略的风险。这三重证据见 §5.2.1 步骤 3。
+
+---
+
+#### 5.2.1 详细展开版（6 步）
 
 > 前置：你已安装大 QMT 完整版，且能用它的客户端打开「策略」相关界面。
+> Windows 用户走上面「快速上手 4 步」即可，本节是展开版供排障参考。
 
 **步骤 1 · 生成 bundle**
 
@@ -251,12 +275,31 @@ is_connected() = self._connected and not self._agent_unresponsive
 
 | 工具 | 用途 |
 |---|---|
-| `scripts/qmt_agent_deploy.py {deploy\|register\|check\|config\|inspect} [--reveal]` | 部署 / 登记 / 检查 / 配置 / 检视 bundle |
-| `scripts/gen_qmt_agent_bundle.py` | 从 `backend/agent_bigqmt/` 生成单文件 bundle |
-| `scripts/qmt_strategy_list_probe.py --target X` | 探查策略注册树里是否已登记 |
-| `scripts/qmt_agent_verify.py` | 注册态 + 心跳一起判（是否真在跑） |
+| **`deploy_qmt_work_agent.bat`** | **Windows 双击**：一键部署（自动找 QMT → 生成 bundle + config → 打开资源管理器 → 打印下一步指引） |
+| **`diag_qmt_work_agent.bat`** | **Windows 双击**：一键诊断（跑 probe + verify + inspect 三合一，输出结构化状态） |
+| `scripts/qmt_agent_deploy.py {deploy\|register\|check\|config\|inspect} [--reveal] [--txt]` | 部署 / 登记 / 检查 / 配置 / 检视 bundle（`--txt` 额外产一份 .txt 副本供路径 B 粘贴） |
+| `scripts/gen_qmt_agent_bundle.py [--out X.py] [--txt] [--embed-config CFG]` | 从 `backend/agent_bigqmt/` 生成单文件 bundle |
+| `scripts/qmt_strategy_list_probe.py --target X [--qmt-dir ...]` | 探查策略注册树里是否已登记 |
+| `scripts/qmt_agent_verify.py [--json]` | 注册态 + 心跳一起判（是否真在跑），JSON 输出可直接给程序消费 |
 | `scripts/qmt_cef_cdp.py` | CEF 面板 CDP 诊断 |
 | `scripts/check_bigqmt_agent_py36.py` | G3 校验：bundle 入口捕获的注入函数名字面量是否 ≤3（必须走 `capture_qmt_injected_funcs(globals())`） |
+
+### 5.7 常见部署错误 → 解决方案
+
+| 症状 | 根因 | 解决 |
+|---|---|---|
+| 「模型交易」里看不到 `qmt_work_agent` | 注册树未登记（bundle 已拷贝但未在 QMT GUI 里做导入动作） | 走 §5.2.0 步骤 2：QMT「模型研究」右键「导入本地策略」→ 选 `qmt_work_agent.py` → 重启 QMT |
+| `qmt_agent_verify` 报「心跳已过期 Xs（阈值 45s）」 | 策略未在跑（未启动 / 已崩 / 未启动 autorun） | ①在 QMT「模型交易」手工点「运行」启动一次；②想自动拉起就勾「自动运行」（记进 `UiSettingConfig`）；③确认 `agent_config.json` 路径正确 |
+| `qmt_agent_verify` 报 `registered: false` | 同上（注册树未登记） | 同「模型交易里看不到」 |
+| `qmt_agent_verify` 报 `probe_stale: true` | 上面结论只是「陈旧快照里未见」，不代表当前缺失 | 先让策略真正启动一次（生成新的 `probe_result.json`），再跑 verify |
+| 桥连不上但前端无错 | `agent_config.json` 里 `bridge_dir` 与前端桥接参数不一致（**日常排障第一名**） | 两处必须**完全一致**，包括绝对/相对路径与斜杠方向 |
+| `trading_enabled: false` | 默认下单关闭（安全默认） | 编辑 `agent_config.json` 改为 `true`，重启策略 |
+| `inspect` 报「配置文件被独占锁定」/ `PermissionError` | QMT 正在运行持有文件锁 | 关 QMT 再跑 inspect；`--force` 只跳过运行判定，**不做锁规避** |
+| 「导入本地策略」菜单灰色 / 找不到 | 券商禁用了 .rzrk 导入 | 改走路径 B：新建策略 → 粘贴 `qmt_work_agent.txt` 全部内容 → 编译 |
+| 策略启动但报 `NameError` / `ModuleNotFoundError` | bundle 生成失败或编码问题 | 跑 `python scripts/check_bigqmt_agent_py36.py`；确保用 `gen_qmt_agent_bundle.py` 生成的 bundle 而非手改 |
+| 策略启动即退出、无日志 | `agent_config.json` JSON 语法错 | 用 `python -c "import json; json.load(open('agent_config.json'))"` 校验；模板见 `backend/agent_bigqmt/agent_config.example.json` |
+| 端口 `8086` 拒绝连接（跑 CEF CDP 时） | QMT 未开「CEF 调试」或客户端版本不支持 | 关闭 CEF 诊断路径，改用 `qmt_agent_verify`；`qmt_cef_cdp.py` 需要 QMT 客户端以调试模式启动 |
+| 心跳一直 stale 但「模型交易」里显示运行中 | handlebar 未触发（无行情推进，常见于收盘后或策略未订阅） | 这是**误判活死**的常见来源 —— 心跳新鲜度只是判据之一，不能单独作为唯一判据（TD 系列根因）。用 `is_connected()` 的「现在可用」语义判 |
 
 ---
 

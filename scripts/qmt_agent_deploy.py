@@ -145,6 +145,14 @@ def cmd_deploy(args):
           % (out, os.path.getsize(out), enc))
     print("     策略显示名 = 注册树里的条目名（建议就叫 qmt_work_agent）")
 
+    # 路径 B 辅助：同内容 .txt 副本，记事本双击打开粘贴更顺手（--txt 显式请求）
+    if getattr(args, "txt", False):
+        out_txt = os.path.splitext(out)[0] + ".txt"
+        with io.open(out_txt, "w", encoding=enc, newline="\n") as fh:
+            fh.write(text)
+        print("[OK] 已额外写出 .txt 副本（供路径 B「新建策略→粘贴代码」用）: %s (%d bytes)"
+              % (out_txt, os.path.getsize(out_txt)))
+
     running = qmt_running()
     if running:
         print("\n[!] 检测到 QMT 正在运行: %s" % ", ".join(running))
@@ -382,6 +390,10 @@ def main(argv=None):
                          "（把导入时的「找文件」一步降到一次点击；只开 explorer，"
                          "不触碰 QMT 进程）")
     ap.add_argument("--force", action="store_true", help="inspect: 忽略 QMT 运行状态")
+    ap.add_argument("--txt", action="store_true",
+                    help="deploy: 同目录额外产一份 .txt 副本（内容与 .py 相同，后缀改 .txt）。"
+                         "用途：QMT「新建策略 → 粘贴代码」路径 —— 记事本打开 .txt 粘贴比 IDE 打开 .py 稳。"
+                         "默认关闭（主路径 A「导入本地策略」用 .py 即可）。")
     args = ap.parse_args(argv)
     return {"deploy": cmd_deploy, "config": cmd_config, "inspect": cmd_inspect,
             "check": cmd_check, "register": cmd_register}[args.cmd](args)
