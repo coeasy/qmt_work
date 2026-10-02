@@ -43,8 +43,18 @@ PREFIX = "/api/v1"
 
 #: ``http.get<T>("/x")`` / ``http.post("/x", ...)`` —— 泛型可选，路径可为
 #: 单/双引号字符串或模板字面量。
+#:
+#: ★ R19 第 3 轮修两个漏配（都属**假绿灯**：门禁「看不见」就等于放行）：
+#:   1. 客户端真正发 DELETE 的助手叫 **`http.del`**（`services/http.ts:177`
+#:      `del: (path, opts) => request("DELETE", ...)`）。全仓 `http.del(` 有 **9 处**、
+#:      `http.delete(` **0 处** —— 而原正则只列了 `delete`，于是这 9 个 DELETE 端点
+#:      **从未被对账过**：后端把它们改名/删掉，前端照样运行时 404，门禁全绿。
+#:   2. 泛型用 ``[^<>]*`` 描述，碰到嵌套/多字符实参的 `Record<string, unknown>`
+#:      这类（写成 ``http.post<Record<string, unknown>>(...)``）时尾部多出一个 `>`
+#:      而匹配失败 —— `limitupApi.start/stop/reset` 就是这样整条漏掉的。
+#:      改用「直到 `(` 且不跨行」的描述，两种写法都能吃下。
 CALL_RE = re.compile(
-    r"""\bhttp\.(get|post|patch|put|delete)\s*(?:<[^<>]*>)?\s*\(\s*([`"'])([^`"']*)\2""",
+    r"""\bhttp\.(get|post|patch|put|delete|del)\b[^(\n]*\(\s*([`"'])([^`"']*)\2""",
     re.VERBOSE,
 )
 #: 模板字面量里的插值 ``${kid}`` → 路径参数占位 ``{kid}``
@@ -64,8 +74,17 @@ def load_backend_endpoints() -> set[str]:
     return {k.strip() for k in raw if isinstance(k, str)}
 
 
+#: 前端 http 助手名 → 规范 HTTP 方法名。
+#: `del` 是 `delete` 的别名（`services/http.ts:177` `del: (path, opts) =>
+#: request("DELETE", ...)`），而契约里写的是规范名 `DELETE` —— 不做这层映射，
+#: 刚被 CALL_RE 认出来的 9 个 DELETE 端点会全部误报成「后端不存在」（假红）。
+_METHOD_ALIASES = {"del": "delete"}
+
+
 def normalize(method: str, path: str) -> str:
     """把前端路径字面量归一成 ``METHOD /api/v1/...`` 的契约形态。"""
+    m = method.strip().lower()
+    m = _METHOD_ALIASES.get(m, m)
     p = path.split("?", 1)[0].strip()
     p = INTERP_RE.sub("{param}", p)
     if not p.startswith("/"):
@@ -74,7 +93,7 @@ def normalize(method: str, path: str) -> str:
         p = PREFIX + p
     # 契约里的路径参数名各异（{kid} / {rid} / {job_id}），统一成 {param} 再比
     p = re.sub(r"\{[^}]*\}", "{param}", p)
-    return f"{method.upper()} {p}"
+    return f"{m.upper()} {p}"
 
 
 def contract_normalized(endpoints: set[str]) -> set[str]:

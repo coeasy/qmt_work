@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import inspect
 import logging
 import os
 from typing import Any, Optional
@@ -26,6 +27,41 @@ def _split_instrument(code: str):
 
     base, _, ex = (code or "").partition(".")
     return InstrumentId(code=base, exchange=ex.upper())
+
+
+def _account_type_arg(gateway, account_type: str) -> tuple:
+    """``account_type`` → 追加位置实参元组（网关不支持时返回空元组）。
+
+    ★ 为什么必须探测而不是无条件传（R19 第 1 轮）：
+      走**旧直连路径**（``QMT_USE_PORTS=0``，默认值）时
+      ``bridge.gateway.place_order`` 可能是 **mini 适配器**
+      （``xtquant_client/xtp/trading.py``），它底层调 ``trader.order_stock``，
+      **没有 ``opAccountType`` 形参**，信用/融资语义由连接级 ``account_type``
+      派生。无条件追加第 8 个位置实参 → mini 连接**下单必 TypeError**。
+
+      mini 侧「收下却不用」正是本项目明确反对的形态（见
+      ``tests/test_bigqmt_bridge_face.py::_ACCEPTED_MINI_WIDENINGS`` 的注释），
+      所以这里选择「按签名投递」：只有真正声明该形参的网关（大 QMT 网关）才收到。
+
+      探测结果按函数对象缓存，避免每单重复 ``inspect.signature``。
+    """
+    if not account_type:
+        return ()
+    fn = getattr(gateway, "place_order", None)
+    if fn is None:
+        return ()
+    cached = _ACCOUNT_TYPE_SUPPORT.get(fn)
+    if cached is None:
+        try:
+            cached = "account_type" in inspect.signature(fn).parameters
+        except (TypeError, ValueError):  # 内建/装饰器不可内省 → 保守不传
+            cached = False
+        _ACCOUNT_TYPE_SUPPORT[fn] = cached
+    return (account_type,) if cached else ()
+
+
+#: 缓存：网关 place_order 是否声明 ``account_type`` 形参（见 _account_type_arg）。
+_ACCOUNT_TYPE_SUPPORT: dict = {}
 
 
 def _port_for_bridge(bridge):
@@ -66,7 +102,8 @@ def _port_for_bridge(bridge):
 
 
 def _make_order_request(code: str, direction: str, price_type: str, price: float,
-                        volume: int, strategy_name: str, remark: str):
+                        volume: int, strategy_name: str, remark: str,
+                        account_type: str = ""):
     """构造 canonical 下单请求（price_type/direction 已在更上游校验）。"""
     from connectors.ports import OrderRequest
 
@@ -80,6 +117,8 @@ def _make_order_request(code: str, direction: str, price_type: str, price: float
         remark=remark or "",
         # 幂等锚点：上层若已生成，应在此透传；留空则由 SingleFlight 的第一道防线兜住。
         client_order_id="",
+        # 下单级账户/标的类型（stock/etf/future/option/credit）；空串 = 不覆盖。
+        account_type=str(account_type or ""),
     )
 
 
@@ -143,12 +182,18 @@ class ExecutionService:
         price_type: str = "limit",
         strategy_name: str = "",
         remark: str = "",
+        account_type: str = "",
         *,
         risk=None,
         audit_action: str = "order.submitted",
         risk_checked: bool = False,
     ) -> dict:
         """执行一笔真实委托；市价/无价委托必须使用真实行情完成风控估价。
+
+        account_type：下单级账户/标的类型（stock/etf/future/option/credit）。
+        透传到 connector → 方言 → agent 的 passorder ``opAccountType``；空串表示
+        不覆盖（agent 侧 ``default_account_type`` / stock 兜底）。**不是**连接级
+        ``ConnectionConfig.account_type``（那是账户归类，用于连接发现与展示）。
 
         risk_checked=True 表示**调用方已完成风控**（当前仅 SignalRouter 的下单路径，
         它在 route() 里先跑风控再调本方法）。此时本方法跳过二次校验，只做价格估价——
@@ -161,6 +206,7 @@ class ExecutionService:
             "code": code, "direction": direction, "volume": volume,
             "price": price, "price_type": price_type,
             "strategy": strategy_name, "remark": remark,
+            "account_type": account_type,
         }
         # V9 §7 强制规则：Mandatory Risk 不可绕过。风控未初始化时必须拒绝，
         # 绝不允许「checker is None 即放行」的无风控裸单。
@@ -192,7 +238,8 @@ class ExecutionService:
             # V4 Phase 0-c：经 canonical ExecutionPort 下单（灰度）。
             # 估价/风控已在上方完成，此处只是把「送达」交给端口层。
             request = _make_order_request(code, direction, price_type, risk_price,
-                                          volume, strategy_name, remark)
+                                          volume, strategy_name, remark,
+                                          account_type)
             try:
                 snap = await port.place_order(request)
             except Exception as exc:  # noqa: BLE001
@@ -207,7 +254,7 @@ class ExecutionService:
 
         result: Any = await bridge.call_locked(
             bridge.gateway.place_order, code, direction, price_type, risk_price,
-            volume, strategy_name, remark)
+            volume, strategy_name, remark, *_account_type_arg(bridge.gateway, account_type))
         if isinstance(result, dict) and result.get("code", 0) != 0:
             result["ok"] = False
             self._audit("order.failed", code, params, str(result.get("message") or result))

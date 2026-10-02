@@ -107,6 +107,10 @@ class BigQmtV1:
                 "strategy_name": payload.get("strategy_name", ""),
                 "remark": payload.get("remark", ""),
                 "client_order_id": payload.get("client_order_id", ""),
+                # 下单级账户/标的类型（stock/etf/future/option/credit）→ agent 侧
+                # ``Executor.do_place`` 解析成 passorder 的 ``opAccountType``。
+                # 空串 = 不覆盖（由 agent 的 default_account_type / stock 兜底）。
+                "account_type": payload.get("account_type", "") or "",
                 # D3：幽灵单防护的时间预算。缺省 0=不过期（向后兼容）。
                 # ★ 白名单式产出（D7 / easytrader #520 教训）：调用方多传的
                 #   未知键必须在这里被丢弃，绝不能透传到 agent 的严格签名。

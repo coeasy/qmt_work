@@ -18,10 +18,7 @@ import ast
 import importlib.util
 import json
 import pathlib
-import subprocess
-import sys
 
-import pytest
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 SCRIPTS = ROOT / "scripts"

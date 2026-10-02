@@ -319,6 +319,7 @@ is_connected() = self._connected and not self._agent_unresponsive
 | `scripts/qmt_agent_verify.py [--json]`                                                      | 注册态 + 心跳一起判（是否真在跑），JSON 输出可直接给程序消费                                           |
 | `scripts/qmt_cef_cdp.py`                                                                    | CEF 面板 CDP 诊断                                                                |
 | `scripts/check_bigqmt_agent_py36.py`                                                        | G3 校验：bundle 入口捕获的注入函数名字面量是否 ≤3（必须走 `capture_qmt_injected_funcs(globals())`） |
+| `qmt_agent_verify.py --json` → `bundle.*` 字段                                              | **P0 护栏**（R17 起）：AST 语法校验 + 污染签名检测（前缀被拼了 pandas/numpy/talib 之类） |
 
 ### 5.7 常见部署错误 → 解决方案
 
@@ -336,6 +337,127 @@ is_connected() = self._connected and not self._agent_unresponsive
 | 策略启动即退出、无日志                                | `agent_config.json` JSON 语法错                               | 用 `python -c "import json; json.load(open('agent_config.json'))"` 校验；模板见 `backend/agent_bigqmt/agent_config.example.json` |
 | 端口 `8086` 拒绝连接（跑 CEF CDP 时）                | QMT 未开「CEF 调试」或客户端版本不支持                                    | 关闭 CEF 诊断路径，改用 `qmt_agent_verify`；`qmt_cef_cdp.py` 需要 QMT 客户端以调试模式启动                                                      |
 | 心跳一直 stale 但「模型交易」里显示运行中                   | handlebar 未触发（无行情推进，常见于收盘后或策略未订阅）                          | 这是**误判活死**的常见来源 —— 心跳新鲜度只是判据之一，不能单独作为唯一判据（TD 系列根因）。用 `is_connected()` 的「现在可用」语义判                                          |
+| 策略「运行」时 `IndentationError` 或 `SyntaxError`     | **R17 真实事故**：`qmt_work_agent.py` 头部被拼了另一支策略代码（如 `import pandas/numpy/talib`） | `qmt_agent_verify --json` → 看 `bundle.syntax_ok` / `bundle.pollution_ok`；重新 `deploy_qmt_work_agent.bat` 覆盖 |
+| `bundle.pollution_hits` 非空                           | bundle 前 20 行出现 pandas/numpy/talib/sklearn/torch 等非标准库 import           | 同上，重新部署；手工改过的 bundle **禁止**再往顶部塞任何代码（会污染 agent 入口）                          |
+
+### 5.8 Bundle 完整性护栏（P0 · R17 引入）
+
+**背景**：2026-10-02 用户实测点「运行」报 `IndentationError`，根因是 `QMT_WORK_AGENT.py` 头部被拼了 18 行另一支 CCI 策略（`import pandas/numpy/talib` + `init/handlebar` stub），Python 解释到 docstring 边界就爆。R17 引入两道护栏：
+
+| 检查 | 函数 | 判据 | 何时触发 |
+|---|---|---|---|
+| **语法校验** | `check_bundle_syntax()` | AST `parse()` 是否通过 | 每次 `qmt_agent_verify.py` 运行时 |
+| **污染签名** | `check_bundle_pollution()` | 前 20 行是否出现 `pandas/numpy/talib/sklearn/scipy/matplotlib/seaborn/plotly/torch/tensorflow` | 同上 |
+
+结构化输出（`diag_report.json` → `bundle` 字段）：
+
+```json
+{
+  "path": "P:\\stock\\gd_qmt\\python\\qmt_work_agent.py",
+  "size_bytes": 52538, "line_count": 1297, "encoding": "gb18030",
+  "syntax_ok": true, "syntax_error": null,
+  "pollution_ok": true, "pollution_hits": [], "pollution_first_line": -1,
+  "ok": true
+}
+```
+
+`ok = syntax_ok AND pollution_ok`。任一为假 → `diag_report.json` 的 `problems[]` 里会带具体化建议（"重跑 `deploy_qmt_work_agent.bat` 覆盖为干净版本"）。
+
+### 5.9 多标的账户类型支持（P1 · R18 引入）
+
+**升级前**：`do_place` 只支持 A 股 `passorder` 标准 11-arg 签名，前端只能选「股票」一个 account_type，柜台一旦返 `invalid instrument` 就无从定位。
+
+**升级后**：完整覆盖 5 类标的 × 3 级签名降级：
+
+| account_type | 中文名 / 别名 | opAccountType | 走签名 | 代码格式 |
+|---|---|---|---|---|
+| `stock`     | 股票 / A股 / A 股 | 0 | 11-arg 标准 | `600036.SH` / `000001.SZ` / `688981.SH`（科创板）/ `300059.SZ`（创业板） |
+| `etf`       | ETF / LOF | 1 | 12-arg 扩展 | `510300.SH` / `159915.SZ` |
+| `future`    | 期货 / 商品 | 3 | 12-arg 扩展 | `IF2312.SHF`（股指期货）/ `AU2402.SHF` / `M2401.DCE` / `SR2405.CZCE` |
+| `option`    | 期权 | 2 | 12-arg 扩展 | `10005847.SH` / `02000031.SZ` |
+| `credit`    | 融资融券 / 两融 | 4 | 12-arg 扩展 | `600036.SH`（与 A 股同 code 体系） |
+
+**下单示例**：
+
+```python
+# 股票（默认，无需指定 account_type）
+do_place({"stock_code": "600036.SH", "side": "buy", "price": 35.0, "volume": 100})
+
+# ETF
+do_place({"stock_code": "510300.SH", "side": "buy", "price": 3.5, "volume": 100,
+          "account_type": "etf"})
+
+# 期货（支持中文别名）
+do_place({"stock_code": "IF2312.SHF", "side": "buy", "price": 3800.0, "volume": 1,
+          "account_type": "期货"})
+```
+
+**三级签名降级**（`qmt_api.Executor.do_place` 内部）：
+
+1. 非 stock → 12-arg 扩展签名（末位带 `opAccountType`）
+2. 12-arg 被 `TypeError` 拒 → 11-arg 标准签名（含 ContextInfo 形参）
+3. 11-arg 也被拒 → 10-arg 兜底（老券商版本无 ContextInfo 形参）
+4. 三层全失败 → 抛最后一个 `TypeError` → 外层 `execute()` 转成 `BrokerSDKError` 返回
+
+结果里会带 `extended_signature_fallback: true` 标记（仅当降级发生时），前端可据此提示用户「券商版本不支持扩展签名，已自动降级」。**注意**：降级后 opAccountType 参数**不会**传给柜台——柜台会根据代码格式自己判定。绝大多数场景（ETF/期货/期权）柜台都能从代码识别，问题不大。
+
+**代码格式校验**（下单前）：格式不匹配直接 `BrokerError` 拒绝，避免柜台返难懂的错。
+
+| 场景 | 前端/后端行为 |
+|---|---|
+| `stock_code="IF2312.SHF"` + `account_type="stock"` | ✅ 通过（stock 正则匹配 A 股，但代码是期货格式）→ **应该被拒** |
+
+_注：当前实现对 stock 类型的正则较宽松，未来会加更严格的账户类型 × 代码交叉校验。目前主要靠用户手动选择正确的 `account_type`，或从代码后缀自动推断。_
+
+**配置**（`agent_config.json` 可覆盖）：
+
+```json
+{
+  "default_account_type": "stock",
+  "passorder": {
+    "opAccountType_stock": 0,
+    "opAccountType_etf": 1,
+    "opAccountType_option": 2,
+    "opAccountType_future": 3,
+    "opAccountType_credit": 4
+  }
+}
+```
+
+不同券商版本的枚举可能不同（比如某些版本的 `opAccountType_future` 是 `5` 而不是 `3`），PROBE 诊断正常但下单失败时先改这里的覆盖值。
+
+**Probe 能力面**（`probe_result.json` → `account_types` 字段）：
+
+```json
+{
+  "account_types": {"stock": 0, "etf": 1, "option": 2, "future": 3, "credit": 4},
+  "default_account_type": "stock"
+}
+```
+
+前端可据此渲染下拉框、动态显示支持的账户类型（不用硬编码 5 个）。
+
+---
+
+### 5.10 行情字段契约：所有出口恒定携带 `price`（P0 · R19 第 3 轮修复）
+
+qmt_work 的行情出口有三个：批量 `GET /market/quotes`、单只 `GET /market/quote`、指数条 `GET /market/indices`。
+三者都以**界面契约名**返回——`price`（最新价）与 `pre_close`（昨收）为**必填**。
+
+**修复前**：只有批量出口做了「原生名 → 契约名」归一，单只与指数条直接透传数据源原始字段。
+而不同数据源字段名不一致：`eltdx` / 公开源只给 `last`（无 `price`），券商行情两套名都给。
+于是单只 / 指数行情**可能缺 `price`**，前端读到 `undefined`，K 线 / 概览面板**静默空白**（不报错，最难查）。
+
+**修复后**：归一收敛到唯一入口 `core.quote_fields.apply_ui_quote_contract()`，三个出口共用：
+
+| 行为 | 说明 |
+|---|---|
+| 原生名优先序 | `lastPrice` → `last` → `price` → `close`（唯一键序入口，不再各处各写一份） |
+| 取不到怎么办 | **删键，绝不写 0**——0 会被误读成「价格为零」，属粉饰 |
+| `pre_close` | 与 `price` 成对处理，同规则 |
+| 共享对象 | 单只 / 指数条**复制再改**（`{**q}`），不污染券商 `latest_quotes` 里的共享 dict |
+
+> 使用者侧影响：**无需任何操作**；单只与指数行情现在恒定携带 `price`，K 线 / 概览面板不再可能因缺字段而空白。
 
 ---
 

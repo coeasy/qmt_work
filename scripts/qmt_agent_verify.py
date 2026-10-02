@@ -3,13 +3,24 @@
 
 设计原则（与项目「零猜测」纪律一致）
 ------------------------------------
-* 判定证据只有三份，都不依赖人的口述：
+* 判定证据有**四份**，都不依赖人的口述：
+    - **bundle 源文件本身**   AST 语法 + 污染签名（P0 护栏；先于运行时数据）
     - ``probe_result.json``  启动自检（注入函数 / ContextInfo 方法面 / 写权限）
     - ``agent_status.json``  心跳（uptime / trading_enabled / 主循环最近异常）
     - 客户端日志的注册树片段  策略**是否已登记**（这是「模型交易里看不到」的根因面）
 * 心跳**新鲜度**才是「策略在跑」的判据 —— 「文件存在」不代表进程活着
   （QMT 关闭后文件会留着，这正是最容易自欺的一条）。
 * 每一项失败都给出**下一步动作**，而不是只报错。
+
+**Bundle 完整性**（R17 引入 · 2026-10-02）
+----------------------------------------
+真实事故：`QMT_WORK_AGENT.py` 头部被拼了 18 行另一支 CCI 策略（`#encoding:gbk`
++ `import pandas/numpy/talib` + `init(ContextInfo)` stub），docstring 边界处
+Python 直接 `IndentationError`。所以除了运行时证据，还要在**运行前**做两件事：
+
+1. `check_bundle_syntax` — AST 解析能否通过；不通过就直接定位到行号
+2. `check_bundle_pollution` — 前 N 行是否出现 pandas/numpy/talib/sklearn 等
+   非 qmt_api 白名单 import（合法 agent 只应 import 标准库）
 
 注册状态为什么必须单独验
 ------------------------
@@ -49,6 +60,123 @@ def _load(path):
             return json.load(fh)
     except Exception:
         return None
+
+
+# ---------------------------------------------------------------------------
+# Bundle 完整性护栏（P0 · R17 引入）
+# ---------------------------------------------------------------------------
+
+#: QMT agent bundle **只应** import 标准库 + `__future__`。下列第三方/科学计算库
+#: 出现在 bundle 前部就是**污染**（另一支策略被前缀拼进来）：
+#: 2026-10-02 真实事故 `QMT_WORK_AGENT.py` 被 18 行 CCI 策略头污染，前缀含
+#: `import pandas as pd` + `import numpy as np` + `import talib`。
+POLLUTION_IMPORTS = (
+    "pandas", "numpy", "talib", "sklearn", "scipy",
+    "matplotlib", "seaborn", "plotly", "torch", "tensorflow",
+)
+
+#: 合法 QMT agent 顶部只应有标准库 import（白名单）。
+_AGENT_STDLIB_IMPORTS = frozenset({
+    "json", "os", "sys", "time", "traceback", "ast", "io", "re", "glob",
+    "argparse", "threading", "signal", "shutil", "tempfile", "logging",
+    "collections", "collections.abc", "functools", "itertools",
+    "datetime", "math", "random", "string", "textwrap", "base64",
+    "hashlib", "struct", "enum", "contextlib", "types", "operator",
+    "copy", "pprint", "socket", "http", "http.client", "urllib",
+    "thread", "select", "select.select", "subprocess", "unicodedata",
+    "__future__",
+})
+
+
+def _read_bundle_source(path, encoding_candidates=("utf-8", "gb18030", "gbk")):
+    """按多个编码候选读 bundle 源文件。返回 (text, encoding) 或 (None, reason)。"""
+    if not path or not os.path.isfile(path):
+        return None, "file_not_found"
+    for enc in encoding_candidates:
+        try:
+            with io.open(path, "r", encoding=enc) as fh:
+                return fh.read(), enc
+        except (UnicodeDecodeError, IOError):
+            continue
+    return None, "encoding_failed"
+
+
+def check_bundle_syntax(path):
+    """AST 解析校验。返回 dict：
+    {'ok': bool, 'error': str|None, 'encoding': str|None,
+     'line_count': int, 'size_bytes': int}
+    """
+    out = {"ok": False, "error": None, "encoding": None,
+           "line_count": 0, "size_bytes": 0}
+    try:
+        out["size_bytes"] = os.path.getsize(path)
+    except OSError:
+        return out
+    text, enc = _read_bundle_source(path)
+    if text is None:
+        out["error"] = "cannot_read (%s)" % enc
+        return out
+    out["encoding"] = enc
+    out["line_count"] = text.count("\n") + 1
+    try:
+        import ast  # 延迟导入，避免在没用的分支上浪费
+        ast.parse(text)
+        out["ok"] = True
+    except SyntaxError as e:
+        out["error"] = "SyntaxError at line %s: %s" % (e.lineno, e.msg)
+    except Exception as e:  # noqa: BLE001
+        out["error"] = "%s: %s" % (type(e).__name__, e)
+    return out
+
+
+def check_bundle_pollution(path, top_n=20):
+    """检测 bundle 顶部 N 行是否出现「非法第三方 import」。
+    返回 dict：{'ok': bool, 'imports_found': list, 'first_import_line': int}
+    """
+    out = {"ok": True, "imports_found": [], "first_import_line": -1}
+    text, _ = _read_bundle_source(path)
+    if text is None:
+        # 读不出来的情况由 check_bundle_syntax 负责报错
+        return out
+    lines = text.splitlines()
+    import_re = re.compile(r"^\s*(?:import|from)\s+([A-Za-z_][A-Za-z0-9_]*)")
+    for i, line in enumerate(lines[:top_n]):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        m = import_re.match(stripped)
+        if not m:
+            continue
+        mod = m.group(1)
+        root = mod.split(".")[0]
+        if root in POLLUTION_IMPORTS:
+            out["ok"] = False
+            out["imports_found"].append("%s@L%d" % (root, i + 1))
+            if out["first_import_line"] < 0:
+                out["first_import_line"] = i + 1
+    return out
+
+
+def bundle_health(path):
+    """一次跑完语法 + 污染两项检查，返回给 diag_report / 前端聚合用。
+
+    ``checked=True``：调用方已给出确定的 bundle 路径，结论具判定力。
+    """
+    syn = check_bundle_syntax(path)
+    pol = check_bundle_pollution(path)
+    return {
+        "checked": True,
+        "path": path,
+        "size_bytes": syn.get("size_bytes", 0),
+        "line_count": syn.get("line_count", 0),
+        "encoding": syn.get("encoding"),
+        "syntax_ok": syn.get("ok", False),
+        "syntax_error": syn.get("error"),
+        "pollution_ok": pol.get("ok", True),
+        "pollution_hits": pol.get("imports_found", []),
+        "pollution_first_line": pol.get("first_import_line", -1),
+        "ok": bool(syn.get("ok") and pol.get("ok")),
+    }
 
 
 #: 只有**主日志**里才有注册树行。副日志（`XtClient_datasource_*.log` 等）
@@ -100,8 +228,41 @@ def registration(qmt_dir, name):
 
 
 def collect(bridge_dir, qmt_dir=None, name="qmt_work_agent"):
+    # Bundle 完整性（P0 护栏）：从 <qmt_dir>/python/<name>.py 读文件；
+    # 大小写不敏感匹配（Windows 上 QMT_WORK_AGENT.py 与 qmt_work_agent.py 是同一文件）。
+    #
+    # ★ checked 语义（R19 第 1 轮）：只有**知道 QMT 目录**时才谈得上校验 bundle。
+    #   未传 --qmt-dir 时置 ``checked=False``（状态未知），既不能断言"文件在"，
+    #   也不能断言"文件不在" —— 后者会把「只验桥目录」的调用方误判成失败，
+    #   前者则会让 R17 的污染事故再次以假绿灯形式溜过去。
+    #   `diag_qmt_report` 路径总会先解析出真实 qmt_dir（解析不到直接 exit 1），
+    #   所以「部署后校验」这一真实场景始终是 checked=True。
+    bundle_path = None
+    if qmt_dir:
+        for cand in (os.path.join(qmt_dir, "python", name + ".py"),
+                     os.path.join(qmt_dir, "python", name.upper() + ".py")):
+            if os.path.isfile(cand):
+                bundle_path = cand
+                break
+    if not qmt_dir:
+        bundle = {
+            "checked": False, "ok": None, "path": None, "syntax_ok": None,
+            "syntax_error": None, "pollution_ok": None, "pollution_hits": [],
+            "size_bytes": 0, "line_count": 0, "encoding": None,
+        }
+    elif bundle_path:
+        bundle = bundle_health(bundle_path)
+        bundle["checked"] = True
+    else:
+        bundle = {
+            "checked": True, "ok": False, "path": None, "syntax_ok": False,
+            "syntax_error": "bundle_not_found",
+            "pollution_ok": True, "pollution_hits": [],
+            "size_bytes": 0, "line_count": 0, "encoding": None,
+        }
     return {
         "bridge_dir": bridge_dir,
+        "bundle": bundle,
         "probe": _load(os.path.join(bridge_dir, "probe_result.json")),
         "status": _load(os.path.join(bridge_dir, "agent_status.json")),
         "req_dir": os.path.isdir(os.path.join(bridge_dir, "req")),
@@ -116,6 +277,11 @@ def evaluate(data):
     lines = []
     details = {"alive": False, "trading_enabled": False, "problems": []}
     probe, status = data["probe"], data["status"]
+    # ★ R19 第 1 轮修复：`name` 原先在第 1 段（注册树）才赋值，但第 0 段
+    #   （bundle 完整性）已经要用它拼提示语 —— bundle 缺失时抛
+    #   `UnboundLocalError`，把「策略没部署」误报成脚本崩溃。
+    #   提到函数最前面，全段共用同一个真源。
+    name = data.get("strategy", "qmt_work_agent")
 
     def bad(msg, action):
         details["problems"].append(msg)
@@ -127,9 +293,42 @@ def evaluate(data):
 
     lines.append("桥目录: %s" % data["bridge_dir"])
 
-    # ---- 0. 策略有没有被客户端**登记**（这是「看不到」的根因面）----
+    # ---- 0. Bundle 完整性（P0 护栏 · R17 引入）----
+    # ★ 这一段必须在其他运行时证据**之前**：文件被污染（头部被拼了另一支策略）
+    #   时策略根本跑不起来，心跳/注入函数等后续证据全都拿不到。先拦下来才谈得上
+    #   后续判断，否则会把「bundle 语法错」误诊成「策略未启动」。
+    bundle = data.get("bundle") or {}
+    bundle_checked = bool(bundle.get("checked"))
+    details["bundle_checked"] = bundle_checked
+    details["bundle_syntax_ok"] = bool(bundle.get("syntax_ok"))
+    details["bundle_pollution_ok"] = bool(bundle.get("pollution_ok"))
+    details["bundle_size_bytes"] = bundle.get("size_bytes", 0)
+    if not bundle_checked:
+        # 只验桥目录（未传 --qmt-dir）时 bundle 状态未知 —— **不**计入 problems，
+        # 但也绝不写 [v]，避免读者误以为校验过。
+        lines.append("  [-] bundle 未校验（未提供 --qmt-dir，仅能确认桥目录自身）")
+    elif not bundle.get("path"):
+        bad("策略文件不存在: <QMT>/python/%s.py" % name,
+            "先跑 scripts/qmt_agent_deploy.py deploy 发布单文件 agent；"
+            "或检查 --qmt-dir 是否传对了")
+    elif not bundle.get("syntax_ok"):
+        bad("bundle 语法校验失败: %s" % bundle.get("syntax_error"),
+            "bundle 可能被手工改坏了（R17 真实事故：文件头被拼了另一支策略）。"
+            "重跑 `python scripts/qmt_agent_deploy.py deploy --qmt-dir <QMT> --txt`"
+            " 覆盖为干净版本，然后在 QMT 里重新「导入本地策略」")
+    else:
+        good("bundle 语法校验通过（%d 字节, %d 行, %s）"
+             % (bundle.get("size_bytes", 0), bundle.get("line_count", 0),
+                bundle.get("encoding") or "?"))
+    if bundle_checked and bundle.get("path") and not bundle.get("pollution_ok"):
+        bad("bundle 检测到污染签名: %s"
+            % ", ".join(bundle.get("pollution_hits", [])),
+            "顶部 N 行出现了 pandas/numpy/talib 等非标准库 import —— 说明文件被"
+            " 前缀污染（另一支策略被拼进来）。重新部署覆盖。")
+
+    # ---- 1. 策略有没有被客户端**登记**（这是「看不到」的根因面）----
     reg = data.get("reg") or {}
-    name = data.get("strategy", "qmt_work_agent")
+    # `name` 已在函数开头统一取值（bundle 段也要用），此处不再重复赋值。
     if reg.get("log"):
         details["registered"] = reg.get("registered")
         details["autorun"] = reg.get("autorun")

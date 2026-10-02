@@ -21,7 +21,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from connectors.dialects import BigQmtV1, get_dialect  # noqa: E402
+from connectors.dialects import BigQmtV1  # noqa: E402
 from connectors.registry import resolve  # noqa: E402
 from connectors.transport import WireRequest  # noqa: E402
 

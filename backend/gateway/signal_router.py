@@ -49,6 +49,11 @@ class Signal:
     remark: str = ""
     broker_id: str = ""
     payload: dict = field(default_factory=dict)
+    #: 下单级账户/标的类型（stock / etf / future / option / credit）。
+    #: 空串 = 不覆盖，由 agent 的 ``default_account_type`` 或默认 stock 兜底。
+    #: ⚠️ 与 ``broker_id`` 级别概念不同：broker_id 选**哪条连接**，本字段选
+    #:   该连接上 passorder 的 ``opAccountType``（期货/期权/两融必须显式给出）。
+    account_type: str = ""
 
 
 class SignalRouter:
@@ -291,7 +296,8 @@ class SignalRouter:
     async def submit(self, code: str, side: str, volume: int, price: float = 0.0,
                      price_type: str = "limit", source: str = "manual",
                      broker_id: str = "", remark: str = "", idempotency_key: str = "",
-                     auto_confirm: bool = False, payload: dict | None = None) -> dict:
+                     auto_confirm: bool = False, payload: dict | None = None,
+                     account_type: str = "") -> dict:
         """统一下单入口（引擎/策略/手动共用）：风控 + 幂等 + TOTP + WAL + 审计 + 真实下单。
 
         阶段 0-B（F6/F7/F8/F9）：所有引擎（algo/limitup/rebalance/strategy_runtime/
@@ -300,13 +306,17 @@ class SignalRouter:
         idempotency_key 非空时经单飞（single-flight）幂等：同 key 并发/窗口内重复
         请求只执行一次真实逻辑，其余返回缓存结果并标记 duplicated（阶段 0-B / F1）。
 
+        account_type：下单级账户/标的类型（stock/etf/future/option/credit），
+        透传到 connector/方言/agent。空串 = 不覆盖（默认 stock）。期货/期权/两融
+        账户必须显式给出，否则 agent 会按 A 股标准签名送单被柜台拒。
+
         P0-3：幂等统一在 `route()` 内处理（此处只做透传），避免 submit + route
         双层 single_flight 造成语义混乱；未传 key 的引擎来源由 route 自动生成。
         """
         sig = Signal(source=source, code=str(code), side=str(side),
                      volume=int(volume), price=float(price or 0),
                      price_type=price_type, remark=remark or "", broker_id=broker_id or "",
-                     payload=payload or {})
+                     payload=payload or {}, account_type=str(account_type or ""))
         return await self.route(sig, auto_confirm=auto_confirm,
                                 idempotency_key=idempotency_key)
 
@@ -448,6 +458,7 @@ class SignalRouter:
             "price": sig.price, "volume": sig.volume,
             "price_type": sig.price_type, "broker_id": sig.broker_id,
             "mode": self.mode, "remark": sig.remark,
+            "account_type": sig.account_type,
             "ts": now_iso(),
         })
 
@@ -465,7 +476,7 @@ class SignalRouter:
             from gateway.execution import ExecutionService
             res = await ExecutionService(risk=self._risk, db=self._db).place_order(
                 b, sig.code, sig.side, sig.volume, sig.price, sig.price_type,
-                sig.source, sig.remark, risk=self._risk,
+                sig.source, sig.remark, sig.account_type, risk=self._risk,
                 # P0-2：route() 已完成风控与计数，此处不再二次校验——
                 # 否则同一笔委托会消耗两倍频率窗口与日额度。
                 risk_checked=True,

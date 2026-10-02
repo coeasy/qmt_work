@@ -82,7 +82,10 @@ async def trade_order(body: dict, ctx: AppContext = Depends(get_ctx)):
         res = await ctx.signal_router.submit(
             code, direction, volume, price, price_type, source="manual",
             broker_id=conn_id, remark=str(body.get("remark", "") or ""),
-            idempotency_key=str(idem or ""), auto_confirm=False)
+            idempotency_key=str(idem or ""), auto_confirm=False,
+            # 下单级账户/标的类型（stock/etf/future/option/credit）。不传 = 不覆盖；
+            # agent 侧 `default_account_type`（agent_config.json）或 stock 兜底。
+            account_type=str(body.get("account_type", "") or ""))
         if isinstance(res, dict) and conn_id:
             res["conn_id"] = conn_id
         if isinstance(res, dict) and not res.get("ok", True):

@@ -523,19 +523,19 @@ await user.position()                                  # → canonical 快照
 
 **不变量守护**：A1~A6 全程未触碰 INV-1/2/3；A3 的 UNKNOWN 一等公民与零 mock 纪律（业务失败→400 / 传输故障→503）保持一致；A4 的修正直接堵住「假绿灯放行真单」的合规风险。
 
-**测试增量**：自 §10.5 基线以来（R40 两轮 + R41 复核 + R42 大 QMT 桥接易用性 + R43 诊断聚合）使全仓 `EXPECTED_TESTS` 由 1757 增至 **1938**、`test_*.py` 由 158 增至 **169**（已在 `scripts/ci_reconcile.py` 与 `README.md` 两处同步）。新增/强化集中在 6 个文件：
+**测试增量**：自 §10.5 基线以来（R40 两轮 + R41 复核 + R42 大 QMT 桥接易用性 + R43 诊断聚合 + R17 bundle 完整性护栏 + R18 多标的账户类型 + R19 三轮逻辑审计）使全仓 `EXPECTED_TESTS` 由 1757 增至 **2051**、`test_*.py` 由 158 增至 **172**（已在 `scripts/ci_reconcile.py` 与 `README.md` 两处同步）。新增/强化集中在 13 个文件：
 
 | 文件 | 用例数 | 本轮新增覆盖 |
 |---|---|---|
+| `test_bundle_hardening.py` | **9**（新增，R17） | Bundle 完整性护栏：AST 语法通过/失败（IndentationError 真实事故）、GBK/GB18030 编码兼容、污染签名（pandas/numpy/talib 前缀）、注释与标准库不误报、`bundle_health` 聚合 |
+| `test_multi_instrument.py` | **68**（新增 R18，**R19 修正**） | 多标的账户类型：17 例中文/英文别名归一化、**5 例未知取值必须报错**（R19：原先静默落 A 股，属「不静默吞错」违纪）、5 例 opAccountType 默认映射、23 例代码格式校验（A股/科创板/创业板/北交所/ETF/期货多市场/期权）、4 例三级签名降级（12→11→10 全链）、**3 例 `passorder` 返回 None 判成功**（R19：R18 的 `ret is None` 哨兵把老实的成交误报 BrokerSDKError，用户重试即重复委托）、2 例 meta 能力面、1 例 shield 拒绝 |
+| `test_order_account_type_wiring.py` | **21**（新增，R19） | 下单级 `account_type` **全链路贯通**回归锁：DTO 字段 + 方言 `prepare()` 产出（且不破坏白名单纪律）+ `GenericConnector` payload + 6 个环节源码扫描防断链 + `ExecutionService.place_order` / `SignalRouter.submit` 签名 + agent 取值优先级 + **反向护栏：mini 适配器永不被投递该参数**（否则 `order_stock` 签名不符 TypeError）+ 跨语言对账（前端下拉选项 ⊆ 后端 canonical 类型，从源码 AST/正则读，避免手抄漂移）+ **R19 第 3 轮新增：AST 扫描 `tests/` 全部 SignalRouter.submit 替身，缺参即点名**（防「接口加参 → 替身静默落后 → 运行时才炸」复发，TD-36） |
 | `test_bigqmt_file_bridge.py` | **24**（原 19） | agent 重启 seq 回卷 / 轮转到**更大**文件 / 事件文件删除后重建 / 半行不吃且只投一次 / 两次 drain 间 700 条突发零丢失 |
 | `test_bigqmt_relay_redis.py` | **7**（原 5） | redis 侧会话回卷检测；拐点重放（不回退到 0，避免旧会话高 seq 记录倒灌） |
 | `test_bigqmt_bridge_face.py` | **33**（原 20） | ① 网关相对 mini 契约的**唯一加宽**（`subscribe_quote(period)`）声明化对账 + AST 反向断言（调用点不得把 `period` 漏给网关）；② §6 **wire action 词表五方 AST 对账**（dialect `_OP_TO_ACTION` / `Ops` / agent `_ACTIONS` / agent `execute()` 派发分支 / fake agent，双向集合差必须为空）；③ §7 **存活判据** 7 例（90s 空闲才探、5s 短超时、30s 退避、**连续 2 次**失败才判死、一次成功往返即清旗、`is_connected()` 随之转 False、以及**事件泵确实调用探活**的接线断言） |
 | `test_metrics_wiring.py` | **8**（新增） | 指标「生产者缺失」护栏（TD-27）：从 `Metrics` 反射出全部 `record_*`，在**排除 `tests/`** 的产线代码里逐个核对调用点；反向用 `render()` 的**真实输出**核对每个被渲染的 `qmt_*` 都有生产者；另有自证用例防扫描器静默失效 |
 | `test_db_backup_policy.py` | **53**（原 46） | WAL 指纹形态可比性 7 条：降级↔归一互认、`_shape()` 排除非形态键（`norm`/`pre_wal`）、真写入仍备份、纯 checkpoint 不破 skip 链 |
-
-> **A14 顺带修掉的放大器**：该文件原有的 `_live_db_backup` fixture 直指 1.4 GB 生产库且 `keep=10`，
-> 单文件一轮就要写出约 **5.6 GB** 备份（正是「磁盘满 → checkpoint 降级 → 偶发为红」的元凶）。
-> 已改为 tmp 路径的真 `DB` 实例（仍保持「同一个库」的语义），单次备份体积 1.4 GB → **420 KB**。
+| `test_quote_field_unity.py` | **35**（原 20，**R19 第 3 轮**） | 界面契约名归一唯一入口 `apply_ui_quote_contract` 语义 7 例 + 端点级 4 例（单只 `/market/quote`、指数条 `/market/indices` 均**复制再改**，不污染券商共享 `latest_quotes` 对象）+ 内联回潮扫描（禁止端点自行 `pop("price")` 绕过唯一入口）+ 幂等。堵住「`Quote.price` 声明必填、eltdx/公开源却只给 `last` ⇒ 单只/指数行情缺 `price`」的**潜伏断链** |
 
 ---
 

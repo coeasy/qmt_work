@@ -301,12 +301,6 @@ export const brokerApi = {
   autoDetect: () =>
     http.get<AutoDetectResult>("/brokers/auto-detect", { timeout: 60_000, retry: 0 }),
 
-  runtimes: () => http.get<Record<string, unknown>>("/brokers/runtimes"),
-
-  /** 版本画像：内部会做一次客户端目录探测（可能 spawn 子进程），同样给足超时。 */
-  versionInfo: (body: { client_path: string }) =>
-    http.post<VersionProfile>("/brokers/version-info", body, { timeout: 60_000 }),
-
   /**
    * 端到端可观测性快照（排障用）：宿主 ABI、随包桥接运行时、各连接状态与行情泵健康。
    *
@@ -316,6 +310,4 @@ export const brokerApi = {
    */
   diagnostics: (deep = false) =>
     http.get<BrokerDiagnostics>("/brokers/diagnostics", { query: deep ? { deep: 1 } : {} }),
-
-  launch: (connId: string) => http.post<{ ok: boolean }>("/brokers/launch", { conn_id: connId }),
 };

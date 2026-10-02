@@ -80,11 +80,13 @@ class _SpyRouter:
 
     async def submit(self, code, side, volume, price=0.0, price_type="limit",
                      source="", broker_id="", remark="", idempotency_key="",
-                     auto_confirm=False, payload=None):
+                     auto_confirm=False, payload=None, account_type=""):
         self.submits.append({
             "code": code, "side": side, "volume": volume, "price": price,
             "price_type": price_type, "source": source, "broker_id": broker_id,
             "idempotency_key": idempotency_key, "auto_confirm": auto_confirm,
+            # R19：下单级账户/标的类型也在统一入口的契约面上（透传到 agent）。
+            "account_type": account_type,
         })
         return {"ok": True, "mode": self.mode, "order_id": "PAPER-1", "status": "filled"}
 

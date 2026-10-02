@@ -18,6 +18,8 @@
   "poll_interval_ms": 500,
   "account_id": "",
 
+  "default_account_type": "stock",
+
   "passorder": {
     "_comment": "不同券商 QMT 版本枚举不一致；PROBE 诊断正常但下单失败时先试改这里。下列为常见默认值，请以你的券商 QMT 实际枚举为准。",
     "opType_buy": 23,
@@ -26,6 +28,13 @@
     "prType_limit": 11,
     "prType_market": 5,
     "quickTrade": 2,
-    "strategyName": "qmt_work"
+    "strategyName": "qmt_work",
+
+    "_opAccountType_comment": "QMT 账户类型枚举。非 0 值走扩展 12-参数 passorder 签名；老券商版本不支持扩展签名时会自动降级到 11-参数标准签名（结果里带 extended_signature_fallback=true）。",
+    "opAccountType_stock": 0,
+    "opAccountType_etf": 1,
+    "opAccountType_option": 2,
+    "opAccountType_future": 3,
+    "opAccountType_credit": 4
   }
 }

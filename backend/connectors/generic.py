@@ -132,6 +132,9 @@ class GenericConnector:
             "client_order_id": request.client_order_id,
             "strategy_name": request.strategy_name,
             "remark": request.remark,
+            # 下单级账户/标的类型（stock/etf/future/option/credit）。方言负责把它
+            # 翻成自己 wire 上的键名（大 QMT = account_type）；不支持的方言忽略即可。
+            "account_type": request.account_type,
         }
         snap = await self._call(Ops.PLACE_ORDER, payload)
         if snap is None or not snap.broker_order_id:

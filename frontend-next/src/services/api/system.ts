@@ -8,7 +8,6 @@ import type {
   RuntimeConfig,
   RiskConfig,
   RiskDailyStats,
-  RuntimeJob,
   RuntimeJobList,
   ScheduleItem,
   ScheduleList,
@@ -185,21 +184,13 @@ export interface ScheduleCreate {
  *   - /api-keys 的主键是 id（int），列表返回 key_prefix 而非明文
  */
 export const systemApi = {
-  live: () => http.get<LiveResponse>("/live"),
-
   health: () => http.get<HealthResponse>("/health"),
-
-  ready: () => http.get<ReadyResponse>("/ready"),
 
   capabilities: (category = "", method = "") =>
     http.get<CapabilitiesResponse>("/capabilities", { query: { category, method } }),
 
-  capabilitiesSummary: () => http.get<CapabilitiesSummary>("/capabilities/summary"),
-
   /** MCP 工具清单（自省），用于界面浏览 + 接入说明 */
   capabilitiesMcp: () => http.get<McpCapabilities>("/capabilities/mcp"),
-
-  platformStatus: () => http.get<Record<string, unknown>>("/platform/status"),
 
   /* ---- 运行时引擎参数（热更新） ---- */
 
@@ -210,9 +201,6 @@ export const systemApi = {
       "/config/runtime",
       patch,
     ),
-
-  resetConfig: (key = "") =>
-    http.post<{ reset: string[]; config: RuntimeConfig }>("/config/runtime/reset", { key }),
 
   configHistory: (limit = 50) =>
     http.get<{ rows: ConfigHistoryRow[] }>("/config/runtime/history", { query: { limit } }),
@@ -227,8 +215,6 @@ export const systemApi = {
 
   updateRiskConfig: (patch: Record<string, unknown>) =>
     http.put<{ saved: boolean; changed: string[]; config: RiskConfig }>("/config/risk", patch),
-
-  riskDaily: () => http.get<RiskDailyStats>("/config/risk/daily"),
 
   /** 熔断开关：trip = 手动熔断（暂停买入开仓）/ reset = 解除 */
   riskCircuit: (action: "trip" | "reset", reason = "") =>
@@ -287,9 +273,6 @@ export const systemApi = {
       patch,
     ),
 
-  resetUiAppearance: () =>
-    http.post<{ reset: boolean; appearance: UiAppearance }>("/config/ui/reset"),
-
   /** 导出：可抄给另一台机器（返回体本身即导入所需格式） */
   exportUiAppearance: () =>
     http.get<{ version: number; kind: string; exported_at: string; appearance: UiAppearance }>(
@@ -318,12 +301,9 @@ export const systemApi = {
     http.post<{ deleted: number }>("/notifications/batch-delete", { ids }),
 
   dataProviders: () => http.get<DataProvidersResponse>("/data/providers"),
-  dataProvidersHealth: () => http.get<DataProvidersHealth>("/data/providers/health"),
   datahubPolicies: () => http.get<DatahubPolicies>("/datahub/policies"),
   sourceDiagnostics: (params: { capability?: string; probe?: number } = {}) =>
     http.get<SourceDiagnostics>("/data/source/diagnostics", { query: params }),
-
-
 
   notificationLogs: (limit = 50) =>
     http.get<unknown[]>("/notifications/logs", { query: { limit } }),
@@ -338,8 +318,6 @@ export const systemApi = {
 
   submitJob: (body: RuntimeJobSubmit) =>
     http.post<{ id: string; status: string }>("/runtime/jobs", body),
-
-  job: (jobId: string) => http.get<RuntimeJob>(`/runtime/jobs/${jobId}`),
 
   cancelJob: (jobId: string) =>
     http.post<{ id: string; status: string }>(`/runtime/jobs/${jobId}/cancel`),

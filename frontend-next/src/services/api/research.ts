@@ -146,9 +146,6 @@ export interface AttributionResponse {
 export const researchApi = {
   factorsList: () => http.get<FactorInfo[]>("/factors"),
 
-  factorCompute: (body: { name: string; values: number[]; params?: Record<string, unknown> }) =>
-    http.post<FactorComputeResult>("/factors/compute", body),
-
   computeManyFactors: (body: { names: string[]; values: number[]; params?: Record<string, unknown> }) =>
     http.post<ManyFactorsResult>("/factors/compute/many", body),
 
@@ -240,7 +237,6 @@ export interface BacktestResult {
 
 export const backtestApi = {
   jobs: () => http.get<BacktestJob[]>("/backtest/jobs"),
-  job: (id: string) => http.get<BacktestJob>(`/backtest/jobs/${id}`),
   /** kind: backtest / compare / sensitivity / sweep（后端白名单，写错 400） */
   submit: (body: { kind?: string; params: Record<string, unknown> }) =>
     http.post<BacktestJob>("/backtest/jobs", body),
@@ -248,7 +244,6 @@ export const backtestApi = {
   cancel: (id: string) => http.del<{ cancelled: boolean }>(`/backtest/jobs/${id}`),
   batchDelete: (ids: string[]) =>
     http.post<{ deleted: number }>("/backtest/jobs/batch-delete", { ids }),
-  sweep: (body: Record<string, unknown>) => http.post<BacktestJob>("/backtest/sweep", body),
 };
 
 /* ---------------- 策略市场（口径来源：app/routes/strategy_market.py） ---------------- */
@@ -294,8 +289,6 @@ export const strategyMarketApi = {
     http.post<Record<string, unknown>>("/strategy-market/export", body),
   importBundle: (body: { path: string }) =>
     http.post<Record<string, unknown>>("/strategy-market/import", body),
-  exportJson: (body: { id: string; path?: string }) =>
-    http.post<Record<string, unknown>>("/strategy-market/export-json", body),
   importJson: (body: { path: string }) =>
     http.post<Record<string, unknown>>("/strategy-market/import-json", body),
 };

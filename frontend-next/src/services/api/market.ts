@@ -477,16 +477,6 @@ export const marketApi = {
   session: () => http.get<SessionSnapshot>("/market/session"),
 
   /**
-   * 单标的快照。
-   *
-   * ⚠️ 目前**无调用方**（界面行情一律走 WS 订阅 + `stores/quotes.ts`）。
-   * 重新启用前必须确认契约：eltdx 路径返回的是 `last` 而非界面契约名 `price`，
-   * 直接用会得到一堆 `undefined` —— 与「订阅到了但没数字」是同一个坑。
-   */
-  quote: (code: string, connId = "", source = "auto") =>
-    http.get<Quote>("/market/quote", { query: { code, conn_id: connId, source } }),
-
-  /**
    * 批量快照。优先命中 SyncEngine 已订阅缓存，缺失项再打源补齐。
    *
    * ⚠️ 后端在补齐失败时会**静默丢弃**缺项（`routes/market.py` 的
@@ -537,11 +527,6 @@ export const marketApi = {
   resolve: (q: string, limit = 8) =>
     http.get<Instrument[]>("/market/resolve", { query: { q, limit } }),
 
-  indices: (codes = "", source = "auto", ttl = 3, spark = false, sparkDays = 20) =>
-    http.get<IndicesResponse>("/market/indices", {
-      query: { codes, source, ttl, spark, spark_days: sparkDays },
-    }),
-
   boards: (kind = "industry", sortBy = "pct", limit = 50, source = "auto", ttl = 10) =>
     http.get<BoardsResponse>("/market/boards", {
       query: { kind, sort_by: sortBy, limit, source, ttl },
@@ -550,16 +535,6 @@ export const marketApi = {
   boardConstituents: (code: string, limit = 100, page = 0, source = "auto", ttl = 15) =>
     http.get<BoardConstituentsResponse>("/market/board/constituents", {
       query: { code, limit, page, source, ttl },
-    }),
-
-  boardLookup: (name: string, limit = 8, source = "auto", ttl = 600) =>
-    http.get<BoardLookupResponse>("/market/board/lookup", {
-      query: { name, limit, source, ttl },
-    }),
-
-  boardKline: (code: string, period: Period = "1d", count = 60, source = "auto", ttl = 60) =>
-    http.get<BoardKlineResponse>("/market/board/kline", {
-      query: { code, period, count, source, ttl },
     }),
 
   etfs: (limit = 0, withQuote = false, source = "auto", ttl = 300) =>
@@ -595,32 +570,15 @@ export const marketApi = {
   overview: (source = "auto", ttl = 60) =>
     http.get<OverviewResponse>("/market/overview", { query: { source, ttl } }),
 
-  /** 批量流通股本 + 涨跌停价（换手率/涨跌停展示的真实口径来源） */
-  capital: (codes: string[], source = "auto", ttl = 300) =>
-    http.get<{ shares: Record<string, unknown>; limits: Record<string, unknown> }>(
-      "/market/capital",
-      { query: { codes: codes.join(","), source, ttl } },
-    ),
-
   /** 涨停板扫描（基于板块内最新行情） */
   limitupScan: (sector = "沪深A股", minPct = 9.5, onlyLimit = true, limit = 200, sort = "change") =>
     http.get<LimitUpScanResponse>("/market/limitup", {
       query: { sector, min_pct: minPct, only_limit: onlyLimit, limit, sort },
     }),
 
-  /** 市场广度：全市场/板块/主要指数涨跌停家数 */
-  breadth: () => http.get<Record<string, unknown>>("/market/breadth"),
-
   /** L2 逐笔成交 */
   l2: (code: string, count = 100) =>
     http.get<L2Transaction[]>("/market/l2", { query: { code, count } }),
-
-  sources: () => http.get<MarketSourcesResponse>("/market/sources"),
-
-  /** 可用周期清单（契约驱动 UI，supported=false 的周期应置灰） */
-  periods: () => http.get<{ periods: PeriodSpec[] }>("/market/periods"),
-
-  providers: () => http.get<Record<string, unknown>>("/market/providers"),
 
   klineSyncStatus: () => http.get<KlineSyncStatus>("/market/kline/sync-status"),
 

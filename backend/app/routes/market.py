@@ -1,7 +1,7 @@
 from core.config import export_dir
 from core.context import AppContext, get_ctx
 from core.paths import PathError, validate_dir
-from core.quote_fields import pick_last_price
+from core.quote_fields import apply_ui_quote_contract
 # --- stdlib imports injected by fix_route_imports ---
 import asyncio
 import logging
@@ -231,7 +231,13 @@ async def market_quote(code: str, conn_id: str = "", source: str = "auto", ctx: 
         return err(*quote_error(code, source))
     # 必须用 ok() 包裹：quote dict 自带 "code" 字段（股票代码），若裸返回，
     # 前端 _req 会误判 `j.code !== 0` 直接抛错 → 个股/行情分析全部空数据。
-    return ok(q)
+    #
+    # ★ R19 第 3 轮：本端点此前把源 dict **原样**返回，而前端 `marketApi.quote`
+    #   声明类型是 `Quote`（`price` 必填）。走 eltdx/公开源时只有原生名 `last`，
+    #   于是「类型说一定有 price、实际没有」——接线即断链（此前无调用方，属潜伏
+    #   地雷；`market.ts` 的注释也自认了这一点）。这里与批量端点共用同一份归一，
+    #   让声明类型成为真话。**复制再改**，避免污染券商缓存里的共享对象。
+    return ok(apply_ui_quote_contract({**q}))
 
 
 @router.post("/market/quotes")
@@ -314,8 +320,9 @@ def _normalize_quotes(items: list) -> list:
       - 券商 WS 快照缓存：给 `price`
       - eltdx / 打源补齐：给 `last`（见 `marketApi.quote` 注释里那条老警告）
     前端 `Quote` 类型只有 `price`，直接读 `last` 会得到一堆 `undefined`
-    （「订阅到了但没数字」的老坑）。这里用 `core.quote_fields.pick_last_price`
-    （键序唯一入口）统一成 `price`，前端契约就此唯一。
+    （「订阅到了但没数字」的老坑）。这里用
+    `core.quote_fields.apply_ui_quote_contract`（键序唯一入口 `pick_last_price`
+    的封装）统一成 `price`，前端契约就此唯一。
 
     ⚠️ 取不到价就**删掉** `price` 键，绝不写 0 —— 前端 `fmtPrice(undefined)`
     才是诚实的 `--`，`0.00` 会被读成「这只票跌到 0 了」。
@@ -335,12 +342,11 @@ def _normalize_quotes(items: list) -> list:
             nm = lookup_name(code)
         it["name"] = nm
 
-        # ② 最新价：统一为契约名 price（键序唯一入口 core.quote_fields）
-        px = pick_last_price(it)
-        if px is None:
-            it.pop("price", None)
-        else:
-            it["price"] = px
+        # ② 最新价 / 昨收：统一为契约名（键序唯一入口 core.quote_fields）
+        #   R19 第 3 轮：归一逻辑上收到 `apply_ui_quote_contract`，与单只
+        #   `/market/quote`、`/market/indices` 共用同一份实现（此前只有本端点
+        #   做归一，另外两个端点把源 dict 直接交出去 ⇒ 声明 Quote 却没有 price）。
+        apply_ui_quote_contract(it)
     return items
 
 

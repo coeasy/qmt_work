@@ -43,13 +43,16 @@ async def signal_submit(body: dict, ctx: AppContext = Depends(get_ctx)):
         price_type=body.get("price_type", "limit"),
         remark=body.get("remark", ""),
         broker_id=body.get("broker_id", ""),
+        # 下单级账户/标的类型（stock/etf/future/option/credit）；空串 = 不覆盖。
+        account_type=str(body.get("account_type", "") or ""),
         payload=body.get("payload", {}))
     # 阶段 4：idempotency_key 非空时经 submit() 单飞幂等（同 key 只执行一次真实逻辑）
     idem = str(body.get("idempotency_key", "") or "").strip()
     res = await ctx.signal_router.submit(
         code=sig.code, side=sig.side, volume=sig.volume, price=sig.price,
         price_type=sig.price_type, source=sig.source, broker_id=sig.broker_id,
-        remark=sig.remark, idempotency_key=idem, payload=sig.payload)
+        remark=sig.remark, idempotency_key=idem, payload=sig.payload,
+        account_type=sig.account_type)
     if isinstance(res, dict) and res.get("ok"):
         return ok(res)
     # ★★ 失败原因必须按 `broker_unavailable` 分流，**不能一律 503**（2026-09-23 R25）。
@@ -128,7 +131,10 @@ async def signal_webhook(request: Request, ctx: AppContext = Depends(get_ctx)):
         code=body.get("code", ""), side=body.get("side", "buy"),
         volume=int(body.get("volume", 0)), price=float(body.get("price", 0) or 0),
         price_type=body.get("price_type", "limit"), remark=body.get("remark", ""),
-        broker_id=body.get("broker_id", ""), payload=body.get("payload", {}))
+        broker_id=body.get("broker_id", ""),
+        # 入站 webhook 也可指定下单级账户/标的类型（外部系统下期货/期权单必须传）。
+        account_type=str(body.get("account_type", "") or ""),
+        payload=body.get("payload", {}))
     # P0-3：外部系统可显式传 idempotency_key 获得幂等（未传则不去重，保持旧行为）。
     res = await ctx.signal_router.route(
         sig, idempotency_key=str(body.get("idempotency_key", "") or "").strip())

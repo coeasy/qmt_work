@@ -91,6 +91,20 @@ export type Period = "1m" | "5m" | "15m" | "30m" | "60m" | "1d" | "1w" | "1M";
 
 export type Side = "buy" | "sell";
 export type PriceType = "limit" | "market";
+
+/**
+ * **下单级**账户/标的类型 —— 与后端 `agent_bigqmt/qmt_api.py::_ACCOUNT_TYPE_ALIASES`
+ * 的 canonical key 一一对应（stock/etf/future/option/credit）。
+ *
+ * ★ 与连接级 `account_type`（`STOCK`/`CREDIT`/`OPTION`/`FUTURES`，见 `Connection`）
+ *   **不是同一个概念**：
+ *   - 连接级：这条连接对应哪一类账户，用于账号发现与展示；
+ *   - 下单级：这一笔委托要按哪种标的送 ``passorder``（决定 ``opAccountType``，
+ *     期货/期权/两融走扩展 12-arg 签名）。
+ *   后者不传（空串）= 由 agent 侧 `default_account_type` 或默认 stock 兜底。
+ */
+export type OrderAccountType = "stock" | "etf" | "future" | "option" | "credit";
+
 /**
  * 订单状态 —— **必须**与后端平台标准词表一致：
  * `backend/xtquant_client/order_status.py`（PENDING/PARTIAL/FILLED/CANCELLED/

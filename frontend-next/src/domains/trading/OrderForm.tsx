@@ -7,7 +7,7 @@ import { useQuoteSubscription } from "@/hooks/useQuoteSubscription";
 import { useAsync } from "@/hooks/useAsync";
 import { fmtMoney, fmtPct, fmtPrice, normalizeCode, toneColor } from "@/shared/format";
 import { isLivePrice } from "@/shared/freshness";
-import type { PriceType, Side } from "@/shared/types";
+import type { OrderAccountType, PriceType, Side } from "@/shared/types";
 import s from "./trade.module.css";
 
 /**
@@ -48,6 +48,26 @@ export interface OrderFormProps {
 }
 
 type ResultTone = "success" | "danger" | "warning" | "info";
+
+/**
+ * 「账户类型」下拉的选项表 —— **必须**与后端 canonical key 同名同序。
+ *
+ * canonical key 真源：`backend/agent_bigqmt/qmt_api.py::_ACCOUNT_TYPE_ALIASES`
+ * 的值集合（stock/etf/future/option/credit）。前端只暴露这 5 个（别名如
+ * `futures`/`lof`/`两融` 由后端归一化，界面不重复提供）。
+ *
+ * ★ 导出成常量而不是内联在 JSX 里，是为了让单测能直接 import 断言
+ *   「界面选项 ⊆ 后端可接受值」—— 手抄一份别名表正是漂移的温床。
+ *   空串选项 = 自动（不下发该字段）。
+ */
+export const ACCOUNT_TYPE_OPTIONS: { value: OrderAccountType | ""; label: string }[] = [
+  { value: "", label: "自动（跟随连接/默认）" },
+  { value: "stock", label: "A 股股票" },
+  { value: "etf", label: "ETF 基金" },
+  { value: "future", label: "期货" },
+  { value: "option", label: "股票期权" },
+  { value: "credit", label: "融资融券" },
+];
 
 /**
  * 「这一单到底会不会真的报给券商」—— 下单前必须说清的**唯一结论**。
@@ -128,6 +148,15 @@ export function OrderForm({
 
   const [side, setSide] = useState<Side>("buy");
   const [priceType, setPriceType] = useState<PriceType>("limit");
+  /**
+   * 下单级账户/标的类型（空串 = 自动：跟随 agent 的 default_account_type / stock）。
+   *
+   * ★ 期货 / 期权 / 两融必须显式选，否则 agent 会按 A 股标准签名送 ``passorder``
+   *   （末位缺 ``opAccountType``）被柜台拒。选错不会静默成交：agent 侧会按
+   *   账户类型做代码格式校验并回 BrokerError（400 + 真因）。
+   */
+  const [accountType, setAccountType] = useState<OrderAccountType | "">("");
+
   const [volume, setVolume] = useState("100");
   const [price, setPrice] = useState("");
   /**
@@ -302,6 +331,8 @@ export function OrderForm({
         volume: Number(volume) || 0,
         price: priceType === "market" ? 0 : Number(price) || 0,
         price_type: priceType,
+        // 空串不发（后端 None/'' → stock 兜底，避免无意义载荷漂移）
+        ...(accountType ? { account_type: accountType } : {}),
       });
 
       if (res.pending_confirmation && res.confirm_token) {
@@ -596,6 +627,14 @@ export function OrderForm({
               { value: "limit", label: "限价" },
               { value: "market", label: "市价" },
             ]}
+          />
+        </FormRow>
+
+        <FormRow label="账户类型（期货/期权/两融必选）">
+          <Select
+            value={accountType}
+            onChange={(e) => setAccountType(e.target.value as OrderAccountType | "")}
+            options={ACCOUNT_TYPE_OPTIONS}
           />
         </FormRow>
 

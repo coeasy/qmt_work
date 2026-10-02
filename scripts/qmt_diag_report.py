@@ -45,9 +45,61 @@ def _run(args_list, timeout=30):
         return -1, "", "subprocess exception: %s: %s" % (type(exc).__name__, exc)
 
 
+def _bundle_health(qmt_dir, name="qmt_work_agent"):
+    """Bundle 完整性快速诊断。复用 verify 脚本的 bundle_health 实现。"""
+    try:
+        sys.path.insert(0, _HERE)
+        import qmt_agent_verify as vfy  # noqa: E402
+    except Exception:
+        return {"ok": False, "path": None, "expected": name + ".py",
+                "syntax_ok": False, "syntax_error": "verify module unavailable",
+                "pollution_ok": True, "pollution_hits": []}
+
+    # Windows 大小写不敏感：先试小写再试大写
+    candidates = [os.path.join(qmt_dir, "python", name + ".py"),
+                  os.path.join(qmt_dir, "python", name.upper() + ".py")]
+    for cand in candidates:
+        if os.path.isfile(cand):
+            result = vfy.bundle_health(cand)
+            result["expected"] = name + ".py"
+            return result
+    return {"ok": False, "path": None, "expected": name + ".py",
+            "syntax_ok": False, "syntax_error": "file_not_found",
+            "pollution_ok": True, "pollution_hits": [],
+            "size_bytes": 0, "line_count": 0, "encoding": None}
+
+
 def collect(qmt_dir):
     """并行跑三条诊断链路，返回汇总 dict。"""
     problems = []
+
+    # --- bundle 完整性（P0 护栏 · R17 引入）---
+    # ★ 独立于 verify 之外的快速诊断：只 AST parse + 扫描前 N 行 import。
+    #   这样即使 verify 因其他原因挂了（比如心跳还没新鲜），bundle 状态
+    #   也能被单独拿到 —— 因为这是「能否被 Python 解释」的静态事实。
+    bundle_health = _bundle_health(qmt_dir)
+    if not bundle_health.get("ok"):
+        if not bundle_health.get("path"):
+            problems.append({
+                "source": "bundle",
+                "msg": "策略 bundle 文件不存在: %s" % (bundle_health.get("expected") or "?"),
+                "fix": "跑 deploy_qmt_work_agent.bat 或 python scripts/qmt_agent_deploy.py deploy",
+            })
+        elif not bundle_health.get("syntax_ok"):
+            problems.append({
+                "source": "bundle",
+                "msg": "bundle 语法错误: %s" % bundle_health.get("syntax_error"),
+                "fix": "bundle 可能被手工改坏了。重跑 "
+                       "`python scripts/qmt_agent_deploy.py deploy --qmt-dir <QMT> --txt` "
+                       "覆盖为干净版本，然后在 QMT 里重新「导入本地策略」",
+            })
+        if bundle_health.get("pollution_hits"):
+            problems.append({
+                "source": "bundle",
+                "msg": "bundle 检测到污染签名（非标准库 import）: %s"
+                       % ", ".join(bundle_health["pollution_hits"]),
+                "fix": "文件被前缀污染（另一支策略被拼进来）。重新部署覆盖。",
+            })
 
     # --- probe ---
     try:
@@ -126,10 +178,12 @@ def collect(qmt_dir):
             "fix": "关闭 QMT 客户端再跑一次 inspect；或用 --force 只看 bundle 状态",
         })
 
-    # 三态判定：probe.registered=True + verify.ok=True + 无 inspect PermissionError
+    # 四态判定：bundle.ok + probe.registered=True + verify.ok=True + 无 inspect PermissionError
     # 任一为假（含降级为 error dict 时字段缺失）→ ok=False
+    # bundle 检查放最前面 —— bundle 都不干净时，probe/verify 结果都是「假绿灯」。
     ok = bool(
-        probe.get("registered") and verify.get("ok")
+        bundle_health.get("ok")
+        and probe.get("registered") and verify.get("ok")
         and not any(p["source"] == "inspect" and "PermissionError" in p["msg"]
                     for p in problems)
     )
@@ -138,6 +192,7 @@ def collect(qmt_dir):
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "qmt_dir": qmt_dir,
         "python": sys.executable,
+        "bundle": bundle_health,
         "probe": probe,
         "verify": verify,
         "inspect": inspect,

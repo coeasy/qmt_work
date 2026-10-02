@@ -4,6 +4,7 @@ import type {
   ConditionStatusPayload,
   Deal,
   Order,
+  OrderAccountType,
   Position,
   PriceType,
   Side,
@@ -28,6 +29,13 @@ export interface SubmitOrderPayload {
   price_type?: PriceType;
   remark?: string;
   idempotency_key?: string;
+  /**
+   * 下单级账户/标的类型（stock/etf/future/option/credit）。
+   * 不传 = 由 agent 侧 `default_account_type` / 默认 stock 兜底；
+   * 期货 / 期权 / 两融**必须**显式给出，否则 agent 会按 A 股标准签名送单被柜台拒。
+   * 传未知值 → 后端返回 400（agent 侧 BrokerError），不会静默当 A 股成交。
+   */
+  account_type?: OrderAccountType;
 }
 
 /**

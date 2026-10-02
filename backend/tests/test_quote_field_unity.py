@@ -26,6 +26,7 @@ from core.quote_fields import (
     BOOK_KEYS,
     LAST_PRICE_KEYS,
     PREV_CLOSE_KEYS,
+    apply_ui_quote_contract,
     pick_last_price,
     pick_order_ref_price,
     pick_prev_close,
@@ -155,3 +156,136 @@ def test_known_call_sites_use_the_shared_entry():
         text = (BACKEND / rel).read_text(encoding="utf-8", errors="ignore")
         assert "from core.quote_fields import" in text, f"{rel} 未导入唯一入口"
         assert symbol in text, f"{rel} 未使用 {symbol}"
+
+
+# ============================================ 5. 界面契约名归一（R19 第 3 轮）
+#
+# 被锁住的缺陷：前端 `Quote` 把 `price` 声明为**必填**，界面到处读 `quote.price`；
+# 而 eltdx / 公开源只给原生名 `last`。此前**只有** `/market/quotes`（批量）在出口
+# 归一，`/market/quote`（单只）与 `/market/indices`（指数条）把源 dict 原样交出
+# ⇒「声明类型说一定有 price、实际没有」的潜伏断链（接线即一片 `--`，且不报错）。
+def test_ui_contract_fills_price_from_native_name():
+    """eltdx / 公开源形态：只有 `last`，归一后必须同时有 `price`。"""
+    q = apply_ui_quote_contract({"code": "600519", "last": 1700.5, "lastClose": 1680.0})
+    assert q["price"] == 1700.5
+    assert q["pre_close"] == 1680.0
+    # 原生名必须保留：引擎 / 风控 / 涨跌停判定仍按原生名读取。
+    assert q["last"] == 1700.5
+    assert q["lastClose"] == 1680.0
+
+
+def test_ui_contract_is_idempotent_on_broker_shape():
+    """券商形态（两套名都给）归一后值不变、键集不增不减。"""
+    src = {"code": "600519", "last": 1700.5, "lastClose": 1680.0,
+           "price": 1700.5, "pre_close": 1680.0}
+    assert apply_ui_quote_contract(dict(src)) == src
+
+
+def test_ui_contract_drops_price_when_unknown_never_zero():
+    """取不到价必须**删键**，绝不写 0 —— `0.00` 会被读成「跌到 0 了」。"""
+    q = apply_ui_quote_contract({"code": "600519", "price": 0, "last": None})
+    assert "price" not in q
+    assert "pre_close" not in q
+
+
+def test_ui_contract_keeps_already_valid_contract_prev_close():
+    """源只给契约名 `pre_close`（无 lastClose）时不得误删。"""
+    q = apply_ui_quote_contract({"code": "600519", "last": 100.0, "pre_close": 99.0})
+    assert q["pre_close"] == 99.0
+
+
+def test_ui_contract_prefers_native_order_for_price():
+    """归一用键序唯一入口：`lastPrice` > `last` > `price` > `close`。"""
+    q = apply_ui_quote_contract({"code": "X", "close": 9.0, "price": 9.5, "last": 10.0})
+    assert q["price"] == 10.0
+
+
+@pytest.mark.parametrize("bad", [None, [], "x", 3, ()])
+def test_ui_contract_non_dict_is_returned_as_is(bad):
+    assert apply_ui_quote_contract(bad) is bad
+
+
+def test_ui_contract_never_invents_book_price():
+    """只有盘口（ask/bid）时不得造出 `price`。"""
+    q = apply_ui_quote_contract({"code": "X", "ask": 11.0, "bid": 10.9})
+    assert "price" not in q
+
+
+# ------------------------------- 6. 端点级：三个出口共用同一份归一
+def test_market_quote_single_endpoint_normalizes():
+    """单只 /market/quote 必须归一 —— 前端把它声明为 `Quote`（price 必填）。"""
+    import asyncio
+
+    from app.routes import market as market_mod
+
+    class _Hub:
+        async def get_quote(self, code, source="auto", conn_id=None):
+            # eltdx / 公开源形态：只有原生名
+            return {"code": code, "name": "上证指数", "last": 3210.5,
+                    "lastClose": 3200.0, "open": 3205.0, "volume": 123, "ts": "t"}
+
+    orig = market_mod.get_hub
+    market_mod.get_hub = lambda: _Hub()
+    try:
+        res = asyncio.run(market_mod.market_quote("000001.SH"))
+    finally:
+        market_mod.get_hub = orig
+
+    assert res["code"] == 0, res
+    data = res["data"]
+    assert data["price"] == 3210.5, "单只端点未归一：前端 Quote.price 会是 undefined"
+    assert data["pre_close"] == 3200.0
+    assert data["last"] == 3210.5
+
+
+def test_indices_snapshot_normalizes_items():
+    """/market/indices 的每个 item 必须归一 —— 前端声明 items 为 `Quote[]`。"""
+    import asyncio
+
+    from app.services.market import aggregates as agg
+
+    class _Hub:
+        async def get_quote(self, code, source="auto", conn_id=None):
+            return {"code": code, "name": code, "last": 1000.0, "lastClose": 990.0}
+
+        async def get_board_kline(self, code, period="1d", count=20, source="auto"):
+            return [], "x"
+
+    orig_hub, orig_idx = agg.get_hub, agg.configured_indices
+    agg.get_hub = lambda: _Hub()
+    agg.configured_indices = lambda _st: ["000001.SH", "399001.SZ"]
+    try:
+        out = asyncio.run(agg.indices_snapshot(ttl=0))
+    finally:
+        agg.get_hub = orig_hub
+        agg.configured_indices = orig_idx
+
+    assert len(out["items"]) == 2
+    for it in out["items"]:
+        assert it["price"] == 1000.0, "指数条 item 未归一：顶部指数条接线即一片 --"
+        assert it["pre_close"] == 990.0
+        assert it["last"] == 1000.0        # 原生名保留（两市中心成交额聚合用 amount，非此处）
+
+
+def test_normalize_quotes_uses_the_shared_contract():
+    """批量端点也必须走同一份归一（防第二份实现回潮）。"""
+    from app.routes.market import _normalize_quotes
+
+    items = [{"code": "600519", "last": 1700.5, "lastClose": 1680.0}]
+    _normalize_quotes(items)
+    assert items[0]["price"] == 1700.5
+    assert items[0]["pre_close"] == 1680.0
+
+
+def test_no_endpoint_reimplements_price_normalization():
+    """除 core/quote_fields.py 外不得再出现 `pop("price")` 式的内联归一。"""
+    pattern = re.compile(r"""\.pop\(\s*["']price["']\s*\)""")
+    offenders: list[str] = []
+    for path in _iter_backend_sources():
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        for m in pattern.finditer(text):
+            line = text.count("\n", 0, m.start()) + 1
+            offenders.append(f"{path.relative_to(BACKEND)}:{line}")
+    assert not offenders, (
+        "发现内联的最新一代价归一（应改调 core.quote_fields.apply_ui_quote_contract）：\n  "
+        + "\n  ".join(offenders))

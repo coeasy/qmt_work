@@ -234,6 +234,11 @@ def self_probe(cfg, injected, ctx, executor):
     result["agent_ver"] = _AGENT_VERSION
     result["injected"] = captured
     result["ctx_methods"] = _ctx_methods(ctx)
+    # ★ P1 多标的账户类型能力面（R18）：外部端据此枚举 agent 支持哪些标的
+    #   类型（stock/etf/future/option/credit）。key=name, value=opAccountType
+    #   数值（0=stock 走标准 11-arg 签名，非 0 走扩展 12-arg 签名）。
+    result["account_types"] = getattr(executor, "_account_types", {}) or {}
+    result["default_account_type"] = cfg.get("default_account_type", "stock")
     if executor is not None:
         try:
             result["meta"] = executor.meta()

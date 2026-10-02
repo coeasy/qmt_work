@@ -38,7 +38,114 @@ _DEFAULT_PASSORDER = {
     "prType_market": 5,     # 市价（对手方最优）
     "quickTrade": 2,
     "strategyName": "qmt_work",
+    # 账户类型（QMT opAccountType 枚举）。非 0 值会触发**扩展 12-参数签名**
+    # 的 passorder 调用（标准 11-arg 版本会自动降级）。
+    # 不同券商版本可能不支持扩展签名 —— do_place 会捕获 TypeError 并降级。
+    "opAccountType_stock": 0,   # A 股股票（默认，走 11-arg 标准签名）
+    "opAccountType_etf": 1,     # ETF 基金
+    "opAccountType_option": 2,  # 股票期权
+    "opAccountType_future": 3,  # 期货
+    "opAccountType_credit": 4,  # 融资融券（两融）
 }
+
+
+#: 账户类型别名归一化：不同前端/文档可能用不同写法，统一成内部 key。
+_ACCOUNT_TYPE_ALIASES = {
+    # 股票
+    "stock": "stock", "a_stock": "stock", "astock": "stock", "a股": "stock",
+    # ETF
+    "etf": "etf", "fund_etf": "etf", "lof": "etf",
+    # 期货
+    "future": "future", "futures": "future", "qh": "future", "期货": "future",
+    # 期权
+    "option": "option", "options": "option", "期权": "option",
+    # 两融
+    "credit": "credit", "margin": "credit", "two_fin": "credit",
+    "融资融券": "credit", "两融": "credit",
+}
+
+
+#: 标的代码格式（正则）。account_type → regex 字符串。
+#: 不匹配直接拒绝（BrokerError），避免柜台返难懂的错。
+#:
+#: 覆盖范围（QMT 常用市场）：
+#:   stock  : 沪深 A 股（60xxxx/000xxx/002xxx/688xxx/300xxx/8/4/605xxx）
+#:   etf    : 沪 5xxxxx / 深 1xxxxx
+#:   future : 沪 SHF（CU/AU 等）、深 SZF（IF/IC/IH）、大商所 DCE（M/I/J）、
+#:            郑商所 CZCE（SR/CF/MF）
+#:   option : 沪 100xxxxx.SH / 深 020xxxxx.SZ
+#:   credit : 与 A 股同一 code 体系（两融账户走同一支股票的融资融券通道）
+_CODE_PATTERNS = {
+    "stock": r"^(60\d{4}|000\d{3}|001\d{3}|002\d{3}|003\d{3}|603\d{3}"
+             r"|605\d{3}|688\d{3}|689\d{3}|300\d{3}|301\d{3}|302\d{3}"
+             r"|430\d{3}|8[37]\d{4})\.(SH|SZ)$",
+    "etf": r"^(5\d{5}|1\d{5})\.(SH|SZ)$",
+    "future": r"^[A-Za-z]{1,4}\d{4}\.(SHF|SZF|DCE|CZCE|INE|GFE|GFEX)$",
+    "option": r"^(100\d{5}\.SH|020\d{5}\.SZ)$",
+    "credit": r"^(60\d{4}|000\d{3}|001\d{3}|002\d{3}|003\d{3}|603\d{3}"
+              r"|605\d{3}|688\d{3}|689\d{3}|300\d{3}|301\d{3}|302\d{3}"
+              r"|430\d{3}|8[37]\d{4})\.(SH|SZ)$",
+}
+
+
+def normalize_account_type(value):
+    """把外部传入的 account_type 归一化到内部 key。
+
+    None/'' → 'stock'（向后兼容：老调用方没传 account_type 就是 A 股）。
+
+    认不出的名字 → 抛 ``ValueError``（**绝不静默落到 A 股**）。
+
+    ⚠️ R19 第 1 轮修正：R18 初版把未知值兜底成 'stock'，与「零 mock / 不静默
+    吞错」纪律冲突 —— 用户把 ``futures`` 写成 ``future1`` 时会**当成 A 股送单**。
+    虽然 ``validate_code`` 对期货/期权/ETF 的代码格式能兜住大部分误输入，
+    但 ``credit`` 与 ``stock`` 共用同一套代码格式，误输入会**静默走错通道**。
+    改为抛错后由 ``do_place`` 转成 ``BrokerError`` 返回给外部端，错误可见。
+    """
+    if value is None or value == "":
+        return "stock"
+    key = _ACCOUNT_TYPE_ALIASES.get(str(value).strip().lower())
+    if key is None:
+        raise ValueError(
+            "不支持的 account_type: %r（可选: %s）"
+            % (value, ", ".join(sorted(set(_ACCOUNT_TYPE_ALIASES.values())))))
+    return key
+
+
+def resolve_account_type(account_type, po=None):
+    """(key, opAccountType 数值)。po=None 时读 _DEFAULT_PASSORDER 作兜底。
+
+    ``account_type`` 非法时抛 ``ValueError``（上层转 BrokerError）。
+    """
+    po = po or _DEFAULT_PASSORDER
+    key = normalize_account_type(account_type)
+    # 配置里若没有对应 opAccountType_* 键（比如券商版本没定义），
+    # 回退到 stock 的 0 值——这样至少不炸、也留了清晰的 raw 值给上层判定。
+    op_value = po.get("opAccountType_%s" % key, 0)
+    try:
+        op_value = int(op_value)
+    except (TypeError, ValueError):
+        op_value = 0
+    return key, op_value
+
+
+def validate_code(code, account_type):
+    """按 account_type 校验标的代码格式。
+
+    返回 (ok, error_msg)。ok=False 时 error_msg 描述期望的格式，避免柜台
+    返难懂的 'invalid instrument' 报错。
+
+    ``account_type`` 非法时抛 ``ValueError``（与 ``normalize_account_type`` 一致）。
+    """
+    key = normalize_account_type(account_type)
+    pattern = _CODE_PATTERNS.get(key)
+    if not pattern:
+        # 未知类型：不拒绝，让 passorder 层去报
+        return True, ""
+    import re as _re
+    if not _re.match(pattern, str(code or "")):
+        return False, ("code=%r 不符合 %s 标的格式（期望：%s）"
+                       % (code, key, pattern))
+    return True, ""
 
 
 class ActionError(Exception):
@@ -128,6 +235,18 @@ class Executor(object):
         self._dir_unknown = 0
         self.subscribed = set()
         self._ascii_only = bool(self.cfg.get("ascii_only", False))
+        # ★ 多标的账户类型能力表（P1 · R18）：从 po（已合并 config.passorder
+        #   覆盖）读取 opAccountType_* 键，形成外部端可枚举的字典。
+        #   外部端（后端 bridge_client）据此知道「这个 agent 支持哪些标的」，
+        #   前端下拉框据此渲染（不用硬编码 5 个类型，不同券商版本可能子集）。
+        self._account_types = {}
+        for _k in ("stock", "etf", "future", "option", "credit"):
+            _op = self.po.get("opAccountType_%s" % _k)
+            if _op is not None:
+                try:
+                    self._account_types[_k] = int(_op)
+                except (TypeError, ValueError):
+                    self._account_types[_k] = 0
 
     # ------------------------------------------------------------------
     # 主循环（由 handlebar 驱动）
@@ -216,6 +335,11 @@ class Executor(object):
             "direction_unknown": self._dir_unknown,
             "subscribed": len(self.subscribed),
             "ascii_only": self._ascii_only,
+            # ★ P1 多标的账户类型能力面（R18）：外部端据此枚举 agent 支持的
+            #   标的类型；前端下拉框据此渲染。key=name, value=opAccountType
+            #   数值（0=stock 走标准签名，非 0 走扩展签名）。
+            "account_types": dict(self._account_types),
+            "default_account_type": self.cfg.get("default_account_type", "stock"),
         }
 
     # ------------------------------------------------------------------
@@ -394,7 +518,15 @@ class Executor(object):
 
     # ------------------------------------------------------------------
     def do_place(self, params):
-        """下单。trading_enabled=false 时**拒绝**并返回明确 error_type。"""
+        """下单。trading_enabled=false 时**拒绝**并返回明确 error_type。
+
+        P1（R18 升级）：支持多标的账户类型。
+          - `account_type` 参数：stock/etf/future/option/credit
+            （默认 stock；也可用别名如 A股/期货/lof）
+          - 非 stock 时走 **扩展 12-参数 passorder**（追加 opAccountType）
+          - 扩展签名不兼容（老券商版本）时自动降级到 11-参数标准签名
+          - code 按 account_type 正则校验，格式错直接 BrokerError
+        """
         if not self._shield:
             raise ActionError(
                 "Rejected",
@@ -413,6 +545,21 @@ class Executor(object):
         if price_type == "limit" and price <= 0:
             raise ActionError("BrokerError", "限价单必须给出正的价格")
 
+        # ★ 账户类型解析 + 标的代码校验（P1）
+        #   取值优先级：请求显式 account_type > agent_config.default_account_type > stock。
+        #   `default_account_type` 让「本机只连一个期货/两融账户」的场景一次配置、
+        #   全单生效（前端/REST 不必每单都传），也保证该能力**不依赖前端改造**可用。
+        #   非法值 → ValueError → 转 BrokerError（400 + 真实原因），绝不静默走 A 股。
+        try:
+            acct_type, acct_type_num = resolve_account_type(
+                params.get("account_type") or self.cfg.get("default_account_type"),
+                self.po)
+            ok_code, code_err = validate_code(code, acct_type)
+        except ValueError as exc:
+            raise ActionError("BrokerError", str(exc))
+        if not ok_code:
+            raise ActionError("BrokerError", code_err)
+
         fn = self._need("passorder")
         op_type = self.po["opType_buy"] if side == "buy" else self.po["opType_sell"]
         pr_type = self.po["prType_limit"] if price_type == "limit" else self.po["prType_market"]
@@ -426,16 +573,57 @@ class Executor(object):
         while len(self._placed) >= self._placed_cap:
             self._placed.pop(next(iter(self._placed)), None)
         self._placed[user_order_id] = side
-        try:
-            ret = fn(op_type, self.po["orderType"], account, code, pr_type,
-                     price, volume, self.po["strategyName"],
-                     self.po["quickTrade"], user_order_id, self.ctx)
-        except TypeError:
-            # 少一个 ContextInfo 形参的版本
-            ret = fn(op_type, self.po["orderType"], account, code, pr_type,
+
+        # ★ passorder 三级降级（P1 多账户类型）：
+        #   每个签名先试，失败即换下一个；三层全挂则抛最后一个 TypeError，
+        #   让外层 execute() 捕获转成 error_result 返回给外部端。
+        #
+        # 顺序不能颠倒：扩展签名是**加参数**、不删减；标准签名在扩展失败时
+        #   一定能再试一次。三层里**任一成功就立即返回**，不再试后面的。
+        #
+        # ⚠️ 成功判据必须用**显式下标**，绝不能用 `ret is None`：
+        #   QMT 的 passorder 是 void，正常路径**就返回 None**（`_ret_to_result`
+        #   明确支持这种「拿不到委托号」的情形）。用返回值做哨兵会把「下单成功
+        #   但无回执」误判成失败 —— 更糟的是此时 `last_err` 也是 None，
+        #   `raise None` 会抛 `TypeError: exceptions must derive from
+        #   BaseException`，把一单**已送达柜台**的委托报成 SDK 故障，
+        #   用户重试即产生**重复委托**（R19 第 1 轮修复）。
+        base_args = (op_type, self.po["orderType"], account, code, pr_type,
                      price, volume, self.po["strategyName"],
                      self.po["quickTrade"], user_order_id)
+        std_11 = base_args + (self.ctx,)
+        noctx_10 = base_args  # 老券商版本无 ContextInfo 形参
+        if acct_type_num != 0:
+            sigs = (std_11 + (acct_type_num,), std_11, noctx_10)
+        else:
+            sigs = (std_11, noctx_10)
+        ret = None
+        last_err = None
+        success = False
+        success_idx = -1
+        for _i, _sig in enumerate(sigs):
+            try:
+                ret = fn(*_sig)
+                success = True
+                success_idx = _i
+                break
+            except TypeError as e:
+                last_err = e
+        if not success:
+            # 三层全失败 —— 抛最后一个 TypeError 让 execute() 转成 BrokerSDKError。
+            # last_err 必定非 None（否则不可能三层都「失败」），但仍显式兜底，
+            # 避免任何未来重构再次把 None 抛出去。
+            raise last_err if last_err is not None else TypeError(
+                "passorder 三级签名（12/11/10 参数）全部失败")
+        fallback_used = success_idx > 0
+
         result = _ret_to_result(ret, user_order_id)
+        # 回显：外部端（后端/前端）据此知道这单用了哪种账户类型，
+        # 以及是否走了降级签名（排障时可看到 fallback_used=true）
+        result["account_type"] = acct_type
+        result["code"] = code
+        if fallback_used:
+            result["extended_signature_fallback"] = True
         if params.get("client_order_id") != user_order_id:
             result["generated_client_order_id"] = True
         return result

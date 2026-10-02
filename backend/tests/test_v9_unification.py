@@ -77,11 +77,12 @@ class _SpyRouter:
 
     async def submit(self, code, side, volume, price=0.0, price_type="limit",
                      source="", broker_id="", remark="", idempotency_key="",
-                     auto_confirm=False, payload=None):
+                     auto_confirm=False, payload=None, account_type=""):
         self.submits.append({"code": code, "side": side, "volume": volume,
                              "source": source, "broker_id": broker_id,
                              "idempotency_key": idempotency_key,
-                             "auto_confirm": auto_confirm, "price_type": price_type})
+                             "auto_confirm": auto_confirm, "price_type": price_type,
+                             "account_type": account_type})
         if not self.ok:
             return {"ok": False, "reason": "risk blocked", "mode": self.mode}
         return {"ok": True, "mode": self.mode, "order_id": f"OID-{len(self.submits)}"}

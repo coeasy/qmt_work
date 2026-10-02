@@ -589,6 +589,15 @@ def test_bigqmt_gateway_accepts_the_same_keywords_as_mini():
                   if p.name != "self" and p.kind != inspect.Parameter.VAR_KEYWORD]
         except (TypeError, ValueError):
             continue
+        # 大 QMT 网关允许**已登记**的可选加宽（见 _ACCEPTED_GATEWAY_WIDENINGS）：
+        # 新增的是带默认值的尾部可选形参，按 ABC 的写法调用不受影响。
+        allowed = _ACCEPTED_GATEWAY_WIDENINGS.get(name, set())
+        pb_extra = [p for p in pb if p not in pa]
+        pb = [p for p in pb if p not in allowed]
+        if set(pb_extra) - allowed:
+            diffs.append(
+                f"{name}: 网关多出未登记的形参 {sorted(set(pb_extra) - allowed)}"
+                "（如属有意扩展，请登记进 _ACCEPTED_GATEWAY_WIDENINGS）")
         if pa != pb:
             diffs.append(f"{name}: ABC{pa} vs 大QMT网关{pb}")
     assert not diffs, (
@@ -606,6 +615,19 @@ _ACCEPTED_MINI_WIDENINGS = {
     # 周期传过去只会被无声忽略 —— 「收下却不生效」比「根本没有这个参数」更糟。
     # 与 ABC（真正的契约）签名一致，产线唯一调用点只传 2 个位置参数。
     "subscribe_quote": {"period"},
+}
+
+#: 反向加宽登记：**大 QMT 网关**比 mini 具体适配器多出的可选形参。
+#: 形式 = {方法名: 多出的形参集合}。Liskov 安全（多的是**带默认值**的可选参数，
+#: 按 ABC/mini 的写法调用完全不受影响），但必须显式登记 —— 否则下次改动
+#: 会把「有意的能力扩展」和「签名漂移 bug」混在一起，产线 TypeError 无从归因。
+_ACCEPTED_GATEWAY_WIDENINGS = {
+    # 大 QMT 的 ``passorder`` 支持 ``opAccountType``（股票/ETF/期权/期货/两融），
+    # 走扩展 12-arg 签名；mini 底层是 ``trader.order_stock``，**没有**这个形参，
+    # 其信用/融资语义由**连接级** account_type 派生。
+    # 故本参数只在大 QMT 网关存在，且 `gateway/execution.py::_account_type_arg`
+    # 会**按签名探测**后再投递（绝不无条件追加，避免 mini 连接下单 TypeError）。
+    "place_order": {"account_type"},
 }
 
 
@@ -632,7 +654,7 @@ def test_bigqmt_gateway_widening_over_the_mini_contract_is_declared():
         except (TypeError, ValueError):
             return None
 
-    undeclared, lost = [], []
+    undeclared = []
     for name in sorted(XTQuantGateway.__abstractmethods__):
         gw, impl = getattr(_BigQmtGateway, name, None), getattr(XTPQuantAdapter, name, None)
         if gw is None or not callable(impl):
@@ -645,13 +667,16 @@ def test_bigqmt_gateway_widening_over_the_mini_contract_is_declared():
         if extra != allowed:
             undeclared.append(f"{name}: 大QMT{pg} vs mini{pi}"
                               f"（实得多余 {sorted(extra)}，已登记 {sorted(allowed)}）")
-        if [p for p in pg if p not in pi]:
-            lost.append(f"{name}: 大QMT{pg} 有 mini{pi} 没有的形参")
+        gw_extra = set(p for p in pg if p not in pi)
+        gw_allowed = _ACCEPTED_GATEWAY_WIDENINGS.get(name, set())
+        if gw_extra != gw_allowed:
+            undeclared.append(
+                f"{name}: 大QMT{pg} 相对 mini{pi} 多出 {sorted(gw_extra)}，"
+                f"已登记 {sorted(gw_allowed)}")
     assert not undeclared, (
         "网关与 mini 具体适配器的形参加宽未经登记：\n  " + "\n  ".join(undeclared)
-        + "\n  若确属有意，请登记进 _ACCEPTED_MINI_WIDENINGS 并写明理由。")
-    assert not lost, "网关多出 mini 没有的形参（调用方从 mini 迁过来会 TypeError）：\n  " \
-        + "\n  ".join(lost)
+        + "\n  若确属有意，请登记进 _ACCEPTED_MINI_WIDENINGS（mini 侧多出）"
+          " 或 _ACCEPTED_GATEWAY_WIDENINGS（网关侧多出）并写明理由。")
 
 
 def test_gateway_never_receives_the_mini_only_period_kwarg():

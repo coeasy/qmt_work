@@ -195,7 +195,7 @@ class _BigQmtGateway:
     # ---------------- 交易 ----------------
     async def place_order(self, code: str, direction: str, price_type: str,
                           price: float, volume: int, strategy_name: str = "",
-                          remark: str = "") -> dict:
+                          remark: str = "", account_type: str = "") -> dict:
         req = OrderRequest(
             instrument=_split_instrument(code),
             side=str(direction or "").lower(),
@@ -204,6 +204,8 @@ class _BigQmtGateway:
             quantity=int(volume or 0),
             strategy_name=strategy_name or "",
             remark=remark or "",
+            # 下单级账户/标的类型 → 方言 → agent passorder opAccountType。
+            account_type=str(account_type or ""),
         )
         snap = await self._c.place_order(req)
         # 幂等锚点回读：回执里如实带上平台侧关联号（拿不到就是空串，不伪造）。

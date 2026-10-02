@@ -76,6 +76,15 @@ jobs:
         run: python scripts/check_licenses.py
       - name: Capability drift gate (REST agent-visible -> MCP tool)
         run: python scripts/check_capability_drift.py
+      # ★ R19 第 1 轮补齐：以下三条门禁此前**不在 CI 上**，只能靠人记得本地跑。
+      #   本项目已两次栽在这上面（TD-29 / Gate 1 常驻红数月）：
+      #   「没接在 CI 上的门禁会腐烂」—— 冻结基线会悄悄过期，红灯无人看见。
+      - name: AppContext convergence gate (frozen baseline, no new direct `state` imports)
+        run: python scripts/check_appcontext.py
+      - name: BigQMT agent py3.6 compatibility gate
+        run: python ../scripts/check_bigqmt_agent_py36.py
+      - name: Capability coverage gate (every backend capability has an entry point or a registered exemption)
+        run: python ../scripts/check_capability_coverage.py
       - name: API contract drift gate (frontend calls -> backend REST, path + query params)
         run: python ../scripts/check_api_contract_drift.py
       - name: WS consumption gate (backend emitted -> frontend registered)

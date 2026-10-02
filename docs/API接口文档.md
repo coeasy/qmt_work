@@ -924,6 +924,27 @@ payload 的 `data.type` 子类型（如 `order`→`order_event`）**不是**独�
 | 行情订阅（WS `quotes`） | 原生回调，毫秒级 | 文件桥无回调：事件泵每秒对账合成（`SUB_QUOTE` → agent 轮询 diff → `events.ndjson` → WS），秒级 |
 | 存活判据 | 连接对象状态 | `connector_probe()` 返回 `available` / `agent_unresponsive` / `liveness_failures` / `last_agent_ok_age_s`，以真实往返为准（文件残留 ≠ 在跑） |
 
+### 账户类型（下单级 `account_type`）
+
+下单接口（`POST /api/v1/trade/order`、`POST /api/v1/signal/submit`、入站 webhook `POST /api/v1/signal/webhook`）接受**可选**的 `account_type`，用于决定大 QMT `passorder` 的 `opAccountType`（A 股走标准 11 参数签名；非 A 股走扩展 12 参数签名，被老版本券商拒时自动降级并回执 `extended_signature_fallback=true`）。
+
+| 取值 | 含义 | 代码格式示例 |
+|------|------|--------------|
+| `stock`（默认） | A 股股票 | `600519.SH` / `000001.SZ` / `832000.SH` |
+| `etf` | ETF / LOF 基金 | `510300.SH` / `159915.SZ` |
+| `future` | 期货 | `IF2312.SHF` / `M2401.DCE` / `SR2405.CZCE` |
+| `option` | 股票期权 | `10005847.SH` / `02000031.SZ` |
+| `credit` | 融资融券（与 A 股共用代码格式） | `600519.SH` |
+
+约定：
+
+- **不传 / 空串 = 不覆盖**：由 agent 侧 `agent_config.json` 的 `default_account_type` 决定，仍为空则按 `stock` 处理（向后兼容）。
+- 也接受别名（大小写不敏感、可带空格）：`A股`/`astock`、`futures`/`期货`、`期权`、`margin`/`两融`/`融资融券`、`lof`。
+- **未知取值 → 400**（agent 侧 `BrokerError`，带「可选值」清单），**不会**静默当作 A 股下单。
+- 标的代码会按该类型做前置格式校验；格式不符直接 400，避免柜台返回难懂的错误。
+- ⚠️ 这与**连接级** `account_type`（`STOCK`/`CREDIT`/`OPTION`/`FUTURES`，见 `/api/v1/brokers/*` 的连接配置）**不是同一个概念**：连接级描述「这条连接属于哪类账户」，用于账号发现与展示；下单级描述「这一笔委托按哪类标的送单」。小 QMT 直连路径底层是 `order_stock`，没有 `opAccountType`，其融资融券语义由连接级类型派生。
+- 能力面：agent 自检（`probe_result.json`）与 `Executor.meta()` 会上报 `account_types` / `default_account_type`，供脚本与运维诊断消费（`qmt_agent_verify.py` / `qmt_diag_report.py`）。
+
 ### 必读约束
 
 - 小 QMT **只有直连**，没有「策略桥」「注册树」概念；大 QMT 策略须写入客户端注册树（GUI 动作），光放 `.py` 文件不生效。

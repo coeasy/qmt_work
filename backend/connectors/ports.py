@@ -77,6 +77,15 @@ class OrderRequest:
     client_order_id: str = ""
     strategy_name: str = ""
     remark: str = ""
+    #: 账户/标的类型（stock / etf / future / option / credit）。
+    #:
+    #: ★ 这是**下单级别**的类型，不是连接级别的 ``ConnectionConfig.account_type``
+    #:   （后者是 STOCK/CREDIT/OPTION/FUTURES 的账户归类，用于连接发现与展示）。
+    #:   大 QMT 的 ``passorder`` 需要 ``opAccountType`` 形参：A 股走标准 11-arg
+    #:   签名，期货/期权/两融等走扩展 12-arg 签名（``agent_bigqmt/qmt_api.py``
+    #:   的 ``do_place`` 三级降级）。留空 = 由 agent 侧 ``default_account_type``
+    #:   或默认 stock 兜底，语义为「不覆盖」。
+    account_type: str = ""
 
     def validate(self) -> None:
         if self.side not in {"buy", "sell"}:

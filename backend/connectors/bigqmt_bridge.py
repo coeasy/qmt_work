@@ -700,9 +700,10 @@ class BigQmtBridge:
 
     async def place_order(self, code: str, direction: str, price_type: str,
                           price: float, volume: int, strategy_name: str = "",
-                          remark: str = "") -> dict:
+                          remark: str = "", account_type: str = "") -> dict:
         return await self.gateway.place_order(code, direction, price_type, price,
-                                              volume, strategy_name, remark)
+                                              volume, strategy_name, remark,
+                                              account_type)
 
     async def cancel_order(self, order_id: str) -> dict:
         return await self.gateway.cancel_order(order_id)

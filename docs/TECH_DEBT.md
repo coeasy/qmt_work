@@ -947,7 +947,7 @@
   V4 内两处提及已改写为「内容并入本文 / 实体已删除」，其余全仓无残留引用。
 - ④ 结构性结论：**大 QMT 能否运行取决于「注册树」而非文件是否拷贝**——本轮实测 bundle 文件就位 52 KB 但
   「已注册:否 / 心跳过期」，桥链路无法启动。这是 QMT 客户端侧限制（注册树需 GUI 动作，自动注册三重证据不可行），
-  非平台代码缺陷；平台侧 readiness 已由 1938 用例 + 29/29 客户端自检 + `probe_stale` 诚实标注共同保证。*
+  非平台代码缺陷；平台侧 readiness 已由 2035 用例 + 29/29 客户端自检 + `probe_stale` 诚实标注共同保证。*
 
 ### TD-34（R15，2026-10-02）：定时补数的三种「隐形浪费」+ 界面默认值与预热脚本漂移
 - **① 每天一次的全市场无效补数（根因：判「数据落后」用的是日历今日，不是数据可得日）**。
@@ -990,4 +990,144 @@
   `test_session_contract.py` ×4（`expected_bar_date` 四个边界：ready 前 / ready 后 / 周末 / `ready_hour=0` 严格模式）。
   前端 `theme.test.ts` 新增 2 例锁定旧 id 迁移（`tongdaxin → midnight` 且 `document.documentElement.dataset.skin` 同步），
   `tsc --noEmit` 与 `npm run test:serial` 50 文件 498 用例全绿。*
+
+
+### TD-35（R19 第 1 轮，2026-10-02）：R18 多标的账户类型的两个「自伤」——拿返回值当哨兵 + 能力无生产者
+
+本轮是**对 R18 自身交付的复审**，两条都属于「新写的能力反而更危险」这一类：
+
+- **① P0：`do_place` 用 `ret is None` 当「三层签名全失败」的哨兵，把成交误报成 SDK 故障。**
+  QMT 的 `passorder` 是 void 函数，**正常路径就返回 `None`**——这一点在本文件自身的
+  `_ret_to_result()` 里写得清清楚楚（「拿不到委托号时如实返回空字符串」，`status=unknown`）。
+  于是：首签成功但返回 None → `raise last_err`，而 `last_err` 也是 `None` →
+  `TypeError: exceptions must derive from BaseException` → 外层 `execute()` 包成
+  `BrokerSDKError` 返回给用户。**一单已经送达柜台的委托被报成失败，用户重试即产生重复委托**
+  （本平台最不能接受的一类风险）。修法：改用**显式 `success` 布尔 + 成功下标**，
+  `last_err` 仅为「全失败」时的抛出对象，并显式兜底「不可能为空」。
+  真实执行结果（修复前后对比，`passorder=lambda *a: None`）：
+
+  | | 修复前 | 修复后 |
+  |---|---|---|
+  | 首签成功返回 None | `{'ok': False, 'error_type': 'BrokerSDKError', 'error': 'TypeError: exceptions must derive from BaseException'}` | `{'ok': True, 'result': {'status': 'unknown', 'order_id': '', ...}}` |
+  | 降级后成功返回 None | 同上（且会把**旧的** TypeError 抛出来） | `{'ok': True, ..., 'extended_signature_fallback': True}` |
+
+  护栏：`test_multi_instrument.py` 新增 3 例（首签 void / 降级后 void / 经 `execute()` 信封）。
+  **教训：判断「调用是否成功」只能看控制流，不能看返回值**；当一个函数的返回值
+  在业务上允许为 `None` 时，用 `is None` 当哨兵等于把「业务上的合法空值」变成「故障」。
+
+- **② 断链：`account_type` 有实现、有探针、有测试，却**没有任何生产者**。**
+  R18 在 agent 侧加了完整的多标的支持（`opAccountType` + 扩展 12 参签名 + 代码格式校验 +
+  `meta().account_types` 能力上报），但链路的**每一环都没接**：
+  `OrderRequest` 无该字段 → `GenericConnector` payload 不带 → `BigQmtV1.prepare()`
+  白名单式产出把它丢掉 → `_make_order_request` / `ExecutionService.place_order` /
+  `SignalRouter.submit` / REST body 也都没有。结果 `params.get("account_type")` 恒为 `None`，
+  能力**永不可达**；而探针把 `account_types` 报给外部端，属于典型**假绿灯**
+  （前端看得到、下单用不上）。前端同时也没有任何消费者（`grep account_types` 零命中）。
+  修法：贯通 9 个环节（DTO → 连接器 → 方言 → 网关 → 桥 → 执行 → 信号 → REST → 前端下拉），
+  并用 `test_order_account_type_wiring.py`（20 例）把「每一环都提到过该参数」变成结构性断言。
+
+- **③ 顺带修掉的三个同族缺陷**：
+  - **未知 `account_type` 静默落 A 股**（R18 刻意为之）。`credit` 与 `stock` 共用同一套代码格式，
+    代码校验兜不住 → 用户把 `futures` 打成 `futur` 会**静默走错通道**。现改为**抛错**，
+    由 `do_place` 转成 `BrokerError`（400 + 可选值清单），符合「不静默吞错」纪律。
+  - **`qmt_agent_verify.evaluate()` 的 `UnboundLocalError`**：bundle 段用 `name` 拼提示语，
+    而 `name` 到下一段才赋值 ⇒ **恰好只在「策略没部署」这个最需要清晰提示的场景崩溃**。
+    已把取值提到函数开头。
+  - **bundle 校验的 `checked` 语义**：未传 `--qmt-dir` 时不能既不断言「文件在」也不断言「文件不在」，
+    否则会把「只验桥目录」的调用方误判为失败。改为显式 `[-] 未校验`（不计入 problems，也不写 `[v]`）。
+
+- **④ 未接入 CI 的三条门禁**（`check_appcontext` / `check_bigqmt_agent_py36` /
+  `check_capability_coverage`）：本地全绿但 `ci.yml` 里没有它们。这正是 TD-29 记录过的
+  「**没接在 CI 上的门禁会腐烂**」——冻结基线会悄悄过期、红灯无人看见。已全部接入 CI。
+
+- **⑤ 教训：跨层「加一个可选参数」不是局部改动。** 给大 QMT 网关的 `place_order` 加参数，
+  立刻撞上两条既有护栏：`test_bigqmt_gateway_accepts_the_same_keywords_as_mini`
+  （ABC 形参名严格相等）与 `test_bigqmt_gateway_widening_over_the_mini_contract_is_declared`
+  （加宽必须登记）。更关键的是**运行期**：`QMT_USE_PORTS=0`（默认）下 execution 直调
+  `bridge.gateway.place_order`，mini 适配器底层是 `order_stock`（**无** `opAccountType`），
+  无条件追加第 8 个位置实参 → **mini 连接下单必 TypeError**。修法用「按签名投递」
+  （`_account_type_arg()`，结果按函数对象缓存）：只有真正声明该形参的网关才收到它。
+  反向登记表 `_ACCEPTED_GATEWAY_WIDENINGS` 与 `_ACCEPTED_MINI_WIDENINGS` 成对，
+  两侧各自的「多出形参」都必须显式登记。
+
+*用例数 2006 → **2035**（`test_multi_instrument.py` +9、新增 `test_order_account_type_wiring.py` 20），
+`test_*.py` 171 → **172**，已同步 `scripts/ci_reconcile.py` / `README.md` ×2 / V4 §10.5。*
+
+
+### TD-36（R19 第 3 轮，2026-10-02）：前后端契约贯通——一条潜伏断链 + 三个假绿灯 + 一类孤儿逻辑
+
+本轮主题是「**接线**」：能力/字段/端点是否真的通了。四条全部属于「**看着通、实际没通**」这一族——
+绿灯由另一个 bug 或过宽判据遮出来。修完四条并新增两条**可证伪守卫**。
+
+- **① 潜伏断链（P0）：`/market/quote`（单只）与 `/market/indices`（指数条）声明响应模型 `Quote`
+  （`price` 必填），却可能没有 `price`。**
+  根因：链路里**只有批量端点 `/market/quotes` 在出口做了「原生名 → 界面契约名」归一**，
+  而单只与指数条直接把券商/数据源的原始 dict 塞进响应。`eltdx` 与公开源**只给原生名 `last`**
+  （无 `price`），券商两套名都给——于是同一个 `Quote` 契约，在不同端点上时而成立时而不成立。
+  前端 `Quote.price` 读到 `undefined`，K 线/概览类面板**静默空白**（不报错，最难查的一类）。
+  修法：把归一抽成**键序唯一入口** `core/quote_fields.apply_ui_quote_contract()`
+  （`price`/`pre_close` 成对处理：**取不到就删键，绝不写 0**，符合「零粉饰」纪律），三处共用；
+  单只与指数条**复制再改**（`{**q}`）——否则就地改会**污染券商 `latest_quotes` 里的共享 dict**，
+  把一次读的副作用留给所有后续消费者。
+  护栏：`test_quote_field_unity.py` **20 → 35**（+15）：`apply_ui_quote_contract` 语义 7 例 +
+  端点级 4 例（monkeypatch `get_hub`，断言单只与指数条出口含 `price` 且不污染源对象）+
+  **内联回潮扫描**（正则 `\.pop\(\s*["']price["']\s*\)` 禁止端点自行归一，绕过唯一入口）+ 幂等。
+
+- **② 假绿灯（P0）：`check_capability_coverage` 把「api 客户端声明了路径」当「前端有入口」。**
+  `services/api/*.ts` 里 `xxApi.foo: () => http.get("/x")` 这种**声明**本身不是入口——
+  只要**没有任何调用点**，能力依然不可达。可这层声明会让门禁报「已覆盖」⇒ **死声明遮住真实缺口**。
+  实测被遮端点 **21 个**（`accountApi.pnl` / `marketApi.quote` / `marketApi.indices` /
+  `systemApi.ready` / `brokerApi.launch` / `researchApi.factorCompute` …）。
+  修法：判据改为「**声明不算入口、接线才算**」——方法名必须在客户端之外有调用点，
+  或该 URL 出现在客户端之外的源码里，才记为「有入口」；21 条按 R19-3 登记豁免。
+  同时新增**豁免反腐烂**：登记了豁免但**后端已无此端点**（或已有真实入口）⇒ 报红。
+  这条反测立刻抓出 **2 条既有过期豁免**（`GET /api/v1/data/providers`、`GET /api/v1/datahub/policies`
+  其实已被 `SystemStatus.tsx:122/135` 真实接线，且原登记方向还写反了）。
+  成效：`缺口 30 → 0`、`覆盖 173 / 豁免 58 / 过期 0`。
+
+- **③ 假绿灯 ×2（P0）：`check_api_contract_drift` 看不见 9 个 `http.del` 与全部嵌套泛型调用。**
+  两个独立的正则盲区叠在一起：
+  - **别名盲区**：`services/http.ts` 的 DELETE 助手函数叫 `del`，而 `CALL_RE` 的方法白名单只列了
+    `delete`——全仓 `http.del(` **9 处**、`http.delete(` **0 处** ⇒ 9 个 DELETE 端点从未被对账。
+  - **泛型盲区**：调用形态用 `[^<>]*` 描述到括号，遇到 `http.post<Record<string, unknown>>`
+    会**多出一个 `>`** 而匹配失败 ⇒ 22 个嵌套泛型调用被跳过。
+  修法：字符类补 `del`、泛型段改 `[^(\n]*`；**并补 `_METHOD_ALIASES = {"del": "delete"}`**——
+  否则刚认出来的 9 条会**反过来误报「后端不存在」**（第一次跑确实报了 9 条假红，核对后端
+  `DELETE /api/v1/...` 11 条全部存在后才确认是归一化漏配）。
+  成效：前端**可见端点 160 → 191**，契约门禁从此覆盖 DELETE 与泛型调用。
+
+- **④ 孤儿逻辑（P1）：29 个前端 API 方法声明但零调用点。**
+  先例是 R38 已删的同类死代码 `referenceApi`（`check_capability_coverage.py` 内有记载）。
+  死声明不只是噪音——它会让②的门禁说假话。删除 29 个方法 + 4 个失效 `import`（**−146 行**），
+  载荷类型保留（仍被别处引用），并在 `services/api/index.ts` 写明「客户端表面积纪律」。
+  工具坑：一次性删除脚本把**下一个方法的文档注释**当成上一个方法的尾部吃掉了
+  （`account.ts` 的 `batchCancel` 丢了 `/** 批量撤单… */`）⇒ 回滚 5 个文件、改算法：
+  尾部只吃「方法自己最后一行之前」的 trivia，**尾部空行/注释归下一个方法**。
+
+- **⑤ 教训：门禁必须能「被证伪」。** 本轮新增/重写两条可证伪守卫：
+  `verify_api_contract_falsifiable.py`（4 → **7 例**，覆盖改名 / 方法错配 / 顶层段不存在 /
+  `http.del` 别名 / 嵌套泛型三种形态）与 `verify_capability_coverage_falsifiable.py`（**新建 3 例**）。
+  写守卫本身踩了两次坑，恰好印证主题：
+  ① 锚点缩进写成 4 空格（实际 2 空格）⇒ **锚点未命中**，守卫假绿；
+  ② 只改对象名（`marketApi` → `mktApiX`）而不改**方法名**，门禁按方法名判定 ⇒ `.overview(` 仍命中，`rc=0`。
+  **结论：制造违规必须对准「判据本身」，否则守卫会自己变成假绿灯。**
+  每例后都做**字节级还原**，终态对照（不制造违规 ⇒ 门禁绿）作为收尾断言。
+
+- **⑥ 全量回归抓出的真回归（且只有全量跑才暴露）：R18 给 `SignalRouter.submit` 加了
+  `account_type`，却漏改测试替身 `test_p0_manual_confirm.py::_SpyRouter`。**
+  路由 `trade.py` 传该参数 → `TypeError: _SpyRouter.submit() got an unexpected keyword
+  argument 'account_type'`，3 例失败。
+  这正是 TD-34 记录过的「**给接口加参数会打断所有替身**」——同一坑**第二次**踩。
+  修法：补齐 `_SpyRouter` 与 `test_v9_unification.py` 两处替身签名，并新增**机械化护栏**
+  （并入 `test_order_account_type_wiring.py`）：以 `SignalRouter.submit` 真签名为真源，
+  AST 扫描 `tests/` 下全部 `async def submit` 替身，缺参即点名
+  （`**kwargs` 见容一切、`submit(spec)` 之类异名接口按「形参不含 `code`」自动排除）。
+  *附带教训：「本地绿」不等于「全量绿」——改动者只跑了相关文件，漏掉的替身要等逐文件
+  全量测试才现形。本轮另有 1 例 `test_bigqmt_relay_redis` 失败经隔离重跑证明是**构建并发
+  抢 CPU 导致的 2 秒 deadline 抖动**，非回归（说明「失败也分真假」，隔离复跑是廉价判据）。*
+
+*用例数 2035 → **2051**（`test_quote_field_unity.py` 20 → 35、`test_order_account_type_wiring.py`
+20 → 21），`test_*.py` 172 → **172**（未新增文件），已同步 `scripts/ci_reconcile.py` /
+`README.md` ×2 / V4 §10.5。前端 **52 文件 / 508 用例**全绿、`tsc --noEmit` 零错误；
+8 条 CI 门禁 + 2 条可证伪守卫（7 例 / 3 例）全绿。*
 

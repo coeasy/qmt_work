@@ -18,6 +18,7 @@ from app.services.market.common import (
 from core.state import state
 from datasource.registry import get_hub
 from core.clock import now_iso
+from core.quote_fields import apply_ui_quote_contract
 
 
 def _now() -> str:
@@ -95,7 +96,12 @@ async def indices_snapshot(codes: str = "", source: str = "auto", ttl: int = 3,
     res = await asyncio.gather(*[_one(c) for c in want])
     items, errors = [], {}
     for c, q, e in res:
-        items.append(q)
+        # ★ R19 第 3 轮：前端 `IndicesResponse.items` 声明为 `Quote`（`price` 必填），
+        #   而本源返回的是 eltdx/公开源的原生 dict（只有 `last`，没有 `price`）。
+        #   以前这里原样透出 ⇒ 「类型说有、实际没有」的潜伏断链（顶部指数条接线即空）。
+        #   与 `/market/quotes`、`/market/quote` 共用同一份界面契约归一；**复制再改**，
+        #   不污染数据源缓存里的共享 dict。
+        items.append(apply_ui_quote_contract({**q}) if isinstance(q, dict) else q)
         if e:
             errors[c] = e
     spark_map = {}

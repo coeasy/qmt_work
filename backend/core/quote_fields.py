@@ -34,6 +34,7 @@ __all__ = [
     "BOOK_KEYS",
     "LAST_PRICE_KEYS",
     "PREV_CLOSE_KEYS",
+    "apply_ui_quote_contract",
     "pick_last_price",
     "pick_order_ref_price",
     "pick_prev_close",
@@ -103,3 +104,48 @@ def pick_order_ref_price(quote: Any) -> Optional[float]:
         if num is not None:
             return num
     return None
+
+
+def apply_ui_quote_contract(quote: Any) -> Any:
+    """把一份 quote dict 就地归一为**界面契约名**（返回同一个对象；非 dict 原样返回）。
+
+    为什么需要它（R19 第 3 轮）
+    --------------------------
+    各数据源给出的键名**不统一**：
+      - 券商 xtquant（`xtp/quotes.py::_norm_quote`）：**同时**给原生名（``last`` /
+        ``lastClose``）与界面契约名（``price`` / ``pre_close`` / ``time``）；
+      - eltdx / 公开源（腾讯、新浪）：**只给原生名**（``last`` / ``lastClose``）。
+
+    前端 ``Quote`` 类型把 ``price`` 声明为**必填**，界面到处读 ``quote.price``。
+    于是「同一份行情，走券商有数字，走补充源一片 ``--``」，而且**不报错、不兜底**
+    —— 与 ``_normalize_quotes`` 注释里记录的「订阅到了但没数字」是同一个坑。
+
+    此前只有 ``/market/quotes``（批量）在出口做过归一，`/market/quote`（单只）与
+    `/market/indices`（指数条）直接把源 dict 交出去，声明类型与实际不符 ⇒ 一旦接线
+    就是断链。这里把归一收成**一份实现**，三个端点共用。
+
+    语义（与既有铁律一致）：
+      - 补 ``price`` ← :func:`pick_last_price`（键序唯一入口）；**取不到就删键**，
+        绝不写 ``0``（``0.00`` 会被界面读成「这只票跌到 0 了」）；
+      - 补 ``pre_close`` ← :func:`pick_prev_close`，已存在且有效的 ``pre_close`` 原样保留；
+      - 原生名（``last`` / ``lastClose`` / ``lastPrice``）**一律保留**——引擎、风控、
+        涨跌停判定仍按原生名读取，本函数只做**加法与空值清理**。
+    """
+    if not isinstance(quote, dict):
+        return quote
+
+    px = pick_last_price(quote)
+    if px is None:
+        quote.pop("price", None)
+    else:
+        quote["price"] = px
+
+    pc = pick_prev_close(quote)
+    if pc is None:
+        pc = _positive(quote.get("pre_close"))   # 契约名自身也认，避免误删源给的值
+    if pc is None:
+        quote.pop("pre_close", None)
+    else:
+        quote["pre_close"] = pc
+
+    return quote
