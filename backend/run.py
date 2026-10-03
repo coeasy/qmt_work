@@ -25,7 +25,7 @@ import sys
 
 import uvicorn
 
-from core.config import settings
+from core.config import settings, normalize_remote_access, is_remote_enabled, is_wan_enabled, effective_host
 
 log = logging.getLogger("qmt_work")
 _MAX_PORT_RETRY = int(os.environ.get("QMT_PORT_SCAN", "10") or 10)
@@ -81,10 +81,17 @@ def _is_remote_listen(host: str) -> bool:
 
 
 def _self_check() -> None:
-    """启动自检：数据库目录可写、时钟基准、API Key 存在性。
+    """启动自检：数据库目录可写、时钟基准、API Key 存在性、远程访问档位安全。
 
-    0-E 安全基线：远程监听(host 非 loopback) + 默认 api_key=qmt-dev-key
-    属高危组合（他人可用默认密钥接管远程接口），直接拒绝启动。
+    0-E 安全基线三级分级（remote_access: off / lan / wan）：
+
+    - off（默认）：严格单机。若用户手动把 host 改为远程监听 + 默认密钥，
+      拒绝启动（防止他人用默认密钥接管远程接口）。
+    - lan：局域网多设备。host 强制绑定 0.0.0.0，强制 api_key != "qmt-dev-key"。
+      否则拒绝启动（内网可达 = 弱密钥即被接管）。
+    - wan：公网可访问。lan 的全部约束 + 强制 totp_secret 非空（远程下单需二次确认）。
+
+    详见 docs/REMOTE_ACCESS_DECISION.md
     """
     from datetime import datetime
     db_dir = os.path.dirname(str(settings.db_path)) or "."
@@ -100,19 +107,52 @@ def _self_check() -> None:
     local = datetime.now().astimezone()
     log.info("自检：本地时间 %s（UTC%+d）— TOTP 二次确认依赖本机时钟，偏差须 <30s",
              local.isoformat(timespec="seconds"), local.utcoffset().total_seconds() // 3600)
+
+    # ---- 远程访问档位判定 ----
+    mode = normalize_remote_access(settings.remote_access)
+    eff_host = effective_host()
+    log.info("自检：远程访问档位 = %s（实际绑定 %s）", mode, eff_host)
+
+    # ---- API Key 校验（按档位分级）----
+    default_key = "qmt-dev-key"
     if not settings.api_key:
+        # lan/wan 档下 api_key 为空 = 任何人都能调用远程接口，必须拒绝
+        if mode != "off":
+            log.error("自检：远程访问档位 %s 下 api_key 未配置，"
+                      "任何远程请求将绕过鉴权。请在配置文件设置 api_key 后重试。", mode)
+            sys.exit(1)
         log.warning("自检：未配置 API Key（api_key），鉴权端点将拒绝访问")
-    elif settings.api_key == "qmt-dev-key":
+    elif settings.api_key == default_key:
         log.warning("自检：API Key 仍为默认值 qmt-dev-key —— 生产环境必须修改！")
-        if _is_remote_listen(settings.host):
+        if mode in ("lan", "wan"):
+            # lan/wan 档下默认密钥 = 内网/公网可达 + 弱密钥 = 高危，必须拒绝
+            log.error("自检：远程访问档位 %s 下 api_key 仍为默认值 qmt-dev-key，"
+                      "他人可用默认密钥接管全部接口（含实盘下单）。"
+                      "请在配置文件设置 api_key 后重试。", mode)
+            sys.exit(1)
+        # off 档：用户手动改了 host 到远程监听 + 默认密钥，仍拒绝
+        if _is_remote_listen(eff_host):
             log.error("自检：绑定地址 %s 可被远程访问，且 api_key 仍为默认值 qmt-dev-key，"
                       "他人可用默认密钥接管全部接口。为避免未授权接管，拒绝启动。"
                       "请在配置文件设置 api_key（并在需要时改回远程绑定 host）后重试。",
-                      settings.host)
+                      eff_host)
             sys.exit(1)
         log.warning("自检：当前仅本机访问，默认密钥风险可控——但生产环境仍务必修改 api_key")
     else:
         log.info("自检：API Key 已配置（已脱敏）")
+
+    # ---- TOTP 校验（wan 档强制）----
+    if mode == "wan":
+        if not (settings.totp_secret or "").strip():
+            log.error("自检：远程访问档位 wan（公网）要求强制启用 TOTP 二次确认，"
+                      "但 totp_secret 未配置。远程下单将无二次确认保护，拒绝启动。"
+                      "请在配置文件设置 totp_secret（或改用 lan 档仅内网访问）后重试。")
+            sys.exit(1)
+        log.info("自检：TOTP 二次确认已启用（wan 档强制）")
+    elif mode == "lan":
+        if not (settings.totp_secret or "").strip():
+            log.warning("自检：lan 档未配置 TOTP（内网可达，风险较可控）。"
+                        "如需更强保护请配置 totp_secret 或升级到 wan 档")
 
 
 def _port_in_use(port: int) -> bool:
@@ -123,7 +163,7 @@ def _port_in_use(port: int) -> bool:
     """
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
-        s.bind((settings.host, port))
+        s.bind((effective_host(), port))
         return False
     except OSError:
         return True
@@ -227,6 +267,11 @@ if __name__ == "__main__":
         except Exception:  # noqa: BLE001
             pass
     log.info("监听端口：%s（来源：%s）", settings.port, _port_src)
+    # 远程访问档位提示（off = 仅本机；lan/wan = 绑定 0.0.0.0 远程可达）
+    _mode = normalize_remote_access(settings.remote_access)
+    if _mode != "off":
+        log.info("远程访问：%s（绑定 %s，远程设备可通过 http://<本机IP>:%s/ 访问）",
+                 _mode.upper(), effective_host(), settings.port)
     # 单实例保护：双开直接退出，防止两个进程并发写同一 SQLite
     lock_fd = _acquire_singleton_lock(
         os.path.dirname(str(settings.db_path)) or ".")
@@ -255,4 +300,4 @@ if __name__ == "__main__":
     # 端口锁定：把实际监听端口持久化，下次启动优先复用（多实例部署互不冲突）
     _write_locked_port(target)
     _write_port_file(target)
-    uvicorn.run("app.main:app", host=settings.host, port=target, reload=False)
+    uvicorn.run("app.main:app", host=effective_host(), port=target, reload=False)

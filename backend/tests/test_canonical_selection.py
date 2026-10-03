@@ -224,3 +224,206 @@ def test_sql_order_matches_python_key_on_multi_source(store):
     assert sql_pick["provider_id"] == py_pick["provider_id"], (
         f"SQL 选 {sql_pick['provider_id']}，Python 选 {py_pick['provider_id']}")
     assert sql_pick["close"] == 30.0  # broker 质量序最优
+
+
+# =====================================================================
+# 2026-10-03：质量状态「表与实现错位」护栏
+#
+# 背景：QUALITY_STATE_RANK 曾只登记 validated/complete/match，而生产代码实际写的是
+# raw/unknown/final/conflict —— 四个真实取值**全部**落在 .get(..., 3) 的 ELSE 档，
+# 与彼此同档。后果：reconcile_bars 把胜出者从 raw 升为 final 后，读侧排序键
+# (final=3) 与 (raw=3) 完全并列，晋级**存在但无效**，99.98% 的 K 线永卡 raw。
+#
+# 这类错位不会报任何错（.get 默认值静默兜底），所以只能靠下面的源码扫描钉住。
+# =====================================================================
+import ast
+import pathlib
+
+
+def _written_quality_states() -> set[str]:
+    """AST 扫全后端源码，收集所有写入 **``local_bars.quality_state``** 的字符串字面量。
+
+    ⚠️ 必须限定表：仓库里 **两张表共用 ``quality_state`` 列名但语义不同**——
+    ``local_bars`` 走「数据质量档位」词汇（raw/unknown/final/conflict），
+    ``dataset_snapshots`` 走「发布终态」词汇（provisional/final/revised/invalid/empty）。
+    不区分表就把两套词汇混在一起，测试自己会变成误报源。
+
+    覆盖 ``local_bars`` 的四种真实写法：
+    - ``upsert_bars(..., quality_state="raw")`` —— 关键字实参（upsert_bars 只写 local_bars）
+    - ``def upsert_bars(..., quality_state: str = "unknown")`` —— 带默认值形参
+      （**必须按形参名取默认值**，取错就是本测试自己变成误报源）
+    - ``UPDATE local_bars SET quality_state='conflict'`` —— SQL 字面量
+    - ``quality_state = "x"`` —— 局部赋值（仅在上游已被判定为 local_bars 语境时计入）
+    """
+    import re
+
+    root = pathlib.Path(__file__).resolve().parent.parent
+    exclude = {"dist", "build", "runtimes", ".venv", "node_modules", "__pycache__"}
+    found: set[str] = set()
+    for py in root.rglob("*.py"):
+        if any(part in exclude for part in py.parts):
+            continue
+        if "tests" in py.parts:
+            continue
+        rel = str(py.relative_to(root))
+        src = py.read_text(encoding="utf-8", errors="replace")
+
+        # SQL 字面量：只认显式指向 local_bars 的 UPDATE
+        for m in re.finditer(
+                r"UPDATE\s+local_bars\s+SET\s+quality_state\s*=\s*'([A-Za-z_][A-Za-z0-9_]*)'",
+                src):
+            found.add(m.group(1))
+
+        # 非 local_bars 语境的赋值不采（dataset_snapshots 有自己的终态词汇）
+        if rel == "datasource/snapshots.py":
+            continue
+
+        try:
+            tree = ast.parse(src)
+        except SyntaxError:
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                # 归口判断：直接调 upsert_bars，或 asyncio.to_thread(upsert_bars, ...)
+                # 后者是 EOD 同步的实际写法（落库移出事件循环），漏了就漏采 'raw'。
+                fn = node.func
+                target = fn.id if isinstance(fn, ast.Name) else (
+                    fn.attr if isinstance(fn, ast.Attribute) else "")
+                is_upsert = target == "upsert_bars"
+                if target == "to_thread" and node.args:
+                    first = node.args[0]
+                    inner = (first.id if isinstance(first, ast.Name) else
+                             (first.attr if isinstance(first, ast.Attribute) else ""))
+                    is_upsert = inner == "upsert_bars"
+                if not is_upsert:
+                    continue
+                for kw in node.keywords:
+                    if kw.arg == "quality_state" and isinstance(kw.value, ast.Constant):
+                        found.add(str(kw.value.value))
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if node.name != "upsert_bars":
+                    continue
+                args = node.args
+                # args.defaults 右对齐到 posonlyargs+args 的尾部
+                pos = list(args.posonlyargs) + list(args.args)
+                pos_defaults = {pos[len(pos) - len(args.defaults) + i].arg: d
+                                for i, d in enumerate(args.defaults) if d is not None}
+                kw_defaults = {k.arg: d for k, d in zip(args.kwonlyargs, args.kw_defaults)
+                               if d is not None and k.arg is not None}
+                for argname, d in {**pos_defaults, **kw_defaults}.items():
+                    if argname == "quality_state" and isinstance(d, ast.Constant):
+                        found.add(str(d.value))
+    return found
+
+
+def _written_snapshot_states() -> set[str]:
+    """``dataset_snapshots.quality_state`` 的取值（发布终态词汇）。"""
+    import re
+
+    root = pathlib.Path(__file__).resolve().parent.parent
+    py = root / "datasource" / "snapshots.py"
+    src = py.read_text(encoding="utf-8", errors="replace")
+    found: set[str] = set(re.findall(r"quality_state\s*=\s*'([A-Za-z_][A-Za-z0-9_]*)'", src))
+    try:
+        tree = ast.parse(src)
+    except SyntaxError:
+        return found
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            for tgt in node.targets:
+                if isinstance(tgt, ast.Name) and tgt.id == "quality_state":
+                    if isinstance(node.value, ast.Constant):
+                        found.add(str(node.value.value))
+        elif isinstance(node, ast.Compare):
+            # quality_state in ("complete", "match") —— 输入态判定
+            if isinstance(node.left, ast.Name) and node.left.id == "quality_state":
+                for comp in node.comparators:
+                    if isinstance(comp, (ast.Tuple, ast.List)):
+                        for e in comp.elts:
+                            if isinstance(e, ast.Constant):
+                                found.add(str(e.value))
+    return found
+
+
+def test_rank_table_covers_every_quality_state_written_in_source():
+    """每一个被生产代码写出的 quality_state 都必须显式登记在排名表内。
+
+    未登记的值会静默落到 ``.get(..., 3)`` 兜底档——正是「晋级无效」的原始缺陷形态。
+    这里**禁止兜底掩盖**：宁可让测试变红，也不许新状态悄悄同档。
+    """
+    written = _written_quality_states()
+    registered = set(QUALITY_STATE_RANK)
+    missing = written - registered
+    assert not missing, (
+        f"以下 quality_state 被生产代码写出但未登记 QUALITY_STATE_RANK：{sorted(missing)}\n"
+        f"它们会静默落到 ELSE 兜底档，导致 canonical 选主与晋级失效。"
+        f"已登记：{sorted(registered)}"
+    )
+
+
+def test_final_outranks_raw_so_promotion_matters():
+    """reconcile_bars 的晋级结果必须真的改变排序 —— 否则晋级是空转。"""
+    # 同一 provider 下，晋级行必须压过未晋级行
+    assert canonical_sort_key("final", "eltdx") < canonical_sort_key("raw", "eltdx")
+    assert canonical_sort_key("final", "eltdx") < canonical_sort_key("unknown", "eltdx")
+    assert QUALITY_STATE_RANK["final"] < QUALITY_STATE_RANK["raw"]
+
+
+def test_conflict_never_wins_canonical_even_from_best_provider():
+    """冲突行给最差档：即使来自质量序最好的 broker，也不该赢得 canonical。"""
+    assert QUALITY_STATE_RANK["conflict"] > QUALITY_STATE_RANK["raw"]
+    assert canonical_sort_key("raw", "eltdx") < canonical_sort_key("conflict", "broker")
+
+
+def test_sql_case_covers_every_quality_state_written_in_source():
+    """SQL 的 ``CASE`` 由排名表程序化生成，须覆盖全部真实取值。
+
+    未命中的值落 ``ELSE 3``，与 Python 侧 ``.get(..., 3)`` 一致——但那是兜底，
+    不是设计意图，故不允许出现。
+    """
+    written = _written_quality_states()
+    for state in sorted(written):
+        assert f"WHEN '{state}'" in _QUALITY_STATE_CASE_SQL, (
+            f"quality_state={state!r} 未出现在 SQL CASE 中，将落到 ELSE 兜底档")
+
+
+def test_two_tables_share_quality_state_column_but_not_vocabulary():
+    """``quality_state`` 列被两张表共用，但词汇**完全不同**——必须钉住这个事实。
+
+    这是同名异构的经典陷阱：新代码很容易把 ``dataset_snapshots`` 的终态词汇
+    （provisional/final/revised/invalid/empty）误当成 ``local_bars`` 的档位词汇写，
+    或反之，且**不会有任何报错**（两表各自独立校验）。
+
+    断言两张表的实际取值集**不相交于危险语义**——两者都有 ``final``，但含义不同：
+    ``local_bars.final`` = 跨源对账胜出；``dataset_snapshots.final`` = 快照可对外承诺。
+    """
+    bars_states = _written_quality_states()
+    snap_states = _written_snapshot_states()
+    # local_bars 侧必须是纯档位词汇
+    assert "provisional" not in bars_states and "revised" not in bars_states
+    assert "invalid" not in bars_states and "empty" not in bars_states
+    # 两套词汇都必须非空（空集说明扫描器坏了，等于测试自废）
+    assert bars_states, "扫描器未收集到任何 local_bars 质量状态，扫描逻辑可能失效"
+    assert snap_states, "扫描器未收集到任何 dataset_snapshots 终态，扫描逻辑可能失效"
+    assert "raw" in bars_states, "local_bars 的默认写入态 raw 未被采集"
+
+
+def test_finality_states_declares_every_state_snapshots_can_write():
+    """``FINALITY_STATES`` 必须覆盖 dataset_snapshots 实际写出的全部终态。
+
+    2026-10-03 发现：``snapshots.py`` 会把空批次降级为 ``quality_state="empty"``
+    （绕开 :func:`apply_finality` 的直接写入），但 ``FINALITY_STATES`` 只声明了
+    provisional/final/revised/invalid 四档 ⇒ 声明与实现不一致。任何经
+    ``apply_finality`` 写入 ``empty`` 的路径会直接 ``ValueError``，而同一个值
+    经 ``snapshots.py`` 却能写进去——同一个字段两条路径两套规则。
+    """
+    from datasource.quality import FINALITY_STATES
+
+    written = _written_snapshot_states()
+    # 输入态（会被降级，不作为终态对外承诺）单独放行
+    input_states = {"complete", "match"}
+    missing = {s for s in written if s not in FINALITY_STATES and s not in input_states}
+    assert not missing, (
+        f"dataset_snapshots 写出了以下终态但未登记 FINALITY_STATES：{sorted(missing)}\n"
+        f"已声明：{FINALITY_STATES}；输入态（可降级，非终态）：{sorted(input_states)}\n"
+        "后果：同一字段经 apply_finality 会 ValueError，经 snapshots.py 却能写入。")

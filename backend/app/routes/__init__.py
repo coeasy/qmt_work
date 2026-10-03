@@ -23,6 +23,7 @@ import app.routes.paper as paper
 import app.routes.rebalance as rebalance
 import app.routes.reconcile as reconcile
 import app.routes.reference as reference
+import app.routes.remote_access as remote_access
 import app.routes.research as research
 import app.routes.runtime as runtime
 import app.routes.screen as screen
@@ -71,3 +72,4 @@ router.include_router(screen.router)
 router.include_router(analysis.router)
 router.include_router(runtime.router)
 router.include_router(datahub.router)
+router.include_router(remote_access.router)

@@ -5,6 +5,7 @@ import threading
 from ..base import BrokerError
 from ._common import _dget, _direction_from_order_type, _pick, _shell_attr, log
 from core.clock import now_iso
+from core.errors import swallow
 
 
 class TradingMixin:
@@ -94,13 +95,34 @@ class TradingMixin:
         return _Cb()
 
     def _handle_disconnected(self) -> None:
-        """断线：翻转连接态并通知 manager 触发健康重连。"""
+        """断线：翻转连接态、**唤醒所有挂起的报单等待**，并通知 manager 触发健康重连。
+
+        2026-10-03 正确性修复：原实现只 ``clear()`` 三个映射就结束，但
+        :meth:`_wait_order_response` 里注册的 ``threading.Event`` 挂在 ``_pending_resp``
+        的值里——把表清掉并不等于 ``set()`` 那个 Event。柜台断线瞬间如果有
+        :meth:`place_order` 正在等回包，它会一直挂到 ``timeout=10.0`` 才返回
+        ``status="unknown"``，用户表现为「下单卡住十秒才失败」而不是立刻知道柜台掉了。
+        现在取出 pending 表再逐个 ``set()``，等待方立刻返回（拿到 ``oid=None`` ⇒
+        ``status="unknown"``，绝不伪报 submitted），由上层按真实状态处理。
+        """
         was = self._connected
         self._connected = False
         with self._map_lock:
+            # ★ 必须先**复制**再清：`pend = self._pending_resp` 拿到的是同一个 dict 对象，
+            #   若先 ``clear()`` 再 ``pend.values()``，迭代的是已被清空的表，唤醒循环空转。
+            pend = list(self._pending_resp.values())
             self._seq_to_oid.clear()
             self._oid_to_seq.clear()
             self._pending_resp.clear()
+            for item in pend:
+                # item = (threading.Event, bucket)；set() 让 _wait_order_response 立刻返回
+                try:
+                    item[0].set()
+                except Exception as exc:  # noqa: BLE001
+                    # 唤醒失败不得影响断线主流程（断线态与映射清理都已生效）。
+                    # 用 swallow 而非裸 pass：``threading.Event.set()`` 几乎不会抛，
+                    # 真抛了说明内存状态异常，留一条痕迹便于排查。
+                    swallow(exc, why="断线唤醒挂起的报单等待失败，断线主流程已生效")
         log.warning("XtQuantTrader 断线（adapter=%s account=%s）",
                     self._account_id, self._account_type)
         if was and self._on_disconnect_cb is not None:

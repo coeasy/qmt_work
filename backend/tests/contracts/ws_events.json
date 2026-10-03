@@ -6,7 +6,9 @@
   "algo_alert": [],
   "algo_slice": [],
   "broker.connected": [],
-  "broker.disconnected": [],
+  "broker.disconnected": [
+    "broker.disconnected"
+  ],
   "condition_created": [],
   "condition_expired": [],
   "condition_failed": [],

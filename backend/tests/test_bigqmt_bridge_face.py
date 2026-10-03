@@ -1049,3 +1049,169 @@ def test_pump_actually_runs_the_liveness_probe(monkeypatch):
     assert was_running is True
     assert conn.calls >= 1, "泵没有跑探活 ⇒ is_connected 会永远停在 True（假绿灯回归）"
     assert bridge.is_connected() is False
+
+
+# =====================================================================
+# 2026-10-03：ensure_handler 幂等性（行情帧放大 / handler 无界累积）
+# =====================================================================
+# 背景：``BigQmtBridge.ensure_handler`` 原先直接 ``self.on()``（无条件 append），
+# 而唯一调用方 ``app.bootstrap.phase_watchdogs._pump_guard`` 每 **2 秒**无条件调用一次。
+# 后果（不是理论风险，是运行期确定性退化）：
+#   1. 大 QMT 连接保持活跃期间 ``_handlers["quote"]`` 每天追加 ≈43,200 个重复引用，
+#      进程不重启就持续膨胀（内存泄漏）；
+#   2. ``enqueue`` 遍历全表 ⇒ 一条行情帧被派发 N 次 ⇒ ``SyncEngine.on_event`` 执行 N 次
+#      ⇒ K 线重复落库、内存队列重复入队、下游指标重复计算。
+# 同一仓库 ``xtquant_client.gateway.XTQuantBridge.ensure_handler`` 已经是幂等实现
+# （同一调用方、同一语义），此前两个实现行为相反。
+def test_bigqmt_ensure_handler_is_idempotent():
+    b = BigQmtBridge.__new__(BigQmtBridge)
+    b._handlers = {}
+    delivered: list[dict] = []
+    handler = lambda evt: delivered.append(evt)
+
+    # 模拟 _pump_guard 的 2 秒周期重复调用
+    for _ in range(5000):
+        b.ensure_handler("quote", handler)
+
+    assert b._handlers["quote"] == [handler], (
+        f"ensure_handler 未去重：同一 handler 被追加 {len(b._handlers['quote'])} 次"
+        f"（_pump_guard 每 2s 一次，长期运行将无界膨胀）")
+
+    # 一帧只派发一次
+    b.enqueue({"type": "quote", "data": {"code": "600000.SH"}})
+    assert len(delivered) == 1, (
+        f"单帧被派发 {len(delivered)} 次（修复前为追加次数，行情帧放大 ⇒ 重复落库）")
+
+
+def test_two_ensure_handler_implementations_agree_on_idempotency():
+    """两个桥的 ensure_handler 语义必须一致——同调用方、同语义，不允许各写一套。
+
+    回归保护：本次缺陷的根因正是两份实现语义相反（一个幂等、一个 append）。
+    如果将来再有人「对齐」到 append 语义，本测试会立刻红。
+
+    用**未绑定函数**直接调用而非实例化：这里只测 handler 注册行为，
+    给它一个只提供 ``_handlers`` 的合成 self 即可（两个桥的 ``__init__``
+    都拉起线程池/事件循环，实例化成本与副作用都远大于被测逻辑本身）。
+    """
+    class _Self:
+        def __init__(self):
+            self._handlers = {}
+
+    cases = [
+        ("bigqmt", BigQmtBridge.ensure_handler),
+        # ★ 是 XTQuantBridge，不是 XTQuantGateway —— 后者是带 10 个抽象方法的 ABC，
+        #   既没有 ensure_handler，也无法实例化。xtquant 侧的幂等实现住在桥里。
+        ("xtquant", XTQuantBridge.ensure_handler),
+    ]
+    for label, method in cases:
+        obj = _Self()
+        h = lambda evt: None
+        for _ in range(200):
+            method(obj, "quote", h)
+        assert len(obj._handlers["quote"]) == 1, (
+            f"{label}.ensure_handler 未幂等：{len(obj._handlers['quote'])} 个引用")
+
+
+def test_ensure_handler_does_dedup_across_distinct_instances():
+    """两个**不同** handler（如两条连接各自的回调）都必须保留，不被误删。"""
+    b = BigQmtBridge.__new__(BigQmtBridge)
+    b._handlers = {}
+    got: list = []
+    h1 = lambda evt: got.append("h1")
+    h2 = lambda evt: got.append("h2")
+    for _ in range(50):
+        b.ensure_handler("quote", h1)
+        b.ensure_handler("quote", h2)
+    assert sorted(b._handlers["quote"], key=id) and len(b._handlers["quote"]) == 2
+    b.enqueue({"type": "quote"})
+    assert got == ["h1", "h2"]
+
+
+def test_bigqmt_emits_disconnected_once_when_agent_becomes_unresponsive(monkeypatch):
+    """大 QMT 侧的掉线必须经同一 ``broker.disconnected`` 链路送到前端。
+
+    回归保护：2026-10-03。此前 xtquant 适配器有 SDK 的 ``on_disconnected`` 回调，
+    而大 QMT 桥只有「可用性布尔量」——没有「可用性由可用变不可用」这个**边沿事件**，
+    前端只能靠下一次健康轮询才发现（延迟 = 探活间隔 × 失败阈值）。
+
+    断言四件事：
+      1. 连败**到阈值的那一次**才发事件（未达阈值只记账，不骚扰前端）；
+      2. 只发**一次**（边沿去重：失败持续期间不刷屏）；
+      3. ``is_connected()`` 如实反映状态，与事件一致；
+      4. 恢复后重新计数，**再次**连败仍能触发新边沿（不是一次性全局开关）。
+    """
+    class _Flaky:
+        def __init__(self):
+            self.calls = 0
+            self.ok = True
+
+        async def test_connection(self):
+            self.calls += 1
+            if not self.ok:
+                raise OSError("agent 已死")
+
+    # 三个探活节奏常量必须压平，否则第 2 次探活会被
+    # ``now < _liveness_next_at`` 短路，失败永远累计不到阈值。
+    monkeypatch.setattr("connectors.bigqmt_bridge._LIVENESS_IDLE_SECONDS", 0)
+    monkeypatch.setattr("connectors.bigqmt_bridge._LIVENESS_RETRY_SECONDS", 0)
+    monkeypatch.setattr("connectors.bigqmt_bridge._LIVENESS_FAILURES_TO_DIE", 2)
+
+    connector = _Flaky()
+    bridge = BigQmtBridge.__new__(BigQmtBridge)
+    bridge.connector = connector
+    bridge.conn_id = "c1"
+    bridge._connected = True
+    bridge._handlers = {}
+    bridge._last_agent_ok = 0.0        # 0.0 为假值 ⇒ 跳过 idle 短路
+    bridge._liveness_next_at = 0.0
+    bridge._liveness_failures = 0
+    bridge._agent_unresponsive = False
+
+    delivered: list[dict] = []
+    # ★ handler 必须在**探活之前**注册：边沿事件是在第 2 次探活时同步派发的，
+    #   事后再注册永远收不到（这就是旧版本测试「断言不了任何东西」的原因）。
+    bridge.ensure_handler("disconnected", lambda e: delivered.append(e))
+
+    async def probe(n):
+        for _ in range(n):
+            await bridge._liveness_probe()
+
+    connector.ok = False
+    asyncio.run(probe(1))               # 第 1 次失败：只记账
+    assert bridge._liveness_failures == 1
+    assert bridge._agent_unresponsive is False
+    assert delivered == [], "阈值未到就发事件会骚扰前端"
+    assert bridge.is_connected() is True
+
+    asyncio.run(probe(1))               # 第 2 次失败 ⇒ 翻真 ⇒ 边沿
+    assert bridge._agent_unresponsive is True
+    assert len(delivered) == 1, "翻真的那一刻必须发出 disconnected"
+    assert delivered[0]["type"] == "disconnected"
+    assert "agent 已死" in delivered[0]["detail"]
+    assert bridge.is_connected() is False
+
+    asyncio.run(probe(5))               # 失败持续 ⇒ 只发一次
+    assert len(delivered) == 1, (
+        f"边沿被重复触发 {len(delivered)} 次（刷屏/重复落库）")
+
+    # 恢复：一次成功即清零，且**能再次**触发新边沿
+    connector.ok = True
+    asyncio.run(probe(1))
+    assert bridge._agent_unresponsive is False
+    assert bridge._liveness_failures == 0
+    assert bridge.is_connected() is True
+    connector.ok = False
+    asyncio.run(probe(2))
+    assert len(delivered) == 2, "恢复后再次连败必须能再次发出边沿"
+    assert delivered[1]["type"] == "disconnected"
+
+
+def test_bigqmt_disconnected_event_registered_via_adapter_slot():
+    """``on_disconnect`` 必须是大 QMT 桥的公开方法（接口门禁 + 行为双保险）。"""
+    b = BigQmtBridge.__new__(BigQmtBridge)
+    b._disconnect_cbs = []
+    b.on_disconnect(lambda: None)
+    assert len(b._disconnect_cbs) == 1
+    # None 不得污染注册表
+    b.on_disconnect(None)
+    assert len(b._disconnect_cbs) == 1

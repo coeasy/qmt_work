@@ -87,6 +87,7 @@
   "get_ready",
   "get_reconcile_last",
   "get_reconcile_wal_stats",
+  "get_remote_access_modes",
   "get_runtime_jobs",
   "get_runtime_jobs_by_job_id",
   "get_runtime_schedules",

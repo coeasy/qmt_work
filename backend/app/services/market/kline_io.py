@@ -118,8 +118,9 @@ def start_moneyflow_collector():
 async def stop_moneyflow_collector() -> None:
     """停机：取消资金流采集循环（幂等，未启动时为空操作）。"""
     global _collector_task
-    task, _collector_task = _collector_task, None
+    task = _collector_task
     if task is None or task.done():
+        _collector_task = None
         return
     task.cancel()
     try:
@@ -128,6 +129,14 @@ async def stop_moneyflow_collector() -> None:
         # 停机路径：取消与循环内异常都属预期终态，绝不能阻断 shutdown 的后续步骤；
         # 但**必须留痕** —— 静默 pass 会让「采集循环到底怎么退出的」永远查不出来。
         swallow(exc, why="停机取消资金流采集循环（取消/循环异常均属预期终态）")
+    # ★ 2026-10-03 修：原先在 cancel **之前**就把 `_collector_task` 置 None。
+    #   采集循环里有一步 ``await snapshot_codes(watch)`` 是真实 IO，取消要等它
+    #    unwind；在这个窗口里全局已空 ⇒ 重入的 ``start_moneyflow_collector()``
+    #   会判定「未启动」并**再起一个循环** ⇒ 两个采集循环并发写同一张
+    #   moneyflow_cache，且先退的那个还在收尾。改为只在任务真正结束后清空。
+    #   ``_collector_task is task`` 守卫：期间若已有新任务顶上，不得覆盖它。
+    if _collector_task is task:
+        _collector_task = None
 
 
 def moneyflow_replay(db, code: str, date: str = "", limit: int = 500) -> dict:

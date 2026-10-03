@@ -358,6 +358,12 @@ export const PAGES: Record<string, PageDef> = {
     comp: P(() => import("@/domains/system/Settings")),
     status: "done",
   },
+  remote_access: {
+    key: "remote_access",
+    label: "远程访问",
+    comp: P(() => import("@/domains/system/RemoteAccess")),
+    status: "done",
+  },
   system_log: {
     key: "system_log",
     label: "系统日志",
@@ -426,6 +432,7 @@ export const MENU: MenuGroup[] = [
       "apikeys",
       "mcp",
       "settings",
+      "remote_access",
       "system_log",
     ],
   },

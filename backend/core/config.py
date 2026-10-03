@@ -53,8 +53,15 @@ def _default_config_payload() -> dict[str, Any]:
                    "`_` 开头的键是说明，不会被解析。"
                    "db_path / log_dir 填相对路径时以本文件所在目录（exe 同目录）为基准。",
         "app_name": "qmt_work",
-        # 默认仅本机可访问（0-E 安全基线）；需远程访问请改为 0.0.0.0
-        # 并务必修改 api_key，否则启动自检会拒绝在远程监听下使用默认密钥
+        # 远程访问档位（三级安全分级；默认 off = 严格单机）
+        # off：仅本机可访问（绑定 127.0.0.1，loopback 免鉴权）—— 默认
+        # lan：局域网多设备可访问（绑定 0.0.0.0，强制 API Key，scope 分级）
+        # wan：公网可访问（lan + 强制 TOTP，signal.mode 默认 paper）
+        # 开启 lan/wan 后 host 自动覆盖为 0.0.0.0，且强制修改 api_key
+        # （否则启动自检拒绝启动）。详见 docs/REMOTE_ACCESS_DECISION.md
+        "remote_access": "off",
+        # 显式绑定地址；remote_access=off 且本字段为 127.0.0.1 时维持单机
+        # remote_access=lan/wan 时本字段被忽略（强制绑定 0.0.0.0）
         "host": "127.0.0.1",
         "port": 21118,
         # ---- 存储与日志 ----
@@ -252,7 +259,15 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_prefix="QMT_", extra="ignore")
 
     app_name: str = "qmt_work"
-    # 0-E 安全基线：默认仅本机可访问；远程监听(0.0.0.0)且未改默认 api_key 时启动自检拒绝启动
+    # 远程访问档位（0-E 安全基线三级分级；默认 off = 严格单机）
+    # off：仅本机可访问（绑定 127.0.0.1，loopback 免鉴权）—— 默认
+    # lan：局域网多设备可访问（绑定 0.0.0.0，强制 API Key，scope 分级）
+    # wan：公网可访问（lan + 强制 TOTP，signal.mode 默认 paper）
+    # 开启 lan/wan 后：host 自动覆盖为 0.0.0.0；强制 api_key != "qmt-dev-key"；
+    #   wan 档强制 totp_secret 非空。否则启动自检拒绝启动。
+    remote_access: str = "off"
+    # 显式绑定地址；remote_access=off 时本字段生效（默认 127.0.0.1）；
+    # remote_access=lan/wan 时本字段被忽略（强制 0.0.0.0）
     host: str = "127.0.0.1"
     port: int = 21118
 
@@ -371,3 +386,61 @@ settings = Settings()
 # 打包运行时：首次启动自动生成默认配置文件（开发模式不生成，避免污染仓库）
 if _is_frozen():
     ensure_config_file()
+
+
+# =============================================================================
+# 远程访问档位（off / lan / wan）—— 安全基线三级分级
+#
+# 设计原则：默认最安全（off = 严格单机），用户显式升级才扩大攻击面。
+# 档位语义：
+#   off：仅本机可访问（绑定 127.0.0.1，loopback 免鉴权）—— 桌面壳同机使用
+#   lan：局域网多设备可访问（绑定 0.0.0.0，强制 API Key，scope 分级）
+#        —— 多设备看盘 / 团队共享 / MCP 远程接入
+#   wan：公网可访问（lan + 强制 TOTP，signal.mode 默认 paper）
+#        —— 远程办公 / 公网访问（需用户侧处理 HTTPS/反代/防火墙）
+#
+# 关键约束（启动自检强制）：
+#   lan/wan：host 自动覆盖为 0.0.0.0；强制 api_key != "qmt-dev-key"
+#   wan   ：强制 totp_secret 非空
+#   lan/wan + 默认 api_key  => 启动自检拒绝启动（run.py::_self_check）
+#
+# 详见 docs/REMOTE_ACCESS_DECISION.md
+# =============================================================================
+
+REMOTE_MODES = ("off", "lan", "wan")
+
+
+def normalize_remote_access(v: str) -> str:
+    """归一化 remote_access 档位：大小写不敏感；非法值退回 off（最安全）。"""
+    s = (v or "off").strip().lower()
+    return s if s in REMOTE_MODES else "off"
+
+
+def is_remote_enabled() -> bool:
+    """当前是否启用了远程访问（lan 或 wan 档）。"""
+    return normalize_remote_access(settings.remote_access) != "off"
+
+
+def is_wan_enabled() -> bool:
+    """当前是否启用了公网访问档位（wan）。"""
+    return normalize_remote_access(settings.remote_access) == "wan"
+
+
+def effective_host() -> str:
+    """实际绑定地址（单一真源）：
+    - off：用户配置的 host（默认 127.0.0.1）
+    - lan/wan：强制 0.0.0.0（绑定所有网卡，远程可达）
+    """
+    if is_remote_enabled():
+        return "0.0.0.0"
+    return (settings.host or "127.0.0.1").strip() or "127.0.0.1"
+
+
+def remote_mode_label() -> str:
+    """人类可读的档位标签（供 UI / 托盘菜单 / 日志使用）。"""
+    mode = normalize_remote_access(settings.remote_access)
+    return {
+        "off": "单机（仅本机）",
+        "lan": "内网（局域网多设备）",
+        "wan": "公网（远程访问）",
+    }[mode]

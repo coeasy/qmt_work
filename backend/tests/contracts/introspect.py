@@ -18,8 +18,20 @@ from pathlib import Path
 
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
 
-# 无头内省环境兜底：settings 要求主密钥存在（仅内省用，不参与真实鉴权）
-os.environ.setdefault("QMT_API_KEY", "contract-introspect-key")
+# 无头内省环境兜底：settings 要求主密钥存在（仅内省用，不参与真实鉴权）。
+#
+# ★ 2026-10-03 修：原来**无条件** setdefault，等于在测试进程里种下一个
+#   进程级全局环境变量。一旦本模块先于 ``test_remote_access_tiers`` 被导入（
+#   收集顺序 a<c<r<w），tiers 的 ``sys.modules.pop("core.config")`` 会重建
+#   Settings 并读到这个假密钥，而路由层仍绑定旧 settings（api_key="qmt-dev-key"）
+#   ⇒ 同一个测试进程出现两个 settings「真相源」⇒ ``test_ws_contract`` 全量回归
+#   必现 3 条 4401（WS token 与主密钥不匹配）。
+#   settings 恒有非空默认值，只有它为空时才需要兜底——正常路径下永不触发，
+#   也就不会污染任何后续的 Settings 重建。
+import core.config as _cc
+
+if not getattr(_cc.settings, "api_key", ""):
+    os.environ.setdefault("QMT_API_KEY", "contract-introspect-key")
 
 _WS_SCAN_ROOTS = ("sync", "app", "gateway", "engines", "xtquant_client")
 # 事件发射函数名。除 broadcast/_notify 外，绝大多数事件走各引擎的 `_emit(event: dict)`

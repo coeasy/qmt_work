@@ -10,9 +10,9 @@
 
 | 接口面 | 数量 | 来源 |
 |--------|------|------|
-| REST 端点 | **232** | `rest_endpoints.json` |
-| MCP 工具 | **127** | `mcp_tools.json` |
-| WebSocket 渠道 | **30** 渠道 / 4 子类型 | `ws_events.json` |
+| REST 端点 | **238** | `rest_endpoints.json` |
+| MCP 工具 | **128** | `mcp_tools.json` |
+| WebSocket 渠道 | **30** 渠道 / 5 子类型 | `ws_events.json` |
 
 ## 通用约定（简明，详细见多语言接入指南）
 
@@ -21,7 +21,7 @@
 - **统一响应包裹**：`{ code, message, data }`，`code !== 0` 即错误。健康检查探针（`/live` `/health` `/ready` `/metrics`）额外带 `service/version`。
 - **错误归因**：错误 `message` 给出根因分类（未连接券商 / 柜台拒单 / 风控拦截 / 参数错误 / 内部异常），前端按分类给出不同引导，不做「网络错误」兜底。
 
-## REST API（232 端点）
+## REST API（238 端点）
 
 所有路径前缀为 `/api/v1`，按资源分组；组内先按方法（`G`=GET `P`=POST `U`=PUT `D`=DELETE `X`=PATCH）再按路径排序。
 
@@ -366,6 +366,17 @@ Prometheus 指标暴露。
 | G | `/api/v1/reference/sector-stocks` |
 | G | `/api/v1/reference/sectors` |
 
+### remote-access（remote-access）· 6 端点
+
+| M | 路径 |
+|---|------|
+| G | `/api/v1/remote-access/modes` |
+| G | `/api/v1/remote-access/status` |
+| P | `/api/v1/remote-access/api-key` |
+| P | `/api/v1/remote-access/mode` |
+| P | `/api/v1/remote-access/totp/enable` |
+| P | `/api/v1/remote-access/totp/verify` |
+
 ### research（研究分析）· 6 端点
 
 研究分析：归因、相关性、因子 IC、分位分析、组合回测与 walk-forward。
@@ -511,7 +522,7 @@ WAL 统计与手动检查点。
 
 ---
 
-## MCP 工具（127 个）
+## MCP 工具（128 个）
 
 FastMCP Streamable HTTP，接入点 `http://<host>:<port>/mcp`，携带 `X-API-Key`。工具集与 REST 的 `agent-visible` 端点保持同步（能力漂移门禁校验）。
 
@@ -616,7 +627,7 @@ FastMCP Streamable HTTP，接入点 `http://<host>:<port>/mcp`，携带 `X-API-K
 | `generate_rebalance` |
 | `generate_strategy` |
 
-#### get_* · 76 个
+#### get_* · 77 个
 
 只读查询（行情 / 账户 / 配置 / 任务 / 系统状态等）。
 
@@ -688,6 +699,7 @@ FastMCP Streamable HTTP，接入点 `http://<host>:<port>/mcp`，携带 `X-API-K
 | `get_ready` |
 | `get_reconcile_last` |
 | `get_reconcile_wal_stats` |
+| `get_remote_access_modes` |
 | `get_runtime_jobs` |
 | `get_runtime_jobs_by_job_id` |
 | `get_runtime_schedules` |
@@ -856,7 +868,7 @@ walk-forward 滚动验证。
 
 ---
 
-## WebSocket 事件（30 渠道 / 4 子类型）
+## WebSocket 事件（30 渠道 / 5 子类型）
 
 连接 `ws://<host>:<port>/api/v1/ws?token=<API-KEY>`（本机回环免 token）。服务端先推全量快照，再补发订阅代码最近 30s 行情（断线重连缺口）。客户端动作：`subscribe` / `unsubscribe` / `ping`（→ `pong`）。
 
@@ -869,7 +881,7 @@ payload 的 `data.type` 子类型（如 `order`→`order_event`）**不是**独�
 | `algo_alert` | — | 算法单异常告警。 |
 | `algo_slice` | — | 算法单拆单进度。 |
 | `broker.connected` | — | 券商连接建立（含重连成功）。 |
-| `broker.disconnected` | — | 券商连接断开 / 进入退避重试（`health_status=needs_action` 表示需人工处理）。 |
+| `broker.disconnected` | `broker.disconnected` | 券商连接断开 / 进入退避重试（`health_status=needs_action` 表示需人工处理）。 |
 | `condition_created` | — | 条件单创建。 |
 | `condition_expired` | — | 条件单到期。 |
 | `condition_failed` | — | 条件单失败（含原因）。 |

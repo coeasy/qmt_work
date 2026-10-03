@@ -287,12 +287,27 @@ def create_app() -> FastAPI:
     app.middleware("http")(request_id_middleware)
     # CORS（P1）：可配置跨域来源（QMT_CORS_ORIGINS 逗号分隔；空=不启用，仅同源）。
     # 置于最后添加 = 最外层，确保 OPTIONS 预检请求不被鉴权/限流拦截。
+    # ⚠️ 安全约束：allow_credentials=True 与 allow_origins=["*"] 不兼容（浏览器拒绝），
+    # 且通配 origin 在 allow_credentials 场景下等于「任何来源均可携带凭证跨域访问」。
+    # 启用 CORS 时必须指定具体 origin，否则启动时警告并降级为仅同源。
     if settings.cors_origins.strip():
         from fastapi.middleware.cors import CORSMiddleware
         origins = [o.strip() for o in settings.cors_origins.split(",") if o.strip()]
-        app.add_middleware(CORSMiddleware, allow_origins=origins,
-                           allow_credentials=True,
-                           allow_methods=["*"], allow_headers=["*"])
+        # 安全检查：* 不允许与 allow_credentials 共存
+        if "*" in origins:
+            log.warning(
+                "CORS: allow_origins 含通配 '*' 与 allow_credentials=True 不兼容，"
+                "浏览器将拒绝请求。若需开放跨域访问，请指定具体 origin "
+                "（如 http://localhost:3000,https://app.example.com），"
+                "详见 docs/REMOTE_ACCESS_DECISION.md 安全章节。")
+        # 仅当含具体 origin（非纯通配）时才启用 CORS 中间件
+        effective_origins = [o for o in origins if o != "*"]
+        if effective_origins:
+            app.add_middleware(CORSMiddleware, allow_origins=effective_origins,
+                               allow_credentials=True,
+                               allow_methods=["*"], allow_headers=["*"])
+        else:
+            log.warning("CORS: 配置仅含通配 '*'，已降级为仅同源（禁用 CORS 中间件）")
 
     app.include_router(router)
     _apply_openapi_meta(app)

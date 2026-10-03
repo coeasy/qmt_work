@@ -29,7 +29,7 @@
 ## 目录
 
 - [核心能力](#核心能力)
-- [界面导航（6 分组 / 43 页）](#界面导航6-分组--43-页)
+- [界面导航（6 分组 / 44 页）](#界面导航6-分组--44-页)
 - [界面预览](#界面预览)
 - [环境要求](#环境要求)
 - [安装](#安装)
@@ -53,9 +53,9 @@
 
 | 模块 | 说明 |
 |------|------|
-| 可视化界面 | React + Vite + ECharts SPA，纯前端、前后端解耦；6 分组 / 43 页 + keep-alive 多标签工作区 |
+| 可视化界面 | React + Vite + ECharts SPA，纯前端、前后端解耦；6 分组 / 44 页 + keep-alive 多标签工作区 |
 | MCP 接口 | FastMCP Streamable HTTP，Cursor / Claude Desktop 直连 |
-| REST API | FastAPI `/api/v1/*`，35 个路由模块（账户 / 行情 / 下单 / 回测 / 因子 / 再平衡 / 风控 / 配置…） |
+| REST API | FastAPI `/api/v1/*`，36 个路由模块（账户 / 行情 / 下单 / 回测 / 因子 / 再平衡 / 风控 / 配置 / 远程访问…） |
 | 实时推送 | WebSocket，活跃券商只订阅一次，多客户端扇出；断线重连补发最近 30s 行情 |
 | 多账户网格 | 多券商 / 多账户统一看板，批量下单 / 撤单 / 重连 |
 | 回测引擎 | 向量化回测 + 参数扫描（与逐根信号一致），真实 K 线 |
@@ -74,9 +74,9 @@
 
 ---
 
-## 界面导航（6 分组 / 43 页）
+## 界面导航（6 分组 / 44 页）
 
-页面注册表 `frontend-next/src/app/routes.tsx` 的 `PAGES`（含 `status: "done" | "planned"`）是顶部菜单、命令面板的**单一真相来源**。6 大业务域、43 个页面（43 已实现，0 占位）。`menu: false` 的页面（报价牌 / K 线分析 / 分时图 / 盘口逐笔 / 成交明细，以及已下线的分仓再平衡）已合并进上层页面，不再占主菜单入口，但页面仍注册、仍可用（行情子页入口在工作台头部的「独立打开」按钮组，分仓再平衡入口在「多账户网格」），并由 `tests/routes.test.ts` 强制要求每个隐藏页声明 `entryFrom`。占位页会显式展示其后端契约，避免「看起来能用其实是空壳」。
+页面注册表 `frontend-next/src/app/routes.tsx` 的 `PAGES`（含 `status: "done" | "planned"`）是顶部菜单、命令面板的**单一真相来源**。6 大业务域、44 个页面（44 已实现，0 占位）。`menu: false` 的页面（报价牌 / K 线分析 / 分时图 / 盘口逐笔 / 成交明细，以及已下线的分仓再平衡）已合并进上层页面，不再占主菜单入口，但页面仍注册、仍可用（行情子页入口在工作台头部的「独立打开」按钮组，分仓再平衡入口在「多账户网格」），并由 `tests/routes.test.ts` 强制要求每个隐藏页声明 `entryFrom`。占位页会显式展示其后端契约，避免「看起来能用其实是空壳」。
 
 | 分组 | 页面 |
 |------|------|
@@ -85,7 +85,7 @@
 | 交易（6） | 手动交易 · 算法交易 · 条件单 · 涨停监控 · 目标持仓 · 分仓再平衡(占位) |
 | 账户（4） | 多账户网格 · 委托/持仓/成交 · 对账核销 · 模拟盘 |
 | 自动化（4） | 告警规则 · 出站 Webhook · 外部信号 · 定时任务 |
-| 系统（7） | 仪表盘 · 连接管理 · 系统状态 · 审计日志 · API Key · 设置 · 系统日志 |
+| 系统（8） | 仪表盘 · 连接管理 · 系统状态 · 审计日志 · API Key · 设置 · 系统日志 · 远程访问 |
 
 工作区（多标签）约束见 `frontend-next/src/stores/`；页面懒加载与路由见 `routes.tsx`。
 
@@ -459,7 +459,7 @@ print(httpx.get(f"{BASE}/paper/positions", headers=HEAD).json())
 
 | 层级 | 命令 | 覆盖范围 |
 |------|------|----------|
-| 后端单测 | `cd backend && for f in tests/test_*.py; do python -m pytest "$f" -q -p no:cacheprovider; done` | 172 个 `test_*.py`，2051 个用例 |
+| 后端单测 | `cd backend && for f in tests/test_*.py; do python -m pytest "$f" -q -p no:cacheprovider; done` | 174 个 `test_*.py`，2100 个用例 |
 | 后端冒烟 | `python backend/tests/smoke2.py` | REST 主要端点 + 错误语义（**需先起后端**；默认连 `data/app.db`，检测到真实券商连接时自动跳过 3 条「未连接券商 → 503」断言并提示改用下方客户端测试做权威验证） |
 | 前端类型检查 | `cd frontend-next && npm run typecheck` | TypeScript strict 零错误 |
 | 前端单测 | `cd frontend-next && npm run test:serial` | vitest，**52 文件 / 508 用例**。**必须用 `test:serial`**：并行 worker 在受限 temp 环境下会 `EPERM` 死亡并**静默丢 1~4 个文件而汇总仍全绿**（详见 TD-24）。判据：文件数应等于 `include` 匹配数（52），底部无 `unhandled errors` / `resolveConfig.*.js writeFile EPERM` |
@@ -529,7 +529,7 @@ qmt_work/
 ├─ backend/              # FastAPI 统一后端（V10 重构：core/ 无依赖内核 + engines/ 引擎）
 │  ├─ run.py            # 启动入口（端口自动扫描 + 单实例锁 + AppContext 装配）
 │  ├─ app/              # 装配层：main / routes / services / gateway
-│  │  ├─ routes/        # 35 个 REST 路由模块（account/market/trade/backtest/broker/…）
+│  │  ├─ routes/        # 36 个 REST 路由模块（account/market/trade/backtest/broker/remote_access/…）
 │  │  └─ gateway/       # 鉴权 / 限流 / 风控 / 审计 / 脱敏 / K 线缓存 / metrics / 日志告警
 │  ├─ core/             # 无依赖内核（context / crypto / db …）
 │  ├─ engines/          # 交易引擎（signal router / execution / backtest …）
@@ -540,7 +540,7 @@ qmt_work/
 │  ├─ connectors/ plugins/ sync/   # 外部连接器 / 插件内核 / WebSocket 同步引擎
 │  ├─ tools/ runtimes/  # 因子策略工具 / 捆绑 Python 运行时（cp311）
 │  ├─ data/ static/ dist/   # SQLite / 前端构建产物 / PyInstaller 产物
-│  ├─ tests/            # 172 个 test_*.py（2051 用例）+ 冒烟测试 smoke2.py
+│  ├─ tests/            # 174 个 test_*.py（2100 用例）+ 冒烟测试 smoke2.py
 │  ├─ scripts/          # 门禁脚本（许可 / 能力漂移 / 契约生成 / 架构校验）
 │  └─ build_exe.py      # EXE 打包脚本（含 static 闸门）
 ├─ frontend-next/         # 主前端：React 18 + Vite 5 + TS 5 strict（已退役旧 frontend/）

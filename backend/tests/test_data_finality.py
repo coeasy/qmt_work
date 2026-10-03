@@ -22,7 +22,22 @@ def _mk_snapshot(db, snapshot_id="snap-1", quality="provisional"):
 
 
 def test_finality_states_complete_set():
-    assert FINALITY_STATES == ("provisional", "final", "revised", "invalid")
+    assert FINALITY_STATES == ("provisional", "final", "revised", "invalid", "empty")
+
+
+def test_apply_finality_accepts_empty(tmp_db):
+    """空批次终态必须可经 apply_finality 幂等标记。
+
+    回归保护：2026-10-03。``snapshots.py`` 直接写 ``quality_state="empty"``，
+    若 FINALITY_STATES 未登记该值，同一字段会走两套规则——``snapshots.py`` 能写、
+    ``apply_finality`` 抛 ValueError（调用方 system_jobs 传的是用户参数）。
+    """
+    _mk_snapshot(tmp_db)
+    res = apply_finality(tmp_db, "snap-1", "empty")
+    assert res["finality"] == "empty"
+    row = tmp_db.query(
+        "SELECT quality_state FROM dataset_snapshots WHERE id='snap-1'")[0]
+    assert row["quality_state"] == "empty"
 
 
 def test_apply_finality(tmp_db):

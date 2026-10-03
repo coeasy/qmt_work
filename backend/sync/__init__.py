@@ -482,13 +482,24 @@ class SyncEngine:
         def _on_deal_evt(t, _a=acc_key, _br=broker, _b=b):
             _b.enqueue({"type": "deal", "data": t or {}, "account": _a, "broker": _br})
 
+        # 2026-10-03：接通断线链路。此前 adapter 的 ``on_disconnect`` 注册入口在生产
+        # 代码里零调用方（只有测试在用），SDK 的 ``on_disconnected`` → ``_handle_disconnected``
+        # 里 ``if was and self._on_disconnect_cb is not None`` 恒为假 —— 断线事件被吞，
+        # 上层只能靠 gateway.health 的轮询发现。这里补上事件驱动路径：柜台掉线的当下
+        # 就推 ``broker.disconnected``（契约事件已存在，ws_events.json / wsEvents.ts 均已登记）。
+        def _on_disconnect_evt(_a=acc_key, _br=broker, _b=b):
+            _b.enqueue({"type": "disconnected", "account": _a, "broker": _br})
+
         try:
             conn.adapter.on_order(_on_order_evt)
             conn.adapter.on_trade(_on_deal_evt)
+            conn.adapter.on_disconnect(_on_disconnect_evt)
             # partial 对象：同 func+args 判等，ensure_handler 可去重（幂等补注册）
             from functools import partial
             b.ensure_handler("order", partial(self._on_realtime_order, acc_key))
             b.ensure_handler("deal", partial(self._on_realtime_deal, acc_key))
+            b.ensure_handler("disconnected",
+                             partial(self._on_realtime_disconnect, acc_key))
             self._trade_cbs.add(key)
         except Exception as exc:  # noqa: BLE001
             log.warning("realtime trade handlers %s: %s", conn.cfg.conn_id, exc)
@@ -526,6 +537,20 @@ class SyncEngine:
         seen.add(key)
         await self._notify("deal", {"type": "deal_event", "data": data,
                                     "broker": event.get("broker", "")})
+
+    async def _on_realtime_disconnect(self, acc_key: str, event: dict) -> None:
+        """柜台断线 → 立即推 ``broker.disconnected``（契约事件，前端已登记）。
+
+        与 ``gateway.health`` 的轮询发现**互补**：事件驱动路径在断线当下即通知，
+        轮询仍是兜底（覆盖桥接层之外的断开）。两端重复推送无副作用——前端只关心
+        「状态变成断了」，且 ``broker.disconnected`` 已按 system-log 归类，不会刷屏
+        到业务面板。
+        """
+        conn_id = event.get("broker") or acc_key
+        await self._notify("broker.disconnected", {
+            "type": "broker.disconnected", "conn_id": conn_id,
+            "detail": "xtquant on_disconnected",
+        })
 
     async def stop(self) -> None:
         """停止快照归档与微批 flush 循环。

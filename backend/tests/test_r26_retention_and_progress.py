@@ -289,9 +289,16 @@ def test_jobruntime_stop_is_idempotent_and_blocks_resurrection():
     asyncio.run(main())
 
 
-def test_moneyflow_collector_stop_is_idempotent():
+def test_moneyflow_collector_stop_is_idempotent(monkeypatch):
     """资金流采集：启动句柄必须可停（此前 create_task 返回值被丢弃，无法停）。"""
     from app.services.market import kline_io
+
+    # ★ 2026-10-03 修：不得依赖 lifespan 在 TestClient 那个事件循环里创建的
+    #   ``_collector_task``。本用例用 ``asyncio.run`` 自建新循环，跨循环
+    #   cancel/await 一个「挂在已关闭循环上的任务」并不可靠——取消可能尚未投递
+    #   就返回了，于是全量同进程回归中偶发「采集任务未被取消」（单跑该文件必过）。
+    #   先置空，让 start 在本循环里创建属于自己、可完整收尾的任务。
+    monkeypatch.setattr(kline_io, "_collector_task", None)
 
     async def main():
         kline_io.start_moneyflow_collector()

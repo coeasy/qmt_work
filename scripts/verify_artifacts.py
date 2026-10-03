@@ -43,6 +43,70 @@ def _toolchain() -> dict:
         return {}
 
 
+def _pyproject_version() -> str | None:
+    """P2-29：读 ``backend/pyproject.toml`` 的 ``[project].version``。
+
+    用正则而不是 ``tomllib``：本脚本要在最小环境里跑（release 校验常在刚
+    checkout 的干净机器上执行），且这里只需要一个标量。
+    """
+    path = ROOT / "backend" / "pyproject.toml"
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    for line in text.splitlines():
+        match = re.match(r'^\s*version\s*=\s*["\']([^"\']+)["\']', line)
+        if match:
+            return match.group(1)
+    return None
+
+
+def _json_version(path: Path) -> str | None:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    value = data.get("version")
+    return value if isinstance(value, str) else None
+
+
+def _lock_version() -> str | None:
+    """package-lock.json 的版本在两个位置，两处都算（TD-30 同源）。"""
+    lock = ROOT / "frontend-next" / "package-lock.json"
+    try:
+        data = json.loads(lock.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    root_pkg = data.get("packages", {}).get("", {}).get("version")
+    if isinstance(root_pkg, str):
+        return root_pkg
+    value = data.get("version")
+    return value if isinstance(value, str) else None
+
+
+def _version_drift() -> list[str]:
+    """P2-29：版本真源一致性闸门。
+
+    2026-10-03 发现的真缺陷：``backend/pyproject.toml`` 长期停在 ``0.1.0-beta.1``，
+    而 VERSION / package.json / package-lock.json 都已是 ``0.4.3``（漂移 4 个版本）。
+    全仓没有 ``importlib.metadata.version("qmt-work")`` 读取方，三个 workflow 也
+    不引用它，所以**从来没有任何 CI 会报错**——但它是依赖声明的真源，未来一旦
+    接入 ``pip install -e`` 或 wheel 打包，就会打出错误版本号的包。
+
+    返回不一致项列表（空 = 全一致）。缺文件不计入漂移（允许部分产物未检出）。
+    """
+    expected = _version()
+    if expected in ("", "unknown"):
+        return ["VERSION 文件缺失或不可读，无法作为版本真源"]
+    found: dict[str, str | None] = {
+        "backend/pyproject.toml": _pyproject_version(),
+        "frontend-next/package.json": _json_version(ROOT / "frontend-next" / "package.json"),
+        "frontend-next/package-lock.json": _lock_version(),
+    }
+    return [f"{name} = {value}（期望 {expected}）"
+            for name, value in found.items() if value != expected]
+
+
 def components() -> list[dict[str, str]]:
     result: list[dict[str, str]] = []
     lock = ROOT / "frontend-next" / "package-lock.json"
@@ -69,6 +133,12 @@ def main() -> int:
                              "（build-client.yml 便携包流水线专用；release.yml "
                              "两种产物都打，不加此参数维持 exe+zip 双闸）。")
     args = parser.parse_args()
+    # P2-29：版本真源一致性 —— 与产物是否存在无关，任何情况下都必须先过这一关。
+    drift = _version_drift()
+    if drift:
+        print("artifact verification failed: 版本真源不一致\n  " + "\n  ".join(drift),
+              file=sys.stderr)
+        return 1
     backend = ROOT / "backend" / "dist" / "qmt_work"
     release = ROOT / "frontend-next" / "dist-electron"
     artifact_paths = [p for p in files(backend) + files(release)

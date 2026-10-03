@@ -23,10 +23,38 @@ PROVIDER_QUALITY_RANK: dict[str, int] = {
 }
 
 #: 质量状态优先级（越小越优）——与 ``local_bars`` 窗口函数里的 ``CASE`` 一一对应
-QUALITY_STATE_RANK: dict[str, int] = {"validated": 0, "complete": 1, "match": 2}
+#: （后者由本表在 ``datasource.local_store`` 程序化生成，故只改这一处）。
+#:
+#: 2026-10-03 正确性修复：**表与实现此前完全错位**，是 99.98% K 线永卡 ``raw`` 的
+#: 主因。实测 ``local_bars.quality_state`` 只有 4 个真实取值——``unknown``（upsert 默认）、
+#: ``raw``（同步路径硬编码）、``conflict`` / ``final``（本模块 :func:`reconcile_bars` 写出）——
+#: 而旧表只登记了从未被任何生产者写出的 ``validated/complete/match``。后果：
+#: :func:`reconcile_bars` 辛苦把胜出者从 ``raw`` 升为 ``final``，但
+#: ``QUALITY_STATE_RANK.get('final', 3)`` 落 ELSE 3，与 ``raw``/``unknown`` **同档** ⇒
+#: 晋级对 canonical 选主排序毫无作用，读侧照样大量命中 ``raw`` 行（晋级存在但无效）。
+#: 现按「实际写入值」对齐，让晋级真正生效：``raw``(3) → ``final``(2) 会真的压过未晋级行；
+#: ``conflict`` 给最差档 9，冲突行永远不该赢得 canonical。
+QUALITY_STATE_RANK: dict[str, int] = {
+    "validated": 0,   # 显式校验通过（最优，预留人工/权威校验路径）
+    "complete": 1,    # 字段完整（预留）
+    "match": 2,       # 多源比对一致（历史语义，保留兼容）
+    "final": 2,       # reconcile_bars 晋级终态 —— 与 match 等价，**必须 < raw**
+    "raw": 3,         # 单源未校验（同步默认态）
+    "unknown": 3,     # 未标注来源
+    "conflict": 9,    # 多源价差超阈值 —— 最差，不得赢得 canonical
+}
 
 #: Data Finality 终态（快照可对外承诺的状态）
-FINALITY_STATES: tuple[str, ...] = ("provisional", "final", "revised", "invalid")
+#:
+#: 2026-10-03：补入 ``empty``。此前 ``datasource/snapshots.py`` 会把空批次直接降级为
+#: ``quality_state="empty"``（**绕过** :func:`apply_finality` 直接写库），而本表未声明该值
+#: ⇒ 同一个字段存在两套规则：经 ``snapshots.py`` 能写入 ``empty``，
+#: 经 :func:`apply_finality`（其唯一调用方 ``app/runtime/system_jobs.py`` 传用户参数）
+#: 则会 ``ValueError``。空批次是明确的终态判定（该快照不代表任何真实数据集，
+#: 下游研究/回测必须显式拒绝），理应在声明集内可被幂等标记。
+FINALITY_STATES: tuple[str, ...] = (
+    "provisional", "final", "revised", "invalid", "empty",
+)
 
 
 def provider_rank(provider_id: str) -> int:

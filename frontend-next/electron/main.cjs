@@ -890,7 +890,32 @@ function hintTrayOnce() {
 function refreshTrayTooltip() {
   if (!tray || !trayAvailable) return;
   try {
-    tray.setToolTip(`qmt_work 量化平台（端口 ${activePort}）`);
+    let tooltip = `qmt_work 量化平台（端口 ${activePort}）`;
+    // 异步获取远程访问状态，不阻塞托盘刷新
+    if (activePort && !TEST_MODE) {
+      const req = http.get(
+        { host: "127.0.0.1", port: activePort, path: "/api/v1/remote-access/status", timeout: 2000 },
+        (res) => {
+          let body = "";
+          res.on("data", (chunk) => { body += chunk; });
+          res.on("end", () => {
+            try {
+              const data = JSON.parse(body);
+              if (data.data && data.data.mode) {
+                const modeLabel = { off: "单机", lan: "内网", wan: "公网" }[data.data.mode] || data.data.mode;
+                tooltip = `qmt_work 量化平台（端口 ${activePort}，${modeLabel}）`;
+                if (tray && trayAvailable) {
+                  tray.setToolTip(tooltip);
+                }
+              }
+            } catch { /* 解析失败忽略 */ }
+          });
+        }
+      );
+      req.on("error", () => {});
+      req.on("timeout", () => { req.destroy(); });
+    }
+    tray.setToolTip(tooltip);
   } catch { /* 托盘正在销毁时忽略 */ }
 }
 

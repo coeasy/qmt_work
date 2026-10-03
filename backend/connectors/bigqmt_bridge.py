@@ -152,6 +152,7 @@ class BigQmtBridge:
         #: 适配器回调注册位（大 QMT 的真实事件经 EventPort 泵送出，见 ``on_order``）。
         self._order_cbs: list = []
         self._trade_cbs: list = []
+        self._disconnect_cbs: list = []
         # ---- 行情订阅对账状态（见 ``want_quotes`` / ``_reconcile_quote_subscriptions``）----
         #: 本地**意图**：期望 agent 转发哪些标的。只增不减 —— agent 没有 UNSUB op，
         #: 谎报「已退订」比留着一个多余的转发更坏（与 ``subscribe_positions`` 同口径）。
@@ -370,6 +371,11 @@ class BigQmtBridge:
                         "bigqmt[%s]：agent 连续 %d 次探活无应答（%s）"
                         "⇒ 如实标记为不可用，等待自动重连",
                         self.conn_id, self._liveness_failures, exc)
+                    # 2026-10-03：这里是「可用性由可用变不可用」的**边沿**。
+                    # 只在翻真的那一刻发一次，避免每次探活失败都刷屏。
+                    # 与 xtquant 侧 SDK 的 on_disconnected 回调语义对齐——同一条
+                    # broker.disconnected 链路，两条连接形态都能走通。
+                    self.enqueue({"type": "disconnected", "detail": str(exc)[:200]})
                 self._agent_unresponsive = True
             return
         self._stamp_agent_ok()
@@ -729,6 +735,22 @@ class BigQmtBridge:
         if cb is not None:
             self._trade_cbs.append(cb)
 
+    def on_disconnect(self, cb) -> None:
+        """注册断线回调（理由同 ``on_order``）。
+
+        2026-10-03：补齐此方法。此前 ``sync_engine.register_realtime_trade_handlers``
+        对 xtquant 适配器调 ``conn.adapter.on_disconnect(...)`` 能生效，但本桥**没有**
+        这个方法 —— 而 ``BrokerManager.Connection`` 里大 QMT 连接只有一个对象同时占
+        ``bridge`` 与 ``adapter`` 两个槽位，于是大 QMT 侧的断线回调注册会直接
+        ``AttributeError``（被 ``register_realtime_trade_handlers`` 的 try/except 吞掉，
+        只留一条 warning），大 QMT 连接的掉线事件永远到不了前端。
+
+        真正的派发由 :meth:`enqueue` 承担：见 :meth:`_liveness_probe` 在
+        ``_agent_unresponsive`` 由假翻真那一步发出的 ``{"type": "disconnected"}``。
+        """
+        if cb is not None:
+            self._disconnect_cbs.append(cb)
+
     def subscribe_quote(self, codes: list[str], on_tick) -> None:
         self.gateway.subscribe_quote(codes, on_tick)
 
@@ -789,7 +811,21 @@ class BigQmtBridge:
         self._handlers.setdefault(event_type, []).append(handler)
 
     def ensure_handler(self, event_type: str, handler) -> None:
-        self.on(event_type, handler)
+        """注册事件 handler（**幂等去重**）。
+
+        2026-10-03 正确性修复：本实现原先直接 ``self.on()``（无条件 append），
+        而调用方 ``app.bootstrap.phase_watchdogs._pump_guard`` 每 **2 秒**无条件调用
+        一次 → 大 QMT 连接保持活跃期间 ``_handlers["quote"]`` 每天追加 ≈43,200 个
+        重复引用，且 ``enqueue`` 遍历全表 ⇒ 一条行情帧被派发 N 次（K 线重复落库、
+        下游指标重复计算），进程越跑越慢而**无任何报错**。
+
+        这与同一仓库 ``xtquant_client/gateway.py::ensure_handler`` 的幂等实现语义相同
+        （同一调用方、同一语义，此前两个实现行为相反）。此处一并收敛：
+        bound method 用 ``==`` 比较（函数 + 实例），故 ``if handler not in hs`` 可靠。
+        """
+        hs = self._handlers.setdefault(event_type, [])
+        if handler not in hs:
+            hs.append(handler)
 
 
 __all__ = ["BigQmtBridge"]

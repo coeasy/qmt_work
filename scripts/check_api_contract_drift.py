@@ -44,19 +44,31 @@ PREFIX = "/api/v1"
 #: ``http.get<T>("/x")`` / ``http.post("/x", ...)`` —— 泛型可选，路径可为
 #: 单/双引号字符串或模板字面量。
 #:
-#: ★ R19 第 3 轮修两个漏配（都属**假绿灯**：门禁「看不见」就等于放行）：
+#: ★ 三轮修复，每一轮都是**假绿灯**（门禁「看不见」就等于放行）：
 #:   1. 客户端真正发 DELETE 的助手叫 **`http.del`**（`services/http.ts:177`
 #:      `del: (path, opts) => request("DELETE", ...)`）。全仓 `http.del(` 有 **9 处**、
 #:      `http.delete(` **0 处** —— 而原正则只列了 `delete`，于是这 9 个 DELETE 端点
 #:      **从未被对账过**：后端把它们改名/删掉，前端照样运行时 404，门禁全绿。
-#:   2. 泛型用 ``[^<>]*`` 描述，碰到嵌套/多字符实参的 `Record<string, unknown>`
-#:      这类（写成 ``http.post<Record<string, unknown>>(...)``）时尾部多出一个 `>`
-#:      而匹配失败 —— `limitupApi.start/stop/reset` 就是这样整条漏掉的。
-#:      改用「直到 `(` 且不跨行」的描述，两种写法都能吃下。
+#:   2. 泛型用 ``[^<>]*`` 描述，碰到嵌套实参的 `Record<string, unknown>`（写成
+#:      ``http.post<Record<string, unknown>>(...)``）时尾部多出一个 `>` 而匹配失败
+#:      —— `limitupApi.start/stop/reset` 就是这样整条漏掉的。
+#:   3. 泛型改成 ``[^(\n]*`` 后仍要求**不跨行** —— 但前端为类型排版，泛型参数会
+#:      排成 10 行（`system.ts` 的 `remoteAccessStatus` / `setRemoteAccessMode`）。
+#:      于是「`http.get<` 开头、路径写在十几行之后」的调用**整条对不上**：
+#:      它既没进 `found`，也不进 `unresolved`，门禁显示全绿而实际没查。
+#:   修法：泛型段改成「直到第一个 `(`」且不排斥换行（`[^()]*`），嵌套尖括号天然成立。
+#:   再叠一层自证（见 :func:`uncovered_call_sites`）：凡是 `http.<method>` 出现处，
+#:   必须被本正则或 unresolved 正则覆盖，否则直接判检查失效。
 CALL_RE = re.compile(
-    r"""\bhttp\.(get|post|patch|put|delete|del)\b[^(\n]*\(\s*([`"'])([^`"']*)\2""",
+    r"""\bhttp\.(get|post|patch|put|delete|del)\b[^()]*\(\s*([`"'])([^`"']*)\2""",
     re.VERBOSE,
 )
+#: 泛型段允许跨行后，未解析正则也要跟上（`Record<string, unknown>` / 多行泛型）。
+UNRESOLVED_CALL_RE = re.compile(
+    r"\bhttp\.(get|post|patch|put|delete|del)\b[^()]*\(\s*([A-Za-z_$][\w$.]*)"
+)
+#: 只做**站点计数**用：每个 `http.<method>` 都是一个调用点，一个都不能隐身。
+CALL_SITE_RE = re.compile(r"\bhttp\.(get|post|patch|put|delete|del)\b")
 #: 模板字面量里的插值 ``${kid}`` → 路径参数占位 ``{kid}``
 INTERP_RE = re.compile(r"\$\{[^}]*\}")
 #: 调用点之后的查询参数窗口：``{ query: { a: 1, b: x } }``
@@ -134,9 +146,30 @@ def scan_frontend() -> tuple[dict[str, list[str]], list[str], dict[str, set[str]
             if names:
                 query_params.setdefault(key, set()).update(names)
         # 形如 http.get(someVar) 的调用点
-        for m in re.finditer(r"\bhttp\.(get|post|patch|put|delete)\s*(?:<[^<>]*>)?\s*\(\s*([A-Za-z_$][\w$.]*)", text):
-            unresolved.append(f"{ts.name}: {m.group(1)} {m.group(2)}")
+        for m in UNRESOLVED_CALL_RE.finditer(text):
+            if not CALL_RE.match(text, m.start()):
+                unresolved.append(f"{ts.name}: {m.group(1)} {m.group(2)}")
     return found, unresolved, query_params
+
+
+def uncovered_call_sites() -> list[str]:
+    """自证：``http.<method>`` 出现处必须被 CALL_RE 或 UNRESOLVED_CALL_RE 覆盖。
+
+    这个函数存在的唯一理由，是让**门禁自己**无法变成假绿灯。
+    前两轮漏配（`http.del`、嵌套泛型）都是「门禁说 0 个问题」而实际整批端点
+    从未被对账。有了这一层，新增任何一种前端调用写法（多行泛型、变量路径、
+    换行插值…）都会在这里暴露出来，而不是悄无声息地被跳过。
+    """
+    out: list[str] = []
+    for ts in sorted(API_DIR.rglob("*.ts")):
+        text = ts.read_text(encoding="utf-8")
+        covered = {m.span() for m in CALL_RE.finditer(text)}
+        covered |= {m.span() for m in UNRESOLVED_CALL_RE.finditer(text)}
+        for m in CALL_SITE_RE.finditer(text):
+            start = m.start()
+            if not any(c[0] <= start <= c[1] for c in covered):
+                out.append(f"{ts.name}:{text[:start].count(chr(10)) + 1}")
+    return out
 
 
 def backend_query_params() -> dict[str, set[str]]:
@@ -212,6 +245,16 @@ def main() -> int:
     if len(frontend) < 20:
         print(f"✗ 前端只解析到 {len(frontend)} 个端点 —— 正则可能已与代码形态脱节",
               file=sys.stderr)
+        return 1
+
+    # ★ 自证：不允许有「既没被对账、也没被报未解析」的隐身调用点。
+    #   这是把「门禁看不见」从静默风险变成硬失败的唯一办法。
+    hidden = uncovered_call_sites()
+    if hidden:
+        print(f"✗ 发现 {len(hidden)} 个前端调用点本检查**解析不到**"
+              f"（既未对账也未报未解析 —— 假绿灯风险）：\n    " + "\n    ".join(hidden[:20]),
+              file=sys.stderr)
+        print("  请在 CALL_RE / UNRESOLVED_CALL_RE 中补上这种写法后重跑。", file=sys.stderr)
         return 1
 
     missing = sorted(k for k in frontend if k not in backend_norm)

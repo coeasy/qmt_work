@@ -251,6 +251,54 @@ export const systemApi = {
   cleanUnusedApiKeys: (days = 30) =>
     http.post<{ deleted: number; cutoff: string }>("/api-keys/clean-unused", { days }),
 
+  /* ---- 远程访问三档管理 ---- */
+
+  remoteAccessStatus: () =>
+    http.get<{
+      mode: string;
+      label: string;
+      host: string;
+      port: number;
+      config_file: string;
+      exe_dir: string;
+      api_key: { configured: boolean; is_default: boolean; prefix: string; length: number };
+      totp: { enabled: boolean; period_seconds: number; code_remaining_seconds: number };
+      signal: { mode: string | null; requires_totp: boolean };
+      warnings: string[];
+      available_modes: string[];
+    }>("/remote-access/status"),
+
+  remoteAccessModes: () =>
+    http.get<{ mode: string; label: string; description: string; force_api_key: boolean; force_totp: boolean; signal_default: string }[]>(
+      "/remote-access/modes",
+    ),
+
+  setRemoteAccessMode: (mode: string) =>
+    http.post<{
+      mode: string;
+      label: string;
+      changed: boolean;
+      requires_restart: boolean;
+      signal_mode: string;
+      signal_mode_auto_set: boolean;
+      hints: string[];
+      message: string;
+    }>("/remote-access/mode", { mode }),
+
+  resetRemoteAccessApiKey: () =>
+    http.post<{ api_key: string; requires_restart: boolean; message: string; warning: string }>(
+      "/remote-access/api-key",
+    ),
+
+  enableRemoteAccessTotp: (secret?: string) =>
+    http.post<{ secret: string; otpauth_url: string; requires_restart: boolean; message: string }>(
+      "/remote-access/totp/enable",
+      secret ? { secret } : {},
+    ),
+
+  verifyRemoteAccessTotp: (code: string) =>
+    http.post<{ verified: boolean; message: string }>("/remote-access/totp/verify", { code }),
+
   /* ---- 审计 ---- */
 
   audit: (query?: { limit?: number; action?: string }) =>

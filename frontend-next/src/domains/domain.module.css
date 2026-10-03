@@ -443,3 +443,164 @@
   cursor: pointer;
   flex: 0 0 auto;
 }
+
+/* ===== 远程访问页面样式 ===== */
+
+.statusPanel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.statusRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-4);
+  align-items: center;
+}
+
+.statusRow > div {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+}
+
+.label {
+  font-size: var(--font-sm);
+  color: var(--text-dim);
+}
+
+.value {
+  font-family: var(--font-mono);
+  font-size: var(--font-sm);
+  color: var(--text);
+}
+
+.warnings {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  padding: var(--sp-2);
+  background: var(--warning-dim);
+  border: 1px solid var(--warning);
+  border-radius: var(--radius);
+}
+
+.warningItem {
+  font-size: var(--font-sm);
+  color: var(--warning);
+}
+
+.banner {
+  padding: var(--sp-2);
+  border-radius: var(--radius);
+  font-size: var(--font-sm);
+}
+
+.bannerOk {
+  background: var(--success-dim);
+  border: 1px solid var(--success);
+  color: var(--success);
+}
+
+.bannerErr {
+  background: var(--danger-dim);
+  border: 1px solid var(--danger);
+  color: var(--danger);
+}
+
+.modeList {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+
+.modeItem {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-2);
+}
+
+.modeHeader {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.modeDesc {
+  font-size: var(--font-sm);
+  color: var(--text-dim);
+  margin: 0;
+}
+
+.modeBadges {
+  display: flex;
+  gap: var(--sp-1);
+  flex-wrap: wrap;
+}
+
+.keyInfo {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-4);
+  margin-bottom: var(--sp-3);
+}
+
+.keyInfo > div {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+}
+
+.hint {
+  font-size: var(--font-sm);
+  color: var(--text-dim);
+  margin: 0;
+}
+
+.totpSecret {
+  margin-top: var(--sp-3);
+  padding: var(--sp-3);
+  background: var(--bg-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.totpSecret Input {
+  width: 100%;
+  margin: var(--sp-2) 0;
+}
+
+.totpVerify {
+  display: flex;
+  gap: var(--sp-2);
+  align-items: center;
+  margin-top: var(--sp-2);
+}
+
+.totpVerify Input {
+  flex: 1;
+  max-width: 200px;
+}
+
+.totpResult {
+  margin-top: var(--sp-2);
+  font-size: var(--font-sm);
+}
+
+.loading {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-4);
+  justify-content: center;
+}
+
+.error {
+  color: var(--danger);
+  margin-bottom: var(--sp-2);
+}

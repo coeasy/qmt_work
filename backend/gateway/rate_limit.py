@@ -53,8 +53,11 @@ class RateLimiter:
 def make_rate_limit_middleware(limiter: RateLimiter):
     async def rate_limit_middleware(request: Request, call_next):
         # loopback 免限流（本机开发/桌面壳）
-        host = (request.client.host if request.client else "") or ""
-        if host in {"127.0.0.1", "::1", "localhost"}:
+        # ⚠️ 必须用 gateway.auth.is_loopback（含 x-forwarded-for 检查），
+        # 否则同机反代场景下 request.client.host=127.0.0.1 会导致所有经代理转发
+        # 的外部请求都被豁免限流（实测踩到：nginx 反代 → qmt_work，client.host=127.0.0.1）。
+        from gateway.auth import is_loopback
+        if is_loopback(request):
             return await call_next(request)
         if not limiter.allow(request):
             return JSONResponse(status_code=429, content={
