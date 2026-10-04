@@ -168,7 +168,7 @@ export function MarketTicksPanel({
         逐笔成交暂不可用：{err}
         <div style={{ marginTop: 4 }}>
           本面板走**公开行情源**（本地 TDX），与券商无关；不可用通常是
-          eltdx 未安装或行情服务器不可达。也可连接券商后用「逐笔(L2)」查看券商侧逐笔。
+          TDX 行情源（easy_tdx）未安装或行情服务器不可达。也可连接券商后用「逐笔(L2)」查看券商侧逐笔。
         </div>
       </div>
     );

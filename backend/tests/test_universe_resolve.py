@@ -101,7 +101,7 @@ def test_universe_sector_online():
     class Hub:
         async def get_board_constituents(self, code, limit=50, page=0, source="auto"):
             return {"items": [{"code": "600000.SH", "name": "浦发"},
-                              {"code": "600036.SH", "name": "招商"}]}, "eltdx"
+                              {"code": "600036.SH", "name": "招商"}]}, "tdx"
     uni = _run(resolve_universe(UniverseSpec(kind="sector", value="银行"), hub=Hub()))
     assert set(uni["codes"]) == {"600000.SH", "600036.SH"}
-    assert uni["provider_used"] == "eltdx"
+    assert uni["provider_used"] == "tdx"

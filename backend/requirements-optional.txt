@@ -1,22 +1,33 @@
 # ============================================================================
-# 可选依赖（默认不安装 · 商用部署禁止安装）
+# 可选依赖（默认不安装；商用部署**推荐安装 easy_tdx**）
 # ============================================================================
 # 安装：pip install -r requirements-optional.txt
-# 风险：以下包带有非商业使用限制。安装即表示你接受其许可条款，
-#       且**不得**将包含它们的环境用于任何商业用途或对外分发。
 # 清单与核对方式：docs/THIRD_PARTY_LICENSES.md
 # ============================================================================
 
 # ---------------------------------------------------------------------------
-# eltdx —— 通达信(TDX)公共行情源，无券商客户端时的行情/基础数据补充
+# easy-tdx —— 通达信(TDX)公共行情传输层（2026-10-04 起替代 eltdx 成为主传输）
+# 许可：MIT（净室实现，**商用安全**）。
+# 来源：PyPI 暂未发布（README 声称包名 easy-tdx，实测 404），从 GitHub 安装：
+#   pip install git+https://github.com/clong365/easy_tdx.git
+# 能力：MAC 协议承载快照/K线（含复权）/分时/逐笔/板块/资金流；
+#       标准协议仅用于证券清单枚举（其五档/K线命令对当前服务端不可用，实测）。
+# 影响：不安装时 datasource/eltdx_source.py 仍可导入（_HAS_TDX=False，
+#       回退 eltdx 或降级为纯券商数据源），启动不受影响。
+# ---------------------------------------------------------------------------
+easy-tdx @ git+https://github.com/clong365/easy_tdx.git
+
+# ---------------------------------------------------------------------------
+# eltdx —— （旧传输层，仅作 easy_tdx 缺失时的回退；默认**不要安装**）
 # 许可：ELTDX Research-Only License（**不是** MIT，网上流传的 MIT 是 1.x 历史信息）
 # 原文首句："This project is provided only for personal learning, protocol
 #           research, and non-commercial study." 并明确禁止一切商业使用和滥用。
 # 核对：本机 eltdx==3.0.4 的 dist-info/licenses/LICENSE（28 行）。
 #       注意：该包 License-Expression 为空、GitHub 判 NOASSERTION，自动化扫描
 #       工具不会报警，必须人工打开 LICENSE 正文核对。
-# 影响：不安装时 app/datasource/eltdx_source.py 仍可导入（_HAS_ELTDX=False），
-#       系统降级为纯券商数据源，启动不受影响。
-# 商用：部署前执行 `pip uninstall -y eltdx` 并确认产物中无该包。
+# 影响：仅当 easy_tdx 缺失且本包存在时才被使用；商用模式（QMT_COMMERCIAL=1）
+#       下 is_commercial_ok 按后端动态过滤，回退传输时链路自动跳过 tdx 源。
+# 商用：部署前执行 `pip uninstall -y eltdx` 并确认产物中无该包
+#       （发布安装包已不再收集 eltdx，见 build_exe.py COLLECT_ALL）。
 # ---------------------------------------------------------------------------
-eltdx>=3.0
+# eltdx>=3.0   # ← 默认注释：商用部署禁止安装

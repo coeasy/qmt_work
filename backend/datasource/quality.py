@@ -19,7 +19,7 @@ log = logging.getLogger("qmt_work.datasource.quality")
 
 #: provider 质量序（越小越优）——与默认数据链 QMT→eltdx→baostock→akshare 对齐
 PROVIDER_QUALITY_RANK: dict[str, int] = {
-    "broker": 0, "qmt": 0, "eltdx": 10, "baostock": 20, "akshare": 30,
+    "broker": 0, "qmt": 0, "tdx": 10, "baostock": 20, "akshare": 30,
 }
 
 #: 质量状态优先级（越小越优）——与 ``local_bars`` 窗口函数里的 ``CASE`` 一一对应

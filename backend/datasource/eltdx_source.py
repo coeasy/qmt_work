@@ -7,15 +7,17 @@
 - 全市场股票列表（含中文名，解决 stock-info 中文名缺失）
 - 行业 / 概念（通达信行业 N012 + 题材概念，来自 F10 网关）
 
-⚠️ 许可证：eltdx 采用「ELTDX Research-Only License」，仅允许个人学习 / 协议研究 /
-非商业研究使用，禁止一切商业使用和滥用。本适配器将其作为**可选**行情补充源：
+★ 传输层（2026-10-04）：**easy_tdx 优先**（MIT 许可，商用安全），eltdx 降级为
+easy_tdx 缺失时的可选回退（Research-Only，禁止商用）。两者共享本适配层的
+七族门面接口：easy_tdx 经 ``datasource/tdx_transport.py`` 门面适配，行为口径
+（单位 / 分页 / 降级语义）见该模块 docstring 的实测记录。当前后端见
+``_TDX_BACKEND``（easy_tdx / eltdx / none），源 ID 定为 ``tdx``。
 
-- 默认不安装（见 backend/requirements-optional.txt），商用部署请确保环境无此包
-- 本模块采用软依赖导入：eltdx 缺失时模块仍可正常 import，`_HAS_ELTDX=False`，
+- 两个库均为**可选**依赖：缺失时模块仍可正常 import（``_HAS_TDX=False``），
   所有网络方法提前返回 / 抛明确异常，系统自动降级为券商数据源
 - 降级 ≠ 造假：宁可无数据，也不返回任何伪造行情（项目零 mock 铁律）
 
-详见 docs/THIRD_PARTY_LICENSES.md 第 3.2 节「阻断级风险」。
+详见 docs/THIRD_PARTY_LICENSES.md（easy_tdx: MIT；eltdx: Research-Only）。
 
 本地缓存：股票名称表 / 行业概念表持久化到 <data_dir> 下的 JSON，
 重启后优先读本地缓存（带 TTL），避免首拉 / 每次重启都走网络。
@@ -29,12 +31,19 @@ import time
 from typing import Optional
 from core.clock import now_iso
 
-try:  # 可选依赖：商用部署禁止安装 eltdx（Research-Only 许可）
-    from eltdx import TdxClient
-    _HAS_ELTDX = True
-except ImportError:  # pragma: no cover - 取决于部署环境是否安装
-    TdxClient = None  # type: ignore[assignment,misc]
-    _HAS_ELTDX = False
+try:  # 首选传输：easy_tdx 门面（MIT 许可，商用安全）
+    from datasource.tdx_transport import EasyTdxClient as TdxClient
+    _HAS_TDX = True
+    _TDX_BACKEND = "easy_tdx"
+except ImportError:
+    try:  # 回退传输：eltdx 原生门面（Research-Only，禁止商用）
+        from eltdx import TdxClient
+        _HAS_TDX = True
+        _TDX_BACKEND = "eltdx"
+    except ImportError:  # pragma: no cover - 取决于部署环境是否安装
+        TdxClient = None  # type: ignore[assignment,misc]
+        _HAS_TDX = False
+        _TDX_BACKEND = "none"
 
 from datasource.base import DataSource
 from datasource.board import classify_board, limit_ratio
@@ -71,7 +80,9 @@ _PRECLOSE_TTL = 86400.0      # 昨收缓存有效期（秒）：盘中不变，�
 _NAME_BATCH = 2000           # 每批经 stock_profile_table 取简称的证券数
 
 class EltdxSource(EltdxBoardMixin, DataSource):
-    name = "eltdx"
+    #: 源 ID（2026-10-04 由 "eltdx" 改为 "tdx"：传输层已切换为 easy_tdx(MIT)，
+    #: eltdx 库仅为回退；能力链 / provider 目录 / 测试断言同步更新）
+    name = "tdx"
 
     #: V11 R6：能力声明（**能力的唯一真源**）。此前未声明 → 继承基类默认值
     #: ``{quote, kline, instrument_detail, stock_list}``，与本类实际实现严重不符：
@@ -143,10 +154,10 @@ class EltdxSource(EltdxBoardMixin, DataSource):
     # ---------- 连接治理 ----------
     def _acquire_client(self, timeout: int = 8) -> TdxClient:
         """返回可复用的 TdxClient（类级单例，TTL 到期重建）。"""
-        if not _HAS_ELTDX:
+        if not _HAS_TDX:
             raise RuntimeError(
-                "eltdx 未安装，TDX 行情源不可用（非商业可选的补充源）。"
-                "请连接券商数据源，或在非商业场景下 pip install -r requirements-optional.txt"
+                "easy_tdx/eltdx 均未安装，TDX 行情源不可用（可选补充源）。"
+                "请连接券商数据源，或 pip install -r requirements-optional.txt"
             )
         now = time.time()
         with self.__class__._client_lock:
@@ -210,7 +221,20 @@ class EltdxSource(EltdxBoardMixin, DataSource):
             #    兼容旧 bug：曾出现「仅代码、中文名为空」的坏缓存 → 视为过期，走下方网络重建。
             #    文件 I/O 放线程池：同步读文件会直接占死事件循环。
             cached = await asyncio.to_thread(_load_json_cache, _name_cache_path())
-            if cached and any(cached.values()):
+            # ★ 2026-10-04 新增质量校验：实测出现过 2199 条**纯基金残表**（缺全部 A 股
+            # 条目），旧逻辑「有值就用」会让网络重建被永久跳过 —— 搜索/名称/详情的
+            # 中文名全部失效且无自愈路径。缓存必须覆盖 A 股（6xx.SH / 00x·30x.SZ）
+            # 才视为有效。
+            def _has_stock_coverage(d: dict) -> bool:
+                for k in d:
+                    if k.endswith(".SH") and k[:2] in ("60", "68"):
+                        return True
+                    if k.endswith(".SZ") and k[:3] in ("000", "001", "002", "003",
+                                                       "300", "301"):
+                        return True
+                return False
+
+            if cached and any(cached.values()) and _has_stock_coverage(cached):
                 # 历史缓存可能是「规整逻辑加入之前」落盘的原始值（实测 000858.SZ
                 # 存成 "五 粮 液"），直接 update 会把脏名字带进内存与接口返回。
                 # 加载时统一再规整一次，并仅在确有变化时回写，避免每次启动都写盘。
@@ -225,11 +249,12 @@ class EltdxSource(EltdxBoardMixin, DataSource):
                 return
             # 2) 缓存缺失 → 网络枚举全 A 股代码 + 批量取中文名（TDX 公共行情可搜索/可就绪）
             def _run():
-                if not _HAS_ELTDX:
-                    log.warning("eltdx 未安装，跳过名称表网络枚举（降级：仅券商源可用）")
+                if not _HAS_TDX:
+                    log.warning("TDX 传输不可用，跳过名称表网络枚举（降级：仅券商源可用）")
                     return
-                from eltdx import TdxClient as _TCL
-                with _TCL(timeout=90) as cl:
+                # ★ 模块级 TdxClient（easy_tdx 门面 / eltdx 回退）——禁止函数内局部
+                # import：那会绕过测试对模块属性的替换点（R21 同族教训）。
+                with TdxClient(timeout=90) as cl:
                     # 2.1) 分页枚举全 A 股证券代码。沪深A股 覆盖沪深两市，另兼容 "A股" 分类；
                     #      单个分类失败（如分类名随 SDK 变更失效）不中断整体，逐类 try。
                     ent = []          # (code, ex, full_code)，e.g. ("600519","SH","sh600519")
@@ -670,6 +695,20 @@ class EltdxSource(EltdxBoardMixin, DataSource):
                 inside = getattr(s, "inside_dish", None)
                 outside = getattr(s, "outer_disc", None)
                 points = []
+                # 真实量比：快照自带 vol_ratio（easy_tdx 路径），缺失时退回
+                # eltdx 分钟对比序列（前一日同时段量 ÷ 当日量）。
+                vol_cmp = getattr(s, "vol_ratio", None)
+                try:
+                    if vol_cmp is None:
+                        vc = cl.minutes.aux(ec, kind="volume_comparison")
+                        pts = getattr(vc, "points", None) or []
+                        if pts:
+                            lastp = pts[-1]
+                            a = getattr(lastp, "series_a", None)   # 前一日同时段量
+                            b = getattr(lastp, "series_b", None)   # 当日量
+                            vol_cmp = round(b / a, 2) if a else None
+                except Exception as exc:  # noqa: BLE001
+                    log.debug("eltdx 量比获取失败 %s: %s", code, exc)
                 try:
                     aux = cl.minutes.aux(ec, kind="buy_sell_strength")
                     for p in (getattr(aux, "points", None) or []):
@@ -680,17 +719,6 @@ class EltdxSource(EltdxBoardMixin, DataSource):
                         })
                 except Exception as exc:  # noqa: BLE001
                     log.debug("eltdx 买卖力道获取失败 %s: %s", code, exc)
-                vol_cmp = None
-                try:
-                    vc = cl.minutes.aux(ec, kind="volume_comparison")
-                    pts = getattr(vc, "points", None) or []
-                    if pts:
-                        lastp = pts[-1]
-                        a = getattr(lastp, "series_a", None)   # 前一日同时段量
-                        b = getattr(lastp, "series_b", None)   # 当日量
-                        vol_cmp = round(b / a, 2) if a else None
-                except Exception as exc:  # noqa: BLE001
-                    log.debug("eltdx 量比获取失败 %s: %s", code, exc)
                 return {
                     "code": code,
                     "inside": inside,       # 内盘累计（手）

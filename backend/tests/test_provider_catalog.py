@@ -7,7 +7,7 @@ def test_provider_catalog_exposes_optional_sources_without_claiming_active():
     catalog = ProviderCatalog()
     rows = {row["provider"]: row for row in catalog.describe()}
     # tstdx（pytdx）已于 2026-09-13 按方案 §6.1 移除
-    assert {"eltdx", "baostock", "sina", "tencent"} <= rows.keys()
+    assert {"tdx", "baostock", "sina", "tencent"} <= rows.keys()
     assert "tstdx" not in rows
     assert all(row["active"] is False for row in rows.values())
 

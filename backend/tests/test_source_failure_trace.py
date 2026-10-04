@@ -19,7 +19,7 @@ from datasource.registry import DataSourceManager
 class _NoBoards:
     """注册了但不实现 get_boards 的源。"""
 
-    name = "eltdx"
+    name = "tdx"
 
     def has(self) -> bool:
         return True
@@ -28,7 +28,7 @@ class _NoBoards:
 class _EmptyBoards:
     """实现了但返回空（模拟行情源不可用）。"""
 
-    name = "eltdx"
+    name = "tdx"
 
     async def get_boards(self, *a, **k):
         return []
@@ -43,7 +43,7 @@ def test_empty_chain_is_reported_as_unsupported_not_network():
     from app.services.market.aggregates import _unavailable
 
     mgr = DataSourceManager()
-    mgr._plugins = {"eltdx": _NoBoards()}
+    mgr._plugins = {"tdx": _NoBoards()}
     # broker 对 sector 能力刻意返回空链（见 _sup_chain 的注释）
     _run(mgr._first_supported("get_boards", "industry", "pct", 10,
                               source="broker", capability="sector"))
@@ -91,12 +91,12 @@ def test_non_empty_chain_lists_tried_sources():
     from app.services.market.aggregates import _unavailable
 
     mgr = DataSourceManager()
-    mgr._plugins = {"eltdx": _EmptyBoards()}
-    mgr._sup_chain = lambda *a, **k: ["eltdx"]
+    mgr._plugins = {"tdx": _EmptyBoards()}
+    mgr._sup_chain = lambda *a, **k: ["tdx"]
     _run(mgr._first_supported("get_boards", "industry", "pct", 10, source="auto"))
 
     trace = mgr.last_failure_trace()
-    assert trace["chain"] == ["eltdx"]
+    assert trace["chain"] == ["tdx"]
     assert trace["tried"], f"应记录失败原因：{trace}"
 
     import app.services.market.aggregates as agg
@@ -107,14 +107,14 @@ def test_non_empty_chain_lists_tried_sources():
     finally:
         agg.get_hub = orig
 
-    assert "eltdx" in msg, f"应说明试过哪个源：{msg}"
+    assert "tdx" in msg, f"应说明试过哪个源：{msg}"
 
 
 def test_trace_records_missing_method_and_breaker():
     """溯源要能区分「未注册 / 不支持该方法 / 熔断中 / 返回空」。"""
     mgr = DataSourceManager()
-    mgr._plugins = {"eltdx": _NoBoards()}
-    mgr._sup_chain = lambda *a, **k: ["eltdx", "ghost"]
+    mgr._plugins = {"tdx": _NoBoards()}
+    mgr._sup_chain = lambda *a, **k: ["tdx", "ghost"]
     _run(mgr._first_supported("get_boards", "industry", "pct", 10, source="auto"))
 
     tried = mgr.last_failure_trace()["tried"]
@@ -125,8 +125,8 @@ def test_trace_records_missing_method_and_breaker():
 def test_trace_is_reset_between_calls():
     """每次调用都要重置溯源，不能拿上一次的残留去解释这一次。"""
     mgr = DataSourceManager()
-    mgr._plugins = {"eltdx": _EmptyBoards()}
-    mgr._sup_chain = lambda *a, **k: ["eltdx"]
+    mgr._plugins = {"tdx": _EmptyBoards()}
+    mgr._sup_chain = lambda *a, **k: ["tdx"]
     _run(mgr._first_supported("get_boards", "industry", "pct", 10, source="auto"))
     assert mgr.last_failure_trace()["tried"]
 

@@ -53,7 +53,7 @@ class _CountOnlyPlugin(DataSource):
     也是「把区间交给它会被静默忽略」的根源。
     """
 
-    name = "eltdx"
+    name = "tdx"
     #: 声明 kline_qfq 才会被 ``_resolve_sources`` 收进候选链
     capabilities = frozenset({"quote", "kline", "kline_qfq", "kline_hfq",
                               "instrument_detail", "stock_list"})
@@ -99,7 +99,7 @@ def test_range_is_forwarded_to_broker():
         broker = _RangeBroker()
         m = DataSourceManager()
         m.register_broker(lambda cid: broker)
-        m.set_auto_chain(["broker", "eltdx"])
+        m.set_auto_chain(["broker", "tdx"])
 
         bars, src = await m.get_kline_range(
             "600519.SH", "1d", adjust="qfq", start="20230101", end="20231231")
@@ -122,7 +122,7 @@ def test_range_skips_sources_without_the_capability():
         m = DataSourceManager()
         m.register_broker(lambda cid: broker)
         m.register(plugin)
-        m.set_auto_chain(["broker", "eltdx"])
+        m.set_auto_chain(["broker", "tdx"])
 
         bars, src = await m.get_kline_range(
             "600519.SH", "1d", start="20130101", end="20131231")

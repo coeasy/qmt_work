@@ -24,7 +24,7 @@ class DataResult:
 
     字段：
     - ``results``：核心数据（list[标准模型] / dict / 任意可序列化对象）。
-    - ``source``：数据来源标识（"broker:ths" / "eltdx" / "local:sqlite" 等）。**必填**。
+    - ``source``：数据来源标识（"broker:ths" / "tdx" / "local:sqlite" 等）。**必填**。
     - ``as_of``：数据时间戳（ISO 字符串）。``stale=True`` 时**必填**，否则无意义。
     - ``stale``：是否为陈旧/降级数据（远程失败回退本地、或本地缓存未刷新）。
     - ``warnings``：非阻断告警（如部分字段缺失、源降级说明）。

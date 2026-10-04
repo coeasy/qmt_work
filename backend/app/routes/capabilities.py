@@ -23,7 +23,7 @@ async def platform_status():
 
     返回真实交易可用性（依据券商连接态）与选股可用性（screening_ready / screening_providers）。
     前端 PlatformContext 据此驱动 ``can("trading")`` 等能力门控；未连接券商时 ``screening_ready``
-    仍应为 true（只要有 eltdx / baostock / akshare / 本地数据可用），否则即违反 D12。
+    仍应为 true（只要有 tdx / baostock / akshare / 本地数据可用），否则即违反 D12。
     """
     from app.platform import get_platform_status
     return ok(get_platform_status())

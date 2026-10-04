@@ -54,29 +54,29 @@ class ProviderDescriptor:
 #   `_BoundBrokerSource` 只声明 DataSource 抽象方法里真正实现的那几个；
 #   链首恒为 broker 是**声明偏好**，实际是否入选由 resolve_chain 的能力校验决定。
 DEFAULT_CAPABILITY_CHAINS: dict[str, tuple[str, ...]] = {
-    "kline": ("broker", "eltdx", "baostock", "akshare", "tencent", "sina"),
-    "kline_qfq": ("broker", "eltdx", "baostock", "akshare", "tencent"),
-    "kline_hfq": ("broker", "eltdx", "baostock", "akshare", "tencent"),
-    "stock_list": ("broker", "eltdx", "baostock", "akshare"),
-    "instrument_detail": ("broker", "eltdx", "baostock", "akshare", "tencent", "sina"),
-    "sector": ("broker", "eltdx"),
-    "index_constituent": ("broker", "eltdx", "akshare"),
+    "kline": ("broker", "tdx", "baostock", "akshare", "tencent", "sina"),
+    "kline_qfq": ("broker", "tdx", "baostock", "akshare", "tencent"),
+    "kline_hfq": ("broker", "tdx", "baostock", "akshare", "tencent"),
+    "stock_list": ("broker", "tdx", "baostock", "akshare"),
+    "instrument_detail": ("broker", "tdx", "baostock", "akshare", "tencent", "sina"),
+    "sector": ("broker", "tdx"),
+    "index_constituent": ("broker", "tdx", "akshare"),
     "fundamental": ("broker",),
-    "capital": ("broker", "eltdx"),
+    "capital": ("broker", "tdx"),
     "suspend": ("broker",),
-    "price_limit": ("broker", "eltdx"),
+    "price_limit": ("broker", "tdx"),
     "corporate_action": ("broker",),
     "calendar": ("broker", "local"),
-    "quote": ("broker", "eltdx", "tencent", "sina", "akshare"),
-    "moneyflow": ("broker", "eltdx"),
-    "minutes": ("eltdx",),
-    "etf_list": ("eltdx",),
-    "search": ("eltdx",),
+    "quote": ("broker", "tdx", "tencent", "sina", "akshare"),
+    "moneyflow": ("broker", "tdx"),
+    "minutes": ("tdx",),
+    "etf_list": ("tdx",),
+    "search": ("tdx",),
     # 逐笔成交（真实市场成交）。★ 只挂 eltdx：这条能力的存在意义就是
     # 「**无券商**也能看到真实成交流」——broker 侧的券商 L2 逐笔另有
     # `/market/l2`（券商专属，未连接返 503），两者**刻意不共用一条链**，
     # 否则「auto 优先 broker」会把无券商环境下的可用性重新掐掉。
-    "ticks": ("eltdx",),
+    "ticks": ("tdx",),
 }
 
 
@@ -88,11 +88,13 @@ PROVIDER_CATALOG = (
     ProviderDescriptor("broker", "QMT Broker", "xtquant", (
         "quote", "kline", "kline_qfq", "kline_hfq", "instrument_detail"),
         commercial_ok=True, license_note="券商授权终端，授权即合规"),
-    ProviderDescriptor("eltdx", "ELTDX public market", "eltdx", (
+    ProviderDescriptor("tdx", "easy_tdx public market", "easy_tdx", (
         "quote", "kline", "kline_qfq", "kline_hfq", "instrument_detail", "stock_list",
         "sector", "index_constituent", "capital", "price_limit", "moneyflow",
         "minutes", "etf_list", "search", "ticks"),
-        "eltdx", "ELTDX Research-Only（禁止商用）", commercial_ok=False),
+        "easy_tdx", "easy_tdx: MIT（净室实现，商用安全）；回退 eltdx 时为 "
+        "Research-Only（is_commercial_ok 按 _TDX_BACKEND 动态判定）",
+        commercial_ok=True),
     ProviderDescriptor("baostock", "BaoStock", "baostock", (
         "kline", "kline_qfq", "kline_hfq", "instrument_detail", "stock_list"),
         "baostock", "BSD-3-Clause", commercial_ok=True),
@@ -145,7 +147,17 @@ class ProviderCatalog:
 
     def is_commercial_ok(self, provider_id: str) -> bool:
         item = self._descriptors.get(provider_id)
-        return item.commercial_ok if item else True
+        if item is None:
+            return True
+        if provider_id == "tdx" and item.commercial_ok:
+            # 动态判定：仅当实际传输后端为 easy_tdx（MIT）时商用安全；
+            # 回退到 eltdx（Research-Only）时商用模式必须禁用。
+            try:
+                from datasource.tdx_transport import active_backend
+                return active_backend() == "easy_tdx"
+            except Exception:  # noqa: BLE001
+                return False
+        return item.commercial_ok
 
     def default_chain(self, capability: str) -> list[str]:
         """返回某能力默认降级链（v1.3 契约顺序，未注册过滤前）。
@@ -217,7 +229,7 @@ class ProviderCatalog:
             if desc.optional_dependency and importlib.util.find_spec(desc.optional_dependency) is None:
                 continue
             # 商用模式：跳过 Research-Only 等禁止商用的源（静默跳过，不报错）
-            if commercial_mode and not desc.commercial_ok:
+            if commercial_mode and not self.is_commercial_ok(pid):
                 continue
             # 能力校验（V11 R6）：以实现类的自述为准
             if declared is not None and pid in declared:

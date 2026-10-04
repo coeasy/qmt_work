@@ -257,10 +257,18 @@ export function OrderBookPanel({ code }: { code: string }) {
         ))}
       </div>
 
-      {/* 源确实没给五档数组（如部分指数/退市标的）⇒ 明说，而不是让 4 行空白去暗示 */}
-      {quote.bids === undefined && quote.asks === undefined && (
+      {/* 源确实没给五档（缺数组，或空数组——easy_tdx 公共源无档位数据）⇒ 明说，
+          而不是让 11 行空白去暗示「这只票没盘口」。 */}
+      {(quote.bids === undefined && quote.asks === undefined) && (
         <div className={s.panelNote} style={{ marginTop: 6 }}>
           当前行情源未提供五档数组，以上仅由买一 / 卖一标量补齐 —— 连接券商后可取得完整五档。
+        </div>
+      )}
+      {quote.bids !== undefined && quote.asks !== undefined &&
+        (quote.bids?.length ?? 0) === 0 && (quote.asks?.length ?? 0) === 0 && (
+        <div className={s.panelNote} style={{ marginTop: 6 }}>
+          当前行情源（{quote.source ?? "TDX 公共源"}）不提供五档档位 —— 快照/成交额仍实时；
+          连接券商后可取得完整五档盘口。
         </div>
       )}
 

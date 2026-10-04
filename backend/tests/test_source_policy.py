@@ -19,7 +19,7 @@ def test_auto_without_qmt_drops_broker_and_degrades():
         assert "broker" not in r.chain
         assert r.degraded is True
         assert r.qmt_unavailable_reason == "no_broker_connected"
-        assert r.chain[0] == "eltdx"
+        assert r.chain[0] == "tdx"
 
 
 def test_prefer_qmt_same_chain_as_auto():

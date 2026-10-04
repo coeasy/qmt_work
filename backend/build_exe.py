@@ -76,6 +76,7 @@ HIDDEN = [
     # P1-2 收尾（M1）：数据源层从 app/datasource 提升为顶层包，供 tools/sync/backtest 消费
     "datasource", "datasource.registry", "datasource.local_store",
     "datasource.eltdx_source", "datasource.eltdx_utils", "datasource.models",
+    "datasource.tdx_transport",
     "datasource.base", "datasource.board", "datasource.degrade",
     "datasource.instrument", "datasource.periods", "datasource.result",
     "datasource.pinyin",
@@ -108,11 +109,11 @@ HIDDEN = [
 ]
 
 # 收集可能含动态导入/数据的包
-# 注意 eltdx：其行情核心是 Rust 原生扩展（eltdx/_native.pyd），PyInstaller 不会自动收集
-# 该二进制（经 _native_abi 动态装载，二进制分析发现不了）。不 collect-all 会导致打包后的
-# TDX 行情源一拉即抛 “eltdx Rust extension is unavailable”，无券商时行情/个股整页空数据。
+# 注意 TDX 传输层（2026-10-04）：主传输为 easy_tdx（MIT，商用安全）——纯 Python 包，
+# collect-all 连同其模块注册表一起收集；**eltdx 不再进发布包**（Research-Only 许可，
+# 禁止随安装包分发），仅作为开发环境的可选回退传输。
 COLLECT_ALL = ["mcp", "fastmcp", "starlette", "uvicorn", "docket", "burner_redis",
-               "fakeredis", "eltdx"]
+               "fakeredis", "easy_tdx"]
 
 # 明确排除的重型/无关包：应用代码未使用（sqlite3 直连、pandas/numpy 处理行情），
 # 但环境中已安装且会进入依赖图——既拖慢打包又可能触发 hook 崩溃（如 sqlalchemy 2.0.23

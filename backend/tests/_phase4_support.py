@@ -197,4 +197,4 @@ def fake_reg_manager(registered, commercial_mode: bool = False, declared=None):
     return M()
 
 
-REG_ALL = {"broker", "eltdx", "baostock", "akshare"}
+REG_ALL = {"broker", "tdx", "baostock", "akshare"}

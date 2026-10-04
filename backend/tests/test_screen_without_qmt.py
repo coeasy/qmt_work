@@ -39,21 +39,26 @@ def test_env1_no_qmt_has_eltdx():
         try:
             codes = ["600000.SH", "000001.SZ"]
             eltdx = {c: [make_bar(15, time_="2024-01-02")] for c in codes}
-            bp = BarsProvider(hub=FakeKlineHub({"eltdx": eltdx}), store=FakeStore())
+            bp = BarsProvider(hub=FakeKlineHub({"tdx": eltdx}), store=FakeStore())
             batch, rep = _run(bp.get_bars_batch(codes, adjust="qfq", policy_str="auto"))
-            assert rep.provider_used == "eltdx"
+            assert rep.provider_used == "tdx"
             assert all(batch[c] for c in codes)
         finally:
             regmod.get_manager = orig
 
 
-def test_env2_commercial_no_eltdx_falls_to_baostock():
-    """环境② 商用模式：eltdx 被**许可证过滤** → 降级到 baostock。
+def test_env2_commercial_no_eltdx_falls_to_baostock(monkeypatch):
+    """环境② 商用模式：Research-Only 回退传输被**许可证过滤** → 降级到 baostock。
 
-    契约：① 商用模式下 ``commercial_ok=False`` 的源被**跳过**（不报错、不被尝试）；
+    契约：① 商用模式下禁止商用的后端被**跳过**（不报错、不被尝试）；
           ② 无 QMT 连接 → ``broker`` 被剔除、``degraded=True``、reason ``no_broker_connected``；
           ③ 许可证跳过**不**计入 degraded。
+
+    2026-10-04：TDX 主传输 easy_tdx（MIT）商用可用；本用例模拟「easy_tdx 缺失、
+    回退 eltdx（Research-Only）」的部署形态，验证商用过滤路径本身。
     """
+    import datasource.tdx_transport as tt
+    monkeypatch.setattr(tt, "active_backend", lambda: "eltdx")
     with force_deps(), no_qmt():
         orig = _patch_manager()
         try:
@@ -66,7 +71,7 @@ def test_env2_commercial_no_eltdx_falls_to_baostock():
             assert rep.provider_used == "baostock"
             assert all(batch[c] for c in codes)
             # ① 许可证过滤：eltdx 不应被**尝试**（而非「尝试后为空」）
-            assert not any(t.startswith("eltdx") for t in rep.fallback_tried), rep.fallback_tried
+            assert not any(t.startswith("tdx") for t in rep.fallback_tried), rep.fallback_tried
             # ② 无 QMT → broker 被剔除并记因
             assert rep.degraded is True
             assert rep.fallback_tried[0] == "qmt:no_broker_connected"
@@ -89,10 +94,10 @@ def test_env2b_non_commercial_keeps_eltdx():
             eltdx = {c: [make_bar(15, time_="2024-01-02")] for c in codes}
             bao = {c: [make_bar(20, time_="2024-01-02")] for c in codes}
             regmod.get_manager = lambda: fake_reg_manager(REG_ALL, commercial_mode=False)
-            bp = BarsProvider(hub=FakeKlineHub({"eltdx": eltdx, "baostock": bao}),
+            bp = BarsProvider(hub=FakeKlineHub({"tdx": eltdx, "baostock": bao}),
                               store=FakeStore())
             batch, rep = _run(bp.get_bars_batch(codes, adjust="qfq", policy_str="auto"))
-            assert rep.provider_used == "eltdx"        # 非商用 → eltdx 可用
+            assert rep.provider_used == "tdx"        # 非商用 → eltdx 可用
             assert batch[codes[0]][0].close == 15
         finally:
             regmod.get_manager = orig

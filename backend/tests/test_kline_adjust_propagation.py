@@ -68,7 +68,7 @@ class _FakeHub:
         if not self.eltdx_ok:
             # 模拟在线源不可用（腾讯限流 501 / 新浪 456 是常态）
             raise RuntimeError("eltdx 不可用（模拟）")
-        return [], "eltdx"
+        return [], "tdx"
 
 
 class _FakeCache:
@@ -198,7 +198,7 @@ def test_explicit_eltdx_empty_does_not_switch_source(env):
     gw, hub = env
     hub.eltdx_ok = True
     res = _run(tools_mod.fetch_kline_cached("600519.SH", "1d", 10,
-                                            source="eltdx", adjust="qfq"))
+                                            source="tdx", adjust="qfq"))
     assert res["bars"] == []
     assert not gw.calls, "显式 eltdx 不得偷偷改走券商"
 

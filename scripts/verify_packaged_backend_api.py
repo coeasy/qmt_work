@@ -209,14 +209,14 @@ def main() -> int:
             rep.add("FAIL", "GET /brokers/diagnostics", f"status={cd_} body={str(dr)[:120]}")
 
         # ── 问题 8：个股基本信息在打包态的**缺口补齐** ────────────────
-        # 为什么必须在这一层测：打包版自带 eltdx，详情源是**本地 TDX**，
+        # 为什么必须在这一层测：打包版自带 easy_tdx（MIT 传输），详情源是**本地 TDX**，
         # 而「市值/PE/PB/换手/振幅/量比/均价/今开/最高/最低」只有公开行情源（腾讯）才有
         # ⇒ 若 `/market/stock-info` 不按缺口补一次行情，界面就是一整列 `--`（功能等于没做）。
         # 源码实例上详情源是券商/腾讯，走不到这条路径 ⇒ 只有打包态能证伪。
         METRIC_KEYS = ("open", "high", "low", "avg_price", "amplitude",
                        "turnover_rate", "volume_ratio", "pe_ttm", "pb",
                        "circ_mv", "total_mv", "amount")
-        ci_, ir = call("GET", f"{base}/market/stock-info?code=600519.SH&source=eltdx",
+        ci_, ir = call("GET", f"{base}/market/stock-info?code=600519.SH&source=tdx",
                        timeout=40.0)
         if ci_ == 200 and isinstance(ir, dict):
             d = ir.get("data", ir) or {}

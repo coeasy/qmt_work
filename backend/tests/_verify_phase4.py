@@ -113,12 +113,12 @@ def check(name, cond):
 
 def test_source_policy():
     print("[1] SourcePolicy 解析")
-    reg = {"broker", "eltdx", "baostock", "akshare"}
+    reg = {"broker", "tdx", "baostock", "akshare"}
     r = resolve_policy("auto", "kline", commercial_mode=False, registered=reg, qmt_connected=True)
     check("auto+qmt: 链含 broker 且置首", r.chain[:1] == ("broker",) and not r.degraded)
     r2 = resolve_policy("auto", "kline", commercial_mode=False, registered=reg, qmt_connected=False)
     check("auto无qmt: broker 剔除 + degraded", "broker" not in r2.chain and r2.degraded)
-    check("auto无qmt: 降级到 eltdx", r2.chain[:1] == ("eltdx",))
+    check("auto无qmt: 降级到 eltdx", r2.chain[:1] == ("tdx",))
     r3 = resolve_policy("explicit:akshare", "kline", registered=reg, qmt_connected=False)
     check("explicit: 单源不降级", r3.chain == ("akshare",) and not r3.degraded)
     r4 = resolve_policy("qmt_only", "kline", registered={"broker"}, qmt_connected=False)
@@ -126,7 +126,7 @@ def test_source_policy():
     r5 = resolve_policy("local_only", "kline")
     check("local_only: 空链", r5.chain == ())
     r6 = resolve_policy("auto", "kline", commercial_mode=True, registered=reg, qmt_connected=False)
-    check("商用: 跳过 eltdx 且含 akshare", "eltdx" not in r6.chain and "akshare" in r6.chain)
+    check("商用: 跳过 eltdx 且含 akshare", "tdx" not in r6.chain and "akshare" in r6.chain)
 
 
 def test_default_chain():
@@ -134,9 +134,9 @@ def test_default_chain():
     from datasource.providers import DEFAULT_CAPABILITY_CHAINS
     k = list(DEFAULT_CAPABILITY_CHAINS["kline"])
     check("kline 默认链前缀 = broker,eltdx,baostock,akshare",
-          k[:4] == ["broker", "eltdx", "baostock", "akshare"])
+          k[:4] == ["broker", "tdx", "baostock", "akshare"])
     q = list(DEFAULT_CAPABILITY_CHAINS["kline_qfq"])
-    check("kline_qfq 默认链同前缀", q[:4] == ["broker", "eltdx", "baostock", "akshare"])
+    check("kline_qfq 默认链同前缀", q[:4] == ["broker", "tdx", "baostock", "akshare"])
 
 
 async def test_bars_provider():
@@ -144,7 +144,7 @@ async def test_bars_provider():
     from app.data.bars_provider import BarsProvider
     import datasource.registry as regmod
 
-    reg = {"broker", "eltdx", "baostock", "akshare"}
+    reg = {"broker", "tdx", "baostock", "akshare"}
     codes = ["600000.SH", "000001.SZ"]
     eltdx_bars = {c: [Bar(time="2024-01-02", open=1, high=2, low=1, close=15, volume=100)] for c in codes}
     akshare_bars = {c: [Bar(time="2024-01-02", open=1, high=2, low=1, close=15, volume=100)] for c in codes}
@@ -153,10 +153,10 @@ async def test_bars_provider():
     orig = regmod.get_manager
     regmod.get_manager = lambda: fake_reg_manager(reg)
     try:
-        hub = FakeKlineHub({"eltdx": eltdx_bars})
+        hub = FakeKlineHub({"tdx": eltdx_bars})
         bp = BarsProvider(hub=hub, store=FakeStore())
         batch, rep = await bp.get_bars_batch(codes, adjust="qfq", policy_str="auto")
-        check("无QMT有eltdx: provider_used=eltdx", rep.provider_used == "eltdx")
+        check("无QMT有eltdx: provider_used=eltdx", rep.provider_used == "tdx")
         check("无QMT有eltdx: 两标的都有数据", all(batch[c] for c in codes))
 
         # 环境②：仅 akshare（eltdx 无数据）→ 走 akshare
@@ -234,7 +234,7 @@ async def test_fundamentals():
     from app.screener.fundamentals import fetch_fundamentals
     from datasource.providers import provider_catalog
     mgr = FakeManager(
-        {"broker", "eltdx", "baostock", "akshare"},
+        {"broker", "tdx", "baostock", "akshare"},
         {"akshare": FakePlugin({"pe": 12.5, "pb": 1.3, "roe": 0.15})})
     # fundamental 契约链目前只有 broker 占位（无任何源实现 get_fundamentals），
     # 故临时 override 到本桩，才能测到字段级溯源逻辑本身。
@@ -268,7 +268,7 @@ def test_chain_override():
         provider_catalog.clear_override("kline")
         check("clear 后恢复默认", provider_catalog.default_chain("kline") ==
               list(DEFAULT_CAPABILITY_CHAINS["kline"]))
-        check("默认契约链未被改", list(DEFAULT_CAPABILITY_CHAINS["kline"])[1] == "eltdx")
+        check("默认契约链未被改", list(DEFAULT_CAPABILITY_CHAINS["kline"])[1] == "tdx")
     finally:
         provider_catalog._overrides = orig
 

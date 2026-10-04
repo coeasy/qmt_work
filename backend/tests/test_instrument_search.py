@@ -102,7 +102,7 @@ class _FakeHub:
 
     async def search_boards(self, q, limit=8, source="auto"):
         if "香港" in q:
-            return ([{"code": "881305.SH", "name": "香港证券", "kind": "industry"}], "eltdx")
+            return ([{"code": "881305.SH", "name": "香港证券", "kind": "industry"}], "tdx")
         return [], None
 
     async def get_instrument_detail(self, code):
@@ -264,9 +264,9 @@ class TestMarketAnalysis:
 
         async def _get_kline(code, period="1d", count=250, source="auto",
                              conn_id=None, adjust=None):
-            assert source == "eltdx"
+            assert source == "tdx"
             bars = [{"time": fresh_day, "close": 1.9, "high": 2.0, "low": 1.8}] * 70
-            return bars, "eltdx"
+            return bars, "tdx"
         monkeypatch.setattr(fake_hub, "get_kline", _get_kline)
 
         d = _run(mk.market_analysis("513090.SH"))["data"]

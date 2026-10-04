@@ -39,7 +39,7 @@ class FakeBroker:
 
 
 class FakeTDX(DataSource):
-    name = "eltdx"
+    name = "tdx"
     # V11 R6：替身必须与真实 EltdxSource 的**能力声明**一致 —— 真实源接受 adjust
     # 参数，故声明复权变体；否则能力校验会把它移出 kline_qfq/kline_hfq 链，
     # 复权回退测试就测不到「broker 失败 → 落到 eltdx」这条路径。
@@ -94,7 +94,7 @@ def _m(broker_fail=False, tdx_fail=False, slow=False):
         m.register(Slow())
     else:
         m.register(FakeTDX(fail=tdx_fail))
-    m.set_auto_chain(["broker", "eltdx"])
+    m.set_auto_chain(["broker", "tdx"])
     return m
 
 
@@ -108,21 +108,21 @@ def test_auto_prefers_broker():
 def test_auto_falls_back_to_eltdx():
     async def c():
         q = await _m(broker_fail=True).get_quote("X.SH")
-        assert q["source"] == "eltdx" and q["last"] == 2.0
+        assert q["source"] == "tdx" and q["last"] == 2.0
     asyncio.run(c())
 
 
 def test_explicit_source():
     async def c():
-        assert (await _m().get_quote("X.SH", source="eltdx"))["source"] == "eltdx"
+        assert (await _m().get_quote("X.SH", source="tdx"))["source"] == "tdx"
     asyncio.run(c())
 
 
 def test_provider_capability_manifest():
     m = _m()
     details = m.describe_sources()
-    assert details["eltdx"]["active"] is True
-    assert "quote" in details["eltdx"]["capabilities"]
+    assert details["tdx"]["active"] is True
+    assert "quote" in details["tdx"]["capabilities"]
     assert "broker" in details
 
 
@@ -156,7 +156,7 @@ def test_kline_adjusted_chain_prefers_broker_then_falls_back():
 
     ★ 必须用 force_deps()：get_kline 走 provider_catalog.resolve_chain，其中会按
     ``importlib.util.find_spec(optional_dependency)`` 过滤「依赖未安装」的源。本用例
-    注入的是**测试替身** FakeTDX（name="eltdx"），而真实 eltdx 包并未安装，不做
+    注入的是**测试替身** FakeTDX（name="tdx"），而真实 eltdx 包并未安装，不做
     find_spec 替身时 eltdx 会被链路过滤掉，降级断言就会假失败。
     （对照：get_quote 走 _auto_candidates，只做许可证过滤、不做依赖过滤，故无需 force_deps。）
     """
@@ -168,7 +168,7 @@ def test_kline_adjusted_chain_prefers_broker_then_falls_back():
         assert src2 == "broker" and bars2[0]["close"] == 1
         # broker 故障 → 真实降级到 eltdx（而非报错或返回空）
         bars3, src3 = await _m(broker_fail=True).get_kline("X.SH", adjust="qfq")
-        assert src3 == "eltdx" and bars3[0]["close"] == 2
+        assert src3 == "tdx" and bars3[0]["close"] == 2
         # 全链失败 → (None, None)，不冒充「无符合标的」
         bars4, src4 = await _m(broker_fail=True, tdx_fail=True).get_kline("X.SH", adjust="qfq")
         assert bars4 is None and src4 is None
@@ -190,7 +190,7 @@ def test_breaker_trips_and_skips():
         h = await m.health()
         assert "熔断" in h["broker"]["note"]
         q = await m.get_quote("X.SH")
-        assert q["source"] == "eltdx"
+        assert q["source"] == "tdx"
     asyncio.run(c())
 
 
@@ -229,7 +229,7 @@ def test_merge_quote_derives_change_pct():
     keep = _DSM._merge_quote(
         {"code": "X.SH", "last": 10.0, "lastClose": 8.0,
          "change": 1.5, "change_pct": 15.0}, "X.SH",
-        classify_board("600519.SH"), {}, "eltdx")
+        classify_board("600519.SH"), {}, "tdx")
     assert keep["change"] == 1.5 and keep["change_pct"] == 15.0
     # 缺昨收：置 None（不伪造）
     none_c = _DSM._merge_quote({"code": "X.SH", "last": 10.0}, "X.SH",
@@ -237,33 +237,37 @@ def test_merge_quote_derives_change_pct():
     assert none_c["change"] is None and none_c["change_pct"] is None
 
 
-def test_commercial_mode_blocks_eltdx_on_all_paths():
-    """许可证合规（D-J §J.5）：商用模式下 **所有** 取数路径都必须跳过 eltdx。
+def test_commercial_mode_blocks_tdx_only_on_eltdx_fallback(monkeypatch):
+    """许可证合规（D-J §J.5）：商用过滤按**实际传输后端**动态判定（2026-10-04）。
 
-    eltdx 是 ELTDX Research-Only 许可（禁止一切商业使用），其 ProviderDescriptor
-    的 ``commercial_ok=False``。回归背景（2026-09-13 修复）：
+    TDX 传输层已切换为 easy_tdx（MIT，商用安全）：商用模式下 tdx 源**保留**。
+    仅当回退到 eltdx（Research-Only，禁止商用）时，所有取数路径都必须跳过 tdx。
 
-    此前只有 ``get_kline`` 经 ``resolve_chain`` 应用了商用过滤，而 ``get_quote`` /
-    ``get_instrument_detail`` / ``get_minutes`` / ``get_stock_list`` /
-    ``search_stocks`` 直接遍历 ``_auto_chain``，**绕过了许可证过滤**。后果是商用
-    部署里 K 线已正确跳过 eltdx，实时行情却仍在用 eltdx —— 等于把禁止商用的数据源
-    用在了商业部署中。修复后五条路径统一走 ``_auto_candidates()``。
-
-    本用例同时覆盖「非商用必须仍可用」，避免用「一律禁用 eltdx」的粗暴修法蒙混过关。
+    回归背景（2026-09-13 修复，语义仍成立）：此前只有 ``get_kline`` 经
+    ``resolve_chain`` 应用了商用过滤，而 ``get_quote`` / ``get_instrument_detail``
+    等直接遍历 ``_auto_chain`` **绕过许可证过滤** —— 修复后五条路径统一走
+    ``_auto_candidates()``。本用例同时覆盖「非商用必须仍可用」。
     """
+    import datasource.tdx_transport as tt
     with force_deps():
         m = _m(broker_fail=True)  # broker 故障，迫使走补充源
 
         async def c():
-            # --- 非商用（个人研究）：eltdx 全路径可用 ---
+            # --- 非商用（个人研究）：tdx 全路径可用 ---
             m.set_commercial_mode(False)
-            assert (await m.get_quote("X.SH"))["source"] == "eltdx"
-            assert (await m.get_kline("X.SH"))[1] == "eltdx"
+            assert (await m.get_quote("X.SH"))["source"] == "tdx"
+            assert (await m.get_kline("X.SH"))[1] == "tdx"
             assert (await m.get_instrument_detail("X.SH"))["name"] == "E"
             assert await m.search_stocks("E") == [{"code": "E.SH", "name": "E"}]
 
-            # --- 商用：eltdx 必须被全路径跳过（不报错、静默降级）---
+            # --- 商用 + easy_tdx（MIT）：tdx 保留，不被许可证过滤 ---
             m.set_commercial_mode(True)
+            assert m._license_ok("tdx") is True
+            assert (await m.get_quote("X.SH"))["source"] == "tdx"
+
+            # --- 商用 + eltdx 回退（Research-Only）：必须被全路径跳过（不报错、静默降级）---
+            monkeypatch.setattr(tt, "active_backend", lambda: "eltdx")
+            assert m._license_ok("tdx") is False
             assert await m.get_quote("X.SH") is None
             assert await m.get_kline("X.SH") == (None, None)
             assert await m.get_instrument_detail("X.SH") is None
@@ -272,13 +276,26 @@ def test_commercial_mode_blocks_eltdx_on_all_paths():
 
 
 def test_license_gate_keeps_broker_and_public_sources():
-    """许可证过滤只针对 commercial_ok=False 的源，不得误伤 broker 与 MIT/公共源。"""
+    """许可证过滤只针对禁止商用的后端，不得误伤 broker 与 MIT/公共源。
+
+    easy_tdx（MIT）为主传输 ⇒ 商用模式下 ``_license_ok("tdx")`` 为 True；
+    回退 eltdx 时为 False（动态判定，见 is_commercial_ok）。
+    """
+    import datasource.tdx_transport as tt
     m = _m()
     m.set_commercial_mode(True)
     assert m._license_ok("broker") is True   # 券商授权终端，授权即合规
-    assert m._license_ok("eltdx") is False   # Research-Only
+    assert m._license_ok("tdx") is True      # easy_tdx: MIT（默认后端）
     assert m._license_ok("baostock") is True  # BSD-3-Clause
     assert m._license_ok("akshare") is True   # MIT
+    # 回退后端（eltdx, Research-Only）→ 商用必须过滤；测后恢复
+    import datasource.tdx_transport as tt
+    orig = tt.active_backend
+    try:
+        tt.active_backend = lambda: "eltdx"
+        assert m._license_ok("tdx") is False
+    finally:
+        tt.active_backend = orig
     # broker 恒在候选链中，即使商用模式（V11 R6：统一入口 _resolve_sources）
     assert "broker" in m._resolve_sources("auto", "quote")
 
@@ -312,7 +329,7 @@ def test_shell_detail_falls_back_to_local_name_when_network_fails():
     这正是原 docstring 描述的坏体验：空壳详情 + 富化失败 → 个股名显示为一串代码。
     """
     class Dead(DataSource):
-        name = "eltdx"
+        name = "tdx"
 
         @classmethod
         def lookup_name(cls, code):
@@ -334,7 +351,7 @@ def test_shell_detail_falls_back_to_local_name_when_network_fails():
         m = DataSourceManager()
         m.register_broker(lambda cid: ShellBroker())
         m.register(Dead())
-        m.set_auto_chain(["broker", "eltdx"])
+        m.set_auto_chain(["broker", "tdx"])
         q = await m.get_quote("X.SH")
         assert q["source"] == "broker" and q["last"] == 1.0, q
         assert q["name"] == "本地名称", f"富化失败时未用本地名称兜底：{q}"
@@ -350,7 +367,7 @@ def test_detail_enrichment_result_is_cached():
     calls: list = []
 
     class Good(DataSource):
-        name = "eltdx"
+        name = "tdx"
 
         async def get_quote(self, code):
             return {"code": code, "last": 2.0}
@@ -369,7 +386,7 @@ def test_detail_enrichment_result_is_cached():
         m = DataSourceManager()
         m.register_broker(lambda cid: ShellBroker())
         m.register(Good())
-        m.set_auto_chain(["broker", "eltdx"])
+        m.set_auto_chain(["broker", "tdx"])
         q1 = await m.get_quote("X.SH")
         assert q1["name"] == "创业板指", q1
         assert calls == ["X.SH"], calls
@@ -386,7 +403,7 @@ def test_shell_detail_network_enrichment_is_time_bounded():
     不可达源不得把行情拖到秒级——详情只是增强项，拿不到也要让行情照常返回。
     """
     class Hanging(DataSource):
-        name = "eltdx"
+        name = "tdx"
 
         async def get_quote(self, code):
             return {"code": code, "last": 2.0}
@@ -405,7 +422,7 @@ def test_shell_detail_network_enrichment_is_time_bounded():
         m = DataSourceManager()
         m.register_broker(lambda cid: ShellBroker())
         m.register(Hanging())
-        m.set_auto_chain(["broker", "eltdx"])
+        m.set_auto_chain(["broker", "tdx"])
         t0 = time.monotonic()
         q = await m.get_quote("X.SH")
         dt = time.monotonic() - t0
@@ -418,7 +435,7 @@ def test_shell_detail_network_enrichment_is_time_bounded():
 def test_shell_detail_enrichment_still_yields_name_when_a_source_works():
     """限预算不能把富化能力砍掉：有可用源时仍须补出名称（指数场景）。"""
     class Hanging(DataSource):
-        name = "eltdx"
+        name = "tdx"
 
         async def get_quote(self, code):
             return {"code": code, "last": 2.0}
@@ -455,7 +472,7 @@ def test_shell_detail_enrichment_still_yields_name_when_a_source_works():
         m.register_broker(lambda cid: ShellBroker())
         m.register(Hanging())
         m.register(Good())
-        m.set_auto_chain(["broker", "eltdx", "tencent"])
+        m.set_auto_chain(["broker", "tdx", "tencent"])
         t0 = time.monotonic()
         q = await m.get_quote("X.SH")
         dt = time.monotonic() - t0

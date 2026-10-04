@@ -7,12 +7,12 @@ from datasource.providers import DEFAULT_CAPABILITY_CHAINS
 
 def test_default_kline_chain_order():
     k = list(DEFAULT_CAPABILITY_CHAINS["kline"])
-    assert k[:4] == ["broker", "eltdx", "baostock", "akshare"], k
+    assert k[:4] == ["broker", "tdx", "baostock", "akshare"], k
 
 
 def test_default_kline_qfq_chain_order():
     q = list(DEFAULT_CAPABILITY_CHAINS["kline_qfq"])
-    assert q[:4] == ["broker", "eltdx", "baostock", "akshare"], q
+    assert q[:4] == ["broker", "tdx", "baostock", "akshare"], q
 
 
 def test_default_chain_covers_key_capabilities():

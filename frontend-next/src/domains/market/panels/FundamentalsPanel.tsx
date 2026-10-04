@@ -68,7 +68,7 @@ function availTone(a: Avail | undefined): "success" | "warning" | "neutral" {
 
 /** 某维度不可用时的可操作说明（不写「获取失败」这种无信息量的文案）。 */
 const UNAVAIL_HINT: Record<string, string> = {
-  capital: "当前数据源不含股本明细（需 eltdx 行情源或券商股本接口）",
+  capital: "当前数据源不含股本明细（需 TDX 行情源或券商股本接口）",
   moneyflow: "当前数据源不含资金流（券商渠道通常不提供，需在线资金流源）",
   valuation: "估值需券商财务接口（EPS/BPS）；无券商连接或券商终端无财务数据时为空",
   performance: "本地日线不足或券商未同步该标的",

@@ -111,9 +111,9 @@ def test_moneyflow_model():
 
 # ---- 2. DataResult 容器契约 ----------------------------------------------
 def test_dataresult_fresh_to_dict():
-    r = DataResult.from_source([1, 2, 3], source="eltdx")
+    r = DataResult.from_source([1, 2, 3], source="tdx")
     d = r.to_dict()
-    assert d["source"] == "eltdx"
+    assert d["source"] == "tdx"
     assert d["stale"] is False
     assert d["as_of"] is None
     assert d["results"] == [1, 2, 3]

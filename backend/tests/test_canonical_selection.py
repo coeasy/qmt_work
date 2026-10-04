@@ -66,8 +66,8 @@ def test_provider_rank_empty_is_worst():
 
 def test_provider_rank_matches_documented_chain():
     """质量序与模块文档写明的数据链 QMT→eltdx→baostock→akshare 一致。"""
-    assert provider_rank("broker") < provider_rank("eltdx")
-    assert provider_rank("eltdx") < provider_rank("baostock")
+    assert provider_rank("broker") < provider_rank("tdx")
+    assert provider_rank("tdx") < provider_rank("baostock")
     assert provider_rank("baostock") < provider_rank("akshare")
     assert provider_rank("qmt") == provider_rank("broker")   # 同一档
     assert provider_rank("BROKER") == provider_rank("broker")  # 大小写不敏感
@@ -209,7 +209,7 @@ def test_sql_order_matches_python_key_on_multi_source(store):
     """
     code = "600005.SH"
     for pid, close in (("", 10.0), ("akshare", 20.0), ("broker", 30.0),
-                       ("eltdx", 40.0), ("baostock", 50.0)):
+                       ("tdx", 40.0), ("baostock", 50.0)):
         store.upsert_bars(code, [_bar("20260901", close)], adjust="qfq",
                           provider_id=pid, quality_state="unknown")
 
@@ -364,15 +364,15 @@ def test_rank_table_covers_every_quality_state_written_in_source():
 def test_final_outranks_raw_so_promotion_matters():
     """reconcile_bars 的晋级结果必须真的改变排序 —— 否则晋级是空转。"""
     # 同一 provider 下，晋级行必须压过未晋级行
-    assert canonical_sort_key("final", "eltdx") < canonical_sort_key("raw", "eltdx")
-    assert canonical_sort_key("final", "eltdx") < canonical_sort_key("unknown", "eltdx")
+    assert canonical_sort_key("final", "tdx") < canonical_sort_key("raw", "tdx")
+    assert canonical_sort_key("final", "tdx") < canonical_sort_key("unknown", "tdx")
     assert QUALITY_STATE_RANK["final"] < QUALITY_STATE_RANK["raw"]
 
 
 def test_conflict_never_wins_canonical_even_from_best_provider():
     """冲突行给最差档：即使来自质量序最好的 broker，也不该赢得 canonical。"""
     assert QUALITY_STATE_RANK["conflict"] > QUALITY_STATE_RANK["raw"]
-    assert canonical_sort_key("raw", "eltdx") < canonical_sort_key("conflict", "broker")
+    assert canonical_sort_key("raw", "tdx") < canonical_sort_key("conflict", "broker")
 
 
 def test_sql_case_covers_every_quality_state_written_in_source():

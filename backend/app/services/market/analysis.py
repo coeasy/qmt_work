@@ -99,7 +99,7 @@ async def build_analysis(m, code: str, conn_id: str = "", source: str = "auto",
         # 补数失败则保留原表现并显式标 stale（前端展示「数据截至 as_of」，不静默旧数据）。
         if perf and perf_stale(perf.get("as_of")):
             try:
-                bars, _ = await m.get_kline(code, "1d", 250, source="eltdx",
+                bars, _ = await m.get_kline(code, "1d", 250, source="tdx",
                                             conn_id=conn_id or None)
                 fresh = perf_from_bars(bars or [])
                 if fresh and not perf_stale(fresh.get("as_of")):

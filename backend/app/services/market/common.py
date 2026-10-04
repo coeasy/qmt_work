@@ -23,7 +23,7 @@ class ServiceError(Exception):
 
 def quote_error(code: str, source: str) -> tuple:
     """按 source 返回清晰的行情不可用错误参数（取代静默 null）。"""
-    if source == "eltdx":
+    if source == "tdx":
         return 503, f"TDX 行情源不可用：{code}（请检查网络，或连接券商获取更稳定行情）"
     if source == "broker":
         return 503, f"行情获取失败：券商连接异常或未连接，无法取到 {code} 行情。"

@@ -93,7 +93,7 @@ def test_eltdx_declares_ticks_and_implements_it():
 
     assert "ticks" in EltdxSource.capabilities
     assert hasattr(EltdxSource, "get_ticks")
-    desc = next(d for d in PROVIDER_CATALOG if d.id == "eltdx")
+    desc = next(d for d in PROVIDER_CATALOG if d.id == "tdx")
     assert "ticks" in desc.capabilities
 
 
@@ -185,14 +185,14 @@ def test_route_ticks_200_keeps_contract_fields(monkeypatch):
                            "amount": 100.0, "side": "neutral"}],
                 "count": 1,
                 "trading_date": "20261002",
-                "source": "eltdx",
+                "source": "tdx",
             }
 
     monkeypatch.setattr(m, "get_hub", lambda: _Hub())
     res = asyncio.run(m.market_ticks(code="600519.SH", count=20))
     assert res["code"] == 0, res
     d = res["data"]
-    assert d["count"] == 1 and d["source"] == "eltdx"
+    assert d["count"] == 1 and d["source"] == "tdx"
     assert d["trading_date"] == "20261002"
     assert d["items"][0]["time"] == "09:30:00"
 
@@ -203,7 +203,7 @@ def test_route_ticks_fills_trading_date_when_source_omits(monkeypatch):
 
     class _Hub:
         async def get_ticks(self, code, count=60, source="auto"):
-            return {"code": code, "items": [], "count": 0, "source": "eltdx"}
+            return {"code": code, "items": [], "count": 0, "source": "tdx"}
 
     monkeypatch.setattr(m, "get_hub", lambda: _Hub())
     res = asyncio.run(m.market_ticks(code="600519.SH"))
@@ -222,7 +222,7 @@ def test_route_ticks_accepts_both_suffix_forms(monkeypatch, bad):
     class _Hub:
         async def get_ticks(self, code, count=60, source="auto"):
             seen["code"] = code
-            return {"code": code, "items": [], "count": 0, "source": "eltdx"}
+            return {"code": code, "items": [], "count": 0, "source": "tdx"}
 
     monkeypatch.setattr(m, "get_hub", lambda: _Hub())
     res = asyncio.run(m.market_ticks(code=bad))

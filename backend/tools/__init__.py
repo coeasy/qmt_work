@@ -30,7 +30,7 @@ async def fetch_kline_cached(code: str, period: str = "1d", count: int = 250,
                              source: str = "auto", adjust: str | None = None) -> dict:
     """C1：缓存优先取历史 K 线。
 
-    返回 {"bars": [...], "source": "cache"|"broker"|"eltdx"|"cache_stale", "cached_at": ts}。
+    返回 {"bars": [...], "source": "cache"|"broker"|"tdx"|"cache_stale", "cached_at": ts}。
     缓存未初始化时直接回源。source=auto 时券商优先，无连接/异常回退 eltdx(TDX 公共行情)。
     adjust: qfq/hfq/''。**显式复权优先走 eltdx**（少一次券商 RPC，且 eltdx 原生支持复权）；
     但券商路径同样会透传 adjust（V11 R14 修复前漏传，导致降级时口径静默变成不复权）。
@@ -71,15 +71,15 @@ async def fetch_kline_cached(code: str, period: str = "1d", count: int = 250,
 
     async def _fetch_eltdx(c: str, p: str, n: int):
         bars, src = await get_hub().get_kline(
-            c, p, n, source="eltdx", conn_id=broker_id, adjust=adjust)
+            c, p, n, source="tdx", conn_id=broker_id, adjust=adjust)
         return bars, src
 
     # auto/TDX 的显式复权走支持复权的源；显式 broker 不得静默改源。
-    if source in ("auto", "eltdx") and adjust in ("qfq", "hfq") and period.lower() in ("1d", "day", "1w", "week", "1mon", "mon", "month"):
+    if source in ("auto", "tdx") and adjust in ("qfq", "hfq") and period.lower() in ("1d", "day", "1w", "week", "1mon", "mon", "month"):
         try:
             bars, src = await _fetch_eltdx(code, period, count)
         except Exception as exc:  # noqa: BLE001
-            if source == "eltdx":
+            if source == "tdx":
                 raise
             log.warning("eltdx 复权K线失败，auto 链继续尝试券商: %s", exc)
         else:
@@ -92,14 +92,14 @@ async def fetch_kline_cached(code: str, period: str = "1d", count: int = 250,
             if bars:
                 await _persist(code, period, bars, adjust)
                 return {"bars": bars, "source": src, "cached_at": None}
-            if source == "eltdx":
+            if source == "tdx":
                 # 显式指定 eltdx 时不得改源：如实返回空，由路由决定兜底。
                 return {"bars": [], "source": src, "cached_at": None}
             log.warning("eltdx 复权K线返回空（未报错），auto 链继续尝试券商：%s", code)
 
     cache = getattr(state, "kline_cache", None)
 
-    if source == "eltdx":
+    if source == "tdx":
         bars, src = await _fetch_eltdx(code, period, count)
         await _persist(code, period, bars, adjust)
         return {"bars": bars, "source": src, "cached_at": None}

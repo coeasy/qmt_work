@@ -17,7 +17,7 @@ def test_consistent_sources_canonical_final(eod_db):
         f"WHERE code='600000.SH' AND dt='{BAR_DT}'")
     by_prov = {r["provider_id"]: r["quality_state"] for r in rows}
     assert by_prov["broker"] == "final"
-    assert by_prov["eltdx"] in ("raw", "reconciled", "final")   # raw 保留
+    assert by_prov["tdx"] in ("raw", "reconciled", "final")   # raw 保留
     assert stats["conflicts"] >= 1
 
 
@@ -39,6 +39,6 @@ def test_single_source_untouched(eod_db):
 
 
 def test_provider_quality_rank_contract():
-    assert PROVIDER_QUALITY_RANK["broker"] < PROVIDER_QUALITY_RANK["eltdx"]
-    assert PROVIDER_QUALITY_RANK["eltdx"] < PROVIDER_QUALITY_RANK["baostock"]
+    assert PROVIDER_QUALITY_RANK["broker"] < PROVIDER_QUALITY_RANK["tdx"]
+    assert PROVIDER_QUALITY_RANK["tdx"] < PROVIDER_QUALITY_RANK["baostock"]
     assert PROVIDER_QUALITY_RANK["baostock"] < PROVIDER_QUALITY_RANK["akshare"]

@@ -148,7 +148,7 @@ def test_market_coverage_reports_only_days_with_data(tmp_path):
             db.execute(
                 "INSERT INTO local_bars (code,period,adjust,dt,open,high,low,close,"
                 "volume,amount,provider_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                (code, "1d", "qfq", dt, 1, 1, 1, 1, 1, 1, "eltdx"))
+                (code, "1d", "qfq", dt, 1, 1, 1, 1, 1, 1, "tdx"))
         res = asyncio.run(_mk.market_coverage(lookback_days=30,
                                              ctx=SimpleNamespace(db=db)))
         assert res["code"] == 0
@@ -156,7 +156,7 @@ def test_market_coverage_reports_only_days_with_data(tmp_path):
         assert [r["dt"] for r in d["per_day"]] == ["20260918", "20260917"]
         assert d["latest_day"] == "20260918" and d["latest_codes"] == 2
         assert d["days_with_data"] == 2
-        assert d["provider_share"][0]["provider_id"] == "eltdx"
+        assert d["provider_share"][0]["provider_id"] == "tdx"
         # 从没跑过同步 ⇒ None（而不是伪造一条「已同步」记录）
         assert d["sync"] is None
     finally:

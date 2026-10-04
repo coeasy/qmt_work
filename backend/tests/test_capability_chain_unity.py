@@ -88,7 +88,7 @@ CAP_METHODS: dict[str, tuple[str, ...]] = {
 #: 实现类（按 provider_id）。全部可**无 SDK 导入**（依赖都在方法内惰性 import）。
 IMPLS: dict[str, type] = {
     "broker": _BoundBrokerSource,
-    "eltdx": EltdxSource,
+    "tdx": EltdxSource,
     "baostock": BaoStockSource,
     "akshare": AkshareSource,
     "sina": SinaSource,

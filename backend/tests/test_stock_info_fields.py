@@ -87,7 +87,7 @@ ELTDX_DETAIL = {
     "pre_close": 1266.98,
     "industry": "酿酒",
     "concepts": ["白酒概念"],
-    "source": "eltdx",
+    "source": "tdx",
 }
 
 TENCENT_QUOTE = {
@@ -206,7 +206,7 @@ def test_gap_filled_from_metrics_source_when_detail_lacks_them(patch_hub):
     不补的话，用户装的是自带 eltdx 的客户端 ⇒ 面板上这 12 个字段全是 `--`，功能等于没做。
     """
     hub = _StubHub(ELTDX_DETAIL, quotes={"tencent": TENCENT_QUOTE},
-                   plugins={"eltdx": object(), "tencent": _metrics_plugin()})
+                   plugins={"tdx": object(), "tencent": _metrics_plugin()})
     patch_hub(hub)
     info = _payload(asyncio.run(market_stock_info("600519", ctx=None)))
 
@@ -234,7 +234,7 @@ def test_no_extra_quote_call_when_detail_already_has_metrics(patch_hub):
 
 def test_gap_stays_null_when_no_metrics_source(patch_hub):
     """一个能提供派生字段的源都没有（离线）⇒ 保持 None，前端 `--`，不许填 0。"""
-    hub = _StubHub(ELTDX_DETAIL, plugins={"eltdx": object()})
+    hub = _StubHub(ELTDX_DETAIL, plugins={"tdx": object()})
     patch_hub(hub)
     info = _payload(asyncio.run(market_stock_info("600519", ctx=None)))
     for key in ("open", "high", "low", "avg_price", "amplitude", "turnover_rate",
@@ -293,7 +293,7 @@ def test_detail_none_degrades_instead_of_crashing(patch_hub):
 def test_detail_none_still_fills_metrics_from_public_source(patch_hub):
     """没有本地画像**不等于**没有行情：公开源与本地 TDX 数据无关，仍应补上实时字段。"""
     hub = _StubHub(None, quotes={"tencent": TENCENT_QUOTE},
-                   plugins={"eltdx": object(), "tencent": _metrics_plugin()})
+                   plugins={"tdx": object(), "tencent": _metrics_plugin()})
     patch_hub(hub)
     info = _payload(asyncio.run(market_stock_info("600519", ctx=None)))
     for key in EXT_KEYS:

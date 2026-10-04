@@ -94,7 +94,7 @@ def test_empty_shell_note_does_not_claim_fetch_failure(monkeypatch):
     项目已经因为「把『不支持』说成『网络坏了』」吃过亏（见硬约束清单）；
     这里同理：把「都成功了但没数据」说成「获取失败」会把排查方向带偏。
     """
-    resp, _ = _call_kline(monkeypatch, fetched={"source": "eltdx", "bars": []}, local=None)
+    resp, _ = _call_kline(monkeypatch, fetched={"source": "tdx", "bars": []}, local=None)
     note = resp["data"]["note"]
     for bad in ("获取失败", "网络", "连接券商"):
         assert bad not in note, f"空壳说明里不该出现「{bad}」：源其实成功应答了。实得：{note}"

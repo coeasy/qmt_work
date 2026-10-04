@@ -154,12 +154,12 @@ def test_sync_records_real_provider_id(store):
     """抓取器返回 (bars, source) 时必须把真实来源写进 provider_id。"""
 
     async def _fetch(code, period, adjust, count):
-        return [_bar()], "eltdx"
+        return [_bar()], "tdx"
 
     s = BarsSyncer(store=store, fetch_bars=_fetch, provider_id="auto")
     out = asyncio.run(s.sync_one("600519.SH"))
     assert out.ok is True
-    assert _providers(store, "600519.SH") == ["eltdx"]
+    assert _providers(store, "600519.SH") == ["tdx"]
 
 
 def test_sync_never_fabricates_auto_provider(store):

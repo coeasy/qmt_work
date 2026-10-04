@@ -25,9 +25,9 @@
 
 本仓库默认可商用，但**必须同时满足**：
 
-1. **部署环境不得安装 `eltdx`**。该包采用 `ELTDX Research-Only License`，明文"禁止一切商业使用和滥用"（见第 3.1 节）。
-2. 若打包分发，需确认未把 `eltdx` 打进产物 —— 见第 3.1 节的构建检查命令。
-3. 行情层在无 `eltdx` 时自动降级为券商数据源（已由软依赖化改造保证，见第 3.1 节"改造内容"）。
+1. **TDX 传输层主传输为 `easy_tdx`（MIT，商用安全）**（2026-10-04 起）。`eltdx` 降级为 easy_tdx 缺失时的可选回退，**默认不安装**（见 3.2 节）。
+2. 若打包分发，需确认产物中含 `easy_tdx` 而不含 `eltdx`（`build_exe.py` COLLECT_ALL 已按此配置）。
+3. 行情层在无任何 TDX 传输时自动降级为券商数据源（软依赖化改造保证，见第 3.1 节"改造内容"）。
 
 ---
 
@@ -54,9 +54,17 @@
 | fakeredis | >=2.0 | BSD-3-Clause | 测试 | ✅ | 测试替身，不进产物 |
 | pytest | — | MIT | 测试 | ✅ | |
 | pyinstaller | >=6.0 | **GPL-2.0-or-later + 例外** | **构建工具** | ✅ | ⚠️ 见 3.3 |
-| **eltdx** | >=3.0 | **ELTDX Research-Only** | **可选** | ❌ **禁止** | ⛔ 见 3.2 |
+| **easy-tdx** | 1.1.0 (GitHub) | **MIT** | **可选（推荐）** | ✅ | TDX 主传输，见 3.2 |
+| **eltdx** | >=3.0 | **ELTDX Research-Only** | 旧回退（默认不装） | ❌ **禁止** | ⛔ 见 3.2 |
 
-### 3.2 ⛔ 阻断级风险：eltdx（Research-Only License）
+### 3.2 ⚠️ 风险已降级（2026-10-04）：eltdx（Research-Only）→ 回退传输；主传输 easy_tdx（MIT）
+
+> **状态变更**：TDX 传输层主传输已切换为 **easy_tdx（MIT，净室实现，商用安全）**，
+> 源 ID 更名 `eltdx` → `tdx`（`datasource/eltdx_source.py`，适配层保留历史文件名）。
+> eltdx 不再随安装包分发（`build_exe.py` COLLECT_ONLY 含 easy_tdx 不含 eltdx），
+> 仅作为「easy_tdx 缺失时的开发环境可选回退」；商用模式（`QMT_COMMERCIAL=1`）下
+> 若回退到 eltdx，`is_commercial_ok` 会按后端**动态过滤** tdx 源。
+> 以下为 eltdx 本身的许可实证（历史记录，仍然有效）。
 
 **实证**（本机 `eltdx==3.0.4` 的 `dist-info/licenses/LICENSE` 首 4 行原文）：
 

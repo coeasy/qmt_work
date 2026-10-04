@@ -215,9 +215,9 @@ async def market_quote(code: str, conn_id: str = "", source: str = "auto", ctx: 
     """实时行情快照（最新价 / 涨跌幅 / 成交量 / 买卖五档 + 合约名称/涨跌停）。
 
     source:
-      - auto（默认）：券商优先，券商未连接或失败时回退 eltdx(TDX 公共行情)
+      - auto（默认）：券商优先，券商未连接或失败时回退 tdx（TDX 公共行情，easy_tdx 传输）
       - broker：仅券商
-      - eltdx：仅 TDX 公共行情（无需券商客户端）
+      - tdx：仅 TDX 公共行情（easy_tdx 传输，无需券商客户端）
     """
     try:
         q = await get_hub().get_quote(code, source=source, conn_id=conn_id or None)
@@ -365,7 +365,7 @@ _metric_sources = metric_sources
 async def market_stock_info(code: str, conn_id: str = "", source: str = "auto", ctx: AppContext = Depends(get_ctx)):
     """股票基本信息：名称 / 板块 / 交易所 / 涨跌停 / 昨收 + 行情派生字段（供右侧面板）。
 
-    source: auto（券商优先，失败回退 eltdx）/ broker / eltdx
+    source: auto（券商优先，失败回退 tdx）/ broker / tdx
     """
     # 名称表与券商接口均以带后缀代码为键，裸代码会查不到中文名（界面只剩数字）
     code = with_exchange_suffix((code or "").strip().upper())
@@ -516,7 +516,7 @@ def _kline_empty_note(code: str, period: str, src: str) -> str:
 async def market_kline(code: str, period: str = "1d", count: int = 250,
                        conn_id: str = "", force: bool = False, source: str = "auto",
                        adj: str = "", ctx: AppContext = Depends(get_ctx)):
-    """历史 K 线（C1 本地缓存优先；source: auto=券商优先回退eltdx / broker / eltdx）。
+    """历史 K 线（C1 本地缓存优先；source: auto=券商优先回退tdx / broker / tdx）。
     adj: ''=不复权 / qfq=前复权 / hfq=后复权。显式复权时**优先**走 eltdx（原生支持复权、
     少一次券商 RPC）；eltdx 不可用或返回空则继续走券商 —— 券商侧经 `dividend_type`
     参数化同样支持复权（V11 R14 起 adjust 已真正透传，此前漏传导致降级时口径静默

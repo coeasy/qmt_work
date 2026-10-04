@@ -38,7 +38,7 @@ def eod_db(tmp_db):
     bars = [
         # 600000：两源一致（价差 0.1%）
         ("600000.SH", BAR_DT, "broker", 10.0),
-        ("600000.SH", BAR_DT, "eltdx", 10.01),
+        ("600000.SH", BAR_DT, "tdx", 10.01),
         # 600001：两源冲突（价差 5%）
         ("600001.SZ", BAR_DT, "broker", 20.0),
         ("600001.SZ", BAR_DT, "baostock", 21.0),

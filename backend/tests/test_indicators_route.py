@@ -18,7 +18,7 @@ _KLINE = [{"time": f"2026082{i}", "open": 10 + i, "high": 12 + i,
 def fake_kline(monkeypatch):
     async def _fake(code, period="1d", count=250, broker_id=None, force=False,
                     source="auto", adjust=None):
-        return {"bars": _KLINE, "source": "eltdx", "cached_at": "2026-08-30T10:00:00"}
+        return {"bars": _KLINE, "source": "tdx", "cached_at": "2026-08-30T10:00:00"}
     monkeypatch.setattr("tools.fetch_kline_cached", _fake)
 
 
@@ -40,7 +40,7 @@ def test_calc_kdj(fake_kline):
     assert d["name"] == "kdj"
     assert d["params"] == {"n": 9}
     assert d["count"] == len(_KLINE)
-    assert d["source"] == "eltdx"
+    assert d["source"] == "tdx"
     assert set(d["outputs"]) == {"k", "d", "j"}
     assert d["outputs"]["k"][0] is None          # 窗口不足 → null
     assert d["meta"]["category"] == "momentum"

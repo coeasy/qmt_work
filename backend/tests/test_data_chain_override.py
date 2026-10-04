@@ -43,6 +43,6 @@ def test_default_contract_chain_unchanged_by_override():
     try:
         provider_catalog.set_override("kline", ["broker", "akshare"])
         # 默认契约链本身未被改
-        assert list(DEFAULT_CAPABILITY_CHAINS["kline"])[1] == "eltdx"
+        assert list(DEFAULT_CAPABILITY_CHAINS["kline"])[1] == "tdx"
     finally:
         provider_catalog._overrides = orig

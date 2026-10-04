@@ -4,20 +4,20 @@ sys.path.insert(0, r"p:\github_public\qmt_work\backend")
 def section(name):
     print(f"\n=== {name} ===")
 
-reg = {"broker", "eltdx", "baostock", "akshare", "tencent", "sina"}
+reg = {"broker", "tdx", "baostock", "akshare", "tencent", "sina"}
 
 try:
     import datasource.providers as p
     section("providers import + 契约顺序")
     # D-J §J.6：默认链严格契约（不受本机安装了哪些依赖影响）
-    assert p.DEFAULT_CAPABILITY_CHAINS["kline_qfq"][:4] == ("broker", "eltdx", "baostock", "akshare"), \
+    assert p.DEFAULT_CAPABILITY_CHAINS["kline_qfq"][:4] == ("broker", "tdx", "baostock", "akshare"), \
         p.DEFAULT_CAPABILITY_CHAINS["kline_qfq"]
     names = [d.id for d in p.PROVIDER_CATALOG]
     assert "broker" in names and "akshare" in names, names
     assert p.PROVIDER_CATALOG[1].commercial_ok is False, "eltdx 必须 commercial_ok=False"
     # describe 暴露 commercial_ok
     desc = {d["provider"]: d for d in p.provider_catalog.describe()}
-    assert desc["eltdx"]["commercial_ok"] is False
+    assert desc["tdx"]["commercial_ok"] is False
     print("catalog/contract OK")
 
     # 链求值：返回必须是默认顺序的子序列（保持降级顺序），且剔除未安装依赖
@@ -35,7 +35,7 @@ try:
     print("resolve_chain order OK:", ch)
     # commercial 模式必须跳过 eltdx
     ch2 = p.provider_catalog.resolve_chain("kline_qfq", commercial_mode=True, registered=reg)
-    assert "eltdx" not in ch2, ch2
+    assert "tdx" not in ch2, ch2
     print("commercial skips eltdx OK:", ch2)
     print("PROVIDERS OK")
 except Exception:
