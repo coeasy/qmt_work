@@ -578,9 +578,16 @@ class BarsSyncer:
     async def sync_stock_list(self, limit: Optional[int] = None,
                               progress_cb: Optional[Callable[[int, int, str], None]] = None
                               ) -> SyncSummary:
-        """同步全市场股票列表（先刷列表，再按需同步 K 线）。"""
-        from datasource.registry import get_hub as _hub
-        items = await _hub().get_stock_list(source="auto")
+        """同步全市场股票列表（先刷列表，再按需同步 K 线）。
+
+        ★ 必须用模块级 ``get_hub``（2026-10-04 全量回归实测挂起 30+ 分钟）：
+          此前这里是**函数内局部导入** ``from datasource.registry import get_hub as _hub``，
+          绕过了模块级可替换点 —— 测试 monkeypatch ``app.sync.bars.get_hub`` 后，
+          其余方法都走桩，唯独本方法仍连**真实数据源**。本机装了 eltdx 时，
+          「全市场股票列表 + 全量 K 线」会真的从 TDX 拉（5224 只 × 并发 8），
+          单跑看不出问题（无券商时快速失败），全量回归直接挂死。
+        """
+        items = await get_hub().get_stock_list(source="auto")
         fallback = False
         if not items:
             # 券商兜底：券商侧**没有**「全市场股票列表」接口（get_stock_list 恒 None），
@@ -588,7 +595,7 @@ class BarsSyncer:
             # 缺了这一步，纯券商环境下「定时更新日线」每天静默空转、一只都不写，
             # 而任务状态还是 done —— 数据停更，界面却显示「已完成」。
             try:
-                codes_fb, _src = await _hub().get_sector_stocks("沪深A股")
+                codes_fb, _src = await get_hub().get_sector_stocks("沪深A股")
             except Exception:  # noqa: BLE001
                 codes_fb = None
             if codes_fb:

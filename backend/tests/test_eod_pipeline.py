@@ -14,6 +14,24 @@ def _run(coro):
     return asyncio.run(coro)
 
 
+def _stub_bars_hub(monkeypatch):
+    """把日线同步的数据源 hub 换成桩 —— EOD 测试锁的是**管线编排**，不是数据源。
+
+    ★ 为什么必须有（2026-10-04 全量回归实测挂起 30+ 分钟）：``BarsSyncer.
+    sync_stock_list`` 会经全局 hub 拉全市场股票列表再逐只同步 K 线。本机装了
+    eltdx 且 TDX 服务器可达时，这是**真实的全市场网络同步**（5224 只 × 并发 8），
+    单跑时无券商快速失败看不出来，全量回归直接挂死。
+    """
+    class _StubHub:
+        async def get_stock_list(self, source="auto"):
+            return []
+
+        async def get_sector_stocks(self, *_a, **_k):
+            raise RuntimeError("stub：EOD 测试禁止触达真实数据源")
+
+    monkeypatch.setattr("app.sync.bars.get_hub", lambda: _StubHub())
+
+
 def test_eod_pipeline_runs_and_reports(eod_db, monkeypatch):
     """在临时 DB 上跑完整 EOD：无券商 → calendar 降级但管线不中断。"""
     monkeypatch.setattr("core.db.get_db", lambda: eod_db)
@@ -48,6 +66,7 @@ def test_default_eod_schedule_18_30_enabled(eod_db):
 def test_eod_jobkind_submittable(eod_db, monkeypatch):
     """system.eod 可作为 JobKind 提交执行（走真实管线）。"""
     monkeypatch.setattr("core.db.get_db", lambda: eod_db)
+    _stub_bars_hub(monkeypatch)
 
     class _Store:
         def get_stock_list(self):

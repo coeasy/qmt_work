@@ -32,20 +32,34 @@
 | `--text` / `--text-dim` / `--text-faint` | `#e6edf6` / `#9aa8bd` / `#6b7a91` | 三级文本 |
 | `--accent` / `--accent-hover` / `--accent-dim` | `#3b82f6` / `#60a5fa` / `rgba(59,130,246,.16)` | 主强调（链接/选中/代码） |
 | `--success` / `--warning` / `--danger` / `--info` | `#22c55e` / `#f59e0b` / `#ef4444` / `#38bdf8` | 语义色（各带 `-dim` 弱化版） |
-| `--up` / `--down` / `--flat` | `#ef4444` / `#22c55e` / `#9aa8bd` | **涨/跌/平**（默认 A 股口径，见 §2） |
+| `--up` / `--down` / `--flat` | `#ef4444` / `#3b82f6` / `#9aa8bd` | **涨/跌/平**（三套口径，默认**红涨蓝跌**，见 §2） |
 | `--chart-bg` `--chart-grid` `--chart-axis` `--chart-crosshair` | — | 图表底/网格/轴/十字线 |
 | `--chart-ma5` `--chart-ma10` `--chart-ma20` `--chart-ma60` | `#f59e0b` `#38bdf8` `#a78bfa` `#22c55e` | 均线配色 |
 
 浅色主题在 `[data-theme="light"]` 下覆盖同名令牌；**组件不得出现硬编码色值**
 （原由 `check_frontend_classnames.py` 与令牌门禁共同校验；该脚本已随旧前端 `frontend/` 退役而失效，见 §5，现仅令牌门禁生效）。
 
-## 2. 涨跌色约定（A 股口径）
+## 2. 涨跌色约定（三套口径，默认红涨蓝跌）
 
-- 涨/升 → `var(--up)`（**红**）；跌/降 → `var(--down)`（**绿**）。
+`<html data-updown>` 三选一，默认值 **`red-up-blue`**（2026-10-03 起）：
+
+| `data-updown` | 涨 | 跌 | 说明 |
+|---|---|---|---|
+| `red-up-blue` | 红 | **蓝** | **默认**。绿色在界面语义里已被 `--success`（成功）占用，用它表示「跌」会让「一片绿」被读成「一片顺利」；蓝色与红/绿的区分度也更高（红绿色觉障碍最难分）。 |
+| `red-up` | 红 | 绿 | 传统 A 股口径（老用户可在「设置 → 涨跌配色」一键切回）。 |
+| `green-up` | 绿 | 红 | 欧美 / 港美股口径。 |
+
+- 涨/升 → `var(--up)`；跌/降 → `var(--down)`；无方向 → `var(--flat)`。
 - 无涨跌/缺失一律显示 `—`，**绝不估算、绝不用 0 冒充**。
   （`AssetSummary.tsx` / `FundamentalsPanel.tsx` 有统一占位实现，勿各自造轮子。）
-- ⚠️ 这是中国股市惯例，与欧美相反；**禁止**在金融场景使用绿涨红跌。
-- 涨跌色可**独立于主题**切换（`design/skins.ts`），A 股与境外市场两套口径并存。
+- 涨跌色**独立于明暗主题与背景皮肤**，切换入口：设置页「涨跌配色」与状态栏右下角按钮（两者共用 `stores/ui.ts` 的 `UPDOWN_CYCLE`）。
+- ⚠️ K 线图**必须**连同成交量柱一起换色：`chartStyles()` 里 `indicator.bars` 也要接 `--up`/`--down`/`--flat`。
+  只改 `candle.bar` 会出现「蜡烛红涨、成交量柱绿涨」—— 两套配色在同一张图上打架
+  （klinecharts 的 `indicator.bars` 默认是绿涨红跌，不接令牌就会与 A 股口径相反）。
+- ⚠️ 换肤 / 换涨跌色后图表**不会**自动重取令牌：由 `KLineChart` 里监听 `theme`/`updown`
+  的 `setStyles` effect 负责增量刷新（不 `dispose` 图表，缩放与十字光标不复位）。
+  删掉那个 effect，切完配色画布会停留在建图那一刻的颜色（该回归由
+  `tests/klineLoadFailure.test.tsx` 第 4 条锁钉死）。
 
 ## 3. 金额/数量格式化
 

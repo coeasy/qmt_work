@@ -47,12 +47,20 @@
   --danger-dim: rgba(239, 68, 68, 0.14);
   --info-dim: rgba(56, 189, 248, 0.14);
 
-  /* --- 涨跌（默认 A 股口径：红涨绿跌） --- */
+  /* --- 涨跌 --- *
+   * ★ 三套口径，默认 **红涨蓝跌**（`data-updown="red-up-blue"`）：
+   *   - red-up-blue 红涨蓝跌（默认）：涨=红，跌=蓝。跌用蓝而不是绿，是因为绿与
+   *     「成功/上涨」的通用语义冲突，且与红色涨跌在色觉障碍下更易区分；
+   *   - red-up      红涨绿跌（传统 A 股口径）；
+   *   - green-up    绿涨红跌（欧美/港美股口径）。
+   * 三套都在下方 `[data-updown=...]` 显式声明，**不要**只依赖 :root 兜底 ——
+   * `stores/ui.ts::apply` 每次都写 `data-updown`，缺一套就会静默落到默认色。
+   */
   --up: #ef4444;
-  --down: #22c55e;
+  --down: #3b82f6;
   --flat: #9aa8bd;
   --up-dim: rgba(239, 68, 68, 0.14);
-  --down-dim: rgba(34, 197, 94, 0.14);
+  --down-dim: rgba(59, 130, 246, 0.14);
 
   /* --- 图表专用 --- */
   --chart-bg: #131a24;
@@ -96,10 +104,10 @@
   --info-dim: rgba(2, 132, 199, 0.12);
 
   --up: #dc2626;
-  --down: #16a34a;
+  --down: #2563eb;
   --flat: #55637a;
   --up-dim: rgba(220, 38, 38, 0.12);
-  --down-dim: rgba(22, 163, 74, 0.12);
+  --down-dim: rgba(37, 99, 235, 0.12);
 
   --chart-bg: #ffffff;
   --chart-grid: #eef1f6;
@@ -111,7 +119,36 @@
   --chart-ma60: #16a34a;
 }
 
-/* 涨跌色独立切换：国际市场口径（绿涨红跌） */
+/* 涨跌色独立切换 —— 三套口径（详见 :root 处的说明） */
+[data-updown="red-up"] {
+  --up: #ef4444;
+  --down: #22c55e;
+  --up-dim: rgba(239, 68, 68, 0.14);
+  --down-dim: rgba(34, 197, 94, 0.14);
+}
+
+[data-updown="red-up"][data-theme="light"] {
+  --up: #dc2626;
+  --down: #16a34a;
+  --up-dim: rgba(220, 38, 38, 0.12);
+  --down-dim: rgba(22, 163, 74, 0.12);
+}
+
+[data-updown="red-up-blue"] {
+  --up: #ef4444;
+  --down: #3b82f6;
+  --up-dim: rgba(239, 68, 68, 0.14);
+  --down-dim: rgba(59, 130, 246, 0.14);
+}
+
+[data-updown="red-up-blue"][data-theme="light"] {
+  --up: #dc2626;
+  --down: #2563eb;
+  --up-dim: rgba(220, 38, 38, 0.12);
+  --down-dim: rgba(37, 99, 235, 0.12);
+}
+
+/* 国际市场口径（绿涨红跌） */
 [data-updown="green-up"] {
   --up: #22c55e;
   --down: #ef4444;

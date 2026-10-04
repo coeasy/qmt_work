@@ -86,6 +86,7 @@
   "GET /api/v1/market/session": "ops",
   "GET /api/v1/market/sources": "ops",
   "GET /api/v1/market/stock-info": "ops",
+  "GET /api/v1/market/ticks": "ops",
   "GET /api/v1/metrics": "ops",
   "GET /api/v1/notifications": "ops",
   "GET /api/v1/notifications/logs": "ops",

@@ -8,7 +8,9 @@
  * 规则必须与 src/stores/ui.ts 的 load()/apply() 保持一致，改一处要同步另一处：
  *   themePref: auto -> 跟随系统 prefers-color-scheme；dark/light -> 直接用
  *   skin:      预设皮肤靠 <html data-skin> 生效（design/skins.css）
- *   updown:    涨跌色独立于主题
+ *   updown:    涨跌色独立于主题，三套：red-up-blue(默认 红涨蓝跌) / red-up(红涨绿跌)
+ *               / green-up(绿涨红跌)。**必须无条件写**（不能只在 green-up 时写）：
+ *               默认已是 red-up-blue，不写属性就取不到对应的 [data-updown] 块。
  *   customTokens: 自定义背景色**派生好的**令牌（由 ui.ts 计算并落盘）。
  *                 这里只做搬运，不重复实现派生逻辑 —— 单一真源在 design/skins.ts。
  */
@@ -48,7 +50,10 @@
     } else if (!raw) {
       el.dataset.skin = DEFAULT_SKIN; // 首次启动默认极夜黑（纯黑）
     }
-    if (p.updown === "green-up") el.dataset.updown = "green-up";
+    // ★ 三套都要写：默认（red-up-blue）也必须有属性，否则首屏落到 :root 兜底色，
+    //   React 挂载后 ui.ts 再改成 red-up-blue ⇒ 「先绿后蓝」的闪烁。
+    el.dataset.updown =
+      p.updown === "red-up" || p.updown === "green-up" ? p.updown : "red-up-blue";
 
     if (p.skin === "custom" && p.customTokens && typeof p.customTokens === "object") {
       for (var k in p.customTokens) {

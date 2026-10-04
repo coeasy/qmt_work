@@ -14,11 +14,15 @@ import s from "../domain.module.css";
  * 两块内容都在 `panels/` 下（行情工作台右栏共用同一份实现）——
  * 本页只负责「输入代码 / 逐笔条数 + 刷新」这层外壳。
  *
- * ★ 契约要点：
- *   - 五档来自 /market/quote 的 bid/ask 与 bid_vol/ask_vol 数组（长度可能不足 5，按实际渲染）
- *   - 逐笔走 /market/l2（券商 get_l2_transactions），**券商未连接时返回 503**；
- *     TDX 公共行情不提供逐笔，故本页在无券商时逐笔区域明确提示而非空白
- *   - 行情快照本身由 WS 订阅驱动（useQuoteSubscription），无需轮询
+ * ★ 契约要点（2026-10-03 修订，与 `panels/OrderBookPanel.tsx` 同口径）：
+ *   - 五档来自 /market/quote 的 **`bids` / `asks`** 数组（元素 `{price, volume}`）。
+ *     ⚠️ 旧注释写的「bid/ask 与 bid_vol/ask_vol 数组」是**错的**：那四个是买一/卖一
+ *     **标量**（`xtquant_client/xtp/quotes.py` 的 `_lst(..., 0)`），按数组索引读恒为
+ *     undefined ⇒ 五档整列「—」。以 `bids` / `asks` 为准。
+ *   - 取值走「WS 推送优先 + `GET /market/quote` 兜底」：未连券商时 WS 一条不推，
+ *     而本地行情源同样给得出五档，故盘口**不应**在无券商时恒空（面板内 5s 轮询）。
+ *   - 逐笔（L2）走 /market/l2（券商 `get_l2_transactions`），**券商未连接时返回 503**；
+ *     无需券商的市场逐笔另走 `/market/ticks`（见 `MarketTicksPanel` / 独立「逐笔成交」页）。
  *
  * 零 mock：任一档位/逐笔缺失时显示「—」，不用 0 填充。
  * 支持 `params.code` 预填（工作台「独立盘口」按钮带入当前标的）。

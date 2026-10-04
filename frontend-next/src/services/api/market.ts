@@ -307,6 +307,36 @@ export interface L2Transaction {
 }
 
 /**
+ * 当日逐笔成交（真实市场成交）的一条记录 —— `/market/ticks` 契约。
+ *
+ * ⚠️ `volume` 单位是**手**（与 TDX 逐笔同口径），`amount` 单位是**元**。
+ * 后端已算好 `amount`，前端不要再乘 100（重复换算会把成交额放大 100 倍）。
+ */
+export interface MarketTick {
+  /** ``HH:MM:SS`` */
+  time?: string;
+  price?: number;
+  /** 成交量（手） */
+  volume?: number;
+  /** 成交额（元） */
+  amount?: number;
+  /** active buy / sell / neutral */
+  side?: "buy" | "sell" | "neutral" | string;
+  order_count?: number;
+  [k: string]: unknown;
+}
+
+export interface MarketTicksResponse {
+  code?: string;
+  items?: MarketTick[];
+  count?: number;
+  /** 这批逐笔属于哪一天（非交易日为最近一个交易日）；缺省时前端不得臆造 */
+  trading_date?: string | null;
+  source?: string;
+  [k: string]: unknown;
+}
+
+/**
  * 一条**落库的**同步运行记录（`sync_state` 表）。
  *
  * ★ 与内存里的 `last_run` 的区别：内存版重启即丢，而用户判断「今天的数据到底
@@ -457,6 +487,25 @@ export interface KlineCacheStats {
 }
 
 /**
+ * `GET /market/resolve` 的返回（**单个对象**，不是数组 —— 见 `marketApi.resolve` 的说明）。
+ *
+ * 口径来源：`app/routes/market.py::market_resolve`。唯一命中 → `resolved=true`；
+ * 多候选 → `resolved=false` + `candidates`（含代码与名称，供用户选择）。
+ */
+export interface ResolveResult {
+  q?: string;
+  resolved?: boolean;
+  code?: string;
+  name?: string;
+  type?: string;
+  exchange?: string;
+  board?: string;
+  label?: string;
+  match?: string;
+  candidates?: Instrument[];
+}
+
+/**
  * 行情域 API。路径与 backend/app/routes/market.py 一一对应。
  *
  * ★ 契约修正（相对初版，逐端点核对后）：
@@ -477,14 +526,30 @@ export const marketApi = {
   session: () => http.get<SessionSnapshot>("/market/session"),
 
   /**
+   * 单只快照（含**五档盘口** `bids` / `asks`）。
+   *
+   * ★ 与 `quotes`（批量）的分工：批量端点是报价牌命脉（走 SyncEngine 缓存 +
+   *   批量打源）；本端点是**单只深取**，用于五档盘口这类「批量接口不带深度」的场景。
+   *   以前本端点在前端没有调用方（见 `quotes` 的注释），属**潜伏断链**：批量端点
+   *   `/market/quotes` 为了省带宽不带 bids/asks，而盘口面板只读 WS 推送 ——
+   *   于是「没连券商 ⇒ 通道不推 ⇒ 五档恒空」，而明明有无需券商的公开源可取。
+   *
+   * source: auto（券商优先，失败回退 eltdx）/ broker / eltdx。
+   */
+  quote: (code: string, source = "auto", connId = "") =>
+    http.get<Quote>("/market/quote", { query: { code, source, conn_id: connId } }),
+
+  /**
    * 批量快照。优先命中 SyncEngine 已订阅缓存，缺失项再打源补齐。
    *
    * ⚠️ 后端在补齐失败时会**静默丢弃**缺项（`routes/market.py` 的
    * `except: return None`），只能靠 served/requested 差值发现 —— 调用方须显式
    * 处理缺项，不得假设返回长度 == 请求长度。
    *
+   * ⚠️ 本端点**不保证**带 `bids` / `asks`（缓存快照来自券商推送，补齐走批量打源，
+   *   两者都以「报价牌够用」为口径）。需要五档盘口请用上面的 `quote`（单只）。
+   *
    * 调用方：`hooks/useLiveQuotes.ts`（报价牌命脉）。**不要删除**。
-   * （注：无调用方的是单只的 `quote`，不是本方法。）
    */
   quotes: (codes: string[], connId = "", source = "auto") =>
     http.post<QuotesResponse>("/market/quotes", { codes, conn_id: connId, source }),
@@ -524,8 +589,18 @@ export const marketApi = {
   search: (q: string, limit = 20, includeBoards = true) =>
     http.get<Instrument[]>("/market/search", { query: { q, limit, include_boards: includeBoards } }),
 
+  /**
+   * 标的解析归一（任意输入 → 标准代码 + 候选）。
+   *
+   * ★ 2026-10-03 修正：此前声明成 `Instrument[]`，而后端 `/market/resolve`
+   *   （`app/routes/market.py::market_resolve`）返回的是**单个对象**
+   *   `{q, resolved, code, name, type, exchange, board, label, match, candidates}`。
+   *   「类型说数组、实际是对象」正是本项目定义的**接线即断链** —— 之所以一直没炸，
+   *   只是因为它**没有任何调用点**（死声明）。
+   *   本方法保留（后端与 MCP 仍提供该能力），前端的标的选择统一走 `search`。
+   */
   resolve: (q: string, limit = 8) =>
-    http.get<Instrument[]>("/market/resolve", { query: { q, limit } }),
+    http.get<ResolveResult>("/market/resolve", { query: { q, limit } }),
 
   boards: (kind = "industry", sortBy = "pct", limit = 50, source = "auto", ttl = 10) =>
     http.get<BoardsResponse>("/market/boards", {
@@ -576,9 +651,19 @@ export const marketApi = {
       query: { sector, min_pct: minPct, only_limit: onlyLimit, limit, sort },
     }),
 
-  /** L2 逐笔成交 */
+  /** L2 逐笔成交（**券商专属**：未连接券商时后端返 503） */
   l2: (code: string, count = 100) =>
     http.get<L2Transaction[]>("/market/l2", { query: { code, count } }),
+
+  /**
+   * 当日逐笔成交（**真实市场成交，无需券商** —— 走公开行情源）。
+   *
+   * ★ 与 `l2` 的分工：`l2` 是券商 L2（未连接 503）；本接口在无券商环境下也能返回
+   * 真实逐笔，是「成交流」面板的主源。`items` 为空数组是**合法结果**（盘前无成交），
+   * 与「源不可用」（后端 503 → Promise reject）语义不同，文案必须分开。
+   */
+  ticks: (code: string, count = 60, source = "auto") =>
+    http.get<MarketTicksResponse>("/market/ticks", { query: { code, count, source } }),
 
   klineSyncStatus: () => http.get<KlineSyncStatus>("/market/kline/sync-status"),
 

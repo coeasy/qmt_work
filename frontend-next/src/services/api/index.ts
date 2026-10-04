@@ -38,6 +38,8 @@ export type {
   LimitUpScanResponse,
   MarketCoverage,
   MarketSourcesResponse,
+  MarketTick,
+  MarketTicksResponse,
   MinutePoint,
   MinutesResponse,
   MoneyflowResponse,

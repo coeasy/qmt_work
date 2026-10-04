@@ -922,4 +922,47 @@ async def market_l2(code: str, count: int = 100, ctx: AppContext = Depends(get_c
     return envelope_ok(res)
 
 
+@router.get("/market/ticks")
+async def market_ticks(code: str, count: int = 60, source: str = "auto",
+                       ctx: AppContext = Depends(get_ctx)):
+    """当日**逐笔成交**（真实市场成交）—— **无需券商**，这是它与 `/market/l2` 的分工。
+
+    ★ 为什么必须有这条端点（2026-10-03）：看盘界面的「成交流」此前只有两条路，
+    且**都依赖券商桥**：WS `deal` 事件（本账户成交回报，看别人的票/未交易时恒空）
+    与 `/market/l2`（券商 L2 逐笔，未连接返 503）。于是「行情工作台的成交流」在
+    未连券商时永远空白 —— 而真实市场逐笔本来就能从公开行情源（本地 TDX `0x0FC5`）
+    直接取到。这条端点把「成交流」从「券商在线才有」解耦出来。
+
+    source: auto（默认，按能力链）| eltdx（显式指定公开源）。
+
+    返回 ``{code, items:[{time,price,volume,amount,side,order_count}], count,
+    trading_date, source}``。
+
+    ⚠️ ``items == []`` 是**合法结果**（盘前尚无成交），与「源不可用」（503）语义
+    不同，前端文案必须分开；``trading_date`` 用于告知用户「这是哪一天的逐笔」
+    （休市/非交易日取到的是最近一个交易日的数据）。
+    """
+    if not (code or "").strip():
+        return err(400, "缺少 code")
+    try:
+        res = await get_hub().get_ticks(code, count=count, source=source)
+    except UnsupportedDataSource as exc:
+        return err(400, str(exc))
+    if res is None:
+        return err(503, "逐笔成交暂不可用：本地 TDX 行情源未就绪"
+                        "（未安装 eltdx 或行情服务器不可达），可连接券商后用「逐笔(L2)」查看")
+    # ★ 源（TDX 0x0FC5）不总是回交易日，而「这是哪一天的逐笔」必须让用户看得见 ——
+    #   否则周六打开会把上一交易日的成交当成今日行情。源未给时用交易会话的
+    #   数据参照日补齐（as_of = 非交易日时的上一交易日），与顶部 TradingDateBadge 同源。
+    if not res.get("trading_date"):
+        try:
+            from app.sync.calendar import session_snapshot
+
+            snap = session_snapshot() or {}
+            res["trading_date"] = snap.get("as_of") or snap.get("trading_day") or None
+        except Exception as exc:  # noqa: BLE001  仅标注用途，失败不该让逐笔整体失败
+            log.debug("ticks trading_date 补齐失败：%s", exc)
+    return ok(res)
+
+
 # ---------------- 策略模板库 ----------------

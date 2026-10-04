@@ -40,6 +40,22 @@ class _Report:
         return {"provider": self.provider_used}
 
 
+@pytest.fixture(autouse=True)
+def _freeze_expected_bar_date(monkeypatch):
+    """把「数据够不够新」的日历判据钉死在 _BARS 的日期上。
+
+    ★ 为什么必须有（2026-10-04 全量回归实测挂起 13+ 分钟）：runner 在
+    ``bars_map`` 为空**或数据落后于期望交易日**时会内联触发**真实**日线回补
+    （``auto_backfill`` 默认开）。本文件的桩数据固定在 2026-09-18，而真实日历
+    的期望日随时间推进（跑全量的那天是 2026-10-02 的次日）⇒ ``_stale`` 恒真
+    ⇒ 每个用例都试图对**真实数据源**做全市场增量回补 —— 单跑时回补快速失败
+    看不出来，全量时数据源可达就会挂起几十分钟。
+    测试锁的是「选股与落库」逻辑，不是回补 —— 日历冻结到桩数据当日即无回补。
+    """
+    monkeypatch.setattr(
+        "app.sync.calendar.expected_bar_date", lambda *a, **k: "20260918")
+
+
 def _patch(monkeypatch, *, bars_map, report=None):
     """把股票池与批量取数替换成桩（不碰真实数据源）。"""
     report = report or _Report()
@@ -75,7 +91,10 @@ def test_empty_bars_fails_instead_of_reporting_zero_hits(monkeypatch, tmp_db):
     """★ 核心护栏：一只都没扫到 ⇒ 失败 + 可操作原因，绝不返回「0 命中」。"""
     _patch(monkeypatch, bars_map={})
     with pytest.raises(RuntimeError) as ei:
-        _run(monkeypatch, tmp_db, strategies=["turtle_trade"])
+        # auto_backfill=False：本用例锁的是「拿不到数据要报错」这条护栏本身；
+        # 若让默认回补介入（bars 为空必触发），用例就依赖「回补恰好失败」，
+        # 变成环境依赖 —— 数据源可达时会真的去回补全市场（挂起）。
+        _run(monkeypatch, tmp_db, strategies=["turtle_trade"], auto_backfill=False)
     msg = str(ei.value)
     assert "未取得任何 K 线" in msg
     assert "日线" in msg          # 告诉用户该去跑哪个任务
@@ -85,7 +104,7 @@ def test_empty_bars_does_not_write_a_success_run(monkeypatch, tmp_db):
     """失败时不该留下「成功跑过」的运行记录（否则界面会显示一次 0 命中的正常运行）。"""
     _patch(monkeypatch, bars_map={})
     with pytest.raises(RuntimeError):
-        _run(monkeypatch, tmp_db, strategies=["turtle_trade"])
+        _run(monkeypatch, tmp_db, strategies=["turtle_trade"], auto_backfill=False)
     assert picks_mod.list_runs() == []
 
 

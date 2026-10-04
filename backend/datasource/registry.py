@@ -35,6 +35,7 @@ from datasource.manager_kline import (  # noqa: F401
     _accepts_kline_range,  # re-export：tests/test_kline_range.py 从本模块导入
 )
 from datasource.manager_quotes import QuotesMixin
+from datasource.manager_ticks import TicksMixin
 
 log = __import__("logging").getLogger("qmt_work.datasource.registry")
 
@@ -121,7 +122,7 @@ class UnsupportedDataSource(DataSourceUnavailable):
         )
 
 
-class DataSourceManager(QuotesMixin, KlineMixin):
+class DataSourceManager(QuotesMixin, TicksMixin, KlineMixin):
     """多源行情路由中心（进程级单例，见 get_manager）。"""
 
     def __init__(self):

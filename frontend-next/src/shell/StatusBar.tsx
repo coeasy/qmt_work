@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { brokerBadge, useBrokerStore } from "@/stores/broker";
 import { useQuotesStore } from "@/stores/quotes";
 import { sessionBadge, useSessionStore } from "@/stores/session";
-import { useUiStore } from "@/stores/ui";
+import { nextUpDown, useUiStore, UPDOWN_LABEL } from "@/stores/ui";
 import { useWorkspaceStore } from "@/stores/workspace";
 import s from "./shell.module.css";
 
@@ -116,13 +116,15 @@ export function StatusBar() {
       <button type="button" className={s.statusBtn} onClick={() => setCommandOpen(true)}>
         命令面板 ⌘K
       </button>
+      {/* 涨跌配色三档循环：红涨蓝跌 → 红涨绿跌 → 绿涨红跌 → 回到红涨蓝跌。
+          ★ 顺序与设置页的三个按钮一致；循环而不是二选一，三套都能一键到达。 */}
       <button
         type="button"
         className={s.statusBtn}
-        onClick={() => setUpdown(updown === "red-up" ? "green-up" : "red-up")}
-        title="切换涨跌配色"
+        onClick={() => setUpdown(nextUpDown(updown))}
+        title="切换涨跌配色（红涨蓝跌 / 红涨绿跌 / 绿涨红跌）"
       >
-        {updown === "red-up" ? "红涨绿跌" : "绿涨红跌"}
+        {UPDOWN_LABEL[updown]}
       </button>
       <button type="button" className={s.statusBtn} onClick={togglePanel}>
         {panelOpen ? "隐藏侧栏" : "显示侧栏"}

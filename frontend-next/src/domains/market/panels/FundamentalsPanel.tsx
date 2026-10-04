@@ -6,7 +6,7 @@ import { fmtAmount, fmtPct, fmtPrice, toneColor } from "@/shared/format";
 import s from "./panels.module.css";
 
 /**
- * 基本面 / 深度画像面板（工作台底部坞的「基本面」页签）。
+ * 基本面 / 深度画像面板（工作台右栏「资料」Tab 的「基本面」页签）。
  *
  * ★ 契约要点（`app/services/market/analysis.py::build_analysis`）：
  *   - `GET /market/analysis?code=` 单请求并发聚合 6 维：
@@ -27,8 +27,9 @@ import s from "./panels.module.css";
  *    点击某一维才展开该维明细（再点收起）。
  *
  *    为什么改：此前 6 个 Section 用 `repeat(auto-fit, minmax(230px, 1fr))` 平铺，
- *    在底部坞里会铺成 2~3 行、每行都是一整块表格 —— 而底部坞的高度是**从图表那里
- *    借来的**（`dock` 的 `max-height: 42%`），铺得越满，K 线能用的高度就越少。
+ *    会铺成 2~3 行、每行都是一整块表格。v0.4.4 起本面板在**右栏「资料」Tab**
+ *    （260–320px，底部坞已删除），横向空间更紧张 —— 收成一排紧凑卡片 + 点击
+ *    展开是唯一能放下且可用性可见的形态。
  *    实际使用时最常看的是「这一维有没有数据、大概什么水平」，明细只在需要时看，
  *    所以一排卡片 + 点击展开既省高度，又让 6 维的**可用性一眼可见**。
  *
@@ -159,7 +160,8 @@ export function FundamentalsPanel({ code }: FundamentalsPanelProps) {
   const d = res.data as Record<string, any> | null;
   /**
    * 当前展开的维度；`null` = 全部收起（**默认态**）。
-   * 一次只展开一维：底部坞高度是从图表借的，同时展开多块会把 K 线压没。
+   * 一次只展开一维：右栏竖向空间紧张（资料块下还有盘口与下单），同时展开多块
+   * 会把可见区域撑爆。
    */
   const [open, setOpen] = useState<DimKey | null>(null);
 

@@ -12,7 +12,7 @@ import {
 import { systemApi } from "@/services/api";
 import { useAsync } from "@/hooks/useAsync";
 import { CUSTOM_SKIN_ID, DEFAULT_SKIN_ID, PRESETS, presetById } from "@/design/skins";
-import { useUiStore, type ThemePref } from "@/stores/ui";
+import { useUiStore, UPDOWN_CYCLE, UPDOWN_LABEL, type ThemePref, type UpDownMode } from "@/stores/ui";
 import type { ConfigHistoryRow, RiskConfig, RuntimeConfig } from "@/shared/types";
 import s from "../domain.module.css";
 
@@ -404,6 +404,13 @@ const THEME_OPTIONS: Array<{ key: ThemePref; label: string; hint: string }> = [
  * 皮肤通过 <html data-skin>（预设）或内联变量（自定义）驱动，组件本身不感知明暗，
  * 因此切换是零成本的。
  */
+/** 三套涨跌口径的**说明文案**（顺序与文案真源在 `stores/ui.ts::UPDOWN_CYCLE/LABEL`） */
+const UPDOWN_HINT: Record<UpDownMode, string> = {
+  "red-up-blue": "默认：跌用蓝色，避开「绿色=成功」的语义冲突，红绿色觉障碍下也更易分辨",
+  "red-up": "传统 A 股习惯",
+  "green-up": "欧美 / 港美股习惯",
+};
+
 function UiPrefs() {
   const themePref = useUiStore((st) => st.themePref);
   const setThemePref = useUiStore((st) => st.setThemePref);
@@ -510,24 +517,21 @@ function UiPrefs() {
 
       <Panel title="涨跌配色">
         <div className={s.toolbar}>
-          <Button
-            size="sm"
-            variant={updown === "red-up" ? "primary" : "ghost"}
-            onClick={() => setUpdown("red-up")}
-            title="A 股习惯"
-          >
-            红涨绿跌
-          </Button>
-          <Button
-            size="sm"
-            variant={updown === "green-up" ? "primary" : "ghost"}
-            onClick={() => setUpdown("green-up")}
-            title="国际市场习惯"
-          >
-            绿涨红跌
-          </Button>
+          {/* ★ 迭代 `UPDOWN_CYCLE`：顺序与状态栏循环、设置页按钮共用**同一份定义**，
+              避免「状态栏循环到第二档」与「设置页第二个按钮」不是同一套的漂移。 */}
+          {UPDOWN_CYCLE.map((m) => (
+            <Button
+              key={m}
+              size="sm"
+              variant={updown === m ? "primary" : "ghost"}
+              onClick={() => setUpdown(m)}
+              title={UPDOWN_HINT[m]}
+            >
+              {UPDOWN_LABEL[m]}
+            </Button>
+          ))}
           <span className={s.spacer} />
-          <span className={s.muted}>独立于明暗主题与背景配色，仅影响行情涨跌色</span>
+          <span className={s.muted}>独立于明暗主题与背景配色，K 线 / 成交量柱 / 盘口 / 涨跌幅同步生效</span>
         </div>
       </Panel>
 

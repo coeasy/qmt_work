@@ -11,7 +11,7 @@ import type { WsMessage } from "@/shared/types";
  * 领域级消费者。这样「系统日志能看到」与「行情/成交页面真正处理」不会被混为一谈。
  * 新增后端事件时，先刷新 ws_events.json，再在此登记消费策略，契约门禁会检查两边。
  */
-export type WsEventHandler = "quotes-store" | "deal-feed" | "system-log";
+export type WsEventHandler = "quotes-store" | "system-log";
 
 export const WS_EVENT_REGISTRY: Record<string, WsEventHandler> = {
   // 频道事件：服务端 type 是频道，payload 内可能再带 data.type
@@ -20,10 +20,15 @@ export const WS_EVENT_REGISTRY: Record<string, WsEventHandler> = {
   "quotes_replay": "system-log",
   "heartbeat": "system-log",
   "pong": "system-log",
-  "deal": "deal-feed",
-  "deal_event": "deal-feed",
-  "order": "deal-feed",
-  "order_event": "deal-feed",
+  // ★ v0.4.4 起 deal/order 不再有领域级消费者：唯一消费方 DealFeedPanel
+  //   （原「实时成交流」）实为本账户成交回报，已由真实市场逐笔
+  //   （MarketTicksPanel，REST 轮询 /market/ticks）替代 —— 详见该面板头注释。
+  //   账户成交/委托在交易域页面经 REST 轮询呈现，WS 事件统一进 SystemLog 兜底。
+  //   后续若为成交/委托做实时推送视图，把 handler 改回专用类型即可。
+  "deal": "system-log",
+  "deal_event": "system-log",
+  "order": "system-log",
+  "order_event": "system-log",
   "risk": "system-log",
   "risk_circuit": "system-log",
   "system": "system-log",

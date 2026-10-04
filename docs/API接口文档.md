@@ -10,8 +10,8 @@
 
 | 接口面 | 数量 | 来源 |
 |--------|------|------|
-| REST 端点 | **238** | `rest_endpoints.json` |
-| MCP 工具 | **128** | `mcp_tools.json` |
+| REST 端点 | **239** | `rest_endpoints.json` |
+| MCP 工具 | **129** | `mcp_tools.json` |
 | WebSocket 渠道 | **30** 渠道 / 5 子类型 | `ws_events.json` |
 
 ## 通用约定（简明，详细见多语言接入指南）
@@ -21,7 +21,7 @@
 - **统一响应包裹**：`{ code, message, data }`，`code !== 0` 即错误。健康检查探针（`/live` `/health` `/ready` `/metrics`）额外带 `service/version`。
 - **错误归因**：错误 `message` 给出根因分类（未连接券商 / 柜台拒单 / 风控拦截 / 参数错误 / 内部异常），前端按分类给出不同引导，不做「网络错误」兜底。
 
-## REST API（238 端点）
+## REST API（239 端点）
 
 所有路径前缀为 `/api/v1`，按资源分组；组内先按方法（`G`=GET `P`=POST `U`=PUT `D`=DELETE `X`=PATCH）再按路径排序。
 
@@ -219,7 +219,7 @@ API Key 的创建、轮换、启用/禁用、批量删除与清理未使用。
 |---|------|
 | G | `/api/v1/live` |
 
-### market（行情）· 52 端点
+### market（行情）· 53 端点
 
 行情全景：K线 / 分时 / tick、板块与成分、资金流、选股（表达式 / 经典 / 自然语言）、指标计算、导出与同步。
 
@@ -264,6 +264,7 @@ API Key 的创建、轮换、启用/禁用、批量删除与清理未使用。
 | G | `/api/v1/market/session` |
 | G | `/api/v1/market/sources` |
 | G | `/api/v1/market/stock-info` |
+| G | `/api/v1/market/ticks` |
 | P | `/api/v1/market/analysis/run` |
 | P | `/api/v1/market/crawl` |
 | P | `/api/v1/market/export` |
@@ -522,7 +523,7 @@ WAL 统计与手动检查点。
 
 ---
 
-## MCP 工具（128 个）
+## MCP 工具（129 个）
 
 FastMCP Streamable HTTP，接入点 `http://<host>:<port>/mcp`，携带 `X-API-Key`。工具集与 REST 的 `agent-visible` 端点保持同步（能力漂移门禁校验）。
 
@@ -627,7 +628,7 @@ FastMCP Streamable HTTP，接入点 `http://<host>:<port>/mcp`，携带 `X-API-K
 | `generate_rebalance` |
 | `generate_strategy` |
 
-#### get_* · 77 个
+#### get_* · 78 个
 
 只读查询（行情 / 账户 / 配置 / 任务 / 系统状态等）。
 
@@ -687,6 +688,7 @@ FastMCP Streamable HTTP，接入点 `http://<host>:<port>/mcp`，携带 `X-API-K
 | `get_market_session` |
 | `get_market_sources` |
 | `get_market_stock_info` |
+| `get_market_ticks` |
 | `get_notifications` |
 | `get_notifications_logs` |
 | `get_paper_account` |

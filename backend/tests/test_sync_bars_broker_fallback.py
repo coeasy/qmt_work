@@ -78,19 +78,44 @@ def test_empty_list_falls_back_to_broker_sector():
 
     syncer.sync_many = _fake_sync_many  # type: ignore[assignment]
 
-    import datasource.registry as reg
-    orig = reg.get_hub
-    reg.get_hub = lambda: hub
+    import app.sync.bars as bars_mod
+    orig = bars_mod.get_hub
+    bars_mod.get_hub = lambda: hub
     try:
         summary = asyncio.run(syncer.sync_stock_list())
     finally:
-        reg.get_hub = orig
+        bars_mod.get_hub = orig
 
     assert summary.total == 2, f"应同步 2 只，实际 {summary.total}"
     assert seen["codes"] == ["600000.SH", "600519.SH"]
     assert hub.sector_asked == ["沪深A股"]
     # 兜底路径只有代码没有名称，写进股票列表会把名称覆盖成空 —— 必须跳过
     assert store.upserted is None, "兜底数据不得回写股票列表（会把名称抹成空）"
+
+
+def test_sync_stock_list_uses_module_level_get_hub():
+    """★ AST 锁：``sync_stock_list`` 内**禁止**局部导入 registry.get_hub。
+
+    局部导入会绕过模块级替换点（``app.sync.bars.get_hub``）：其余方法都走测试桩，
+    唯独它真连数据源 —— 本机有 eltdx 时就是全市场真实拉数（2026-10-04 实测把
+    全量回归挂死 30+ 分钟）。补历史教训见 ``sync_stock_list`` 的 docstring。
+    """
+    import ast
+    import pathlib
+    import app.sync.bars as bars_mod
+
+    tree = ast.parse(pathlib.Path(bars_mod.__file__).read_text(encoding="utf-8"))
+    found = False
+    for node in ast.walk(tree):
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "sync_stock_list":
+            found = True
+            for sub in ast.walk(node):
+                if isinstance(sub, ast.ImportFrom) and sub.module == "datasource.registry":
+                    names = {a.name for a in sub.names}
+                    raise AssertionError(
+                        f"sync_stock_list 内出现 registry 局部导入 {names} —— "
+                        "会绕过 app.sync.bars.get_hub 测试替换点，必须改用模块级 get_hub()")
+    assert found, "没找到 sync_stock_list（函数被改名？同步更新本测试）"
 
 
 def test_no_codes_at_all_returns_empty_summary():
@@ -107,13 +132,13 @@ def test_no_codes_at_all_returns_empty_summary():
 
     syncer.sync_many = _fake_sync_many  # type: ignore[assignment]
 
-    import datasource.registry as reg
-    orig = reg.get_hub
-    reg.get_hub = lambda: hub
+    import app.sync.bars as bars_mod
+    orig = bars_mod.get_hub
+    bars_mod.get_hub = lambda: hub
     try:
         summary = asyncio.run(syncer.sync_stock_list())
     finally:
-        reg.get_hub = orig
+        bars_mod.get_hub = orig
 
     assert summary.total == 0
     assert called["v"] is False

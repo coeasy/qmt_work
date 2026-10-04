@@ -35,7 +35,57 @@ import {
 
 export type Theme = "dark" | "light";
 export type ThemePref = "auto" | Theme;
-export type UpDownMode = "red-up" | "green-up";
+/**
+ * 涨跌配色三套（与 `design/tokens.css` 的 `[data-updown=...]` 一一对应）：
+ *   - `red-up-blue` **红涨蓝跌**（默认）
+ *   - `red-up`      **红涨绿跌**（传统 A 股口径）
+ *   - `green-up`    **绿涨红跌**（欧美 / 港美股口径）
+ *
+ * ★ 为什么默认值是「红涨蓝跌」而不是沿用「红涨绿跌」：绿色在界面语义里已被
+ *   `--success`（成功）占用，用它表示「跌」会让「一片绿」在涨跌幅列表里被读成
+ *   「一片顺利」；蓝色与红/绿的区分度也更高（色觉障碍下红绿最难分）。
+ *   三套都保留，老用户在设置里一键切回即可。
+ *
+ * ⚠️ 新增一套必须同时改三处：本类型 + `tokens.css` 的 `[data-updown]` 块 +
+ *   `public/theme-boot.js` 的校验分支（漏一处 ⇒ 首屏闪回默认色）。
+ */
+export type UpDownMode = "red-up-blue" | "red-up" | "green-up";
+
+/** 默认值：红涨蓝跌（见 `UpDownMode` 的说明） */
+const DEFAULT_UPDOWN: UpDownMode = "red-up-blue";
+
+/** 把任意持久化值收成合法枚举；未知值回退默认，绝不把半个值写进 DOM */
+function isUpDown(v: unknown): v is UpDownMode {
+  return v === "red-up-blue" || v === "red-up" || v === "green-up";
+}
+
+/**
+ * 涨跌配色的**唯一顺序真源**：状态栏按它循环、设置页按它排按钮、标签文案也在这里。
+ *
+ * ★ 为什么不各写一份：三处各写一次顺序的后果是「状态栏循环到第二档」与
+ *   「设置页第二个按钮」可能不是同一套 —— 那种漂移不会报错，只会让用户在
+ *   两个入口之间对不上号。集中定义后新增一套只改这一处 + tokens.css。
+ */
+export const UPDOWN_CYCLE: readonly UpDownMode[] = ["red-up-blue", "red-up", "green-up"];
+
+export const UPDOWN_LABEL: Record<UpDownMode, string> = {
+  "red-up-blue": "红涨蓝跌",
+  "red-up": "红涨绿跌",
+  "green-up": "绿涨红跌",
+};
+
+/**
+ * 循环里的下一档（状态栏一键切换用）。
+ *
+ * 抽成函数而不是在组件里写 `CYCLE[(i + 1) % CYCLE.length]`：后者在
+ * `noUncheckedIndexedAccess` 下会得到 `UpDownMode | undefined`，组件只能再加一层
+ * 兜底判断 —— 而「周期末尾回到首项」这个语义本来就属于这份定义，不该散到调用方。
+ */
+export function nextUpDown(m: UpDownMode): UpDownMode {
+  const i = UPDOWN_CYCLE.indexOf(m);
+  // 循环非空是编译期常量，`??` 只是为了满足 noUncheckedIndexedAccess
+  return UPDOWN_CYCLE[(i + 1) % UPDOWN_CYCLE.length] ?? DEFAULT_UPDOWN;
+}
 export type DataPanelTab = "watchlist" | "orderbook" | "alerts";
 
 const STORAGE_KEY = "qmt.ui.v1";
@@ -108,7 +158,7 @@ function load(): Persisted {
   //   预览色不一致，且没有任何一处解释这个差异。默认既已定为深色���这里统一深色。
   const fallback: Persisted = {
     themePref: "dark",
-    updown: "red-up",
+    updown: DEFAULT_UPDOWN,
     dataPanelTab: "watchlist",
     dataPanelOpen: true,
     skin: DEFAULT_SKIN_ID,
@@ -127,7 +177,8 @@ function load(): Persisted {
     else if (isTheme(p.theme)) themePref = p.theme;
     return {
       themePref,
-      updown: p.updown === "green-up" ? "green-up" : "red-up",
+      // ★ 未知值（含旧版没有的三套枚举之外的脏数据）回退默认，不落盘半个值
+      updown: isUpDown(p.updown) ? p.updown : DEFAULT_UPDOWN,
       dataPanelTab:
         p.dataPanelTab === "orderbook" || p.dataPanelTab === "alerts"
           ? p.dataPanelTab

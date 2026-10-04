@@ -72,6 +72,11 @@ DEFAULT_CAPABILITY_CHAINS: dict[str, tuple[str, ...]] = {
     "minutes": ("eltdx",),
     "etf_list": ("eltdx",),
     "search": ("eltdx",),
+    # 逐笔成交（真实市场成交）。★ 只挂 eltdx：这条能力的存在意义就是
+    # 「**无券商**也能看到真实成交流」——broker 侧的券商 L2 逐笔另有
+    # `/market/l2`（券商专属，未连接返 503），两者**刻意不共用一条链**，
+    # 否则「auto 优先 broker」会把无券商环境下的可用性重新掐掉。
+    "ticks": ("eltdx",),
 }
 
 
@@ -86,7 +91,7 @@ PROVIDER_CATALOG = (
     ProviderDescriptor("eltdx", "ELTDX public market", "eltdx", (
         "quote", "kline", "kline_qfq", "kline_hfq", "instrument_detail", "stock_list",
         "sector", "index_constituent", "capital", "price_limit", "moneyflow",
-        "minutes", "etf_list", "search"),
+        "minutes", "etf_list", "search", "ticks"),
         "eltdx", "ELTDX Research-Only（禁止商用）", commercial_ok=False),
     ProviderDescriptor("baostock", "BaoStock", "baostock", (
         "kline", "kline_qfq", "kline_hfq", "instrument_detail", "stock_list"),

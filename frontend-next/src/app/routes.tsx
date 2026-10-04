@@ -102,7 +102,10 @@ export const PAGES: Record<string, PageDef> = {
   },
   deal_feed: {
     key: "deal_feed",
-    label: "成交明细",
+    // ★ 2026-10-03 改名：本页此前叫「成交明细」，但数据来自 WS `deal` 事件 ——
+    //   那是**本账户成交回报**，不是市场成交流，标题会直接被误读。
+    //   现接 `GET /market/ticks`（本地 TDX 当日逐笔，无需券商），故改称「逐笔成交」。
+    label: "逐笔成交",
     comp: P(() => import("@/domains/market/DealFeed")),
     fullBleed: true,
     status: "done",

@@ -16,15 +16,26 @@ import { cleanup, render, waitFor } from "@testing-library/react";
  * 1. 通道状态是**可判的**（`useQuotesStore.socketState`）⇒ 两个成因必须分开说；
  *    退回「WS 未连接或该标的不在推送范围」这种糊在一起的写法，第 1 条必红。
  * 2. 通道**开着**却没行情时**不得**再给「去连接」—— 那是假出口；把出口加回去，第 2 条必红。
+/**
  * 3. `L2Panel` 能走到空态 ⇒ `/market/l2` 返回了 200（未连券商时 `no_broker()` 返 503，
  *    已被 error 分支接管）⇒ 空态里说「未连接券商时为空是预期行为」**必然是错的**；
  *    把这句话加回去，第 4 条必红。
+ *
+ * ★ 2026-10-03 第 3 条判据（本轮修的断链，必须用测试钉死）：
+ *   `OrderBookPanel` **不得只认 WS 推送**。WS 行情推送的前提是「有活跃券商桥」
+ *   （`sync/__init__.py::_subscribe_to_qmt` 无桥直接 return），于是未连券商时
+ *   五档**恒空** —— 而五档本身可从无需券商的公开行情源取到。
+ *   现在面板走「WS 优先 + `GET /market/quote` 兜底」：
+ *     - WS 无推送但 REST 有五档 ⇒ **必须**渲染出五档（把兜底删掉，第 1 条必红）；
+ *     - WS 有五档 ⇒ 优先用 WS（把 `live` 的深度让 REST 覆盖掉，第 3 条必红）；
+ *     - 两边都没有 ⇒ 说「行情不可用」+ 给出路，**不得**再说「行情通道未连接」
+ *       （那是把成因单一归因到一条已被兜底覆盖的通道，第 2 条必红）。
  */
 vi.mock("@/services/api", async (orig) => {
   const actual = await orig<typeof import("@/services/api")>();
   return {
     ...actual,
-    marketApi: { ...actual.marketApi, l2: vi.fn() },
+    marketApi: { ...actual.marketApi, l2: vi.fn(), quote: vi.fn() },
   };
 });
 
@@ -38,41 +49,72 @@ import { OrderBookPanel } from "@/domains/market/panels/OrderBookPanel";
 import { L2Panel } from "@/domains/market/panels/L2Panel";
 
 const l2 = (marketApi as unknown as { l2: ReturnType<typeof vi.fn> }).l2;
+const quote = (marketApi as unknown as { quote: ReturnType<typeof vi.fn> }).quote;
 
 beforeEach(() => {
   l2.mockReset();
+  quote.mockReset();
+  quote.mockRejectedValue(new Error("no mock"));
   useQuotesStore.setState({ quotes: {}, refs: {}, socketState: "idle", lastSeq: 0 });
 });
 
 afterEach(cleanup);
 
-describe("OrderBookPanel · 空态按行情通道的真实状态分叉", () => {
-  it("通道未连接：说明通道状态并给出路，不得用「或」把两个成因糊在一起", () => {
-    useQuotesStore.setState({ socketState: "closed" });
+describe("OrderBookPanel · WS 优先 + 行情接口兜底（不得只认 WS 推送）", () => {
+  it("WS 不推送时也要靠 REST 兜底渲染出五档（否则未连券商 ⇒ 恒空）", async () => {
+    // 通道 idle（无券商桥的典型形态）：WS 一条都不推
+    useQuotesStore.setState({ socketState: "idle", quotes: {} });
+    quote.mockResolvedValue({
+      code: "600519.SH", price: 1680.5, source: "eltdx",
+      bids: [{ price: 1680.5, volume: 12 }, { price: 1680.0, volume: 30 }],
+      asks: [{ price: 1681.0, volume: 8 }, { price: 1681.5, volume: 21 }],
+    });
     const { container } = render(<OrderBookPanel code="600519.SH" />);
-    const txt = container.textContent || "";
+    await waitFor(() => expect(container.textContent).toContain("五档盘口"));
 
-    expect(txt).toContain("行情通道已断开");
-    expect(txt).toContain("去连接");
-    // ★ 旧的错误形态：一个括号把「WS 未连接」与「不在推送范围」糊在一起
-    expect(txt).not.toContain("WS 未连接或该标的不在推送范围");
+    const txt = container.textContent || "";
+    expect(txt, "兜底拿到五档却没渲染出来").toContain("1681.00");
+    expect(txt, "兜底拿到五档却没渲染出来").toContain("1680.50");
+    expect(txt).toContain("行情接口"); // 标注数据来自接口而非实时推送
   });
 
-  it("通道 connecting 时也要如实说是「正在连接」，不能一律说「未连接」", () => {
-    useQuotesStore.setState({ socketState: "connecting" });
+  it("两边都拿不到：说「行情不可用」并给出路，不得把成因单一归因到「通道未连接」", async () => {
+    useQuotesStore.setState({ socketState: "closed", quotes: {} });
+    quote.mockRejectedValue(new Error("本地行情源未就绪"));
     const { container } = render(<OrderBookPanel code="600519.SH" />);
-    expect(container.textContent || "").toContain("行情通道正在连接");
-  });
+    await waitFor(() => expect(container.textContent).toContain("行情不可用"));
 
-  it("通道已连接但无推送：不得再给「去连接」假出口（通道明明是好的）", () => {
-    useQuotesStore.setState({ socketState: "open" });
-    const { container } = render(<OrderBookPanel code="600519.SH" />);
     const txt = container.textContent || "";
-
-    expect(txt).toContain("行情通道已连接，但尚未收到该标的的推送");
-    // ★ 假出口：通道是好的，把用户送去「连接管理」只会白跑
-    expect(txt).not.toContain("去连接");
+    expect(txt).toContain("本地行情源未就绪");
+    expect(txt).toContain("去连接"); // 券商快照同样带五档，是可行的出路
+    // ★ 旧形态：REST 兜底已覆盖「没连券商」，再说「通道未连接」就是错误的单一归因
     expect(txt).not.toContain("行情通道未连接");
+  });
+
+  it("WS 有五档时优先用 WS：REST 的深度不得覆盖实时推送", async () => {
+    useQuotesStore.setState({
+      socketState: "open",
+      quotes: {
+        "600519.SH": {
+          code: "600519.SH", price: 11.11, source: "broker",
+          bids: [{ price: 11.05, volume: 5 }],
+          asks: [{ price: 11.15, volume: 6 }],
+        },
+      },
+    });
+    quote.mockResolvedValue({
+      code: "600519.SH", price: 9.9, source: "eltdx",
+      bids: [{ price: 9.9, volume: 1 }],
+      asks: [{ price: 9.95, volume: 2 }],
+    });
+    const { container } = render(<OrderBookPanel code="600519.SH" />);
+    await waitFor(() => expect(container.textContent).toContain("五档盘口"));
+
+    const txt = container.textContent || "";
+    expect(txt, "WS 的深度被 REST 覆盖了").toContain("11.05");
+    expect(txt, "WS 的深度被 REST 覆盖了").toContain("11.15");
+    expect(txt).not.toContain("9.90");
+    expect(txt).toContain("实时推送");
   });
 });
 

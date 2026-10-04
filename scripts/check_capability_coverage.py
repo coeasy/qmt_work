@@ -274,8 +274,16 @@ def load_frontend_sources() -> list[tuple[str, str]]:
 API_DIR_REL = "frontend-next/src/services/api/"
 _API_OBJ_RE = re.compile(r"^export const (\w+)\s*=")
 _API_METHOD_RE = re.compile(r"^\s{2,}(\w+)\s*:\s*(?:async\s*)?\(")
+# ★ 2026-10-03 修（与 `check_api_contract_drift.py` 同一类**假绿灯**）：
+#   原正则的泛型段写的是 ``[^(\n]*`` —— **不允许跨行**。而 `system.ts` 为类型排版，
+#   把 `remoteAccessStatus` / `setRemoteAccessMode` 的返回类型排成了 6~10 行
+#   （``http.get<{\n ... \n}>("/remote-access/status")``），于是这两个端点
+#   **既没被认作已声明、也没被认作未覆盖**，直接落进「未覆盖且未豁免」——
+#   而它们明明在 `RemoteAccess.tsx` 里有真实调用点。
+#   也就是说：门禁报红报的是**扫描器看不懂**，不是**前端没接线**。
+#   泛型段改成「直到第一个 `(`」（``[^()]*``），嵌套尖括号天然成立。
 _HTTP_CALL_RE = re.compile(
-    r"""\bhttp\.(?:get|post|patch|put|delete|del)\b[^(\n]*\(\s*([`"'])([^`"']*)\1""")
+    r"""\bhttp\.(?:get|post|patch|put|delete|del)\b[^()]*\(\s*([`"'])([^`"']*)\1""")
 
 
 def api_client_declarations() -> list[tuple[str, str, str]]:

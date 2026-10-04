@@ -21,7 +21,12 @@ import s from "./panels.module.css";
  *   - 分时不是 K 线周期：走 /market/minutes，**不能**用 /market/kline 的 tick 周期
  *     （后端会显式 400 并指向本端点，避免静默返回 0 根导致图表空白无报错）
  *
- * 价格线以昨收为基准着色（涨红跌绿，随 --up/--down 令牌变化）。
+ * 价格线以昨收为基准着色 —— **涨用 `--up`、跌用 `--down`**，随三套涨跌口径变化。
+ *
+ * ⚠️ 不要写死 `#ef4444` / `#22c55e`：那是把「红涨绿跌」这一套钉死在代码里，
+ *   默认口径改成**红涨蓝跌**（0.4.4 起）后，分时图的跌线仍是绿的，与同屏 K 线
+ *   （蓝色）**在同一屏里打架**。令牌由 `EChart` 统一解析（canvas 不认 `var()`），
+ *   这里只管写 `var(--x)`。
  * 零 mock：无数据即显式提示，不补假值。
  */
 export function MinutesChart({
@@ -48,7 +53,10 @@ export function MinutesChart({
     const prices = points.map((p) => p.price);
     const avgs = points.map((p) => p.avg ?? null);
     const vols = points.map((p) => p.volume ?? 0);
-    const lineColor = changePct === undefined ? "#888" : changePct >= 0 ? "#ef4444" : "#22c55e";
+    // ★ 走涨跌令牌，不写死色值（见文件头注释）。`--flat` 用于「算不出涨跌幅」，
+    //   而不是用一个跟主题无关的灰色常量。
+    const lineColor =
+      changePct === undefined ? "var(--flat)" : changePct >= 0 ? "var(--up)" : "var(--down)";
 
     return {
       animation: false,
@@ -117,7 +125,8 @@ export function MinutesChart({
           xAxisIndex: 0,
           yAxisIndex: 0,
           showSymbol: false,
-          lineStyle: { width: 1, type: "dashed", color: "#f59e0b" },
+          // 均价线 = 一条均线，走 --chart-ma5（与 K 线图的 MA 配色同源），不写死橙色
+          lineStyle: { width: 1, type: "dashed", color: "var(--chart-ma5)" },
         },
         {
           name: "分钟量",

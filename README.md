@@ -76,11 +76,11 @@
 
 ## 界面导航（6 分组 / 44 页）
 
-页面注册表 `frontend-next/src/app/routes.tsx` 的 `PAGES`（含 `status: "done" | "planned"`）是顶部菜单、命令面板的**单一真相来源**。6 大业务域、44 个页面（44 已实现，0 占位）。`menu: false` 的页面（报价牌 / K 线分析 / 分时图 / 盘口逐笔 / 成交明细，以及已下线的分仓再平衡）已合并进上层页面，不再占主菜单入口，但页面仍注册、仍可用（行情子页入口在工作台头部的「独立打开」按钮组，分仓再平衡入口在「多账户网格」），并由 `tests/routes.test.ts` 强制要求每个隐藏页声明 `entryFrom`。占位页会显式展示其后端契约，避免「看起来能用其实是空壳」。
+页面注册表 `frontend-next/src/app/routes.tsx` 的 `PAGES`（含 `status: "done" | "planned"`）是顶部菜单、命令面板的**单一真相来源**。6 大业务域、44 个页面（44 已实现，0 占位）。`menu: false` 的页面（报价牌 / K 线分析 / 分时图 / 盘口逐笔 / 逐笔成交，以及已下线的分仓再平衡）已合并进上层页面，不再占主菜单入口，但页面仍注册、仍可用（行情子页入口在工作台头部的「独立打开」按钮组，分仓再平衡入口在「多账户网格」），并由 `tests/routes.test.ts` 强制要求每个隐藏页声明 `entryFrom`。占位页会显式展示其后端契约，避免「看起来能用其实是空壳」。
 
 | 分组 | 页面 |
 |------|------|
-| 行情（11） | **行情工作台** · 报价牌 · K 线分析 · 分时图 · 盘口逐笔 · 成交明细 · 板块雷达 · 资金流 · ETF · 市场结构 · 自选股 |
+| 行情（11） | **行情工作台** · 报价牌 · K 线分析 · 分时图 · 盘口逐笔 · 逐笔成交 · 板块雷达 · 资金流 · ETF · 市场结构 · 自选股 |
 | 研究（5） | **选股工作台** · 条件选股 · 公式选股 · 因子研究 · 标的检索 |
 | 交易（6） | 手动交易 · 算法交易 · 条件单 · 涨停监控 · 目标持仓 · 分仓再平衡(占位) |
 | 账户（4） | 多账户网格 · 委托/持仓/成交 · 对账核销 · 模拟盘 |
@@ -89,7 +89,9 @@
 
 工作区（多标签）约束见 `frontend-next/src/stores/`；页面懒加载与路由见 `routes.tsx`。
 
-> **合并展示**：行情域的「行情工作台」把报价牌 / K 线 / 分时 / 盘口逐笔 / 成交明细合并为一个三列界面（左报价牌 · 中 K 线与分时 · 右盘口与成交流），研究域的「选股工作台」合并条件选股与公式选股。被合并的页面**全部保留**为独立入口（多显示器 / 分栏对照仍可用），工作台头部有直达按钮。
+> **合并展示**：行情域的「行情工作台」把报价牌 / K 线 / 分时 / 五档盘口 / 成交流合并为一个**两列**界面（中：K 线与分时吃满整列高度 · 右：资料（基本信息|基本面）→ 盘口与成交（五档|成交流）→ 下单），研究域的「选股工作台」合并条件选股与公式选股。被合并的页面**全部保留**为独立入口（多显示器 / 分栏对照仍可用），工作台头部有直达按钮。
+>
+> ★ 2026-10-03 两处更正：① 原「成交明细」实为**本账户成交回报**（WS `deal` 事件），不是市场成交流，现改接 `GET /market/ticks`（本地 TDX 当日逐笔，**无需券商**），并更名为「逐笔成交」；② 五档盘口此前只读 WS 推送，未连券商时恒空 —— 现加 `GET /market/quote` 兜底（本地行情源同样给得出 `bids`/`asks`）。
 
 ## 界面预览
 
@@ -97,7 +99,7 @@
 > 含真实账户持仓 / 资产的页面（仪表盘、手动交易）**不随仓库分发**。
 > 未连接券商或数据不可用时，界面显式说明成因，不展示假数据。
 
-**行情工作台** —— 报价牌 · K 线 · 分时 · 盘口逐笔 · 成交明细合并为三列界面（真实行情数据；指数本身没有五档盘口，界面如实留空而非填假值）
+**行情工作台** —— 报价牌 · K 线 · 分时 · 五档盘口 · 成交流合并为两列界面（真实行情数据；指数本身没有五档盘口，界面如实留空而非填假值）
 
 ![行情工作台](docs/screenshots/02-workbench.png)
 
@@ -459,10 +461,10 @@ print(httpx.get(f"{BASE}/paper/positions", headers=HEAD).json())
 
 | 层级 | 命令 | 覆盖范围 |
 |------|------|----------|
-| 后端单测 | `cd backend && for f in tests/test_*.py; do python -m pytest "$f" -q -p no:cacheprovider; done` | 174 个 `test_*.py`，2100 个用例 |
+| 后端单测 | `cd backend && for f in tests/test_*.py; do python -m pytest "$f" -q -p no:cacheprovider; done` | 175 个 `test_*.py`，2114 个用例 |
 | 后端冒烟 | `python backend/tests/smoke2.py` | REST 主要端点 + 错误语义（**需先起后端**；默认连 `data/app.db`，检测到真实券商连接时自动跳过 3 条「未连接券商 → 503」断言并提示改用下方客户端测试做权威验证） |
 | 前端类型检查 | `cd frontend-next && npm run typecheck` | TypeScript strict 零错误 |
-| 前端单测 | `cd frontend-next && npm run test:serial` | vitest，**52 文件 / 508 用例**。**必须用 `test:serial`**：并行 worker 在受限 temp 环境下会 `EPERM` 死亡并**静默丢 1~4 个文件而汇总仍全绿**（详见 TD-24）。判据：文件数应等于 `include` 匹配数（52），底部无 `unhandled errors` / `resolveConfig.*.js writeFile EPERM` |
+| 前端单测 | `cd frontend-next && npm run test:serial` | vitest，**53 文件 / 519 用例**。**必须用 `test:serial`**：并行 worker 在受限 temp 环境下会 `EPERM` 死亡并**静默丢 1~4 个文件而汇总仍全绿**（详见 TD-24）。判据：文件数应等于 `include` 匹配数（53），底部无 `unhandled errors` / `resolveConfig.*.js writeFile EPERM` |
 | 前端渲染冒烟 | `node tests/render_smoke_all.mjs` | headless 逐页渲染，判定 `.pane-leaf-body` 非空 |
 | 客户端端到端 | `python scripts/client_start_test.py --target client\|dev\|backend` | 清理 → 启动 → 就绪 → REST 冒烟 → WS → **DOM 渲染自证** + 窗口截图 → 停机 → 零残留（28 项） |
 | 契约计数门禁 | `python scripts/ci_reconcile.py` | 测试数 / 组件数 / 注册页数 / API 契约 / **行尾契约** 共 5 项与文档一致 |
@@ -540,7 +542,7 @@ qmt_work/
 │  ├─ connectors/ plugins/ sync/   # 外部连接器 / 插件内核 / WebSocket 同步引擎
 │  ├─ tools/ runtimes/  # 因子策略工具 / 捆绑 Python 运行时（cp311）
 │  ├─ data/ static/ dist/   # SQLite / 前端构建产物 / PyInstaller 产物
-│  ├─ tests/            # 174 个 test_*.py（2100 用例）+ 冒烟测试 smoke2.py
+│  ├─ tests/            # 175 个 test_*.py（2114 用例）+ 冒烟测试 smoke2.py
 │  ├─ scripts/          # 门禁脚本（许可 / 能力漂移 / 契约生成 / 架构校验）
 │  └─ build_exe.py      # EXE 打包脚本（含 static 闸门）
 ├─ frontend-next/         # 主前端：React 18 + Vite 5 + TS 5 strict（已退役旧 frontend/）

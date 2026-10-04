@@ -82,7 +82,7 @@ class EltdxSource(EltdxBoardMixin, DataSource):
     capabilities = frozenset({
         "quote", "kline", "kline_qfq", "kline_hfq", "instrument_detail", "stock_list",
         "sector", "index_constituent", "capital", "price_limit", "moneyflow",
-        "minutes", "etf_list", "search",
+        "minutes", "etf_list", "search", "ticks",
     })
 
     #: 代码->名称 缓存（首次拉全市场列表后常驻进程内存，并持久化到本地 JSON）
@@ -429,6 +429,89 @@ class EltdxSource(EltdxBoardMixin, DataSource):
             nm = await self._get_index_name(code)
             if nm:
                 res["name"] = nm
+        return res
+
+    async def get_ticks(self, code: str, count: int = 60) -> dict:
+        """当日**逐笔成交**（真实市场成交，非本账户成交回报）—— 无需券商（0x0FC5）。
+
+        ★ 为什么需要它（2026-10-03）：看盘界面的「成交流」此前只有两条路，且都
+        依赖券商桥：
+          ① WS `deal` 事件 —— 那是**本账户成交回报**（`adapter.get_deals` /
+             `on_trade`），看别人的票 / 未交易时永远为空，语义也不是「市场成交」；
+          ② `GET /market/l2` —— 券商 L2 逐笔，未连接返 503。
+        结果是「行情工作台的成交流」在没连券商时恒空，而**真实市场逐笔本来就
+        可以从本地 TDX 直接取到**（本方法）。零 mock 铁律下，宁可接上真源，
+        也不该把账户回报冒充成市场成交流。
+
+        口径（与前端 `MarketTicksPanel` 的契约，改一侧必须同步另一侧）：
+        - `time`   ``HH:MM:SS``（源只给到分，秒位补 ``00``）
+        - `price`  成交价（元）
+        - `volume` 成交量（**手**，与 eltdx `TradeTick.volume` 同口径，勿再乘 100）
+        - `amount` 成交额（元）＝ ``price * volume * 100``
+        - `side`   ``buy`` / ``sell`` / ``neutral``（主动买/主动卖/中性）
+        - 排序      **最新在前**（源在 start=0 页内按时间升序，此处整体反转）
+
+        ⚠️ 休市 / 非交易日调用返回的是**最近一个交易日**的逐笔（TDX 侧行为），
+        因此必须把 ``trading_date`` 一并回给调用方 —— 否则用户会把上一交易日的
+        成交当成今日行情（与 `TradingDateBadge` 同一类诚实性要求）。
+
+        返回 ``{code, items: [...], trading_date: str|None, count, source}``；
+        源不可用 / 无数据时 ``items`` 为空列表（**不造假填充**）。
+        """
+        ec = _to_eltdx(code)
+        n = max(1, min(int(count or 60), 500))
+
+        def _run():
+            def _inner(cl):
+                page = cl.trades.today(ec, start=0, count=n)
+                # ★ 为什么优先 `actual_trades` 而不是 `ticks`（eltdx 文档明示）：
+                #   `ticks` **原样保留 `status=8` 的集合竞价快照** —— 那是竞价过程的
+                #   撮合快照，不是真实成交。把它们当成逐笔显示，用户会在开盘前看到
+                #   一串「09:25 的成交」，而那一刻根本没有成交发生。
+                #   `actual_trades` 排除非成交快照，同时保留 09:25 / 15:00 与
+                #   `status=5` 盘后固定价格的**真实成交**（这些确实是成交，要显示）。
+                #   拿不到 `actual_trades`（老版本/字段缺失）时退回 `ticks`，
+                #   并按 `event_kind` 过滤掉竞价快照 —— 不能因为取不到精确视图
+                #   就把快照当成交。
+                ticks = list(getattr(page, "actual_trades", None) or ())
+                if not ticks:
+                    ticks = [
+                        t for t in list(getattr(page, "ticks", ()) or ())
+                        if str(getattr(t, "event_kind", "") or "trade").strip().lower() == "trade"
+                    ]
+                out = []
+                for t in ticks:
+                    price = _f(getattr(t, "price", None))
+                    vol = getattr(t, "volume", 0) or 0
+                    label = str(getattr(t, "time_label", "") or "")
+                    # 源给 HH:MM（分钟精度）；补齐秒位使前端按统一时间格式渲染
+                    if len(label) == 5:
+                        label = f"{label}:00"
+                    side = str(getattr(t, "side", "") or "").strip().lower()
+                    if side not in ("buy", "sell", "neutral"):
+                        side = "neutral"
+                    out.append({
+                        "time": label,
+                        "price": price,
+                        "volume": int(vol),
+                        "amount": round(float(price) * int(vol) * 100.0, 2)
+                        if price is not None else None,
+                        "side": side,
+                        "order_count": int(getattr(t, "order_count", 0) or 0),
+                    })
+                # 源在「最新一页」内按时间升序（早 → 晚）；成交流要**最新在前**
+                out.reverse()
+                td = getattr(page, "trading_date", None)
+                return {
+                    "code": code,
+                    "items": out,
+                    "count": len(out),
+                    "trading_date": str(td) if td else None,
+                }
+            return self._use_client(_inner)
+
+        res = await asyncio.to_thread(_run)
+        res["source"] = self.name
         return res
 
     async def get_kline(self, code: str, period: str = "1d", count: int = 250,

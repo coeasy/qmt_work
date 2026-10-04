@@ -159,10 +159,16 @@ describe("主题偏好 · 持久化与迁移", () => {
   });
 });
 
-describe("涨跌配色", () => {
-  it("默认红涨绿跌，可切换为绿涨红跌并落盘", async () => {
+describe("涨跌配色（三套）", () => {
+  it("默认红涨蓝跌，可切换为红涨绿跌 / 绿涨红跌并落盘", async () => {
     const store = await freshStore();
-    expect(store.getState().updown).toBe("red-up");
+    // ★ 默认已改为 red-up-blue（红涨蓝跌）：绿色在界面里已被 --success 占用，
+    //   用它表示「跌」会让「一片绿」被读成「一片顺利」。
+    expect(store.getState().updown).toBe("red-up-blue");
+
+    store.getState().setUpdown("red-up");
+    expect(document.documentElement.dataset.updown).toBe("red-up");
+    expect(JSON.parse(localStorage.getItem(KEY) ?? "{}").updown).toBe("red-up");
 
     store.getState().setUpdown("green-up");
     expect(document.documentElement.dataset.updown).toBe("green-up");
@@ -170,6 +176,31 @@ describe("涨跌配色", () => {
 
     const reloaded = await freshStore();
     expect(reloaded.getState().updown).toBe("green-up");
+  });
+
+  it("旧的 red-up 落盘值仍然生效（升级不丢用户选择）", async () => {
+    localStorage.setItem(KEY, JSON.stringify({ themePref: "dark", updown: "red-up" }));
+    const store = await freshStore();
+    expect(store.getState().updown).toBe("red-up");
+    store.getState().init(); // DOM 属性由 init/apply 写入（load() 只解状态）
+    expect(document.documentElement.dataset.updown).toBe("red-up");
+  });
+
+  it("脏值回退默认，绝不把半个枚举写进 DOM", async () => {
+    localStorage.setItem(KEY, JSON.stringify({ themePref: "dark", updown: "blue-up???" }));
+    const store = await freshStore();
+    expect(store.getState().updown).toBe("red-up-blue");
+    store.getState().init();
+    expect(document.documentElement.dataset.updown).toBe("red-up-blue");
+  });
+
+  it("状态栏循环：三档按序轮转且能回到起点", async () => {
+    const mod = await import("@/stores/ui");
+    expect(mod.nextUpDown("red-up-blue")).toBe("red-up");
+    expect(mod.nextUpDown("red-up")).toBe("green-up");
+    expect(mod.nextUpDown("green-up")).toBe("red-up-blue");
+    // 顺序与文案共用同一份定义：设置页按钮顺序不得与循环顺序漂移
+    expect(mod.UPDOWN_CYCLE).toEqual(["red-up-blue", "red-up", "green-up"]);
   });
 
   it("涨跌配色独立于明暗主题", async () => {

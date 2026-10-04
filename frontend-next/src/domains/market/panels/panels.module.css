@@ -145,13 +145,16 @@
 /* ---- 工作台布局 ---- */
 
 /*
- * 两列：主区（图表 + 底部坞）+ 右栏（五档 / 成交流 / 快捷下单）。
+ * 两列：主区（K 线 / 分时，吃满整列高度）+ 右栏（资料 / 盘口与成交 / 下单）。
  *
  * ★ 原先是三列，左栏独占 240~300px 放报价牌 —— 但报价牌只在「订阅到行情」时
  *   才有内容，其余时候是一整列空白。
- * ★ 后来报价牌一度并入右栏（五档下方），但自选股同时也在左侧数据面板常驻，
- *   同一份列表出现两次。现在右栏只放「当前这一只票」的盘口/成交流/下单，
+ * ★ 报价牌一度并入右栏（五档下方），但自选股同时也在左侧数据面板常驻，
+ *   同一份列表出现两次。现在右栏只放「当前这一只票」的资料/盘口/成交流/下单，
  *   自选股统一由左侧数据面板承载，左右各司其职。
+ * ★ 中列底部坞已移除（2026-10-03）：它存在的唯一理由是「基本面放不进右栏」，
+ *   而现在基本信息与基本面合并成右栏的「资料」块 —— 底部坞只剩下一块重复的
+ *   下单区，却要花掉 42% 的图表高度。去掉后图表吃满整列。
  */
 .work {
   display: grid;
@@ -246,14 +249,9 @@
   min-width: 0;
 }
 
-/* 右列下半区（逐笔 / 成交流）—— 给个下限，避免窗口矮时被压成一条线 */
-.flowArea {
-  flex: 1 1 auto;
-  min-height: 140px;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-}
+/* （原 `.flowArea` 2026-10-03 删除：它是旧「逐笔 / 成交流」平铺区的容器，
+ *   两轮布局重构后该区已并入 `.flowPanel`，类名再无引用 —— 留着只会让人以为
+ *   还有第二块流区域，属孤儿样式。） */
 
 /* 头部右侧的「在独立页打开」按钮组 */
 .linkBar {
@@ -294,31 +292,32 @@
   font-weight: 600;
 }
 
-/* ---- 工作台底部坞（基本信息 / 基本面 / 交易） ----
+/* ---- 右栏「盘口与成交」面板 ----
  *
- * 为什么是「底部坞」而不是再往右加一列：右侧栏只有 260–320px，塞不下第 5 个页签；
- * 而中列（minmax(0,1fr)）宽度充裕，且「看盘 + 下单」本就该同屏 —— 图表在上、
- * 下单/资料在下，视线不用横向跳。
+ * 它是右栏**唯一吃满剩余高度**的面板（资料与下单都是内容驱动高度），
+ * 因此给一个下限：窗口很矮时也不能被压成一条线（成交流至少要露出 6~7 行）。
  */
-.dock {
-  flex: 0 0 auto;
-  max-height: 42%;
-  min-height: 150px;
-  display: flex;
-  flex-direction: column;
+.flowPanel {
+  flex: 1 1 auto;
+  min-height: 180px;
   min-width: 0;
 }
 
-.dockBody {
+/* 五档盘口视图的容器（Tab 切换进来时用它撑满面板体） */
+.bookBody {
   flex: 1 1 auto;
   min-height: 0;
   overflow: auto;
   padding: var(--sp-2);
 }
 
-.dockCollapsed {
-  max-height: none;
-  min-height: 0;
+/* 右栏「资料」面板里的基本面视图 —— 限高 + 内部滚动。
+ * 与 `StockInfoPanel` 的 `maxBodyHeight` 同口径：资料块再高也不能把
+ * 「盘口与成交」与「下单」顶出屏幕（右栏高度是三者共享的）。 */
+.infoBody {
+  max-height: 260px;
+  overflow: auto;
+  padding: var(--sp-2);
 }
 
 /* ---- 面板内的说明条（降级原因 / 数据截至日） ---- */
@@ -364,17 +363,12 @@
  * 6 维各自成区并带 availability 角标：某一维「无数据」是**正常降级**（各维独立
  * 超时容错），必须让用户看出是哪一维、以及为什么，而不是以为整个页面坏了。
  */
-.sectionGrid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
-  gap: var(--sp-2);
-}
 
 /* ---- 基本面：6 维收成一排（默认收起，点击展开） ----
  *
- * 底部坞的高度是从图表那里借来的（.dock 的 max-height: 42%），所以这里的目标是
- * 「一行看完 6 维、明细按需展开」，而不是把 6 块表格全铺开。
- * flex-basis 为 0 + min-width 兜底：宽度够就 6 个平分一行，窄到放不下才换行
+ * ★ v0.4.4 起基本面移入右栏「资料」Tab（底部坞已删除）：右栏 260–320px 更窄，
+ * 「收成一排 + 按需展开」反而更必要。flex-basis 为 0 + min-width 兜底：
+ * 宽度够就 6 个平分一行，窄到放不下才换行
  * （不写死 6 列，否则窄窗口下每格只剩几十像素、摘要全被省略号吃掉）。 */
 
 .dimRow {
@@ -456,16 +450,6 @@
   background: var(--bg-2);
   padding: var(--sp-2);
   min-width: 0;
-}
-
-.sectionHead {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--sp-2);
-  font-size: var(--font-xs);
-  color: var(--text-dim);
-  margin-bottom: var(--sp-1);
 }
 
 .sectionEmpty {

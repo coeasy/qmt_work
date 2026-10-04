@@ -39,6 +39,17 @@ vi.mock("klinecharts", () => ({
     setDataLoader: (l: { getBars: (p: GetBarsArg) => void }) => {
       (globalThis as unknown as { __klineLoader: unknown }).__klineLoader = l.getBars;
     },
+    // ★ 记录调用次数：主题 / 涨跌配色变化后必须**重新 apply 样式**（见下方第 4 条锁）。
+    //   此前 chartStyles() 的注释写着「主题切换时重建」，代码里却没有这条路径 ——
+    //   注释描述了一个不存在的机制。这个桩让「切了配色却没重刷」变成红灯。
+    setStyles: (styles: unknown) => {
+      const g = globalThis as unknown as {
+        __klineStyleCalls?: number;
+        __klineStyles?: unknown;
+      };
+      g.__klineStyleCalls = (g.__klineStyleCalls ?? 0) + 1;
+      g.__klineStyles = styles;
+    },
     resize: () => {},
     createIndicator: () => {},
     removeIndicator: () => {},
@@ -62,6 +73,8 @@ vi.mock("@/services/api", async (orig) => {
 import { marketApi } from "@/services/api";
 // eslint-disable-next-line import/first
 import { KLineChart } from "@/charts/KLineChart";
+// eslint-disable-next-line import/first
+import { useUiStore } from "@/stores/ui";
 
 const mockKline = marketApi.kline as unknown as ReturnType<typeof vi.fn>;
 
@@ -163,6 +176,39 @@ describe("KLineChart 空态/失败态诚实性", () => {
     });
     const txt = document.body.textContent ?? "";
     expect(txt).not.toMatch(/K 线加载失败/);
+  });
+
+  /**
+   * 第 4 条锁（2026-10-03）：**主题 / 涨跌配色变化必须重刷图表样式**。
+   *
+   * `chartStyles()` 的注释此前写着「主题切换时重建」，但 `init()` 只在建图时取一次
+   * 令牌，代码里**没有**任何一条随主题变化的重刷路径 —— 注释描述了不存在的机制。
+   * 后果：切到浅色或换涨跌口径后，画布上的蜡烛与成交量柱仍是建图那一刻的颜色，
+   * 只有切走页签再切回（图表销毁重建）才生效。
+   *
+   * 判据可证伪：把 KLineChart 里那个 `setStyles` effect 删掉，本用例必红。
+   */
+  it("切换涨跌配色 / 明暗主题后必须重新 apply 样式（否则画布停留在建图时的颜色）", async () => {
+    mockKline.mockResolvedValue({ bars: [ONE_BAR] });
+    render(<KLineChart code="600000.SH" period="1d" />);
+    await loadOnce();
+
+    const calls = () =>
+      (globalThis as unknown as { __klineStyleCalls?: number }).__klineStyleCalls ?? 0;
+    const before = calls();
+
+    await act(async () => {
+      useUiStore.getState().setUpdown("green-up");
+      await Promise.resolve();
+    });
+    expect(calls(), "切了涨跌配色却没有重刷图表样式").toBeGreaterThan(before);
+
+    const mid = calls();
+    await act(async () => {
+      useUiStore.getState().setTheme("light");
+      await Promise.resolve();
+    });
+    expect(calls(), "切了明暗主题却没有重刷图表样式").toBeGreaterThan(mid);
   });
 
   it("成功返回数据后 overlay 必须消失（失败态不得残留）", async () => {

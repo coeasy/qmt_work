@@ -75,6 +75,7 @@
   "get_market_session",
   "get_market_sources",
   "get_market_stock_info",
+  "get_market_ticks",
   "get_notifications",
   "get_notifications_logs",
   "get_paper_account",

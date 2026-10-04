@@ -46,7 +46,8 @@ BACKEND = Path(__file__).resolve().parent.parent
 #: ``manager_kline.py``）。源码级断言必须扫描**承载读路径的全部文件**，
 #: 否则这条护栏会因为「字符串不在这个文件里」而假红 ——
 #: 它要守的不变量（读路径不得绕过 ``_resolve_sources``）其实仍然成立。
-REGISTRY_SOURCES = ("registry.py", "manager_quotes.py", "manager_kline.py")
+REGISTRY_SOURCES = ("registry.py", "manager_quotes.py", "manager_kline.py",
+                    "manager_ticks.py")
 REGISTRY_SRC = "\n".join(
     (BACKEND / "datasource" / name).read_text(encoding="utf-8")
     for name in REGISTRY_SOURCES
@@ -70,6 +71,9 @@ CAP_METHODS: dict[str, tuple[str, ...]] = {
     "minutes": ("get_minutes",),
     "etf_list": ("get_etf_list",),
     "search": ("search",),
+    # 当日逐笔成交（真实市场成交，无需券商）。承载方法在 `manager_ticks.py`
+    # —— 与 quotes/kline 同构的 mixin 拆分，故该文件也必须进 REGISTRY_SOURCES。
+    "ticks": ("get_ticks",),
     # 以下四个能力目前**无任何补充源实现**，链里只有 broker 占位；
     # 登记方法名是为了让「声明 → 实现」检查能覆盖它们（一旦有源声明就必须真有方法）。
     # ⚠️ `fundamental` 的方法名是**复数** `get_fundamentals` —— 取自唯一消费方
@@ -251,7 +255,7 @@ def test_all_read_paths_go_through_the_single_resolver():
     assert "self._auto_candidates(" not in REGISTRY_SRC, \
         "不得再有调用点绕过 _resolve_sources"
     # 读路径的循环头必须用 _resolve_sources
-    for cap in ("quote", "instrument_detail", "minutes", "stock_list", "search"):
+    for cap in ("quote", "instrument_detail", "minutes", "stock_list", "search", "ticks"):
         assert f'_resolve_sources(source, "{cap}")' in REGISTRY_SRC \
             or f'_resolve_sources("auto", "{cap}")' in REGISTRY_SRC, \
             f"读路径 {cap} 未走统一解析入口"

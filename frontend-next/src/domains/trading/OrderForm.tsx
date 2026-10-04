@@ -32,8 +32,6 @@ export interface OrderFormProps {
   code?: string;
   /** 父级标的被改（表单内输入框提交时） */
   onCodeChange?: (code: string) => void;
-  /** 紧凑模式：工作台底部坞里用，表单项收窄 */
-  compact?: boolean;
   /**
    * 快捷下单模式：工作台右栏底部「闪电下单」。
    *
@@ -115,7 +113,6 @@ export function orderExecutionNote(
 export function OrderForm({
   code: codeProp,
   onCodeChange,
-  compact = false,
   quick = false,
   onDone,
 }: OrderFormProps) {
@@ -385,8 +382,6 @@ export function OrderForm({
     }
   };
 
-  const rowStyle = compact ? { display: "flex", gap: "var(--sp-2)", alignItems: "center" } : undefined;
-
   /** 该标的当前持仓（快捷模式「卖出全仓」要用） */
   const held = grid?.positions.find((x) => x.code === normCode)?.total_volume ?? 0;
 
@@ -580,7 +575,7 @@ export function OrderForm({
   // ---------------------------------------------------------------- 标准表单
   return (
     <>
-      <div className={compact ? s.formCompact : s.form}>
+      <div className={s.form}>
         {execNote && (
           <div className={s.warnBar}>{execNote}</div>
         )}
@@ -662,7 +657,7 @@ export function OrderForm({
           />
         </FormRow>
 
-        <div className={s.est} style={rowStyle}>
+        <div className={s.est}>
           预估金额 <span className={s.mono}>{estText}</span>
         </div>
 

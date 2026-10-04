@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { dispose, init, type Chart, type KLineData } from "klinecharts";
 import { marketApi } from "@/services/api";
 import { useQuotesStore } from "@/stores/quotes";
+import { useUiStore } from "@/stores/ui";
 import { fmtPct, fmtPrice, toneColor } from "@/shared/format";
 import { PERIOD_MAP } from "@/shared/periods";
 import { toTimestamp } from "@/shared/time";
@@ -73,7 +74,18 @@ export { DEFAULT_INDICATORS, DEFAULT_SUB_INDICATORS };
  */
 const CANDLE_PANE = "candle_pane";
 
-/** 图表主题样式：令牌驱动，主题切换时重建 */
+/**
+ * 图表主题样式：令牌驱动。
+ *
+ * ⚠️ 必须在**主题 / 涨跌配色变化时重新 apply**（见下方 `setStyles` effect）——
+ *   本函数只在 `init()` 时被调用一次，`init` 之后改 `data-theme` / `data-updown`
+ *   不会自动重取令牌，图表会一直停留在建图那一刻的颜色。
+ *
+ * ★ `indicator.bars`（成交量柱）必须显式接令牌：这块如果不给，klinecharts 会用
+ *   图库内置默认（绿涨红跌），于是「K 线蜡烛走 --up/--down、成交量柱走图库默认」
+ *   —— 切到红涨绿跌以外的口径时，两者颜色**正好相反**，看着像两套配色在打架。
+ *   同理 `noChangeColor`（平盘）也要给，否则平盘柱用默认色。
+ */
 function chartStyles(): Record<string, unknown> {
   const css = getComputedStyle(document.documentElement);
   const v = (name: string, fallback: string) => css.getPropertyValue(name).trim() || fallback;
@@ -99,6 +111,14 @@ function chartStyles(): Record<string, unknown> {
       },
     },
     indicator: {
+      // ★ 成交量柱（VOL 等副图的柱状部分）—— 与蜡烛同一套令牌，颜色才不会打架
+      bars: [
+        {
+          upColor: v("--up", "#ef4444"),
+          downColor: v("--down", "#22c55e"),
+          noChangeColor: v("--flat", "#9aa8bd"),
+        },
+      ],
       lines: [
         { color: v("--chart-ma5", "#f59e0b") },
         { color: v("--chart-ma10", "#38bdf8") },
@@ -153,6 +173,10 @@ export function KLineChart({
   const elRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<Chart | null>(null);
   const linkHandlerRef = useRef<((p: CrosshairPayload) => void) | null>(null);
+
+  /** ★ 主题 / 涨跌配色的**唯一真源**：变化时重刷图表样式（见下方 effect） */
+  const theme = useUiStore((st) => st.theme);
+  const updown = useUiStore((st) => st.updown);
 
   const quote = useQuotesStore((st) => st.quotes[code]);
   /**
@@ -291,6 +315,24 @@ export function KLineChart({
       chartRef.current = null;
     };
   }, [code, period, count, adj, linkGroupName]);
+
+  /**
+   * 主题 / 涨跌配色变化 → 重新取令牌并**增量刷新**图表样式。
+   *
+   * ★ 为什么必须单独一个 effect：`chartStyles()` 只在 `init()` 时取一次令牌，
+   *   之后 `<html data-theme>` / `data-updown` 变了，画布上的蜡烛与成交量柱仍是
+   *   建图那一刻的颜色。此前 `chartStyles` 的注释写着「主题切换时重建」，但代码里
+   *   **根本没有这条路径** —— 注释描述了一个不存在的机制（属于「假注释」）。
+   *   用户切到浅色 / 换涨跌口径后，必须切走页签再切回（图表重建）才生效。
+   *
+   * ★ 用 `setStyles` 而不是 `dispose + init`：后者会丢缩放位置与十字光标，
+   *   还要重新拉一次 K 线（表现为「图闪一下、跳回最新一根」）。
+   */
+  useEffect(() => {
+    const chart = chartRef.current;
+    if (!chart) return;
+    chart.setStyles(chartStyles());
+  }, [theme, updown]);
 
   /**
    * 指标叠加 —— **独立 effect**，与主 effect 解耦。

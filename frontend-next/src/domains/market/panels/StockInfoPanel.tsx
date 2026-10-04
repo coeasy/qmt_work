@@ -29,7 +29,7 @@ export interface StockInfoPanelProps {
   /**
    * 面板体最大高度（右栏要留给成交流与下单），超出则内部滚动。
    *
-   * ⚠️ 不给就是自然高度：底部坞与独立页那种宽度充裕的场景不该被截断。
+   * ⚠️ 不给就是自然高度：独立页那种宽度充裕的场景不该被截断。
    */
   maxBodyHeight?: number;
 }

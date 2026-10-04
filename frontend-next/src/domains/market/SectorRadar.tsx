@@ -90,7 +90,10 @@ export function SectorRadar() {
         right: 4,
         top: "center",
         textStyle: { color: "var(--chart-axis)", fontSize: 10 },
-        inRange: { color: ["#22c55e", "#1a2230", "#ef4444"] },
+        // ★ 涨跌幅热力图：跌 → 中性 → 涨，走涨跌令牌而不写死绿/红 ——
+        //   切到「绿涨红跌」口径时若仍是「左绿右红」，方向就是反的。
+        //   中间色用 --bg-2（图表中性底），别用跟主题无关的深色常量。
+        inRange: { color: ["var(--down)", "var(--bg-2)", "var(--up)"] },
       },
       series: [
         {
