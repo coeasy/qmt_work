@@ -153,6 +153,29 @@ def test_frozen_sources_are_not_overbroad(audit):
 
 # ---------------------------------------------------------------- 总闸
 
+def test_every_top_level_doc_is_indexed():
+    """``docs/`` 顶层的每份文档都必须出现在 ``docs/README.md`` 索引里。
+
+    为什么这算「断链」的一种：断链门禁管的是「引用指向不存在的文件」，
+    反过来「文件存在却没人引用」同样致命 —— 索引是文档**有没有被遗弃**的唯一入口，
+    漏登记就是事实上的孤儿文档（本轮实测抓到 3 份：`REMOTE_ACCESS_DECISION.md`
+    被 5 处活代码引用却不在索引里、`SECURITY_AND_DEPLOYMENT_AUDIT.md`、
+    `DATASTORE_SIZE_AND_SPLIT_ANALYSIS.md` 被 `scripts/optimize_local_bars.py` 引用）。
+
+    受管子目录（`release-notes/` / `archive/` / `screenshots/`）各有自己的
+    入口说明，不在本条管辖范围内。
+    """
+    docs = ROOT / "docs"
+    index = (docs / "README.md").read_text(encoding="utf-8", errors="replace")
+    missing = [p.name for p in sorted(docs.glob("*.md"))
+               if p.name != "README.md" and p.name not in index]
+    assert not missing, (
+        f"以下文档未登记进 docs/README.md 索引（孤儿文档）：{missing}\n"
+        "要么补一行索引（说明用途与读者），要么按判据删除/归档："
+        "论证/决策类文档保留，一次性执行计划删除。"
+    )
+
+
 def test_no_broken_doc_links_repo_wide(audit, capsys):
     """全仓产品面无断链。这是「不存在断链」的可证伪判据。
 

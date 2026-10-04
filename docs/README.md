@@ -28,6 +28,7 @@
 | [`TECH_DEBT.md`](TECH_DEBT.md) | 技术债 / 未决事项看板（每条可被一条测试或一个 `grep` 证伪，含 TD-09~TD-33 等门禁约束） | 全体 |
 | [`REMOTE_ACCESS_DECISION.md`](REMOTE_ACCESS_DECISION.md) | **远程访问三档模型（`off`/`lan`/`wan`）**：对比分析、启动自检分档策略、`effective_host()` 绑定规则、API 层设计（被 `core/config.py` / `app/main.py` / `routes/remote_access.py` / `run.py` 活引用） | 部署者 / 后端 |
 | [`SECURITY_AND_DEPLOYMENT_AUDIT.md`](SECURITY_AND_DEPLOYMENT_AUDIT.md) | 部署与安全审计报告 + 改进方案：鉴权 / 加密 / 风控 / 信号路由 / 审计链 / CORS / 限流 / 打包 / 密钥管理逐项源码实查（v0.4.3 基线，与 TECH_DEBT 交叉核对） | 安全 / 发布 |
+| [`DATASTORE_SIZE_AND_SPLIT_ANALYSIS.md`](DATASTORE_SIZE_AND_SPLIT_ANALYSIS.md) | 主库体积诊断 · 拆库评估 · 数据瘦身方案：实测结论「1.35 GB 不是膨胀、**不建议拆库**，该回收的是 `local_bars` 二级索引 383.7 MB 中 137.4 MB 冗余」（被 `scripts/optimize_local_bars.py` 活引用为依据） | 数据 / 运维 |
 | [`项目规划.md`](项目规划.md) | 后续演进方向（券商广度 / 策略量化 / 交易风控 / 体验部署 / 可观测合规） | 全体 / 产品 |
 | [`项目宣传.md`](项目宣传.md) | 产品宣传文档：定位、核心卖点、适用人群、三分钟上手 | 全体 / 市场 |
 | [`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md) | 第三方依赖许可说明（TDX 传输已切换为 `easy_tdx`（MIT，商用安全）；`eltdx` Research-Only 仅作回退且默认不安装） | 合规 / 发布 |
