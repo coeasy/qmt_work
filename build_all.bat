@@ -480,7 +480,7 @@ if "%VERIFY%"=="true" (
 )
 
 REM ---------- Step 4.5: MCP end-to-end (packaged) ----------
-REM  ★ 为什么要单列：REST 自省能列出 127 个工具，**不等于 Agent 真能连上**。
+REM  ★ 为什么要单列：REST 自省能列出 129 个工具，**不等于 Agent 真能连上**。
 REM    实测撞到过 ``POST /mcp`` 405（文档三处都写 ``/mcp``，照文档配的客户端全挂），
 REM    而自省走的是另一条代码路径，照样返回 127 —— 只有按协议握手才暴露。
 REM    build_all.sh 有此步，.bat 原先缺（Windows 侧发布没有覆盖 Agent 接入链路）。

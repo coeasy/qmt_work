@@ -92,6 +92,10 @@ backend/_smoke_srv.log
 # ---------- 运行期数据 / 缓存 ----------
 backend/wal.jsonl
 frontend-next/.vite-node/
+# ★ vitest 的 Node 编译缓存落在这里（实测 2.9MB），**不是** .vite-node/。
+#   此前只忽略了 .vite-node/，于是每次 `npm run test:serial` 都会留下一个
+#   未被忽略的 .tmp-test/，随时可能被 `git add -A` 带进提交。
+frontend-next/.tmp-test/
 
 # 已废弃组件（.dead 后缀标记，勿入库）
 frontend-next/src/**/*.dead

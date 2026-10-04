@@ -30,8 +30,15 @@ import numpy as np
 Num = Optional[float]
 
 
-def _as_float(a: Sequence) -> np.ndarray:
-    """输入转 float64 ndarray；None/NaN 置 NaN（消费方按 NaN 处理为 null）。"""
+def _as_float(a) -> np.ndarray:
+    """输入转 float64 ndarray；None/NaN 置 NaN（消费方按 NaN 处理为 null）。
+
+    公式效率 P0-A 延伸（2026-10-04）：``_col`` 的对象路径现直接产出 float64
+    ndarray，此处对 ndarray **直通**（免二次 list comprehension——全市场规模
+    实测该项与取列合计占求值耗时 ~43%）。语义不变：None/NaN 一律 NaN。
+    """
+    if isinstance(a, np.ndarray):
+        return a if a.dtype == np.float64 else a.astype(np.float64)
     return np.asarray([float("nan") if v is None else float(v) for v in a], dtype=np.float64)
 
 

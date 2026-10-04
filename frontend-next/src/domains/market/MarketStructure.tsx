@@ -5,7 +5,7 @@ import type { EChartsOption } from "@/charts/echartsSetup";
 import { marketApi, type OverviewResponse } from "@/services/api";
 import { useAsync } from "@/hooks/useAsync";
 import { useLiveQuotes } from "@/hooks/useLiveQuotes";
-import { fmtAmount, fmtPct, fmtPrice, toneColor } from "@/shared/format";
+import { dashText, fmtAmount, fmtPct, fmtPrice, toneColor } from "@/shared/format";
 import { isLivePrice } from "@/shared/freshness";
 import s from "../domain.module.css";
 
@@ -70,8 +70,10 @@ export function MarketStructure() {
       mono: true,
       render: (r) => (r.count === null || r.count === undefined ? "—" : String(r.count)),
     },
-    { key: "metric", header: "口径", width: 120, render: (r) => r.metric ?? "--" },
-    { key: "unit", header: "单位", width: 80, render: (r) => r.unit ?? "--" },
+    // 口径 / 单位用 dashText：后端在这两格给的是**空串**（不是 null），
+    // `?? "--"` 会渲染成空白单元格（见 shared/format.ts::dashText）。
+    { key: "metric", header: "口径", width: 120, render: (r) => dashText(r.metric) },
+    { key: "unit", header: "单位", width: 80, render: (r) => dashText(r.unit) },
   ];
 
   // 指数快照同样是**查询那一刻**的值 ⇒ 叠加实时行情，否则必须手动刷新才动。

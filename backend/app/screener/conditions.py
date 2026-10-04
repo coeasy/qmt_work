@@ -46,13 +46,21 @@ def _cmp(a: float, op: str, b: float) -> bool:
 
 
 def _windowed(arr: List, window: int) -> Optional[float]:
-    """取数组 window 偏移处的值；越界 / null 一律 None。"""
+    """取数组 window 偏移处的值；越界 / null 一律 None。
+
+    2026-10-04（公式效率 P0-B）：同时支持 list（元素可为 None）与 numpy 数组
+    （缺失为 NaN）两态 —— 指标 raw 路径（registry.calc(raw=True)）返回 numpy，
+    NaN 自不等 ⇒ 转成 None，与 list 路径「null → 不命中」语义严格一致（绝不估算填充）。
+    """
     n = len(arr)
     idx = window if window >= 0 else n + window
     if idx < 0 or idx >= n:
         return None
     v = arr[idx]
-    return float(v) if v is not None else None
+    if v is None:
+        return None
+    f = float(v)
+    return None if f != f else f          # NaN → None（raw numpy 路径）
 
 
 def _resolve_ind_params(spec, params: Dict[str, Any]) -> Dict[str, Any]:
@@ -79,7 +87,9 @@ def _eval_indicator(cond: dict, bars: list, cache: dict) -> Optional[float]:
     key = _ind_cache_key(name, params)
     res = cache.get(key)
     if res is None:
-        res = calc(name, bars, **params)
+        # raw=True（公式效率 P0-A）：求值只读 window 处一个标量，保留 numpy 数组
+        # 可省去整条序列 numpy→list 的转换（全市场规模实测为求值侧主要成本）。
+        res = calc(name, bars, raw=True, **params)
         cache[key] = res
     out_key = ind.get("output") or (spec.outputs[0] if spec.outputs else None)
     arr = res["outputs"].get(out_key) if out_key else None
@@ -108,6 +118,23 @@ def _field_series(bars: list, name: str) -> list:
     return [float(v) if v is not None else None for v in (getter(b) for b in bars)]
 
 
+def _field_series_cached(bars: list, name: str, cache: dict) -> list:
+    """字段整列的求值内缓存（公式效率 P0-B，2026-10-04）。
+
+    同一 (bars, 字段) 在一次 ``evaluate`` 内可能被多个叶子引用
+    （例：``close > ma`` 与 ``close < ma*1.1`` 都取 close 整列）。此前每个叶子
+    都重建整列 + 逐元素 float() 转换；全市场规模（5000 只 × 250 根 × 多字段叶子）
+    这是求值侧仅次于指标 list 转换的第二大热点。缓存键用 ``("__field__", name)``
+    —— 与 ``_ind_cache_key`` 的 ``(指标名, 参数元组)`` 形状不同，不会冲突。
+    """
+    key = ("__field__", name)
+    arr = cache.get(key)
+    if arr is None:
+        arr = _field_series(bars, name)
+        cache[key] = arr
+    return arr
+
+
 def _operand_value(operand: dict, bars: list, cache: dict) -> Optional[float]:
     """取操作数在 window 处的值（compare 叶子用）。kind ∈ field/indicator。"""
     kind = operand.get("kind")
@@ -115,14 +142,15 @@ def _operand_value(operand: dict, bars: list, cache: dict) -> Optional[float]:
         name = operand.get("name")
         if name not in _FIELD_NAMES:
             raise ValueError(f"未知字段条件：{name}（可选 {sorted(_FIELD_NAMES)}）")
-        return _windowed(_field_series(bars, name), int(operand.get("window", -1)))
+        return _windowed(_field_series_cached(bars, name, cache),
+                         int(operand.get("window", -1)))
     if kind == "indicator":
         spec = get_indicator(operand["name"])
         params = _resolve_ind_params(spec, operand.get("params") or {})
         key = _ind_cache_key(operand["name"], params)
         res = cache.get(key)
         if res is None:
-            res = calc(operand["name"], bars, **params)
+            res = calc(operand["name"], bars, raw=True, **params)
             cache[key] = res
         out = operand.get("output") or (spec.outputs[0] if spec.outputs else None)
         arr = res["outputs"].get(out) if out else None
@@ -151,7 +179,8 @@ def _eval_leaf(cond: dict, bars: list, cache: dict) -> bool:
         name = f.get("name")
         if name not in _FIELD_NAMES:
             raise ValueError(f"未知字段条件：{name}（可选 {sorted(_FIELD_NAMES)}）")
-        val = _windowed(_field_series(bars, name), int(f.get("window", -1)))
+        val = _windowed(_field_series_cached(bars, name, cache),
+                        int(f.get("window", -1)))
         leaf = f
     else:
         raise ValueError("条件叶子须为 {indicator:...} / {field:...} / {compare:...}")

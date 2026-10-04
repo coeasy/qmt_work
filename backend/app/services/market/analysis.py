@@ -204,10 +204,17 @@ async def build_analysis(m, code: str, conn_id: str = "", source: str = "auto",
     if cap:
         circ, total = cap.get("circulating_shares"), cap.get("total_shares")
         vol = (snap or {}).get("volume")
+        # 优先用行情源**原生**口径（快照直接给出的换手率/市值），推导值仅作兜底。
+        # 两套口径的股本基数可能不同（快照用实时股本，get_share_capital 可能滞后），
+        # 2026-10-04 R1 起 TDX 快照原生即含这三项，此前一律走 shares×price 推导，
+        # 与 stock-info 面板显示的 circ_mv/total_mv（走原生）会**对不上**。
         cap = {**cap,
-               "turnover_rate": round(vol / circ * 100, 2) if (vol and circ) else None,
-               "total_mktcap": round(last * total, 2) if (last and total) else None,
-               "float_mktcap": round(last * circ, 2) if (last and circ) else None}
+               "turnover_rate": (snap or {}).get("turnover_rate")
+                                 or (round(vol / circ * 100, 2) if (vol and circ) else None),
+               "total_mktcap": (snap or {}).get("total_mv")
+                               or (round(last * total, 2) if (last and total) else None),
+               "float_mktcap": (snap or {}).get("circ_mv")
+                               or (round(last * circ, 2) if (last and circ) else None)}
 
     return {
         "code": code, "name": name, "type": cls["type"],

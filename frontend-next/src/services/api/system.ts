@@ -427,6 +427,13 @@ export interface ScreenResponse {
   fundamentals?: unknown;
   /** 走经典策略时回显策略 id；空串表示走的是条件树 */
   classic?: string;
+  /**
+   * 结果缓存命中（2026-10-04 P0-C）：同参数 TTL（默认 60s）内重复执行公式
+   * 直接返回缓存副本。首算缺省（=false 语义）；命中时带 cache_age_ms。
+   */
+  cached_result?: boolean;
+  /** 缓存命中时距首次计算过去的毫秒数 */
+  cache_age_ms?: number;
 }
 
 export interface ScreenRunQuery {

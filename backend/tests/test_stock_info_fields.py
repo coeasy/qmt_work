@@ -229,7 +229,11 @@ def test_no_extra_quote_call_when_detail_already_has_metrics(patch_hub):
     patch_hub(hub)
     info = _payload(asyncio.run(market_stock_info("600519", ctx=None)))
     assert hub.quote_calls == [], f"不该补请求，实际打了 {hub.quote_calls}"
-    assert info["metrics_source"] is None
+    # ★ 2026-10-04 R25：此处原先断言 `metrics_source is None` —— 那是在**描述当时的
+    #   缺陷**（详情源给全时该字段永不赋值），不是契约。修好归因后它应当等于详情源：
+    #   这条路径没有「来源不一致」，前端徽标仍不显示（`metrics_source === source`），
+    #   但 API 消费者拿到了完整溯源。
+    assert info["metrics_source"] == info["source"] == "tdx"
 
 
 def test_gap_stays_null_when_no_metrics_source(patch_hub):
@@ -300,3 +304,54 @@ def test_detail_none_still_fills_metrics_from_public_source(patch_hub):
         assert info[key] == TENCENT_QUOTE[key], f"{key} 应从公开行情源补齐"
     assert info["metrics_source"] == "tencent"
     assert info["high_limit"] is None, "涨跌停属于画像字段，公开快照没给就保持 None"
+
+
+# =================== metrics_source 归因（2026-10-04 R25） ===================
+#
+# 背景：`metrics_source` 是**来源标注**字段 —— 前端 `StockInfoPanel` 用它渲染
+# 「行情 · xxx」徽标、`FundamentalsPanel` 用它渲染估值来源。它此前有两个缺陷：
+#   1. 「只要轮到某个源就把名字写上，此后再不更正」⇒ 一个字段都没补上的源
+#      也会被署名（**错误归因**：界面说 A、数据其实来自 B）；
+#   2. 详情源自己就把派生字段给全时（腾讯快照实测给全 12 个）**永不赋值**
+#      ⇒ 最常见路径上恒为 null（与 `trade_date` 同族的「假完整」）。
+# 下面四条把两个缺陷都钉死，并锁住「取不到时保持 null，绝不编来源」。
+
+
+def test_metrics_source_names_detail_source_when_it_supplied_all(patch_hub):
+    """详情源自己给全派生字段 ⇒ `metrics_source` 必须写明是它（此前恒 None）。"""
+    patch_hub(_StubHub(FULL_DETAIL))
+    info = _payload(asyncio.run(market_stock_info("600519", ctx=None)))
+    assert info["metrics_source"] == FULL_DETAIL["source"] == "tencent", (
+        "详情源即为来源时必须署名，否则前端来源徽标永不显示（假完整）")
+
+
+def test_metrics_source_names_the_filling_source(patch_hub, monkeypatch):
+    """详情源只有画像、派生字段靠补齐 ⇒ 必须署名**补齐源**。"""
+    monkeypatch.setattr(market_routes, "_metric_sources", lambda: ["tencent"])
+    patch_hub(_StubHub(ELTDX_DETAIL, quotes={"tencent": TENCENT_QUOTE}))
+    info = _payload(asyncio.run(market_stock_info("600519", ctx=None)))
+    assert info["pe_ttm"] == TENCENT_QUOTE["pe_ttm"]
+    assert info["metrics_source"] == "tencent"
+
+
+def test_metrics_source_not_credited_to_a_source_that_gained_nothing(patch_hub, monkeypatch):
+    """★ 错误归因守卫：排在前面却**一个字段都没补上**的源，不得被署名。
+
+    此前实现是「只要轮到它就把名字写上」⇒ 界面显示「行情 · empty」，
+    而数据其实是 tencent 给的。来源标错比标不出更危险（把人引去查错的源）。
+    """
+    monkeypatch.setattr(market_routes, "_metric_sources", lambda: ["empty", "tencent"])
+    patch_hub(_StubHub(ELTDX_DETAIL,
+                       quotes={"empty": {"source": "empty"},
+                               "tencent": TENCENT_QUOTE}))
+    info = _payload(asyncio.run(market_stock_info("600519", ctx=None)))
+    assert info["metrics_source"] == "tencent", "空格源不该被署名"
+
+
+def test_metrics_source_stays_null_when_nothing_available(patch_hub, monkeypatch):
+    """一个派生字段都没拿到 ⇒ 保持 None（前端不显示徽标），绝不编一个来源出来。"""
+    monkeypatch.setattr(market_routes, "_metric_sources", lambda: [])
+    patch_hub(_StubHub(ELTDX_DETAIL))
+    info = _payload(asyncio.run(market_stock_info("600519", ctx=None)))
+    assert info["pe_ttm"] is None
+    assert info["metrics_source"] is None

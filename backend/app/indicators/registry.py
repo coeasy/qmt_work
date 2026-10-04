@@ -108,7 +108,7 @@ register(IndicatorSpec(
     name="ema", label="EMA 指数均线", category="trend",
     description="指数平滑，k=2/(period+1)，首值播种（对齐前端 calcEMA）。",
     params=[IndicatorParam("period", PARAM_INT, 12, 1, "平滑周期")],
-    outputs=["ema"], fn=builtin.ema, kwargs={"close": "closes"},
+    outputs=["ema"], fn=builtin.ema, kwargs={"close": "series"},
     formula="EMA = C[i]*k + EMA[i-1]*(1-k)",
 ))
 register(IndicatorSpec(
@@ -251,18 +251,38 @@ def _resolve_params(spec: IndicatorSpec, params: Dict[str, Any]) -> Dict[str, An
     return resolved
 
 
-def _col(bars: list, key: str) -> list:
-    """从 Bar 模型或 dict 列表取列（两态兼容）。"""
+def _col(bars: list, key: str):
+    """从 Bar 模型或 dict 列表取列（两态兼容）。
+
+    公式效率 P0-A 延伸（2026-10-04）：对象路径（Bar/BarLite，生产主路径）
+    用 ``np.fromiter`` 直出 float64 数组——替代「lambda getattr 建 list →
+    _as_float 再逐元素转 float」的两道转换（200 万次 getattr 实测占求值 43%）。
+    dict 路径（测试桩/边缘形态）保留 list（字段可能 None，语义由 _as_float
+    置 NaN）。对象字段意外 None 时 fromiter 直接 TypeError —— **fail-fast，
+    绝不静默伪造**（与项目零 mock 契约一致）。
+    """
     if not bars:
         return []
     first = bars[0]
-    getter = (lambda b: getattr(b, key, None)) if hasattr(first, key) else (lambda b: b.get(key))
-    return [getter(b) for b in bars]
+    if hasattr(first, key):
+        return np.fromiter((getattr(b, key) for b in bars),
+                           dtype=np.float64, count=len(bars))
+    # dict 或缺该属性的 NS 对象：缺 key 一律 None（→ NaN → 窗口不命中），
+    # 绝不伪造（与旧实现语义一致——对象缺字段静默 NaN 是既有契约）。
+    return [b.get(key) if isinstance(b, dict) else None for b in bars]
 
 
-def calc(name: str, bars: list, **params: Any) -> dict:
+def calc(name: str, bars: list, *, raw: bool = False, **params: Any) -> dict:
     """计算指标：输入 bars（Bar 模型或 dict，需含 open/high/low/close/volume），
-    返回 {name, params, outputs:{列名: list}}，NaN 一律转 null。"""
+    返回 {name, params, outputs:{列名: list}}，NaN 一律转 null。
+
+    ``raw=True``（**批处理专用**，2026-10-04 公式执行效率优化 P0-A）：outputs 保留
+    numpy 数组（NaN 保持 NaN，不转 list/None）。选股引擎逐标的求值只读 window 处
+    一个标量，把整条序列转成 Python list 是纯浪费——全市场规模（5000 只 × 250 根）
+    实测这项转换占求值耗时的主要部分。默认 ``raw=False`` 行为完全不变（REST/MCP
+    JSON 契约不受影响）；``raw=True`` 的 NaN 语义由消费方（conditions._windowed）
+    按 ``NaN → None → 不命中`` 对齐。
+    """
     spec = get_indicator(name)
     resolved = _resolve_params(spec, params)
     if not bars:
@@ -270,11 +290,16 @@ def calc(name: str, bars: list, **params: Any) -> dict:
     if spec.fn is None:
         raise ValueError(f"指标 {name} 未绑定实现")
     col_kwargs = {spec.kwargs.get(col, col): _col(bars, col) for col in spec.inputs}
-    raw = spec.fn(**col_kwargs, **resolved)
-    if isinstance(raw, dict):
-        outputs = {k: _to_list(v) for k, v in raw.items()}
+    raw_out = spec.fn(**col_kwargs, **resolved)
+    if raw:
+        if isinstance(raw_out, dict):
+            return {"name": name, "params": resolved, "outputs": raw_out}
+        return {"name": name, "params": resolved,
+                "outputs": {spec.outputs[0] if spec.outputs else name: np.asarray(raw_out)}}
+    if isinstance(raw_out, dict):
+        outputs = {k: _to_list(v) for k, v in raw_out.items()}
     else:
-        outputs = {spec.outputs[0] if spec.outputs else name: _to_list(raw)}
+        outputs = {spec.outputs[0] if spec.outputs else name: _to_list(raw_out)}
     return {"name": name, "params": resolved, "outputs": outputs}
 
 

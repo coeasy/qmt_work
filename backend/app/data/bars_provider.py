@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
@@ -254,9 +255,15 @@ class BarsProvider:
     # 内部
     # ------------------------------------------------------------------
     async def _fetch_online(self, hub, codes, src, period, adjust, count) -> Dict[str, list]:
-        # Phase B-3：在线源并发批量（信号量限流 4），避免逐只串行阻塞；
-        # 源原生批量（QMT get_market_data_ex / eltdx 并发）为后续优化项。
-        sem = asyncio.Semaphore(4)
+        # Phase B-3：在线源并发批量（信号量限流），避免逐只串行阻塞。
+        # 公式效率 P1（2026-10-04）：并发度可配（env ``QMT_BARS_ONLINE_CONCURRENCY``，
+        # 默认 8）。此前硬编码 4——easy_tdx MAC 为单连接内部排队，提高并发只会
+        # 增加在途请求数、不会打挂源；QMT get_market_data_ex 等源原生批量为后续优化项。
+        try:
+            conc = max(1, int(os.environ.get("QMT_BARS_ONLINE_CONCURRENCY", "8")))
+        except (TypeError, ValueError):
+            conc = 8
+        sem = asyncio.Semaphore(conc)
 
         async def _one(c: str):
             async with sem:

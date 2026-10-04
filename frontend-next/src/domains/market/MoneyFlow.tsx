@@ -22,8 +22,9 @@ import s from "../domain.module.css";
  * 资金流。
  *
  * ★ 契约要点（aggregates.py:moneyflow / board_moneyflow）：
- *   - 个股：{code, inside(内盘手), outside(外盘手), net(外盘-内盘), strength(分钟主买/主卖),
- *     volume_ratio(量比), est:false, ts, source}；任一字段缺失返回 null → 显示「—」，禁止估算
+ *   - 个股：{code, inside(内盘手), outside(外盘手), net(外盘-内盘), main_net_amount(主力净流入元),
+ *     strength(分钟主买/主卖), volume_ratio(量比), est:false, ts, source}；任一字段缺失返回 null
+ *     → 显示「—」，禁止估算。main_net_amount 仅 TDX 源提供，与 net 是两套独立口径
  *   - 板块：{code, count, total_net, total_inside, total_outside, contributors:[{code,name,net,pct}],
  *     granularity:"day", source, ts}；granularity 固定 day，因为 eltdx 只有日累计快照
  *   - 板块资金流仅对 881xxx / 880xxx 代码有意义，其他代码后端直接 400
@@ -160,7 +161,7 @@ export function MoneyFlow() {
               {/* ★ 一行条：这四个数要放在一起比（外盘 vs 内盘 → 净流入），
                   卡片网格在窄屏塌成一列就把「对比」这件事打散了。
                   括号里的口径说明改悬浮，不占横向空间。 */}
-              <div className={s.statRow}>
+              <div className={s.statRow + " " + s.statRowDense}>
                 <div className={s.statRowItem} title="外盘 = 主买成交量（手）">
                   <span className={s.statRowLabel}>外盘</span>
                   <span className={s.statRowValue} style={{ color: "var(--up)" }}>
@@ -173,10 +174,19 @@ export function MoneyFlow() {
                     {fmtAmount(d.inside)}
                   </span>
                 </div>
-                <div className={s.statRowItem} title="净流入 = 外盘 − 内盘">
+                <div className={s.statRowItem} title="净流入 = 外盘 − 内盘（按逐笔委托方向推导，单位：手）">
                   <span className={s.statRowLabel}>净流入</span>
                   <span className={s.statRowValue} style={{ color: toneColor(d.net) }}>
                     {fmtAmount(d.net)}
+                  </span>
+                </div>
+                <div
+                  className={s.statRowItem}
+                  title={`主力净流入 = 行情源按大单口径直接给出的资金净额（元）。与「净流入（外盘−内盘）」是两套独立口径，可能同号也可能异号；仅 TDX 源提供，取不到显示「—」，绝不用 net 折算冒充。`}
+                >
+                  <span className={s.statRowLabel}>主力净流入</span>
+                  <span className={s.statRowValue} style={{ color: toneColor(d.main_net_amount) }}>
+                    {fmtAmount(d.main_net_amount)}
                   </span>
                 </div>
                 <div className={s.statRowItem} title={`数据时间 ${d.ts ?? "—"}`}>

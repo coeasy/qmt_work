@@ -26,7 +26,7 @@
 
 ## 用法
 
-    backend/runtimes/cp311/python.exe tests/verify_gpu_safe_mode_persistence.py
+    backend/runtimes/cp311/python.exe scripts/verify_gpu_safe_mode_persistence.py
 
 ⚠️ 需要先有打包产物 ``frontend-next/dist-electron/win-unpacked/qmt_work.exe``。
 ⚠️ 本用例会**真的启动三次客户端**（约 1~2 分钟），且只使用自己的隔离 profile，

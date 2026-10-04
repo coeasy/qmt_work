@@ -4,7 +4,7 @@ import { marketApi } from "@/services/api";
 import { useAsync } from "@/hooks/useAsync";
 import { useLiveQuotes } from "@/hooks/useLiveQuotes";
 import { useWatchlistStore } from "@/stores/watchlist";
-import { fmtPct, fmtPrice, toneColor } from "@/shared/format";
+import { dashText, fmtPct, fmtPrice, toneColor } from "@/shared/format";
 import type { Instrument } from "@/shared/types";
 import s from "../domain.module.css";
 
@@ -64,8 +64,8 @@ export function Search() {
         return <span style={{ color: toneColor(pct) }}>{fmtPct(pct)}</span>;
       },
     },
-    { key: "exchange", header: "交易所", width: 90, render: (r) => r.exchange ?? "--" },
-    { key: "category", header: "类别", width: 110, render: (r) => r.category ?? "--" },
+    { key: "exchange", header: "交易所", width: 90, render: (r) => dashText(r.exchange) },
+    { key: "category", header: "类别", width: 110, render: (r) => dashText(r.category) },
     {
       key: "act",
       header: "操作",

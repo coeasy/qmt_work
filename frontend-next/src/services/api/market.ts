@@ -201,6 +201,12 @@ export interface MoneyflowResponse {
   outside?: number | null;
   /** 外盘 - 内盘（手） */
   net?: number | null;
+  /**
+   * 主力净流入（元）—— 交易所/行情源直接给出的资金口径，与「外盘-内盘」
+   * （按逐笔委托方向推导）是两套独立口径，可能同号也可能异号。
+   * 仅 TDX 源提供；其他源为 null → 前端显示「—」，禁止用 net 折算冒充。
+   */
+  main_net_amount?: number | null;
   /** 分钟级主买/主卖力道 */
   strength?: MoneyFlowPoint[];
   /** 量比 */

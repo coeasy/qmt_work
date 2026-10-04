@@ -97,9 +97,11 @@ def rsi(closes: np.ndarray | List[float], n: int = 14) -> np.ndarray:
     - ``/api/v1/factors/compute``（前端「因子研究」面板） → ``factors._rsi``。
 
     同一根 K 线在「行情叠加」与「因子研究」两处显示**不同的 RSI**。
-    下表为 ``backend/tests/test_indicators.py::prices`` 固定序列
-    （``random.Random(42)``，120 根）上 ``RSI(14)`` 的实测值，可用
-    ``backend/output/probe_rsi_old.py`` 复现：
+    下表取自 ``backend/tests/test_indicators.py`` 的 ``prices`` 夹具
+    （``random.Random(42)``，120 根）上的 ``RSI(14)`` 实测值；其中**标准 Wilder
+    一列已由 ``backend/tests/test_indicator_unity.py`` 硬编码锁死**
+    （``assert out[25] == pytest.approx(58.295751485708756)``），故本表不会随
+    实现漂移而失真：
 
     ==================  ==========================  ==========  =============
     实现                规则                        首个有效下标  idx25 值

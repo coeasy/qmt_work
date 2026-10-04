@@ -45,10 +45,8 @@ async def fetch_kline_cached(code: str, period: str = "1d", count: int = 250,
     from datasource.instrument import with_exchange_suffix
     code = with_exchange_suffix(code)
     # 缓存编排也必须遵守 source 契约；否则未知 source 会落入默认券商路径，
-    # 或显式券商请求在复权失败时被错误改成 TDX。
-    source = get_hub().validate_source(source)
-    # 缓存编排也必须遵守 source 契约；否则未知 source 会落入默认券商路径，
-    # 或显式券商请求在复权失败时被错误改成 TDX。
+    # 或显式券商请求在复权失败时被错误改成 TDX。（P2 清理：此前这里连续
+    # 调用了两次 validate_source——幂等但冗余，属历史补丁痕迹。）
     source = get_hub().validate_source(source)
 
     async def _fetch_broker(c: str, p: str, n: int):

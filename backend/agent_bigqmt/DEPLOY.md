@@ -3,7 +3,7 @@
 > 本文是 **客户端（被连接方：大 QMT 内置 Python 策略端 + QMT 客户端软件）** 的接入与配置手册。
 > 适用：券商已收紧外部直连（miniQMT `connect ret error-1` / 日志含 `pid X not allowed`），
 > 需要用**跑在大 QMT 内置 Python 里的策略脚本**作为交易通道的场景（方案里的「路径 B」桥接）。
-> 架构背景见 `docs/UNIVERSAL_BROKER_PLATFORM_FINAL_PLAN_V4.md` §9，决策细节见 `docs/BIG_QMT_COMPAT_PLAN.md`。
+> 架构背景见 `docs/archive/UNIVERSAL_BROKER_PLATFORM_FINAL_PLAN_V4.md` §9，决策细节见 `docs/archive/BIG_QMT_COMPAT_PLAN.md`。
 
 ------------------------------------------------------------------------
 
@@ -28,7 +28,7 @@
 > 如何判断被封？qmt_work 连接诊断若出现 `ret error-1` 且 QMT 极速版日志含
 > `quant session N, pid X not allowed, return`，即授权串
 > `mdl_auth_xttrader/xtdata_strict_connection_check=1` 且 `no_pid_check=0` 生效
-> —— 平台侧无法改写该授权串，只能走路径 B。详见 `BIG_QMT_COMPAT_PLAN.md` §1.1。
+> —— 平台侧无法改写该授权串，只能走路径 B。详见 `docs/archive/BIG_QMT_COMPAT_PLAN.md` §1.1。
 
 ------------------------------------------------------------------------
 
@@ -397,7 +397,7 @@ V4 组合表里 `qmt.big.bridge.redis` / `.zmq` 标记为「可用」，但**那
 
 > **能力探测纪律（零 mock）**：agent 只如实上报它**实际捕获到的注入函数**；
 > 某能力未捕获 ⇒ 诚实 **UNKNOWN**，绝不输出「终端没有该接口」（那会掩盖桥的 bug）。
-> 详见 `docs/UNIVERSAL_BROKER_PLATFORM_FINAL_PLAN_V4.md` §6.2。
+> 详见 `docs/archive/UNIVERSAL_BROKER_PLATFORM_FINAL_PLAN_V4.md` §6.2。
 
 ------------------------------------------------------------------------
 

@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """P1-P4 真机实测（一次性，审计用）：指数/板块/成分股/资金流/ETF/股本/涨跌停。
 
-运行：backend 目录下 python tests/_probe_p1p4.py
+运行：backend 目录下 python tests/probes/_probe_p1p4.py
 """
 import asyncio
 import sys

@@ -12,7 +12,7 @@
     3. 契约驱动 UI：`all_periods()` 供 `/market/periods` 端点返回，前端据此渲染
        周期条并对不支持的周期置灰。
 
-数据源实测结论（2026-08-29，标的 600519.SH，见 tests/probe_periods.py）：
+数据源实测结论（2026-08-29，标的 600519.SH，见 backend/tests/probes/probe_periods.py）：
     - 月线：传 `1mo` 会被服务端当无效值处理、退回日线（间隔 1 天）；
       传 `month` / `1mon` / `mo` 返回真月线（间隔 31 天）→ canonical `1mo` 映射为 `month`。
     - 季线：`1q` / `quarter` / `q` / `3mo` / `season` **全部返回日线**（间隔 1 天），

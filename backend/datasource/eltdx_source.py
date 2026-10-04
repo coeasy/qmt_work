@@ -45,7 +45,7 @@ except ImportError:
         _HAS_TDX = False
         _TDX_BACKEND = "none"
 
-from datasource.base import DataSource
+from datasource.base import DataSource, EXT_DETAIL_KEYS
 from datasource.board import classify_board, limit_ratio
 from datasource.eltdx_utils import (  # noqa: F401
     _EXCH_PFX,
@@ -55,7 +55,6 @@ from datasource.eltdx_utils import (  # noqa: F401
     _NAME_CACHE,
     _cache_dir,
     _f,
-    _industry_cache_path,
     _load_json_cache,
     _map_adjust,
     _map_period,
@@ -68,6 +67,7 @@ from datasource.eltdx_utils import (  # noqa: F401
     is_index_code,
 )
 from datasource.eltdx_boards import EltdxBoardMixin
+from datasource.eltdx_industry import EltdxIndustryMixin
 
 log = logging.getLogger("qmt_work.datasource.eltdx")
 
@@ -79,7 +79,7 @@ _MAX_CONCURRENT = 6          # 同时打到 TDX 的连接数上限（信号量�
 _PRECLOSE_TTL = 86400.0      # 昨收缓存有效期（秒）：盘中不变，按日缓存即可
 _NAME_BATCH = 2000           # 每批经 stock_profile_table 取简称的证券数
 
-class EltdxSource(EltdxBoardMixin, DataSource):
+class EltdxSource(EltdxBoardMixin, EltdxIndustryMixin, DataSource):
     #: 源 ID（2026-10-04 由 "eltdx" 改为 "tdx"：传输层已切换为 easy_tdx(MIT)，
     #: eltdx 库仅为回退；能力链 / provider 目录 / 测试断言同步更新）
     name = "tdx"
@@ -103,6 +103,9 @@ class EltdxSource(EltdxBoardMixin, DataSource):
     #: 代码->{"industry": str, "concepts": [str], "ts": iso} 缓存（持久化到本地 JSON）
     _industry_map: dict = {}
     _industry_loaded: bool = False
+    #: 代码->最近一次行业拉取时间戳（空结果按 _INDUSTRY_RETRY_TTL 重试；
+    #: 磁盘缓存里的陈旧空值首次命中时 _industry_ts 为 0 → 必然重拉）
+    _industry_ts: dict = {}
     _lock = threading.Lock()
     _industry_lock = threading.Lock()
     # 异步路径专用锁。threading.Lock 绝不能跨 await 持有：它会在线程池 worker 仍在
@@ -129,6 +132,32 @@ class EltdxSource(EltdxBoardMixin, DataSource):
     # 昨收缓存：避免 stock-info / quote 富化反复打快照
     _preclose_map: dict = {}
     _preclose_ts: dict = {}
+    # 行情派生指标缓存（估值/市值/换手/量比/振幅/均价，同一次快照直供）
+    _metric_map: dict = {}
+    _metric_ts: dict = {}
+    # 声明本源可提供的详情字段（与 EXT_DETAIL_KEYS 共用一份常量，杜绝漂移）。
+    # 2026-10-04 R1：MAC 快照已原生提供这些字段，故 metric_sources() 能把 tdx
+    # 纳入「缺口补齐候选源」，优先于公开行情源（少一次网络 + 口径一致）。
+    _DETAIL_KEYS = EXT_DETAIL_KEYS
+
+    # EXT_DETAIL_KEYS 契约名 → easy_tdx MAC 快照门面属性名。
+    # 2026-10-04 R1：get_quote 与 get_instrument_detail **必须共用这一份映射**，
+    # 否则「界面显示正常（get_quote 手写正确）、但 stock-info 面板全空
+    # （instrument_detail 按契约名 getattr 拿到 None）」——两处各写一份必漂移。
+    _SNAP_METRIC_MAP = {
+        "open": "open_price",
+        "high": "high_price",
+        "low": "low_price",
+        "avg_price": "avg_price",
+        "amplitude": "amplitude",
+        "turnover_rate": "turnover",
+        "volume_ratio": "vol_ratio",
+        "pe_ttm": "pe_ttm",
+        "pb": "pb_ratio",
+        "circ_mv": "circulating_market_cap",
+        "total_mv": "total_market_cap",
+        "amount": "amount",
+    }
 
     @classmethod
     def lookup_name(cls, code: str) -> Optional[str]:
@@ -317,71 +346,6 @@ class EltdxSource(EltdxBoardMixin, DataSource):
             except Exception as exc:  # noqa: BLE001
                 log.warning("eltdx 名称表网络枚举失败（名称表将为空，仅影响中文名搜索）: %s", exc)
 
-    async def _ensure_industry_loaded(self):
-        """加载行业概念表到类级 _industry_map（所有实例共享）。"""
-        if self.__class__._industry_loaded:
-            return
-        async with self.__class__._get_aio_lock():
-            if self.__class__._industry_loaded:
-                return
-            cached = await asyncio.to_thread(_load_json_cache, _industry_cache_path())
-            if cached:
-                self.__class__._industry_map.update(cached)
-            self.__class__._industry_loaded = True
-            if cached:
-                log.info("eltdx 行业概念表已从本地缓存加载：%d 只", len(cached))
-
-    async def _get_industry(self, code: str) -> dict:
-        """返回 {industry, concepts}；优先本地缓存，缺失则经 F10 网关拉取并落盘。
-
-        并发安全：网络拉取与本地落盘均经 _industry_lock 串行；且仅在确有
-        新记录时才重写整份缓存文件，避免高频请求下的写放大与丢更新。
-        """
-        await self._ensure_industry_loaded()
-        cls_imap = self.__class__._industry_map
-        if code in cls_imap:   # 读不加锁：dict 取键在 CPython 下原子，避免占死事件循环
-            return cls_imap[code]
-        num = _num(code)
-        industry, concepts = "", []
-        try:
-            def _run():
-                def _inner(cl):
-                    ind = ""
-                    try:
-                        sc = cl.f10.stock_score(num, section="pf")
-                        rows = getattr(sc, "rows", None) or []
-                        if rows:
-                            ind = (rows[0].get("N012") or "").strip()
-                    except Exception as e:  # noqa: BLE001
-                        log.warning("eltdx 行业(F10)拉取失败 %s: %s", code, e)
-                    cons = []
-                    try:
-                        tp = cl.helpers.stock_topics(num)
-                        for t in (getattr(tp, "topics", []) or []):
-                            nm = getattr(t, "topic_name", None)
-                            if nm is None and isinstance(t, dict):
-                                nm = t.get("topic_name")
-                            if nm:
-                                cons.append(nm)
-                    except Exception as e:  # noqa: BLE001
-                        log.warning("eltdx 题材拉取失败 %s: %s", code, e)
-                    return ind, cons[:8]
-                return self._use_client(_inner)
-            industry, concepts = await asyncio.to_thread(_run)
-        except Exception as exc:  # noqa: BLE001
-            log.warning("eltdx 行业/题材获取失败 %s: %s", code, exc)
-
-        rec = {"industry": industry, "concepts": concepts,
-               "ts": now_iso()}
-        def _commit() -> None:
-            # 锁 + 文件写入整体放线程池：既保并发下不重复落盘，
-            # 也不让事件循环线程持 threading.Lock 或同步写磁盘。
-            with self.__class__._industry_lock:
-                if code not in cls_imap:  # 二次检查，避免并发重复落盘
-                    cls_imap[code] = rec
-                    _save_json_cache(_industry_cache_path(), cls_imap)
-        await asyncio.to_thread(_commit)
-        return rec
 
     # ---------- 预热（应用启动钩子，best-effort 不阻塞） ----------
     async def warmup(self):
@@ -413,16 +377,16 @@ class EltdxSource(EltdxBoardMixin, DataSource):
                 asks = [{"price": lv.price, "volume": lv.volume}
                         for lv in (s.sell_levels or [])]
                 # 通达信风格盘口扩展字段：内外盘 / 现量 / 委买委卖总量（五档合计）。
-                # 委比/委差由前端按五档派生；换手率需流通股本（快照无），暂不伪造。
+                # 委比/委差由前端按五档派生。
+                # 行情派生指标（2026-10-04 R1）：MAC 快照原生即含换手率/量比/振幅/
+                # 估值/市值/主力净流入，此前因认为「快照无」而未取（注释已作废），
+                # 导致 stock-info / analysis 端点的 EXT_DETAIL_KEYS 恒为 null、
+                # 只能绕道公开行情源补。现按 EXT_DETAIL_KEYS 同名直供（取不到为 None）。
                 return {
                     "code": code,
                     "last": s.last_price,
-                    "open": s.open_price,
-                    "high": s.high_price,
-                    "low": s.low_price,
                     "lastClose": s.pre_close_price,
                     "volume": s.total_hand,
-                    "amount": s.amount,
                     "bid": bids[0]["price"] if bids else None,
                     "ask": asks[0]["price"] if asks else None,
                     "bid_vol": bids[0]["volume"] if bids else None,
@@ -434,6 +398,10 @@ class EltdxSource(EltdxBoardMixin, DataSource):
                     "current_hand": getattr(s, "current_hand", None),  # 现量（手）
                     "sum_buy_vol": getattr(s, "sum_buy_vol", None),    # 委买五档总量
                     "sum_sell_vol": getattr(s, "sum_sell_vol", None),  # 委卖五档总量
+                    # —— EXT_DETAIL_KEYS 同名直供（供 manager 层白名单透出）——
+                    # ⚠️ 与 get_instrument_detail 共用 _SNAP_METRIC_MAP，一处定义杜绝漂移。
+                    **{k: getattr(s, a, None)
+                       for k, a in self._SNAP_METRIC_MAP.items()},
                     "ts": now_iso(),
                 }
             out = self._use_client(_inner)
@@ -723,6 +691,10 @@ class EltdxSource(EltdxBoardMixin, DataSource):
                     "code": code,
                     "inside": inside,       # 内盘累计（手）
                     "outside": outside,     # 外盘累计（手）
+                    # 主力净流入（元，MAC 原生口径）。2026-10-04 R1：easy_tdx MAC
+                    # 快照自带该字段，此前完全未取 → 资金流面板的主力净流入恒空。
+                    # ⚠️ 与 net（外盘-内盘，单位手）语义不同，故独立字段不覆盖 net。
+                    "main_net_amount": getattr(s, "main_net_amount", None),
                     "net": (outside - inside) if (inside is not None and outside is not None) else None,
                     "strength": points,     # 分钟级主买/主卖
                     "volume_ratio": vol_cmp,  # 量比
@@ -795,24 +767,50 @@ class EltdxSource(EltdxBoardMixin, DataSource):
         await self._ensure_name_map()
         name = self._name_map.get(code, "")
         ind = await self._get_industry(code)
-        # 昨收按日缓存：避免每次 stock-info / quote 富化都打快照
+        # 昨收与行情派生指标共用 TTL 缓存：避免每次 stock-info / 估值富化都打快照
+        now = time.time()
         pre_close = self._preclose_map.get(code)
-        if pre_close is None or (time.time() - self.__class__._preclose_ts.get(code, 0)) > _PRECLOSE_TTL:
+        metrics = dict(self.__class__._metric_map.get(code) or {})
+        need_snap = (
+            pre_close is None
+            or (now - self.__class__._preclose_ts.get(code, 0)) > _PRECLOSE_TTL
+            or (not metrics
+                and (now - self.__class__._metric_ts.get(code, 0)) > _PRECLOSE_TTL)
+        )
+        if need_snap:
+            # 一次快照同时取昨收 + 全部行情派生指标（估值/市值/换手/量比/振幅/均价）。
+            # 2026-10-04 R1 数据完善：easy_tdx MAC 快照原生就是富数据（33 字段），
+            # 此前本方法只取 pre_close，导致前端 StockInfoPanel 的「市盈(TTM)/市净率/
+            # 总市值/流通市值/换手率/振幅/均价」在 TDX 环境下全空，只能绕道公开行情源
+            # 补齐（多一次网络 + 口径不一致 + 离线场景直接空壳）。现在同一次快照直供，
+            # market.py 的 _METRIC_KEYS 缺口清单为空即不再外呼公开源。
             ec = _to_eltdx(code)
+
             def _run():
                 def _inner(cl):
                     snaps = cl.quotes.get_snapshots([ec])
                     s = snaps[0] if isinstance(snaps, list) else snaps.get(ec)
-                    return s.pre_close_price if s else None
+                    if not s:
+                        return None, {}
+                    m = {k: getattr(s, a, None)
+                         for k, a in self.__class__._SNAP_METRIC_MAP.items()}
+                    return s.pre_close_price, m
                 return self._use_client(_inner)
             try:
-                pre_close = await asyncio.to_thread(_run)
+                pc, m = await asyncio.to_thread(_run)
             except Exception as exc:  # noqa: BLE001
-                log.warning("eltdx 昨收获取失败 %s: %s", code, exc)
-                pre_close = self._preclose_map.get(code)
+                log.warning("eltdx 昨收/指标获取失败 %s: %s", code, exc)
+                pc, m = None, {}
+            pre_close = pc if pc is not None else self._preclose_map.get(code)
             if pre_close is not None:
                 self.__class__._preclose_map[code] = pre_close
-                self.__class__._preclose_ts[code] = time.time()
+                self.__class__._preclose_ts[code] = now
+            if m:
+                self.__class__._metric_map[code] = m
+                self.__class__._metric_ts[code] = now
+                metrics = m        # ⚠️ 必须回写局部变量：下方 return 展开的是它，
+                                  #    只写缓存不回填会让 stock-info 面板恒 null
+                                  #    （pre_close 有值但估值全空正是此因）。
         # 涨跌停按板块推算（A股：主板±10%，科创/创业/北交±20%；可转债无涨跌幅）
         board = classify_board(code)
         limit = limit_ratio(code, name)
@@ -830,6 +828,9 @@ class EltdxSource(EltdxBoardMixin, DataSource):
             "high_limit": high_limit,
             "low_limit": low_limit,
             "pre_close": pre_close,
+            # 行情派生指标：与 market.py 的 _METRIC_KEYS 同名直供（缺项为 None →
+            # 前端 `--`，由 _metric_map 缺项时再按缺口去公开行情源补）。
+            **{k: v for k, v in metrics.items() if v is not None},
         }
 
     def _index_match(self, q: str, limit: int) -> list:

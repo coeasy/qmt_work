@@ -33,8 +33,8 @@ const require_ = createRequire(import.meta.url);
  * —— 本仓库已有过这个教训（见 `workbenchInfoPlacement.test.ts` 的同名提醒）。
  *
  * ## 可证伪性
- * 每条断言都做过「把实现改回旧写法 ⇒ 用例必须变红」的验证，见
- * `docs/2026-09-22_第20轮_客户端启动退出机制修复.md`。
+ * 每条断言都做过「把实现改回旧写法 ⇒ 用例必须变红」的验证；对应实现说明见
+ * `frontend-next/electron/main.cjs` 的 `trayAvailable` / `requestQuit` 注释。
  */
 
 const resolve_ = (rel: string) => require_.resolve(rel);

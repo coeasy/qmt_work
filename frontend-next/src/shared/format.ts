@@ -112,6 +112,24 @@ export function namePair(
 }
 
 /**
+ * 文本兜底（**唯一入口**）：null / undefined / 纯空白 → `"--"`。
+ *
+ * ★ 为什么不能直接写 `v ?? "--"`（2026-10-04 R25 实测踩到）：
+ *   `??` **只**拦 null/undefined，而后端对若干「允许空值」的字段给的是**空串** ——
+ *   板块榜单的 `unit`（非统计类此前就是 `""`）、档案缺失时的 `industry`、
+ *   请求未指定复权时的 `adjust`。`"" ?? "--"` 的结果仍是 `""`
+ *   ⇒ 表格里渲染出一个**空白单元格**：用户看到的是「前端坏了」，
+ *   而不是「这一项本来就没有」。
+ *   `||` 虽然能拦空串，但会把合法的 `0` 也拦掉（如计数为 0），同样错。
+ *   语义不同，必须用专用函数，而不是在 100 多处各写各的运算符。
+ */
+export function dashText(v: string | number | null | undefined): string {
+  if (v === null || v === undefined) return "--";
+  const s = String(v).trim();
+  return s ? s : "--";
+}
+
+/**
  * 订单状态 → 中文文案（**唯一入口**）。
  *
  * ★ 为什么必须有：此前 Trade 页直接 `{r.status}` 裸渲染英文串，用户看到

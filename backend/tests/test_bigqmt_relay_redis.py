@@ -52,13 +52,25 @@ def test_relay_moves_request_to_file_bridge(env):
                "ts": int(time.time() * 1000), "auth": "tok", "params": {}}
     client.rpush(f"{NS}:req", json.dumps(payload))
     relay.pump_once(root, client, NS, tailer)
-    # 请求已落成文件桥 req 文件，fake agent 处理后写 resp
-    deadline = time.time() + 2.0
-    while not os.listdir(os.path.join(root, "resp")) and time.time() < deadline:
+    # 请求已落成文件桥 req 文件，fake agent（后台线程，轮询 20ms）处理后写 resp。
+    #
+    # ★ 2026-10-04 R25 修：这里原先是硬编码 `deadline = time.time() + 2.0`。
+    #   fake agent 的轮询间隔是 20ms ⇒ 正常情况下有 100 倍余量，但**全量回归时
+    #   机器被跑满**（并行 build / 另一个 pytest 进程），线程可能连续 2s 拿不到时间片，
+    #   于是用例在「全量」里偶发失败、单独跑必然通过 —— 典型的**假红灯**：
+    #   它消耗排查时间（会让人怀疑中继真的会丢请求），却与产品无关。
+    #   判据：本用例在全量回归中 1 failed，`pytest tests/test_bigqmt_relay_redis.py`
+    #   单独跑 7 passed。所以把等待窗口放到「不可能被调度抖动击穿」的量级，
+    #   并同时盯住 agent.received（进程真的读到请求了），失败时能区分
+    #   「中继没写文件」与「agent 还没被调度」。
+    deadline = time.time() + 20.0
+    while (not os.listdir(os.path.join(root, "resp"))
+           and not agent.received and time.time() < deadline):
         time.sleep(0.02)
-    assert os.listdir(os.path.join(root, "resp"))
+    assert agent.received, "中继没把 req 队列搬成文件桥请求（20s 内 agent 未读到任何请求）"
+    assert os.listdir(os.path.join(root, "resp")), "agent 已读请求但没写 resp"
     relay.pump_once(root, client, NS, tailer)
-    got = client.blpop(f"{NS}:resp:s1", timeout=1)
+    got = client.blpop(f"{NS}:resp:s1", timeout=2)
     assert got and json.loads(got[1])["ok"] is True
     # resp 转发后即删，不重复投递
     assert os.listdir(os.path.join(root, "resp")) == []

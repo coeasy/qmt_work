@@ -313,9 +313,19 @@ export function ScreenStats({ res }: { res: ScreenResponse }) {
           {res.total_scanned}
         </span>
       </div>
-      <div className={s.statRowItem}>
+      <div
+        className={s.statRowItem}
+        title={
+          res.cached_result
+            ? `缓存命中（首次计算 ${res.elapsed_ms}ms，缓存已存续 ${res.cache_age_ms ?? 0}ms）`
+            : "本次为新鲜计算（取数 + 求值）"
+        }
+      >
         <span className={s.statRowLabel}>耗时</span>
-        <span className={s.statRowValue}>{res.elapsed_ms}ms</span>
+        <span className={s.statRowValue}>
+          {res.elapsed_ms}ms
+          {res.cached_result && <span className={s.statRowTag}>缓存</span>}
+        </span>
       </div>
       <div
         className={s.statRowItem}

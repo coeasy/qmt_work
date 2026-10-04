@@ -259,7 +259,7 @@ class CapabilityPort(Protocol):
 
 
 # ---------------------------------------------------------------------------
-# P0 阶段新增（方案 C：``docs/UNIFIED_TRADING_ABSTRACTION.md`` §5.2）
+# P0 阶段新增（方案 C：``docs/archive/UNIFIED_TRADING_ABSTRACTION.md`` §5.2）
 #
 # 三条设计纪律，改动前先读：
 #  1) **不新建状态 SSOT**。``OrderSnapshot.status`` 必须是

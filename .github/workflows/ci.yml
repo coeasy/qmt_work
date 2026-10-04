@@ -93,6 +93,17 @@ jobs:
       - name: Execution architecture gate
         run: python ../scripts/check_execution_architecture.py
 
+      # ★ R25 补齐：以下三条同属「没接在 CI 上的门禁会腐烂」家族。
+      #   doc-links 抓「注释/文档指向已删除的文件」（读者按图索骥找不到）；
+      #   unbounded-waits 抓「无出口循环 / 无超时等待」（死循环与冻机退出的静态形态）；
+      #   orphan-modules 抓「零引用模块」（模块还在、引用早没了，只会持续腐化）。
+      - name: Doc link gate (repo-relative path references resolve)
+        run: python ../scripts/audit_doc_links.py
+      - name: Unbounded wait gate (no-exit loops / timeout-less joins)
+        run: python ../scripts/check_unbounded_waits.py
+      - name: Orphan module gate (modules with no import and no path reference)
+        run: python scripts/audit_orphan_modules.py
+
   lint:
     name: Lint (ruff — real-bug gate)
     runs-on: ubuntu-latest

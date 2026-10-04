@@ -31,6 +31,30 @@ from datasource.periods import to_eltdx_period
 #: 与拆分前**同名**的 logger —— 日志行为逐字不变。
 log = logging.getLogger("qmt_work.datasource.eltdx")
 
+#: 口径（``metric``）→ 单位（``unit``）的**唯一映射**（P1-5 / 2026-10-04 R25）。
+#:
+#: ★ 为什么要有这张表：``unit`` 此前对非统计类板块写死成**空串**，于是「单位」这一格
+#:   对行业/概念板块（榜单的绝大多数行）恒为空 —— 字段声明了却等于没有。更隐蔽的是
+#:   消费端常见的 ``unit ?? "--"`` 兜不住空串（``"" ?? x`` 仍是 ``""``），
+#:   结果渲染出一个**空白单元格**，看起来像前端坏了。走单一映射后不可能再出现空串。
+_UNIT_BY_METRIC = {
+    "count": "家",     # 统计类板块：涨跌家数 / 涨停家数等，单位是「家」
+    "point": "点",     # 行业 / 概念板块：板块指数点位，单位是「点」
+}
+
+
+def _board_metric_unit(is_stat: bool) -> tuple[str, str]:
+    """(口径, 单位) —— 板块行的**唯一**产出点（P1-5 / 2026-10-04 R25）。
+
+    ★ 为什么抽成函数：这份 ``{code,name,kind,metric,unit}`` 行在 ``get_boards`` 与
+      ``search_boards`` 里**各构造了一份**，于是同一个「非统计类单位给空串」的缺陷
+      也复刻了两份（第二个副本是加了源码级守卫测试之后才被扫出来的）。
+      两份复刻必然分叉 —— 与 wire action 裸字符串复刻是同一教训，故收成单一产出点，
+      并由 ``test_coverage_universe_and_board_units`` 的守卫锁住「不许再写死字面量」。
+    """
+    metric = "count" if is_stat else "point"
+    return metric, _UNIT_BY_METRIC[metric]
+
 class EltdxBoardMixin:
     """见模块 docstring。"""
 
@@ -140,6 +164,7 @@ class EltdxBoardMixin:
                             continue
                         if kind == "stat" and not is_stat:
                             continue
+                        metric, unit = _board_metric_unit(is_stat)
                         rows.append({
                             "code": _to_qmt(s.full_code),
                             "name": nm,
@@ -152,8 +177,13 @@ class EltdxBoardMixin:
                             "kind": "stat" if is_stat else kind,
                             # 口径标注（P1-5）：统计类板块的 last 是「家数」而非指数点位，
                             # 前端据此显示「家」而不是按涨跌幅染色误读为「北证涨了 27%」。
-                            "metric": "count" if is_stat else "point",
-                            "unit": "家" if is_stat else "",
+                            "metric": metric,
+                            # ★ 2026-10-04 R25：非统计类此前给的是**空串**，于是「单位」
+                            #   这一格对行业/概念板块（榜单的绝大多数行）恒为空 ——
+                            #   字段声明了却等于没有（`unit ?? "--"` 这类写法也拦不住空串，
+                            #   因为 `"" ?? x` 仍是 `""`）。口径与单位一律由
+                            #   _board_metric_unit 产出，杜绝再出现空串或两处复刻分叉。
+                            "unit": unit,
                         })
                 rows.sort(key=lambda r: (r.get("amount") if sort_by == "amount"
                                          else (r.get("change_pct") if r.get("change_pct") is not None
@@ -193,12 +223,14 @@ class EltdxBoardMixin:
                     else:
                         continue
                     is_stat = self._is_stat_name(nm)
+                    _metric, _unit = _board_metric_unit(is_stat)
                     scored.append((score, {
                         "code": _to_qmt(c),
                         "name": nm,
                         "kind": "stat" if is_stat else seg2kind.get(c[2:5], "concept"),
-                        "metric": "count" if is_stat else "point",
-                        "unit": "家" if is_stat else "",
+                        # 与 get_boards 共用同一产出点，避免第三份复刻再分叉（R25）
+                        "metric": _metric,
+                        "unit": _unit,
                     }))
                 scored.sort(key=lambda x: (x[0], -len(x[1]["name"])))
                 return [r for _, r in scored[:limit]]

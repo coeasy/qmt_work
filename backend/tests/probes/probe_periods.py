@@ -5,7 +5,7 @@
 
 用法：
     cd backend
-    python tests/probe_periods.py [code]
+    python tests/probes/probe_periods.py [code]
 """
 import asyncio
 import os

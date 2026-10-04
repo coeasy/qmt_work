@@ -10,8 +10,13 @@
 from __future__ import annotations
 
 import asyncio
+import copy
+import hashlib
+import json
 import logging
+import os
 import time
+from collections import OrderedDict
 from typing import Any, Callable, Dict, List, Optional
 
 from app.screener.conditions import evaluate
@@ -20,6 +25,37 @@ from datasource.local_store import LocalStore, get_store
 log = logging.getLogger("qmt_work.screener.engine")
 
 _SORT_KEYS = {"score", "change_pct", "close", "volume"}
+
+# ---------------------------------------------------------------------------
+# 公式执行效率 P0-C（2026-10-04）：跨请求结果级缓存
+#
+# 背景：同一公式（/market/screen/expr）反复执行是最高频操作，但此前每次都
+# 全量重走「universe 解析 → 批量取数（本地 SQL 秒级/在线更久）→ 逐标的求值」，
+# 数据在 TTL 内并未变化，纯属重复劳动。
+#
+# 设计与诚实性约束：
+# - key 覆盖**全部**影响结果的参数（universe/条件树/排序/过滤/取数口径/policy），
+#   任一不同 → miss，绝不串结果；
+# - TTL 默认 60s（env ``QMT_SCREEN_CACHE_TTL``，0=禁用），盘中重复执行收益最大、
+#   数据延迟可控；命中时响应顶层 ``cached_result=true`` + ``cache_age_ms``，
+#   **绝不伪装成新鲜计算**；
+# - LRU 上限 16 条：结果集是小型 dict，内存可忽略；bars 不缓存（170 万 BarLite
+#   对象内存不可控，是当初放弃 bars 级缓存的原因）。
+# ---------------------------------------------------------------------------
+_RESULT_CACHE: "OrderedDict[str, tuple[float, Dict[str, Any]]]" = OrderedDict()
+_RESULT_CACHE_MAX = 16
+
+
+def _screen_cache_ttl() -> int:
+    try:
+        return max(0, int(os.environ.get("QMT_SCREEN_CACHE_TTL", "60")))
+    except (TypeError, ValueError):
+        return 60
+
+
+def _cache_key(**kw: Any) -> str:
+    payload = json.dumps(kw, sort_keys=True, default=str, ensure_ascii=False)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _stock_name_map(store: LocalStore) -> Dict[str, str]:
@@ -64,7 +100,6 @@ def evaluate_scan(
     names: Optional[Dict[str, str]] = None,
     min_price: Optional[float] = None,
     max_price: Optional[float] = None,
-    prefilter: Optional[dict] = None,
     progress_cb: Optional[Callable[[int, int], None]] = None,
 ) -> tuple[List[dict], int, int]:
     """对给定代码集合做条件求值（同步、纯 CPU），返回 (results, scanned, elapsed_ms)。
@@ -73,6 +108,9 @@ def evaluate_scan(
     表达。两者语义不同，调用方（``total_scanned`` 字段）依赖前者。
 
     指标去重、价格区间过滤、涨跌额计算均在此完成；同源一致性由调用方（BarsProvider）保证。
+    （2026-10-04 孤儿参数清理：删除从未被使用的 ``prefilter`` 形参——ST/停牌
+    预过滤的唯一实现在 :func:`scan_async` 的 ``_prefilter_codes``（取数前），
+    传入求值层也无法处理需在线数据的维度。）
     """
     t0 = time.perf_counter()
     names = names or {}
@@ -161,6 +199,38 @@ async def scan_async(
     if sort_by not in _SORT_KEYS:
         raise ValueError(f"sort_by 非法：{sort_by}（可选 {sorted(_SORT_KEYS)}）")
 
+    # —— P0-C 结果级缓存：命中则零 IO 直接返回（响应带 cached_result 标注）——
+    ttl = _screen_cache_ttl()
+    ckey = None
+    if ttl > 0:
+        # ★ store 身份必须入 key：不同 LocalStore（不同 db 文件）同参数的结果
+        # 互不相干（测试各用 tmp_path 库；全局单例数据被同步任务回补后 key 仍
+        # 指向旧 store 会串结果）。DB.path 是 sqlite 文件路径，天然区分。
+        try:
+            store_id = str(st._db.path)
+        except AttributeError:
+            store_id = repr(id(st))
+        ckey = _cache_key(
+            store=store_id,
+            conditions=conditions, universe=universe, classic=classic,
+            classic_params=classic_params, limit=limit, sort_by=sort_by,
+            sort_desc=sort_desc, adjust=adjust, period=period,
+            min_price=min_price, max_price=max_price, max_codes=max_codes,
+            source_policy=source_policy, prefilter=prefilter,
+            fields=fields, offline=offline)
+        hit = _RESULT_CACHE.get(ckey)
+        if hit is not None:
+            t_cache, snapshot = hit
+            age_ms = int((time.monotonic() - t_cache) * 1000)
+            if age_ms <= ttl * 1000:
+                _RESULT_CACHE.move_to_end(ckey)
+                out = copy.deepcopy(snapshot)
+                out["cached_result"] = True
+                out["cache_age_ms"] = age_ms
+                log.info("选股结果缓存命中（age=%dms, key=%s…）", age_ms, ckey[:12])
+                return out
+            _RESULT_CACHE.pop(ckey, None)          # 过期淘汰
+
     spec = UniverseSpec.parse(universe)
     uni = await resolve_universe(spec, policy_str=source_policy, store=st)
     codes = uni["codes"]
@@ -220,7 +290,7 @@ async def scan_async(
         results, scanned, elapsed_ms = await asyncio.to_thread(
             evaluate_scan, codes, bars_map, conditions,
             names=uni["names"], min_price=min_price, max_price=max_price,
-            prefilter=prefilter, progress_cb=progress_cb)
+            progress_cb=progress_cb)
 
         results.sort(key=lambda r: r[sort_by], reverse=bool(sort_desc))
         if limit and limit > 0:
@@ -240,7 +310,7 @@ async def scan_async(
         "screening_mode": "offline" if offline else "online",
         "classic_strategy": classic or "",
     })
-    return {
+    result = {
         "count": len(results),
         "total_scanned": scanned,
         "elapsed_ms": elapsed_ms,
@@ -256,6 +326,14 @@ async def scan_async(
         "dataset_snapshot_id": None,
         "fundamentals": fund,
     }
+    # —— P0-C：新鲜计算完成后写缓存（命中路径才带 cached_result=true，
+    # 首算结果该字段缺省 = false 语义，绝不把缓存命中伪装成新鲜计算）——
+    if ttl > 0 and ckey is not None:
+        _RESULT_CACHE[ckey] = (time.monotonic(), copy.deepcopy(result))
+        _RESULT_CACHE.move_to_end(ckey)
+        while len(_RESULT_CACHE) > _RESULT_CACHE_MAX:
+            _RESULT_CACHE.popitem(last=False)
+    return result
 
 
 # ---------------------------------------------------------------------------

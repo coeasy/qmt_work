@@ -4,7 +4,7 @@
 ``connectors/ports.py`` 只承载「契约」（Protocol + frozen dataclass），
 方言侧的字段提取属于「实现」，两者混在一起会让契约层长出 SDK 知识。
 
-三条铁律（改动前请先看 ``docs/UNIFIED_TRADING_ABSTRACTION.md`` §5.2）：
+三条铁律（改动前请先看 ``docs/archive/UNIFIED_TRADING_ABSTRACTION.md`` §5.2）：
 1. **状态一律过 ``order_status`` SSOT**：大 QMT 的 ``m_nOrderStatus`` 与 xtquant
    的 ``OrderStatus`` 是同一整数族群（50 已报 / 56 已成 / 57 废单），因此这里
    **不再建第二张映射表**；方言原始值只落到 ``raw_status`` 供诊断。

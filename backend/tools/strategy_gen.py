@@ -250,7 +250,8 @@ def register_strategy_tools(mcp):
     # 实测证据（MCP tools/call，修复前）：
     #   Error calling tool 'save_qmt_strategy': 'FunctionTool' object is not callable
     #   Error calling tool 'generate_strategy'  : 同因（同一文件两处）
-    # 静态判定可复现：`scripts/scan_tool_shadowing.py`。
+    # 静态判定可复现：`backend/tests/test_strategy_tool_shadowing.py`
+    # （AST 扫描本模块，断言被 `@mcp.tool()` 装饰的函数名与模块级函数名不重叠）。
     #
     # 修法：嵌套函数改用 `_*_tool` 命名（彻底消除遮蔽），
     # 并用 `@mcp.tool(name=...)` 把**对外工具名**保持为原值 —— 对 MCP 客户端零影响。

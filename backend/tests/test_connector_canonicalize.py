@@ -1,4 +1,4 @@
-"""P0 接线：方言 raw dict → canonical 快照的转换不变量（docs/UNIFIED_TRADING_ABSTRACTION.md §5.2）。
+"""P0 接线：方言 raw dict → canonical 快照的转换不变量（docs/archive/UNIFIED_TRADING_ABSTRACTION.md §5.2）。
 
 这里盯的是三条铁律，任何一条被破坏都会直接导致产线事故：
  1. 状态只走 SSOT、原始值仅落 raw_status 供诊断；

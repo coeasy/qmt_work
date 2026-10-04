@@ -177,10 +177,47 @@ def apply_finality(db, snapshot_id: str, finality: str) -> dict:
     return {"snapshot_id": snapshot_id, "finality": finality}
 
 
+def _default_universe(db, period: str, adjust: str) -> list[str]:
+    """平台已知的标的池（覆盖率报表 ``universe_size`` 的分母）。
+
+    ★ 存在的理由（2026-10-04 R25）：``coverage_report(universe=...)`` 是**可选**参数，
+      而 REST ``/market/coverage`` 与系统任务 ``system.coverage_report`` 两个调用点
+      **都没传** ⇒ ``universe_size`` 在界面上恒为 ``null`` —— 字段声明了、也返回了，
+      却永不赋值（与 ``trade_date`` 同族的「假完整」）。
+
+    取值优先级：
+    1. ``local_stock_list``（由清单同步写入，含名称/类别）；
+    2. 为空时回落 ``local_bars`` 里该 period/adjust 的**去重标的集合** —— 它在
+       **纯券商环境**下是唯一可靠的口径：券商适配器没有 ``get_stock_list`` 能力，
+       ``local_stock_list`` 永远没人写（详见 ``local_store.codes_with_bars`` 的说明）。
+       覆盖率报表讲的本来就是「本地日线覆盖」，用这份集合当分母既诚实、又不会退化成 null。
+
+    ★ 刻意直接用传入的 ``db`` 而不是 ``local_store.get_store()``：后者绑定的是
+      进程级全局库，与本函数的报表库可能不是同一个（测试里尤其明显）。
+    异常一律回落空列表（→ ``universe_size`` 仍为 ``null``），绝不因分母取不到而让整张报表失败。
+    """
+    try:
+        rows = db.query("SELECT code FROM local_stock_list WHERE code IS NOT NULL AND code <> ''")
+        codes = [str(r["code"]) for r in (rows or [])]
+        if codes:
+            return codes
+        rows = db.query(
+            "SELECT DISTINCT code FROM local_bars "
+            "WHERE period=? AND adjust=? AND code IS NOT NULL AND code <> ''",
+            (period or "1d", adjust or ""))
+        return [str(r["code"]) for r in (rows or [])]
+    except Exception:  # noqa: BLE001 — 分母取不到只影响一个字段，不该拖垮报表
+        return []
+
+
 def coverage_report(db, *, period: str = "1d", adjust: str = "qfq",
                     lookback_days: int = 10, universe: list[str] | None = None) -> dict:
     """覆盖率报表：最近 lookback_days 每个交易日在库的 code 数 + provider 占比。"""
     cut = _cutoff_ymd(lookback_days)
+    # 分母未显式给出时自行推导：否则 REST / 系统任务两个调用点的 universe_size 恒为
+    # null（见 _default_universe 的说明）。显式传入（eod.py）时以传入值为准。
+    if universe is None:
+        universe = _default_universe(db, period, adjust)
     rows = db.query(
         "SELECT dt, COUNT(DISTINCT code) AS n FROM local_bars "
         "WHERE period=? AND adjust=? AND dt >= ? "

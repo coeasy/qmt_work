@@ -1,15 +1,12 @@
-from core.config import export_dir
 from core.context import AppContext, get_ctx
-from core.paths import PathError, validate_dir
 from core.quote_fields import apply_ui_quote_contract
 # --- stdlib imports injected by fix_route_imports ---
 import asyncio
 import logging
-import os
 
 from fastapi import APIRouter, Depends
 from app.routes._common import BrokerError, _call, _need, envelope_ok, err, no_broker, ok
-from app.routes import market_multidim
+from app.routes import market_export, market_multidim
 from app.services.market import (
     QUOTES_FILL_SEM,
     build_analysis,
@@ -460,12 +457,29 @@ async def market_stock_info(code: str, conn_id: str = "", source: str = "auto", 
                 q = None
             if not isinstance(q, dict):
                 continue
+            # ★ 2026-10-04 R25 修：只有**真的贡献了字段**的源才能署名。
+            #   此前是「只要轮到它就把名字写上」（``if info.get("metrics_source") is None:
+            #   info["metrics_source"] = name``）⇒ 第一个源**一个字段都没补上**也会被
+            #   记成来源，且此后再不更正 ⇒ **错误归因**：界面上「行情 · A」而数据其实
+            #   来自 B。来源标注错误比缺失更难查（它会让人去查错的那个源）。
+            gained = False
             for key in list(missing):
                 if q.get(key) is not None:
                     info[key] = q[key]
                     missing.remove(key)
-            if info.get("metrics_source") is None:
+                    gained = True
+            if gained:
                 info["metrics_source"] = name
+    # ★ 2026-10-04 R25 修：详情源自己就把派生字段给全了（腾讯快照实测给全 12 个）时，
+    #   来源就是**详情源**。此前这条路径上 `metrics_source` 恒为 None —— 字段声明了、
+    #   前端 `StockInfoPanel`/`FundamentalsPanel` 也消费了，却在**最常见路径**上恒空
+    #   （与 v0.4.7 修的 ``trade_date`` 同族：字段存在但永不赋值 = 假完整）。
+    #   注意顺序：补齐源要**优先**署名（它与详情源不同，正是界面上要提示的那个）；
+    #   只有没走补齐时才回落到详情源，此时 `metrics_source == source`，前端徽标不显示
+    #   —— 这是正确的（没有「来源不一致」可提示），但 API 消费者能拿到完整溯源。
+    if info.get("metrics_source") is None and any(
+            info.get(k) is not None for k in _METRIC_KEYS):
+        info["metrics_source"] = det.get("source")
     return ok(info)
 
 @router.get("/market/sources")
@@ -781,122 +795,12 @@ async def kline_cache_clear(code: str = "", period: str = "", ctx: AppContext = 
     return ok({"deleted": n})
 
 
-# ---------------- 历史 K 线导出到本地指定目录（CSV/JSON） ----------------
-
-def _resolve_export_dir(ctx: AppContext, raw) -> str:
-    """解析导出目录：未指定时用运行期配置 ``offline.export_dir``（默认 <运行目录>/export）。
-
-    ★ 目录可能来自用户输入，必须经 ``core.paths.validate_dir`` 校验：
-    否则填个 ``C:\\Windows\\System32`` 就把导出文件写进系统目录了
-    （轻则权限报错，重则污染系统目录）。校验唯一入口，不在这里另写一套。
-    """
-    rc = ctx.runtime_config
-    v = str(raw or "").strip()
-    if not v:
-        v = str(rc.get("offline.export_dir") or "") if rc else ""
-    return str(validate_dir(str(export_dir(v)), create=True))
-
-
-@router.post("/market/kline/export")
-async def kline_export(body: dict, ctx: AppContext = Depends(get_ctx)):
-    """批量导出历史 K 线到本地指定目录（CSV / JSON）。
-
-    参数（body JSON）：
-    - dest_dir: **可选**，导出目录（不存在自动创建）；省略时用运行期配置
-      ``offline.export_dir``（默认 ``<运行目录>/export``，可在「设置 → 数据目录」改）
-    - codes: 可选，代码列表；省略则导出本地缓存中全部 code×period 序列
-    - period: 可选，仅导出该周期
-    - count: 每序列导出最近 N 根；0/省略=导出该序列全部根数
-    - format: csv | json，默认 csv
-    - refresh: false（默认）快速直接用本地缓存导出；true 先回源券商刷新到缓存再导出（需连接券商）
-    - conn_id: 指定 broker 连接（refresh 回源用）
-
-    数据来自本地 K 线缓存（KlineCache），"快速"导出完全离线，无网络调用。
-    """
-    if ctx.kline_cache is None:
-        return err(503, "K 线缓存未初始化")
-    body = dict(body or {})
-    try:
-        body["dest_dir"] = _resolve_export_dir(ctx, body.get("dest_dir"))
-    except PathError as exc:
-        return err(400, str(exc))
-    try:
-        out = await kline_io.kline_export(ctx.kline_cache, body)
-    except ValueError as exc:
-        return err(400, str(exc))
-    ctx.db.audit("admin", "kline.export", body.get("dest_dir") or "",
-                   {"format": body.get("format") or "csv",
-                    "refresh": bool(body.get("refresh", False)),
-                    "dest_dir": body.get("dest_dir") or ""},
-                   f"files={out.get('exported', 0)} rows={out.get('rows', 0)}")
-    return ok(out)
-
-
-@router.get("/market/kline/export")
-async def kline_export_read(code: str, dest_dir: str = "", period: str = "1d",
-                            format: str = "csv", ctx: AppContext = Depends(get_ctx)):
-    """读取本地导出目录中已导出的历史 K 线文件（离线/断线时也可用）。
-
-    直接读磁盘文件，不依赖券商连接；文件不存在返回 404。
-    ``dest_dir`` 省略时用运行期配置（与 POST 同口径）。
-    format: csv | json（须与导出时一致）。
-    """
-    from gateway.kline_cache import KlineCache
-    try:
-        dest_dir = _resolve_export_dir(ctx, dest_dir)
-    except PathError as exc:
-        return err(400, str(exc))
-    path = KlineCache.file_path(code, period, dest_dir, format)
-    if not os.path.exists(path):
-        return err(404, f"导出文件不存在：{os.path.basename(path)}"
-                        "（请先 POST /market/kline/export 导出）")
-    try:
-        bars = await asyncio.to_thread(KlineCache.read_export, path, format)
-    except Exception as exc:  # noqa: BLE001
-        return err(500, f"读取导出文件失败：{exc}")
-    return ok({"code": code, "period": period, "format": format,
-               "file": path, "count": len(bars), "bars": bars})
-
-
-# ---------------- 同步全部历史 K 线（日线+周线）到本地指定目录 ----------------
-
-@router.post("/market/kline/sync")
-async def kline_sync(body: dict, ctx: AppContext = Depends(get_ctx)):
-    """把一批股票的最新历史 K 线（含日线 1d、周线 1w）同步到本地指定目录。
-
-    流程：确定股票集合 → 逐只回源券商拉取最新 K 线写入本地缓存 → 导出到 dest_dir。
-    参数（body JSON）：dest_dir(**可选**，省略时用运行期配置 ``offline.export_dir``)/
-    codes/sector/periods/count/format/limit/conn_id。
-    单只失败不中断整体（errors 列出）。真实行情，缺数据不伪造。
-    """
-    if ctx.kline_cache is None:
-        return err(503, "K 线缓存未初始化")
-    try:
-        dest = _resolve_export_dir(ctx, (body or {}).get("dest_dir"))
-    except PathError as exc:
-        return err(400, str(exc))
-    body = {**(body or {}), "dest_dir": dest}
-
-    async def _get_sector_stocks(sector: str, conn_id):
-        b = _need(conn_id)
-        if b is None:
-            raise BrokerError("未连接任何券商客户端：省略 codes 需用板块成分，请先连接券商。")
-        return await _call(b, b.gateway.get_sector_stocks, sector) or []
-
-    try:
-        out = await kline_io.kline_sync(ctx.kline_cache, body, _get_sector_stocks)
-    except ValueError as exc:
-        return err(400, str(exc))
-    except BrokerError as exc:
-        return err(503, str(exc))
-    except LookupError as exc:
-        return err(404, str(exc))
-    ctx.db.audit("admin", "kline.sync", body.get("dest_dir") or "",
-                   {"format": body.get("format") or "csv",
-                    "periods": out["periods"], "count": int(body.get("count") or 250),
-                    "codes": out["codes_total"]},
-                   f"files={out['files_count']} rows={out['rows']} errors={len(out['errors'])}")
-    return ok(out)
+# ---------------- 历史 K 线导出 / 同步到本地目录（子路由） ----------------
+#
+# 2026-10-05 P1-1 二次拆分：本文件第二次越过 Gate 4 的 50KB 上限，
+# 把 export / export 读取 / sync 三条「把缓存写盘」的端点移入 market_export.py。
+# 挂载点保持在原位置，对外 URL 与 OpenAPI 清单不变。
+router.include_router(market_export.router)
 
 
 # ---------------- 行情爬虫（真实 K 线落库） ----------------
@@ -910,7 +814,7 @@ async def crawl_market(body: dict, ctx: AppContext = Depends(get_ctx)):
         return err(503, str(exc))
 
 
-# ---------------- LLM 配置（加密存储） ----------------
+# ---------------- 逐笔 / 五档（券商 L2 与公开源两条路，语义见各端点 docstring） ----------------
 
 @router.get("/market/l2")
 async def market_l2(code: str, count: int = 100, ctx: AppContext = Depends(get_ctx)):
@@ -963,6 +867,3 @@ async def market_ticks(code: str, count: int = 60, source: str = "auto",
         except Exception as exc:  # noqa: BLE001  仅标注用途，失败不该让逐笔整体失败
             log.debug("ticks trading_date 补齐失败：%s", exc)
     return ok(res)
-
-
-# ---------------- 策略模板库 ----------------

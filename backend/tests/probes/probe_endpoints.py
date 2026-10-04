@@ -1,7 +1,7 @@
 """新端点冒烟：指数 / 板块 / 成分股 / 板块K线 / ETF / 资金流 / 股本涨跌停。
 
-需后端已在 http://127.0.0.1:21120 运行。用法：
-    python tests/probe_endpoints.py [base_url]
+需后端已在 http://127.0.0.1:21120 运行。用法（在 backend 目录下）：
+    python tests/probes/probe_endpoints.py [base_url]
 """
 import json
 import sys

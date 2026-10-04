@@ -4,7 +4,7 @@ import { marketApi, type EtfResponse } from "@/services/api";
 import { useAsync } from "@/hooks/useAsync";
 import { useQuotesStore } from "@/stores/quotes";
 import { useQuoteSubscription } from "@/hooks/useQuoteSubscription";
-import { fmtAmount, fmtPct, fmtPrice, toneColor } from "@/shared/format";
+import { dashText, fmtAmount, fmtPct, fmtPrice, toneColor } from "@/shared/format";
 import { useOpenWorkbench } from "@/hooks/useOpenWorkbench";
 import s from "../domain.module.css";
 
@@ -49,7 +49,7 @@ export function Etfs() {
   const cols: Column<EtfRow>[] = [
     { key: "code", header: "代码", width: 104, mono: true, render: (r) => r.code },
     { key: "name", header: "名称", render: (r) => r.name || "--" },
-    { key: "exchange", header: "交易所", width: 80, render: (r) => r.exchange ?? "--" },
+    { key: "exchange", header: "交易所", width: 80, render: (r) => dashText(r.exchange) },
     {
       key: "price",
       header: "最新价",

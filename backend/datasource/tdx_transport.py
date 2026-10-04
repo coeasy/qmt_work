@@ -65,6 +65,11 @@ if _HAS_EASY_TDX:
         "30m": Period.MIN_30, "60m": Period.MIN_60,
         "day": Period.DAILY, "week": Period.WEEKLY,
         "month": Period.MONTHLY, "year": Period.YEARLY,
+        # 平台 canonical 别名（datasource/periods.py 契约）：adapter 层
+        # （eltdx_source._map_period）会先把 '1d'→'day' 再调本门面，但直接
+        # 调用门面的消费方（工具/探针/测试）传 canonical 时也能命中，
+        # 报错口径只留给真正不支持的周期（如季线）。
+        "1d": Period.DAILY, "1w": Period.WEEKLY, "1mo": Period.MONTHLY,
     }
 
 _MARKET_BY_PFX = {"sh": Market.SH, "sz": Market.SZ, "bj": Market.BJ} if _HAS_EASY_TDX else {}
@@ -82,6 +87,19 @@ _INDEX_PFX = {
 }
 _ETF_PFX = {"sh": ("51", "56", "58"), "sz": ("15", "16"), "bj": ()}
 
+#: 纯 6 位数字代码（无市场前缀）→ 市场推断表。
+#: ⚠️ '00' 前缀天然歧义：000001 既是上证指数（SH）又是平安银行（SZ）。
+#: 此处按通达信自身约定取 'sh'（TDX 里裸 000001 即上证指数）。
+#: 因此**需要精确指定深市 000xxx 个股时，必须传 'sz000001' 形态**，
+#: 不能传裸代码——本表的裸代码分支只是降级兜底。
+_MARKET_BY_NUM = {
+    "60": "sh", "68": "sh", "90": "sh", "51": "sh",
+    "56": "sh", "58": "sh", "00": "sh", "88": "sh", "99": "sh",
+    "01": "sz", "02": "sz", "03": "sz", "30": "sz", "39": "sz",
+    "15": "sz", "16": "sz",
+    "43": "bj", "83": "bj", "87": "bj", "92": "bj", "89": "bj",
+}
+
 #: 逐笔 bs_flag → 方向（0=主买 1=主卖 2=中性 5=盘后固定价成交，实测分布）
 _BS_FLAG_SIDE = {0: "buy", 1: "sell", 2: "neutral", 5: "neutral"}
 
@@ -97,11 +115,30 @@ def active_backend() -> str:
 
 
 def _pfx6(ec: str) -> tuple[str, str]:
-    """'sh600519' -> ('sh', '600519')；非法输入抛 ValueError。"""
-    ec = (ec or "").strip().lower()
-    if len(ec) < 8 or ec[:2] not in _MARKET_BY_PFX:
+    """代码规范化 -> (市场前缀, 6 位代码)。
+
+    接受三种形态（大小写不敏感）：
+    - 'sh600519' / 'sz000001'          —— TDX 原生形态
+    - '600519.SH' / '000001.SZ' / '920002.BJ' —— QMT / Wind 形态
+    - '600519'                         —— 纯 6 位（前缀缺失时按市场推断）
+
+    2026-10-04 R1 根因修复：此前只认 'sh600519'，传入 QMT 形态
+    '600519.SH' 会抛「非法 TDX 代码：'600519.sh'」，导致 stock_topics /
+    stock_score 等平台最常见入参形态**静默降级为空**（行业与题材恒空）。
+    """
+    s = (ec or "").strip().lower().replace(" ", "").replace("　", "")
+    if "." in s:                                  # '600519.sh' / 'sh600519' 混写
+        code_part, _, suf = s.partition(".")
+        # 后缀（sh/sz/bj）是**权威**市场标识，必须采信——否则 '000001.SZ'
+        # 会被截成 '000001' 再按代码段推断成 sh，深市个股被错当成上证指数口径。
+        code_part = code_part[2:] if code_part[:2] in _MARKET_BY_PFX else code_part
+        s = (suf + code_part) if suf in _MARKET_BY_PFX else code_part
+    if len(s) == 6 and s.isdigit():               # 纯数字：按代码段推断市场
+        s = _MARKET_BY_NUM.get(s[:2], _MARKET_BY_NUM.get(s[:1], "sh")) + s
+    if len(s) != 8 or s[:2] not in _MARKET_BY_PFX:
         raise ValueError(f"非法 TDX 代码：{ec!r}")
-    return ec[:2], ec[2:]
+    return s[:2], s[2:]
+
 
 
 def _classify(mk: str, code: str) -> str:
@@ -360,6 +397,43 @@ def _belong_of(owner: "EasyTdxClient", ec: str):
     return topics
 
 
+# ---------- 最后交易日（MAC 快照无日期字段，需从指数日线推导） ----------
+
+_LAST_TRADE_DATE_CACHE: dict = {"date": "", "ts": 0.0}
+_TRADE_DATE_INDEX = "sh000001"          # 上证指数：全市场交易日历的权威源
+_TRADE_DATE_TTL = 6 * 3600.0            # 6 小时刷新一次（跨日自动追上）
+
+
+def _last_trade_date(owner: "EasyTdxClient") -> str:
+    """返回最后交易日 'YYYY-MM-DD'（取不到时返回 ""）。
+
+    MAC 快照本身不含日期字段，但 daily_shares / daily_price_limits 的快照
+    数据都是「截至最后交易日」的。2026-10-04 R1：此前这两个接口把
+    trade_date 恒填空串（声明了字段却永不赋值，属"假完整"），调用方无法
+    判断股本/涨跌停数据的时效。现在以上证指数最后日 K 线的日期为准——
+    它是全市场统一的交易日历，一次拉取、6 小时缓存，成本可忽略。
+    """
+    now = time.time()
+    cached = _LAST_TRADE_DATE_CACHE["date"]
+    if cached and now - _LAST_TRADE_DATE_CACHE["ts"] < _TRADE_DATE_TTL:
+        return cached
+    try:
+        r = owner.bars.get(_TRADE_DATE_INDEX, "day", 5)
+        bars = getattr(r, "bars", None) or []
+        got = ""
+        if bars:
+            t = getattr(bars[-1], "time", None)
+            if t is not None:
+                got = getattr(t, "strftime", lambda _f: "")("%Y-%m-%d") or ""
+        if got:
+            _LAST_TRADE_DATE_CACHE["date"] = got
+            _LAST_TRADE_DATE_CACHE["ts"] = now
+            return got
+    except Exception as exc:  # noqa: BLE001
+        log.debug("easy_tdx 最后交易日推导失败：%s", exc)
+    return cached
+
+
 class _MacHolder:
     """MAC 连接持有者：类级缓存最优主机，实例内惰性建连 + 自动重连。"""
 
@@ -524,6 +598,44 @@ class _QuotesFamily:
     def _snap_from_row(ec: str, r) -> _NS:
         pre = _py(r.get("pre_close"))
         close = _py(r.get("close"))
+        # —— 估值 / 市值（2026-10-04 R1 数据完善）——
+        # MAC 快照原生就是富数据（33 字段），此前门面只暴露 11 个：PE/市值/换手率/
+        # 主力净流入等真实可用字段全被丢弃。后果是前端 StockInfoPanel 的
+        # 「市盈(TTM)/市净率/总市值」在 TDX 环境下只能绕道公开行情源补
+        # （多一次网络 + 口径不一致 + 离线场景直接空）。
+        #
+        # ★ 字段单位必须实测验证后才敢暴露（本轮实测 sh600519 / sz000001）：
+        #   - total_market_cap_ab = 元（茅台 1.5734e12=1.57万亿 ✓，平安 2.2453e11=2245亿 ✓）
+        #   - total_shares/float_shares = 万股（平安 1940591.875 万股=194.06亿股 ✓）→ 转股
+        #   - net_assets = 每股净资产（平安 24.13 → PB=11.57/24.13=0.479 ✓；茅台 200.99 → 6.26 ✓）
+        #   - turnover = 换手率%、main_net_amount = 主力净流入元、vol_ratio = 量比
+        #   ✗ dividend_yield 与 speed_pct 值**完全相同**（涨速被误标成股息率）→ 不暴露
+        #   ✗ circulating_capital_z 单位无法验证 → 不暴露（假数据比没数据更危险）
+        turnover = _py(r.get("turnover"))
+        hi, lo = _py(r.get("high")), _py(r.get("low"))
+        amplitude = ((hi - lo) / pre * 100.0) if (hi is not None and lo is not None
+                                                  and pre) else None
+        net_asset = _py(r.get("net_assets"))
+        pb = (close / net_asset) if (close and net_asset) else None   # 市净率（每股净资产口径）
+
+        def _scaled(key: str, scale: float = 1.0):
+            """万股→股等缩放，NaN/0 诚实置空（停牌无成交不算均价）。"""
+            v = r.get(key)
+            if v is None:
+                return None
+            try:
+                v = float(v)
+            except (TypeError, ValueError):
+                return None
+            return v * scale if (v == v and v != 0) else None
+
+        total_sh = _scaled("total_shares", 1e4)     # 万股 → 股
+        float_sh = _scaled("float_shares", 1e4)     # 万股 → 股
+        # 流通市值 / 均价：均可由已验证单位字段真实推导（无估算）
+        circ_mv = (float_sh * close) if (float_sh and close) else None
+        hands = _scaled("vol")                      # 手
+        amount_v = _py(r.get("amount"))
+        avg_price = (amount_v / (hands * 100.0)) if (amount_v and hands) else None
         return _NS(
             full_code=ec,
             last_price=close,
@@ -539,6 +651,31 @@ class _QuotesFamily:
             inside_dish=None, outer_disc=None,       # 批量路径无内外盘
             current_hand=_py(r.get("last_volume")),
             sum_buy_vol=None, sum_sell_vol=None,
+            # ---- 估值（MAC 原生）----
+            pe_dynamic=_py(r.get("pe_dynamic")),
+            pe_ttm=_py(r.get("pe_ttm")),
+            pe_static=_py(r.get("pe_static")),
+            pb_ratio=pb,                             # 推导值（close / 每股净资产）
+            eps=_py(r.get("eps")),
+            net_assets=net_asset,                    # 每股净资产
+            # ---- 市值（元）/ 股本（股）----
+            total_market_cap=_py(r.get("total_market_cap_ab")),
+            circulating_market_cap=circ_mv,               # float_shares × close（元）
+            total_shares=total_sh,                        # 股
+            float_shares=float_sh,                        # 股
+            # ---- 交易统计 ----
+            turnover=turnover,                            # 换手率（%）
+            amplitude=amplitude,                          # 振幅（%）
+            avg_price=avg_price,                          # 均价（成交额/成交量）
+            short_turnover_pct=_py(r.get("short_turnover_pct")),
+            vol_speed_pct=_py(r.get("vol_speed_pct")),
+            main_net_amount=_py(r.get("main_net_amount")),  # 主力净流入（元）
+            # ---- 证券属性 ----
+            decimal_point=_py(r.get("decimal_point")),
+            lot_size=_py(r.get("lot_size")),
+            flag_kcb=_py(r.get("flag_kcb")),
+            security_type=_py(r.get("security_type_price")),
+            stock_tag_flags=_py(r.get("stock_tag_flags")),
         )
 
     def _enrich_single(self, snap: _NS) -> _NS:
@@ -812,9 +949,11 @@ class _HelpersFamily:
         return _NS(rows=out)
 
     def stock_topics(self, num: str):
-        """个股所属板块（题材/概念，MAC belong_board，缓存 1h）。"""
-        ec = num if len(num) >= 8 else f"sh{num}"
-        return _NS(topics=_belong_of(self._o, ec))
+        """个股所属板块（题材/概念，MAC belong_board，缓存 1h）。
+
+        入参形态由 _pfx6 统一规范化，支持 '600519' / 'sh600519' / '600519.SH'。
+        """
+        return _NS(topics=_belong_of(self._o, num))
 
     def daily_shares(self, ecs: list):
         """股本（MAC 快照 total_shares/float_shares，单位**万股** → 股）。"""
@@ -838,6 +977,7 @@ class _HelpersFamily:
 
         raw = self._o._with_mac(_fetch)
         rows = []
+        td = _last_trade_date(self._o)        # 最后交易日（快照数据口径）
         for ec, r in raw:
             try:
                 tot = r.get("total_shares")
@@ -847,7 +987,7 @@ class _HelpersFamily:
                     total_shares=(float(tot) * 1e4) if tot is not None else None,
                     circulating_shares=(float(flt) * 1e4) if flt is not None else None,
                     free_float_shares=None,            # MAC 无自由流通股本（诚实置空）
-                    trade_date="",
+                    trade_date=td,
                     share_source="easy_tdx",
                 ))
             except (TypeError, ValueError):
@@ -875,8 +1015,23 @@ class _HelpersFamily:
             return out
         raw = self._o._with_mac(_fetch)
         rows = []
+        td = _last_trade_date(self._o)        # 最后交易日（快照数据口径）
         for ec, r in raw:
             up, dn, pre = _py(r.get("buy_price_limit")), _py(r.get("sell_price_limit")), _py(r.get("pre_close"))
+            # 涨跌停状态：由现价与真实现的涨跌停价比较推导（非估算）。
+            # 2026-10-04 R1：此前恒为 None（声明了字段却永不赋值，属"假完整"）。
+            # 停牌/无成交时 last_price 为 0 或 None → 诚实置 "unknown"。
+            last = _py(r.get("close"))
+            if not up or not dn:
+                status = "unknown"
+            elif last is None or last == 0:
+                status = "unknown"
+            elif abs(last - up) / up < 1e-4:
+                status = "limit_up"
+            elif abs(last - dn) / dn < 1e-4:
+                status = "limit_down"
+            else:
+                status = "normal"
             rows.append(_NS(
                 full_code=ec,
                 name=str(r.get("name") or ""),
@@ -884,7 +1039,7 @@ class _HelpersFamily:
                 limit_up_price=up, limit_down_price=dn,
                 limit_ratio_pct=_chg_pct(up, pre),
                 limit_rule="easy_tdx price limit",
-                limit_status=None, trade_date="",
+                limit_status=status, trade_date=td,
             ))
         return _NS(rows=rows)
 
@@ -901,12 +1056,13 @@ class _F10Family:
         eltdx 走 F10 网关取行业；easy_tdx 无该网关，但 belong_board 的
         行业板块成员关系给出**同一口径**的行业归属（881xxx 为通达信行业）。
         取不到（如北交所）时 rows=[]（诚实降级，适配层 industry=""）。
+
+        入参形态由 _pfx6 统一规范化，支持 '600519' / 'sh600519' / '600519.SH'。
         """
-        ec = num if len(num) >= 8 else f"sh{num}"
         try:
-            topics = _belong_of(self._o, ec)
+            topics = _belong_of(self._o, num)
         except Exception as exc:  # noqa: BLE001
-            log.debug("easy_tdx 行业推导失败 %s：%s", ec, exc)
+            log.debug("easy_tdx 行业推导失败 %s：%s", num, exc)
             return _NS(rows=[])
         for t in topics:
             if str(t.board_code or "").startswith("881"):

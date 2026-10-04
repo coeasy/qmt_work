@@ -3,8 +3,8 @@
 > 版本：v1.1（2026-10-02）——新增 §10（定时任务的数据新鲜度语义 & 界面默认深色外观）  
 > 姊妹文档：
 >
-> - `docs/BIG_QMT_COMPAT_PLAN.md`（大 QMT 兼容支持方案，可行性论证）
-> - `docs/UNIFIED_TRADING_ABSTRACTION.md`（统一交易接口抽象，选型论证）
+> - `docs/archive/BIG_QMT_COMPAT_PLAN.md`（大 QMT 兼容支持方案，可行性论证）
+> - `docs/archive/UNIFIED_TRADING_ABSTRACTION.md`（统一交易接口抽象，选型论证）
 > - `docs/BROKER_ONBOARDING.md`（券商接入指南，代码层）
 > - `docs/API接口文档.md`（REST/WS 接口契约）
 >
