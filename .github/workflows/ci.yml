@@ -104,6 +104,12 @@ jobs:
       - name: Orphan module gate (modules with no import and no path reference)
         run: python scripts/audit_orphan_modules.py
 
+      # ★ R26 补齐：后端有 orphan-modules，前端一直没有对应物 —— 于是
+      #   「导出了没人用」只能靠人肉审计发现（R26 一次就扫出 9 个，含真漏接
+      #   fmtSigned 与说谎的 docstring）。这一条把前端孤儿导出也纳入 CI。
+      - name: Frontend orphan export gate (src exports with no consumer, incl. tests)
+        run: python ../scripts/check_frontend_orphans.py
+
   lint:
     name: Lint (ruff — real-bug gate)
     runs-on: ubuntu-latest

@@ -7,7 +7,7 @@ import { PERIODS, PERIOD_LABELS } from "@/shared/periods";
 import { useWatchlistStore } from "@/stores/watchlist";
 import { useWorkspaceStore } from "@/stores/workspace";
 import { useDisplayQuotes } from "@/hooks/useLiveQuotes";
-import { fmtPct, fmtPrice, namePair, normalizeCode, toneColor } from "@/shared/format";
+import { fmtPct, fmtPrice, fmtSigned, namePair, normalizeCode, toneColor } from "@/shared/format";
 import type { Instrument, Period } from "@/shared/types";
 import { marketApi } from "@/services/api";
 import type { PageProps } from "@/app/routes";
@@ -214,7 +214,7 @@ export function MarketWorkbench({ params, tabId }: PageProps) {
             {fmtPrice(quote?.price)}
           </span>
           <span style={{ color: toneColor(quote?.change_pct) }}>
-            {fmtPrice(quote?.change)} {fmtPct(quote?.change_pct)}
+            {fmtSigned(quote?.change)} {fmtPct(quote?.change_pct)}
           </span>
           {quote?.source && (
             <Badge tone={quote.stale ? "warning" : "neutral"}>{quote.source}</Badge>

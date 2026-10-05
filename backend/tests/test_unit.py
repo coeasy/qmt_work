@@ -2115,20 +2115,24 @@ def test_detect_sdk_version_from_init(tmp_path):
 
 
 def test_infer_capabilities_modes():
-    """能力矩阵按账户类型裁剪：股票/信用/期权/期货 + 未配账号降级交易能力。"""
+    """能力矩阵按账户类型裁剪：股票/信用/期权/期货 + 未配账号降级交易能力。
+
+    ★ R26：签名去掉了从未使用的 ``client_type`` 形参（见 env.py 该函数 docstring），
+    故这里的调用不再传客户端类型 —— 客户端类型对这份矩阵**本就没有影响**。
+    """
     from xtquant_client.xtp import _infer_capabilities
-    stock = _infer_capabilities("full", "STOCK", account_id="123", realtime_push=True)
+    stock = _infer_capabilities("STOCK", account_id="123", realtime_push=True)
     assert stock.quote and stock.trade and stock.account
     assert not stock.credit and not stock.option and not stock.futures
     assert stock.realtime_push is True          # 配账号 + realtime_push=True
-    credit = _infer_capabilities("full", "CREDIT", "123", True)
+    credit = _infer_capabilities("CREDIT", "123", True)
     assert credit.credit and not credit.option
-    option = _infer_capabilities("full", "OPTION", "123")
+    option = _infer_capabilities("OPTION", "123")
     assert option.option
-    future = _infer_capabilities("full", "FUTURES", "123")
+    future = _infer_capabilities("FUTURES", "123")
     assert future.futures
     # 极简行情版（未配账号）：交易/账户降级为 False，行情仍可用
-    quote_only = _infer_capabilities("mini", "STOCK", account_id="")
+    quote_only = _infer_capabilities("STOCK", account_id="")
     assert quote_only.trade is False and quote_only.account is False
     assert quote_only.quote and quote_only.kline
     assert ["quote", "kline", "financial"]  # 基础能力恒在 as_list
@@ -2406,6 +2410,10 @@ def test_strategy_eval_no_code_column_regression():
 
     双标的 ma_cross 模拟「一只金叉」：断言评估全程无 error 日志
     （旧 bug 会刷「评估失败：no such column: code」）且金叉标的产生下单调用。
+
+    ★ R26 追加：同时锁住「K 线取数必须带本 run 绑定的 conn_id」—— 此前
+    ``_fetch_kline`` 漏传 ``broker_id``（形参传了却不用），多连接下会拿
+    **活跃连接**的行情去算另一个连接的信号。
     """
     from engines.strategy_runtime import StrategyRuntime
 
@@ -2418,12 +2426,15 @@ def test_strategy_eval_no_code_column_regression():
             "codes": ["A.SH", "B.SH"],
             "params": {"fast": 5, "slow": 20, "volume": 100},
             "mode": "paper", "interval_seconds": 60,
+            "conn_id": "cA",
         })
         run_id = run["id"]
+        seen_conn: list = []
 
         # 金叉序列：最后 1 根跳涨 → prev 双均线粘合、末根快线金叉慢线 → buy。
         # 另一标的平盘 → hold。长度 ≥ slow+1=21。
-        async def fake_fetch(bridge, code, period, count):
+        async def fake_fetch(bridge, code, period, count, conn_id=None):
+            seen_conn.append(conn_id)
             closes = [10.0] * 29 + [15.0] if code == "A.SH" else [10.0] * 40
             return [{"time": f"t{i}", "close": c} for i, c in enumerate(closes)]
 
@@ -2437,6 +2448,9 @@ def test_strategy_eval_no_code_column_regression():
         # _set 成功落库 last_eval_at（证明 UPDATE 不再被缺列异常打断；
         # last_signal 为最后一只标的的结果，不在此断言）
         assert rt.get_run(run_id)["last_eval_at"], "last_eval_at 应被 _set 更新"
+        # ★ R26：取 K 线必须带上本 run 的 conn_id（而非总走活跃连接）
+        assert seen_conn and all(c == "cA" for c in seen_conn), (
+            f"K 线取数应带 run 绑定的 conn_id='cA'，实际 {seen_conn}")
     finally:
         _cleanup(db, d)
 

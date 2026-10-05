@@ -193,11 +193,25 @@ class KlineCache:
         """dt 是否落在热窗口内（写入热表）。按**日期**比较，不依赖年份。"""
         return self._dt_date(dt) >= self.hot_cutoff()
 
-    def _where(self, table: str, code: str, period: str, adjust: str = "") -> str:
+    def _read_sql(self, table: str, code: str, period: str, adjust: str,
+                  limit: int) -> tuple[str, tuple]:
+        """构造「按 code/period/adjust 精确过滤 + 限量」的读取语句。
+
+        ★ 返回 ``(sql, params)``：**语句与绑定值同源构造**，调用方不可能再把
+        参数顺序写错，也就不需要「形参长得像已过滤、实际靠 tuple 顺序兜底」的
+        写法。
+
+        R26：原签名是 ``_where(table, code, period, adjust)``，后三个形参**从未
+        被使用** —— SQL 里用的是 ``?`` 绑定，值由调用方在 query 的 tuple 里提供。
+        于是「读路径必须按 adjust 过滤」这条 M6 不变量只由调用方的 tuple 顺序
+        保证，而形参却长得像已经把过滤条件编进去了（改了形参不会有任何效果，
+        是典型的「哑形参」）。改为同源构造后，M6 由本函数唯一保证。
+        """
         # M6：复权维度入唯一键后，读路径必须按 adjust 过滤，
         # 否则 qfq/hfq/原始价三份数据混排（同一 dt 多根 K 线）。
-        return (f"SELECT dt, open, high, low, close, volume, amount, adjust FROM {table} "
-                f"WHERE code=? AND period=? AND adjust=? ORDER BY dt DESC")
+        sql = (f"SELECT dt, open, high, low, close, volume, amount, adjust FROM {table} "
+               f"WHERE code=? AND period=? AND adjust=? ORDER BY dt DESC LIMIT ?")
+        return sql, (code, period, adjust, max(1, int(limit)))
 
     def get(self, code: str, period: str, count: int, adjust: str = "") -> list[dict]:
         """取最近 count 根（热表优先 + 冷仓历史补足），按时间升序返回。
@@ -210,13 +224,13 @@ class KlineCache:
             return []
         count = max(1, int(count))
         adj = adjust or ""
-        hot = self.db.query(self._where(self._HOT, code, period, adj) + " LIMIT ?",
-                            (code, period, adj, count))
+        sql, params = self._read_sql(self._HOT, code, period, adj, count)
+        hot = self.db.query(sql, params)
         need = count - len(hot)
         arch: list[dict] = []
         if need > 0:
-            arch = self._arch.query(self._where(self._ARCHIVE, code, period, adj) + " LIMIT ?",
-                                    (code, period, adj, need))
+            asql, aparams = self._read_sql(self._ARCHIVE, code, period, adj, need)
+            arch = self._arch.query(asql, aparams)
         rows = _rows_from(arch + hot)
         rows.sort(key=lambda x: str(x["time"] or ""))
         return rows
@@ -293,14 +307,13 @@ class KlineCache:
             return []
         count = max(1, int(count))
         adj = adjust or ""
-        hot = await self.db.aquery(self._where(self._HOT, code, period, adj) + " LIMIT ?",
-                                   (code, period, adj, count))
+        sql, params = self._read_sql(self._HOT, code, period, adj, count)
+        hot = await self.db.aquery(sql, params)
         need = count - len(hot)
         arch: list[dict] = []
         if need > 0:
-            arch = await self._arch.aquery(
-                self._where(self._ARCHIVE, code, period, adj) + " LIMIT ?",
-                (code, period, adj, need))
+            asql, aparams = self._read_sql(self._ARCHIVE, code, period, adj, need)
+            arch = await self._arch.aquery(asql, aparams)
         rows = _rows_from(arch + hot)
         rows.sort(key=lambda x: str(x["time"] or ""))
         return rows

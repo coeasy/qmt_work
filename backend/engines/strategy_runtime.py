@@ -148,7 +148,9 @@ class StrategyRuntime:
         except Exception:  # noqa: BLE001
             return {}
 
-    def _normalize_params(self, st: str, params: dict, codes: List[str]) -> dict:
+    def _normalize_params(self, st: str, params: dict) -> dict:
+        # R26：去掉从未使用的 ``codes`` 形参 —— 参数规范化只按策略类型裁剪，
+        #      与标的清单无关；带着它会让人以为「不同标的会有不同参数口径」。
         p = dict(params or {})
         if st == "ma_cross":
             return {"fast": int(p.get("fast", 5)), "slow": int(p.get("slow", 20)),
@@ -202,7 +204,7 @@ class StrategyRuntime:
             raise ValueError(f"未知策略类型：{st}")
         if not codes:
             raise ValueError("codes/code 必填")
-        norm = self._normalize_params(st, body.get("params") or {}, codes)
+        norm = self._normalize_params(st, body.get("params") or {})
         row = {
             "name": body.get("name") or f"{st}-{codes[0]}",
             "strategy_type": st,
@@ -344,7 +346,7 @@ class StrategyRuntime:
     async def _eval_code(self, run, bridge, code, st, params, kp, count) -> None:
         """对单只标的完成：取 K 线 → 算信号 → 查持仓 → 下单。P1-3 拆分复用。"""
         run_id = run["id"]
-        bars = await self._fetch_kline(bridge, code, kp, count)
+        bars = await self._fetch_kline(bridge, code, kp, count, run.get("conn_id"))
         if not bars:
             self._log(run_id, "warn", f"无 {code} 的 {kp} K 线数据（未连接券商或无历史）", "")
             return
@@ -526,10 +528,23 @@ class StrategyRuntime:
             self._inflight.get(run_id, {}).pop(code, None)
 
     # ---------------- 行情/持仓辅助 ----------------
-    async def _fetch_kline(self, bridge, code, period, count):
+    async def _fetch_kline(self, bridge, code, period, count, conn_id=None):
+        """取 K 线（缓存优先，回源按 run 绑定的连接）。
+
+        ★ 必须把 ``conn_id`` 透传给 ``fetch_kline_cached``（R26 修正）
+        ---------------------------------------------------------
+        ``bridge`` 是本 run 绑定的连接（``run["conn_id"]`` →
+        ``broker_manager.bridge()``），但此前取 K 线**漏传** ``broker_id`` ⇒
+        ``fetch_kline_cached`` 内部一律走 ``get_bridge(None)``（**活跃**连接）。
+        多连接场景下的后果是「信号用 A 券商的数据算、订单下到 B 券商」——
+        同一轮里行情口径与交易口径不是同一条连接。``engines/algo.py`` 一直传
+        的是 ``job["conn_id"]``，此处属漏接（同族：参数传了但从未使用）。
+        ``conn_id`` 为空时行为与修正前完全一致（仍走活跃连接）。
+        """
         try:
             from tools import fetch_kline_cached
-            res = await fetch_kline_cached(code, period, count)
+            res = await fetch_kline_cached(code, period, count,
+                                           broker_id=conn_id or None)
             return (res or {}).get("bars") or []
         except Exception as exc:  # noqa: BLE001
             self._log(-1, "warn", f"kline fetch {code} failed: {exc}", "")

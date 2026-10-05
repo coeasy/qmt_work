@@ -441,6 +441,14 @@ export const MENU: MenuGroup[] = [
   },
 ];
 
+/**
+ * 默认落地页（**唯一真源**）。
+ *
+ * 由 `stores/workspace.ts` 消费：初始 Tab 的首个叶子、以及分屏时未指定 pageKey
+ * 的兜底。R26 之前这里虽已声明，却无人引用，而 `"dashboard"` 字面量在
+ * `stores/workspace.ts` 里又硬写了两次 —— 改默认页要同时改三处，漏一处就出现
+ * 「初始页是 A、分屏兜底是 B」。现在只有这里有值。
+ */
 export const DEFAULT_PAGE = "dashboard";
 
 export function pageLabel(key: string): string {

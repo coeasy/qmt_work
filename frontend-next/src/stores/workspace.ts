@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { DEFAULT_PAGE } from "@/app/routes";
 
 /**
  * 工作区 store：多 Tab + LRU keep-alive + 可拖拽分栏。
@@ -152,7 +153,7 @@ function persist(s: Pick<WorkspaceState, "tabs" | "activeId" | "aliveOrder">): v
 const initialTab: Tab = {
   id: nextId("tab"),
   title: "仪表盘",
-  tree: newLeaf("dashboard"),
+  tree: newLeaf(DEFAULT_PAGE),
   activeLeafId: "",
 };
 initialTab.activeLeafId = firstLeafId(initialTab.tree);
@@ -274,7 +275,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     const tab = tabs.find((t) => t.id === tabId);
     if (!tab) return;
     if (leafCount(tab.tree) >= MAX_LEAVES) return;
-    const nextPage = pageKey ?? "dashboard";
+    const nextPage = pageKey ?? DEFAULT_PAGE;
     const out = tabs.map((t) => {
       if (t.id !== tabId) return t;
       const tree = mapLeaf(t.tree, leafId, (leaf) => ({

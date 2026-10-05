@@ -3,7 +3,6 @@ import { Badge, Button, EmptyState, Panel } from "@/design/primitives";
 import { accountApi, systemApi, type HealthResponse } from "@/services/api";
 import { useBrokerStore } from "@/stores/broker";
 import { useWorkspaceStore } from "@/stores/workspace";
-import { fmtPrice } from "@/shared/format";
 import type { AccountGrid } from "@/shared/types";
 import { AssetSummaryCards, CrossAccountPositions } from "./account/AssetSummary";
 import s from "./dashboard.module.css";
@@ -220,6 +219,3 @@ export function Dashboard() {
 }
 
 export default Dashboard;
-
-/** 供测试断言使用的最小工具导出 */
-export const __dashPrice = fmtPrice;

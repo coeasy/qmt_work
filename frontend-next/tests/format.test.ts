@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import fs from "node:fs";
+import path from "node:path";
 import {
   fmtAmount,
   fmtMoney,
@@ -156,5 +158,45 @@ describe("名称/代码显示契约（防「重影」）", () => {
       // 副标题要么不渲染，要么与主标题不同 —— 绝不能重复
       expect(secondary).not.toBe(primary);
     }
+  });
+});
+
+// ---------------------------------------------------------------- 源码级守卫
+
+/**
+ * 源码级：涨跌额展示必须带符号（R26）。
+ *
+ * 为什么要「源码级」而不只测函数行为：**函数单测绿 ≠ 界面真的用了它**。
+ * 本轮实测的原始缺陷就是「函数存在但零消费」—— `fmtSigned` 全站无人调用，
+ * 涨跌额走的是 `fmtPrice()`，于是同一行里「涨跌幅 +1.50%」与「涨跌额 1.50」
+ * 符号口径不一致（正负只能靠颜色区分，色盲/黑白截图下不可辨）。
+ * 故这里直接扫四个展示位源码，断言它们用 `fmtSigned(` 渲染 `change`。
+ */
+const SRC = path.resolve(__dirname, "../src");
+const readSrc = (rel: string) => fs.readFileSync(path.join(SRC, rel), "utf8");
+
+describe("源码级：涨跌额必须带符号", () => {
+  const SITES = [
+    "domains/market/MarketData.tsx",
+    "domains/market/MarketWorkbench.tsx",
+    "domains/market/panels/FundamentalsPanel.tsx",
+    "domains/market/QuoteBoard.tsx",
+  ];
+
+  it("四处涨跌额展示位都走 fmtSigned，且不再用 fmtPrice 渲染 change", () => {
+    for (const rel of SITES) {
+      const src = readSrc(rel);
+      expect(src, `${rel} 应使用 fmtSigned`).toContain("fmtSigned(");
+      // `fmtPrice(quote?.change)` / `fmtPrice(r.change)` / `fmtPrice(snap.change)` 均不允许
+      expect(src, `${rel} 不得用 fmtPrice 渲染 change`).not.toMatch(
+        /fmtPrice\(\s*[A-Za-z_$][\w$]*\??\.change\s*\)/,
+      );
+    }
+  });
+
+  it("fmtSigned 对 0 给 +0.00（与 fmtPct(0)=+0.00% 同口径）", () => {
+    expect(fmtSigned(0)).toBe("+0.00");
+    expect(fmtSigned(-0)).toBe("+0.00");
+    expect(fmtSigned(null)).toBe("--");
   });
 });

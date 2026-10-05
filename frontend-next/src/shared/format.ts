@@ -12,6 +12,15 @@ export function fmtPct(v: number | null | undefined, digits = 2): string {
   return `${v >= 0 ? "+" : ""}${v.toFixed(digits)}%`;
 }
 
+/**
+ * 带符号数值（涨跌额专用：`+1.50` / `-1.50` / `--`）。
+ *
+ * ★ R26：此前全站零消费，一度被当成死代码。实际是**漏接**：涨跌额展示走的是
+ * `fmtPrice()`，于是同一行里「涨跌幅 +1.50%」与「涨跌额 1.50」符号口径不一致 ——
+ * 涨跌额的正负只能靠颜色区分，色盲用户与截图/黑白打印下完全不可辨。
+ * 现已接到行情条 / 工作台 / 五档盘口 / 基本面快照四处涨跌额展示位。
+ * 与 `fmtPct` 同源（`fmtPct` = 本函数 + `%`）。
+ */
 export function fmtSigned(v: number | null | undefined, digits = 2): string {
   if (v === null || v === undefined || Number.isNaN(v)) return "--";
   return `${v >= 0 ? "+" : ""}${v.toFixed(digits)}`;
@@ -67,20 +76,6 @@ export function toneColor(v: number | null | undefined): string {
   if (t > 0) return "var(--up)";
   if (t < 0) return "var(--down)";
   return "var(--flat)";
-}
-
-/** 时间戳 → HH:MM:SS
- *
- * 后端时间戳契约（V11 R8 起唯一）：`YYYY-MM-DDTHH:MM:SS`（ISO 本地时间，无偏移）。
- * ECMAScript 规定「带时间但不带偏移」的串按**本地时间**解析（只有纯日期串才按 UTC），
- * 故此处直接 `new Date` 即可；存量带偏移/空格分隔的值也能被 V8 正确解析。
- */
-export function fmtTime(ts: string | number | null | undefined): string {
-  if (ts === null || ts === undefined || ts === "") return "--";
-  const d = new Date(ts);
-  if (Number.isNaN(d.getTime())) return String(ts);
-  const p = (n: number) => String(n).padStart(2, "0");
-  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
 /** 交易时段判断（A 股：09:30-11:30 / 13:00-15:00） */

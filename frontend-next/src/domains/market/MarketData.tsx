@@ -5,7 +5,7 @@ import { PERIOD_LABELS } from "@/shared/periods";
 import { useQuotesStore } from "@/stores/quotes";
 import { useWatchlistStore } from "@/stores/watchlist";
 import { useQuoteSubscription } from "@/hooks/useQuoteSubscription";
-import { fmtPct, fmtPrice, namePair, toneColor } from "@/shared/format";
+import { fmtPct, fmtPrice, fmtSigned, namePair, toneColor } from "@/shared/format";
 import type { Period } from "@/shared/types";
 import type { PageProps } from "@/app/routes";
 import { OrderBookPanel } from "./panels/OrderBookPanel";
@@ -47,7 +47,7 @@ export function MarketData({ params }: PageProps) {
           {fmtPrice(quote?.price)}
         </span>
         <span style={{ color: toneColor(quote?.change_pct) }}>
-          {fmtPrice(quote?.change)} {fmtPct(quote?.change_pct)}
+          {fmtSigned(quote?.change)} {fmtPct(quote?.change_pct)}
         </span>
         <Badge tone="info">{PERIOD_LABELS[period]}</Badge>
         {quote?.source && <Badge tone={quote.stale ? "warning" : "neutral"}>{quote.source}</Badge>}

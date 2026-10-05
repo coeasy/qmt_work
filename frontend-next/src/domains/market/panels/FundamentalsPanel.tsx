@@ -2,7 +2,7 @@ import { useState } from "react";
 import { Badge, EmptyState, Spinner } from "@/design/primitives";
 import { marketApi, fmtBarDate } from "@/services/api";
 import { useAsync } from "@/hooks/useAsync";
-import { fmtAmount, fmtPct, fmtPrice, toneColor } from "@/shared/format";
+import { fmtAmount, fmtPct, fmtPrice, fmtSigned, toneColor } from "@/shared/format";
 import s from "./panels.module.css";
 
 /**
@@ -188,7 +188,7 @@ export function FundamentalsPanel({ code }: FundamentalsPanelProps) {
           <>
             <Cell k="最新" v={fmtPrice(snap.last)} mono />
             <Cell k="昨收" v={fmtPrice(snap.pre_close)} mono />
-            <Cell k="涨跌" v={fmtPrice(snap.change)} tone={snap.change_pct} mono />
+            <Cell k="涨跌" v={fmtSigned(snap.change)} tone={snap.change_pct} mono />
             <Cell k="涨跌幅" v={fmtPct(snap.change_pct)} tone={snap.change_pct} mono />
             <Cell k="今开" v={fmtPrice(snap.open)} mono />
             <Cell k="最高" v={fmtPrice(snap.high)} mono />

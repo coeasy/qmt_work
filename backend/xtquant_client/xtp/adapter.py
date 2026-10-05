@@ -53,7 +53,8 @@ class XTPQuantAdapter(QuotesMixin, AccountMixin, TradingMixin, InstrumentMixin, 
         # 业务线程并发访问）。与 _lock 分离，避免「锁内调 SDK 方法 + SDK 同步派发
         # 回调再取同一把锁」造成死锁。
         self._map_lock = threading.Lock()
-        self._order_status_cache: dict[str, str] = {}
+        # R26：删除 ``_order_status_cache`` —— 该属性仅在 __init__ 声明、全仓零读写
+        # （状态归一已改成无状态纯函数 ``normalize_order_status``，本缓存是它的残骸）。
         self._name_cache: dict[str, str] = {}
         # 阶段 0-A：报单回调闭环 —— 本地 seq → 柜台真实 order_id 双向映射，
         # 以及 place_order 等待 response 回调的 pending 表。

@@ -41,6 +41,7 @@
 
 | 版本 | 内容 |
 |------|------|
+| [`v0.4.9.md`](release-notes/v0.4.9.md) | R26：**大小 QMT 贯通审计**——逐条走读大 QMT（XtItClient + agent 文件桥）与小 QMT（MiniQMT + `userdata_mini`）的「识别 → 判活 → 取数 → 下单 → 重连 → 停机」，再全仓前后端对账。修 **8 处**，其中 1 处真缺陷：**策略取 K 线漏传 `broker_id` ⇒ 走活跃连接而非 run 绑定连接**（多连接下「信号用 A 券商数据算、订单下到 B 券商」）；其余为「形参传了但没用」族（`_infer_capabilities.client_type` / `kline_cache._where` 三形参 / `_order_status.oid` / `_normalize_params.codes` / `_order_status_cache` 孤儿属性）+ 涨跌额**缺正负号**口径不一致（`fmtSigned` 补接到 4 处展示位）+ 默认页三处各写一份（`DEFAULT_PAGE` 归一）。零 mock 契约实证：`except` 内返回成功形状命中 **0** |
 | [`v0.4.8.md`](release-notes/v0.4.8.md) | R25：**断链归零 + 架构门禁回绿**——新增文档断链门禁（`audit_doc_links`，17 用例）与无出口循环/无超时等待门禁（`check_unbounded_waits`，11 用例），两条都接进 CI；Gate 4（单文件 ≤50KB）回绿靠两次 P1-1 拆分（`market.py`→`market_export.py`、`eltdx_source.py`→`eltdx_industry.py`）；过程中修掉**工具自身的两个假警报**（`.tsx` 被正则截成 `.ts` 致 20 处误报 / `read_text()` 通用换行把 CRLF 写回成 LF）；文档索引补 2 份被 5 处活代码引用却漏登记的文档；删 1 份零活引用的过期一次性计划；手抄接口计数 232/127 → **239/129** |
 | [`v0.4.7.md`](release-notes/v0.4.7.md) | R24：**数据完整性专项**——新增字段级空值率审计脚本量化 15 族接口 14 处恒空，逐项根因修复：**QMT 代码形态 `.SH/.SZ` 被拒导致行业/题材静默恒空**（含 `.SZ` 后缀被丢弃的真 bug）+ **深市股票被当沪市查询**（传裸代码）+ **空结果永久污染缓存**（加 6h 重试窗口，实测旧缓存近半数为陈旧假空）+ MAC 快照 33 字段补齐（此前仅暴露 11 个，估值/市值/换手率离线全空）+ 字段映射单点化杜绝 `get_quote`/`get_instrument_detail` 漂移 + `limit_status`/`trade_date` 恒空修复 + 前端补「主力净流入」孤儿字段展示 + 市值口径统一 + 后端 2128 → **2154** 用例，审计 FAIL 0 / 未知恒空 0 |
 | [`v0.4.6.md`](release-notes/v0.4.6.md) | R23：**公式执行效率优化**——求值热点消除（raw numpy 直出 + 字段列缓存，5000×250 求值 -32%）+ 公式选股结果 TTL 缓存（同公式重复执行秒级→毫秒级，`cached_result` 诚实标注）+ **修 EMA「目录可见、一算就炸」存量 bug**（新增全指标反射守卫）+ 孤儿参数清理 + 历史规划文档归档 5 份 + 后端 2115 → **2128** 用例 |
@@ -73,7 +74,7 @@ CI 上跑的门禁（`ci_reconcile` / `check_*` / `audit_doc_links` / `check_unb
 | `backend/scripts/audit_data_completeness.py` | 数据源改造后 | 15 族接口逐字段非空率；输出 `FAIL / 未知恒空 / 部分缺失 / 已知协议限制` 四类 |
 | `backend/scripts/audit_api_payloads.py` | 改 REST 响应后 | 进程内 `TestClient` 全量打点，报字段级空值率；`--json` 导出叶子路径快照。**裁定表 `KNOWN` 是仓库唯一的「这个字段空着是对的」台账**，别处不要再造第二张 |
 | `backend/scripts/audit_payload_orphans.py` | 配合上一条 | 拿 `--json` 快照当「生产者清单」，反查前端零消费的叶子（载荷漂移 / TD-31）。输出分「已判定（继承 `KNOWN`）/ 待处理」两段；`--strict` 可把「待处理非空」变成非零退出 |
-| `backend/scripts/audit_orphan_modules.py` | 重构 / 删文件后（**已接 CI**） | 零引用模块扫描（产品目录内）。判据含**非 import 的引用方式**：CI `.yml` / `.bat` / `.sh` / 注释 / 文档里出现 `<产品目录>/<模块>.py` 也算被引用 —— 只认 import 会把 `tools/fetch_runtimes.py` 这类**纯命令行入口**误报成孤儿 |
+| `backend/scripts/audit_orphan_modules.py` | 重构 / 删文件后（**已接 CI**） | 零引用模块扫描（产品目录内）。判据含**非 import 的引用方式**：CI `.yml` / `.bat` / `.sh` / 注释 / 文档里出现 `<产品目录>/<模块>.py` 也算被引用 —— 只认 import 会把 `tools/fetch_runtimes.py` 这类**纯命令行入口**误报成孤儿。**前端对应物**：`scripts/check_frontend_orphans.py`（零引用导出，**含 tests 消费者**；裁定表反腐烂），已接 CI |
 | `backend/scripts/bench_formula_scan.py` | 改公式求值后 | 公式选股扫描基准（`--codes/--bars/--repeat`），结论由 `test_formula_perf.py` 锁定 |
 | `scripts/verify_*_falsifiable.py` | 改对应门禁后 | 门禁的**证伪三例**：把实现改回旧写法，门禁必须变红 |
 | `scripts/verify_gpu_safe_mode_persistence.py` | 改 Electron 启动逻辑后 | 真启三次客户端验 GPU 安全模式判定不被改写（需打包产物） |

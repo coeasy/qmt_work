@@ -243,7 +243,7 @@ class TradingMixin:
                 "price": self._f(_pick(o, "price", "Price")),
                 "volume": _pick(o, "order_volume", "ordered_volume", "Volume", default=0),
                 "dealt": _pick(o, "traded_volume", "deal_volume", "DealVolume", default=0),
-                "status": self._order_status(_pick(o, "order_status", "Status", default=-1), oid),
+                "status": self._order_status(_pick(o, "order_status", "Status", default=-1)),
             })
         return out
 
@@ -367,8 +367,10 @@ class TradingMixin:
             "status": "cancel_submitted" if ok else "cancel_failed",
         }
 
-    def _order_status(self, st: int, oid: str) -> str:
+    def _order_status(self, st: int) -> str:
         # 阶段 0-A（F12）：统一走共享词汇表，消除三处各说各话。
+        # R26：去掉从未使用的 ``oid`` 形参 —— 状态词表只由状态码裁决，
+        #      带着订单号会让人误以为「不同订单可能有不同归一结果」。
         from ..order_status import normalize_order_status
         return normalize_order_status(st)
 

@@ -9,7 +9,7 @@ import {
 import { useWatchlistStore } from "@/stores/watchlist";
 import { useDisplayQuotes } from "@/hooks/useLiveQuotes";
 import { useOpenWorkbench } from "@/hooks/useOpenWorkbench";
-import { fmtAmount, fmtPct, fmtPrice, fmtVolume, tone } from "@/shared/format";
+import { fmtAmount, fmtPct, fmtPrice, fmtSigned, fmtVolume, tone } from "@/shared/format";
 import { isLivePrice } from "@/shared/freshness";
 import type { PageProps } from "@/app/routes";
 import type { Quote } from "@/shared/types";
@@ -101,7 +101,7 @@ export function QuoteBoard({ removable = false }: QuoteBoardProps = {}) {
       width: 68,
       align: "right",
       mono: true,
-      render: (r: Row) => fmtPrice(r.change),
+      render: (r: Row) => fmtSigned(r.change),
     },
     {
       key: "pct",

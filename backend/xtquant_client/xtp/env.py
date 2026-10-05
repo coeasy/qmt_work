@@ -760,9 +760,9 @@ def _detect_sdk_version(client_path: str) -> str:
     return ""
 
 
-def _infer_capabilities(client_type: str, account_type: str,
+def _infer_capabilities(account_type: str,
                         account_id: str = "", realtime_push: bool = False) -> QmtCapabilities:
-    """由客户端类型 / 账户类型推导能力矩阵（仅裁剪「本就可选/依赖权限」项）。
+    """由「账户类型 / 是否配置交易账号」推导能力矩阵（仅裁剪本就可选/依赖权限项）。
 
     基础能力（行情/K线/板块/交易/账户/财务）是本适配器统一实现的，恒为 True。
     依赖账号/权限/运行状态的能力按以下规则收敛，缺则 False，绝不臆测：
@@ -770,6 +770,16 @@ def _infer_capabilities(client_type: str, account_type: str,
       - condition_order：需交易账号 + 连接期确认真实可用才由外部置 True
       - l2_tick：需 Level-2 订阅权限，默认 False（连接成功后由运行时探测覆盖）
       - realtime_push：仅配置了交易账号时按参数置真
+
+    ★ 2026-10-05（R26）：签名此前带一个 ``client_type`` 参数（调用方也传了
+    ``p.client_type``），但函数体**从未使用**它，而 docstring 首行写的是
+    「由客户端类型 / 账户类型推导能力矩阵」—— 读代码的人会以为「极速版 vs
+    完整版」会影响这份矩阵，实际不会。真实情况是：两种客户端在本适配器实现层
+    提供的是**同一组** API，差异只在「本机此刻有没有在跑的行情服务」，那一项由
+    ``QmtVersionProfile.client_type`` / ``quote_port`` 如实反映。在这里按
+    client_type 二次裁能力，会在「客户端刚启动、行情服务尚未就绪」这类瞬态下
+    把「暂时没有」写成「没有」——正是本仓反复吃亏的「假绿灯」反向形态。
+    故删除该孤儿参数，并让 docstring 与实现一致。
     """
     caps = QmtCapabilities()
     at = (account_type or "STOCK").upper()
@@ -820,7 +830,7 @@ def build_version_profile(client_path: str, client_mode: str = "auto",
     p.trade_port = int(tports[0]) if tports else 0
     # 真实券商名：优先复用 probe 中的 broker_name（discovery 已从 Config.xml 读出）
     p.broker_name = probe.get("broker_name") or ""
-    p.capabilities = _infer_capabilities(p.client_type, p.account_type,
+    p.capabilities = _infer_capabilities(p.account_type,
                                          p.account_id, realtime_push)
     # 可读诊断文案：说明识别到哪种客户端、支持到什么程度
     type_label = {
