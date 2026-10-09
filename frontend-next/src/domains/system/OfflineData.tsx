@@ -228,7 +228,11 @@ export function OfflineData() {
       : `扫描 ${bars.total ?? "—"} · 成功 ${bars.ok ?? "—"}` +
         (bars.failed ? ` · 失败 ${bars.failed}` : "") +
         (bars.stale ? ` · 陈旧 ${bars.stale}` : "") +
-        (bars.bars_written ? ` · 写入 ${bars.bars_written} 根` : "")
+        (bars.bars_written ? ` · 写入 ${bars.bars_written} 根` : "") +
+        // ★ 写入裁剪后「写入 0 根」是**正常**的（本地已最新），必须说清楚，
+        //   否则用户会把它读成「源不给数据了」。
+        (bars.bars_unchanged ? ` · 已最新跳过 ${bars.bars_unchanged} 根` : "") +
+        (bars.errors_truncated ? ` · 另有 ${bars.errors_truncated} 条失败未列出` : "")
     : "";
 
   // ---- 覆盖度 ----
@@ -413,6 +417,9 @@ export function OfflineData() {
                     上次全量回补：历史最早到
                     {bars.as_of_min ? ` ${fmtBarDate(String(bars.as_of_min))}` : "未知"}，
                     写入 {bars.bars_written ?? "—"} 根
+                    {bars.bars_unchanged
+                      ? `（另有 ${bars.bars_unchanged} 根与本地一致，已跳过重写）`
+                      : ""}
                     {bars.skipped_complete
                       ? `；因本地已补齐而跳过 ${bars.skipped_complete} 只（断点续传）`
                       : ""}

@@ -253,11 +253,17 @@ class DatasetSyncer:
         s.skipped = int(getattr(summary, "skipped_fresh", 0) or 0) + \
             int(getattr(summary, "skipped_complete", 0) or 0)
         s.failed = int(getattr(summary, "failed", 0) or 0)
+        # ★ 写入裁剪后「与本地一致而未重写」的根数必须算进 ``skipped``：
+        #   不算的话，下面「取数成功却 0 写入 ⇒ 记 problem」的护栏会把
+        #   「本地已最新、无需重写」误报成「时间字段解析失败」（假失败）。
+        unchanged = int(getattr(summary, "bars_unchanged", 0) or 0)
+        s.skipped += unchanged
         s.detail = {
             "period": self.spec.period,
             "adjust": self.spec.adjust,
             "store": self.spec.store,
             "codes_ok": int(getattr(summary, "ok", 0) or 0),
+            "bars_unchanged": unchanged,
             "paged": bool(getattr(summary, "paged", False)),
             "stale": int(getattr(summary, "stale", 0) or 0),
             "as_of_max": str(getattr(summary, "as_of_max", "") or ""),
@@ -534,8 +540,18 @@ class DatasetSyncer:
                 s.failed += 1
             else:
                 s.written += int(r)
+                if int(r) == 0:
+                    s.skipped += 1
         if s.written == 0 and s.failed:
             s.problems.append(f"全部 {s.failed} 只财务取数失败")
+        elif s.written == 0 and s.skipped and not s.failed:
+            # ★ 与 :meth:`_sync_event` 同口径的「假成功」护栏：券商连着、接口也调
+            #   通了，但每只都返回空 ⇒ 财报一行没写却被判 ok。
+            #   不记这条，界面上就是「已完成」+ 库里 0 行财报（实测同类形态：
+            #   取数成功但时间字段解析失败 ⇒ 写入 0 行却报成功）。
+            s.problems.append(
+                f"{s.skipped} 只标的财务数据均为空（券商已连接但无内容；"
+                f"请确认该报告期是否已披露，或改用其他数据集）")
 
     # ------------------------------------------------------------------
     # 取数器分派

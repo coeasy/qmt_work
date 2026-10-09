@@ -69,6 +69,8 @@ def _sync_bars_runner(params: dict) -> Runner:
             "failed": int(summary.get("failed") or 0),
             "stale": int(summary.get("stale") or 0),
             "bars_written": int(summary.get("bars_written") or 0),
+            # 写入裁剪后「与本地一致而未重写」的根数：解释「为什么这次只写了这么点」。
+            "bars_unchanged": int(summary.get("bars_unchanged") or 0),
             "as_of_max": summary.get("as_of_max") or "",
             "elapsed_ms": int(summary.get("elapsed_ms") or 0),
             # ---- 全量回补（V11 §5.3 P0-3 III）：这三项缺一不可 ----
@@ -86,7 +88,11 @@ def _sync_bars_runner(params: dict) -> Runner:
             # 后者是这次「压根不用问源」，是日常同步最大的省流来源。
             "skipped_fresh": int(summary.get("skipped_fresh") or 0),
             "errors": errs[:20],
-            "errors_truncated": max(0, len(errs) - 20),
+            # ★ 两层截断必须**合并计数**：``SyncSummary`` 先截到 ``ERRORS_MAX``
+            # （200），这里再截到 20。只算自己这一层的话，全市场 5000 只失败时
+            #   界面看到的是「另有 0 条未列出」—— 明明 4980 条被扔了。
+            "errors_truncated": (int(summary.get("errors_truncated") or 0)
+                                 + max(0, len(errs) - 20)),
         }
 
     async def _run(job: dict) -> dict:

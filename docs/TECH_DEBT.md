@@ -1389,3 +1389,74 @@ cd backend && python -c "from xtquant_client.xtp import read_client_auth_flags a
 
 **关联**：TD-33（诊断工具「假告状」）/ TD-36（假绿灯与孤儿逻辑家族）—— 本条是**假告状**的一个新亚型：
 不是判错方向，而是「证据在文件里、工具却读不到」以及「两种根因共用一个关键字」。
+
+### TD-41（R36，2026-10-10）：数据下载链路的三处「看不见」——每天重写 248 万行、两种「空」不可分、一处把成功写成失败
+
+**背景**：对「数据下载」链路（``app/sync/bars.py`` → ``datasource/registry`` → ``local_store``）
+做实证审计，先量后改。本机实测：``local_bars`` **3 949 926 行 / 7740 个代码**，
+``app.db`` **1.56 GB**（两个月前还是 585 MB）。
+
+**三处缺陷**
+
+1. **写放大：增量同步每天把整个 lookback 窗口重写一遍**。
+   增量拉 ``lookback=320`` 根后整批 ``INSERT OR REPLACE``，而其中约 99% 的行与库里
+   **逐字节相同**。7740 只 × 320 根 ≈ **248 万行/天**的纯重写 —— 磁盘持续膨胀、
+   WAL 疯长、落库线程与在线请求抢写锁（TD-25 同族）。
+   ⇒ 新增**写入裁剪**：只写「本地最新一根之后 + 尾部修正窗口（默认 10 根）」，
+   并把被跳过的根数记进 ``bars_unchanged``（不是静默丢弃）。
+
+2. **``get_kline_range`` 的 ``(None, None)`` 把两种「空」混成一个值**：
+   「链上没有源声明 ``supports_kline_range``」与「这一年确实没有数据」返回完全一样。
+   于是 :meth:`BarsSyncer._fetch_full` 只能靠「第一页空不空」猜，连出两个真 bug ——
+   - **年初**：1 月 1 日前后「今年还没有交易日」 ⇒ 第一页空 ⇒ 被判成
+     「没有源支持区间」⇒ 整只标的退化为单次大 count，**历史永不补齐**；
+   - **退市 / 长期停牌股**：最近几年都没有数据 ⇒ 第一页空就 ``break`` ⇒
+     历史同样一根不补，而汇总仍写着 ``ok``（**假成功**家族新成员）。
+   ⇒ 新增 :meth:`DataSourceManager.kline_range_supported`（**零 RPC 的声明式探测**，
+   三态 ``True/False/None``），把「能力不存在」与「这一年没数据」彻底分开：
+   探测不支持 ⇒ 一次无效 RPC 都不发；探测支持 ⇒ 允许最多 ``FULL_LEAD_EMPTY_MAX``
+   个**前导空年**继续往前翻（拿到数据后遇空年仍立即停，那是上市日边界）。
+
+3. **EOD 备用源续跑把「同步成功」改写成「失败」**（真 bug，静默）：
+   ``f"主源失败 {len(summary.failed)} 只"`` 里 ``SyncSummary.failed`` 是 **int**
+   （不是失败列表）⇒ ``len(int)`` 就地 ``TypeError`` ⇒ 被外层 ``except`` 捕获 ⇒
+   ``steps["bars_sync"]`` 被**覆盖**成 ``{"error": ...}`` ⇒ 快照 quality 随之判
+   ``invalid``。数据明明写进去了，报告却是失败，根因还埋在 ``degraded`` 里。
+
+**顺带修的三种「假信号」**
+
+- ``written == 0`` 不再一律判 ``empty/invalid``：写入裁剪后它可能是
+  「本地已最新、一行都不必写」。EOD / 同步任务的 quality 判据已把
+  ``bars_unchanged > 0`` 计为**有数据**（否则「每天重跑一次同步」天天产出空快照）。
+- 失败明细**两层截断**合并计数（``SyncSummary`` 200 条 + 落库流 20 条），
+  字段名统一为 ``errors_truncated``（此前前端类型声明了它，后端同源链上却不存在）。
+- 财报数据集（``_sync_report``）整批「0 写 0 失败」曾是 ``ok=True`` 的假绿灯，
+  现与 :meth:`_sync_event` 同口径记 ``problems``。
+
+**护栏**：``backend/tests/test_sync_bars_write_trim.py``（10 例，含
+``test_leading_empty_years_no_longer_degrade``「退市股必须补得上」与
+``test_legacy_hub_without_probe_keeps_old_behaviour``「老桩行为逐字不变」两条反腐烂锚）；
+``tests/test_eod_pipeline.py`` 追加 2 例钉死第 3 条。
+
+**证伪方式**：
+```bash
+cd backend && python - <<'PY'
+import asyncio, tempfile, pathlib
+from core.db import DB
+from datasource.local_store import LocalStore
+from app.sync.bars import BarsSyncer
+st = LocalStore(DB(pathlib.Path(tempfile.mkdtemp())/"t.db"))
+st.upsert_bars("600519.SH", [{"time": "20260105", "close": 1}], period="1d", adjust="qfq")
+async def f(*a): return [{"time": "20260105", "close": 1}, {"time": "20260106", "close": 2}]
+s = asyncio.run(BarsSyncer(store=st, fetch_bars=f).sync_many(["600519.SH"]))
+print("written", s.bars_written, "unchanged", s.bars_unchanged)
+PY
+```
+应输出 ``written 2 unchanged 0``（首次拉全写）；再跑一次应变成
+``written 0 unchanged 2`` —— 若两次都是 ``written 2``，说明裁剪没生效。
+
+**状态**：`已修（裁剪 + 探测 + 三处假信号 + 护栏 + 前后端字段贯通）`
+
+**关联**：TD-25（无界等待/写放大）/ TD-31（后端字段前端零消费）/ TD-33·TD-36（假绿灯家族）。
+本条的特殊性：**前两条都不是「报错」，而是「一直在正确地把磁盘写满 / 一直在正确地把历史漏掉」**
+—— 只有量化（行数、GB、翻页次数）才能把它们从日志里揪出来。

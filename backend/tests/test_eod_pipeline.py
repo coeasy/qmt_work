@@ -77,3 +77,63 @@ def test_eod_jobkind_submittable(eod_db, monkeypatch):
     runner = sj._eod_runner({"lookback": 5})
     result = _run(runner({"report": lambda p, m: None}))
     assert "steps" in result
+
+
+def test_eod_fallback_keeps_primary_summary(eod_db, monkeypatch):
+    """备用源续跑**不得**把已成功的主源汇总覆盖成 error（2026-10-10 审计）。
+
+    ★ 钉死的真 bug：``f"主源失败 {len(summary.failed)} 只"`` 里
+    ``SyncSummary.failed`` 是 **int**（不是失败列表），``len(int)`` 就地
+    ``TypeError`` ⇒ 被外层 ``except`` 捕获 ⇒ ``steps["bars_sync"]`` 被写成
+    ``{"error": ...}``，于是「同步明明写进去了」却连快照 quality 一起被判
+    ``invalid`` —— 假失败，且根因深埋在 degraded 里。
+    """
+    monkeypatch.setattr("core.db.get_db", lambda: eod_db)
+    _stub_bars_hub(monkeypatch)
+
+    from app.sync.bars import SyncSummary
+
+    calls: list[str] = []
+
+    async def _fake_sync_stock_list(self, limit=None, progress_cb=None):
+        calls.append(str(self._provider_id))
+        return SyncSummary(started="", finished="", total=2, ok=1, failed=1,
+                           bars_written=2, batch_id="bars-test",
+                           errors=[{"code": "600000.SH", "error": "源无数据"}])
+
+    import app.sync.bars as bars_mod
+    monkeypatch.setattr(bars_mod.BarsSyncer, "sync_stock_list",
+                        _fake_sync_stock_list)
+
+    result = _run(eod_mod.run_eod_pipeline(
+        {"lookback": 5, "primary_provider": "eltdx",
+         "fallback_provider": "tencent"}))
+
+    step = result["steps"]["bars_sync"]
+    assert "error" not in step, step          # ★ 成功结果没被覆盖
+    assert step["bars_written"] == 2
+    assert "fallback" in step                 # 备用源确实续跑了
+    assert step["fallback"]["retried_codes"] == 1
+    assert calls == ["eltdx", "tencent"]
+    # 续跑本身只是降级，不该把整条管线判成失败
+    assert any("备用源续跑" in d for d in result["degraded"])
+
+
+def test_eod_quality_not_invalid_when_all_unchanged(eod_db, monkeypatch):
+    """写入裁剪后 ``written=0`` 但 ``bars_unchanged>0`` ＝ 数据已最新，不是 invalid。"""
+    monkeypatch.setattr("core.db.get_db", lambda: eod_db)
+    _stub_bars_hub(monkeypatch)
+
+    from app.sync.bars import SyncSummary
+
+    async def _fake_sync_stock_list(self, limit=None, progress_cb=None):
+        return SyncSummary(started="", finished="", total=2, ok=2, failed=0,
+                           bars_written=0, bars_unchanged=640,
+                           batch_id="bars-test2")
+
+    import app.sync.bars as bars_mod
+    monkeypatch.setattr(bars_mod.BarsSyncer, "sync_stock_list",
+                        _fake_sync_stock_list)
+
+    result = _run(eod_mod.run_eod_pipeline({"lookback": 5}))
+    assert result["steps"]["snapshot"]["quality_state"] == "provisional"

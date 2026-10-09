@@ -69,6 +69,47 @@ class KlineMixin:
         if isinstance(bars, dict) and bars.get("code"):
             return None
         return bars
+    def kline_range_supported(self, source: str = "auto",
+                              conn_id: Optional[str] = None,
+                              adjust: Optional[str] = None,
+                              period: str = "1d") -> bool:
+        """链上**有没有**源支持按日期区间取 K 线（**零 RPC 的声明式探测**）。
+
+        ★ 为什么需要它（2026-10-10 审计）：:meth:`get_kline_range` 的返回值
+        **无法区分两种「空」** ——
+
+        - 链上没有源声明 ``supports_kline_range`` ⇒ 返 ``(None, None)``；
+        - 链上有源、但该区间**确实没有数据**（早于上市日 / 长期停牌 / 年初）⇒
+          循环走完同样返 ``(None, None)``。
+
+        于是调用方（``BarsSyncer._fetch_full``）只能靠「第一页是不是空」来判断，
+        结果是两个真 bug：**①** 今年 1 月 1 日这种「年内还没有交易日」的场景被
+        误判成「没有源支持区间」，整只标的退化为单次大 count，**历史永不补齐**；
+        **②** 退市股（今年无数据）在第一页就 ``break``，历史同样一根不补。
+
+        本方法只做**声明检查**（不发一次网络请求），所以可以在翻页**之前**问一次，
+        把「能力不存在」与「这一年没数据」彻底分开。
+        """
+        want = self._validate_source(source)
+        # cap 的推导**必须与** :meth:`get_kline_range 逐字一致** —— 探测说「支持」
+        # 而实际调用走了另一条链（qfq 链 vs 不复权链），就又变成「探测骗人」。
+        try:
+            _canon = normalize_period(period)
+        except UnknownPeriodError:
+            _canon = None
+        cap = ("kline_qfq" if (adjust in ("qfq", "hfq")
+                               and _canon in adjust_allowed_periods()) else "kline")
+        for name in self._resolve_sources(want, cap):
+            if name == "broker":
+                b = self._broker(conn_id)
+                if b is not None and _accepts_kline_range(b):
+                    return True
+                continue
+            src = self._plugins.get(name)
+            if src is not None and _accepts_kline_range(src):
+                return True
+        return False
+
     async def get_kline_range(self, code: str, period: str = "1d", *,
                               adjust: Optional[str] = None,
                               start: str = "", end: str = "",

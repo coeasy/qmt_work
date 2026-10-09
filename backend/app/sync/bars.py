@@ -39,6 +39,15 @@ log = logging.getLogger("qmt_work.sync.bars")
 #: 取 10 可覆盖长假而不误判；周末 3 天、清明/五一等短假 3~5 天均在窗口内。
 STALE_DAYS_DEFAULT = 10
 
+#: 写入裁剪时**附带的尾部修正窗口**（根）：只写新数据时，仍把这 N 根旧数据一起
+#: 重写一遍，用于消化复权/除权修正与源端的历史修订。``0`` = 连窗口都不写（最省）。
+#: 取值理由：A 股除权除息与复权因子回溯通常只影响最近几个交易日的收盘价序列，
+#: 10 根（约两周）足以覆盖，代价却只有原来的 3%。
+REWRITE_TAIL_DEFAULT = 10
+
+#: 汇总里保留的失败明细条数上限（超出部分只记数，不记明细）。
+ERRORS_MAX = 200
+
 #: 抓取器签名：(code, period, adjust, count) -> Optional[list[dict|Bar]]
 #: 生产路径返回 ``(bars, source)`` 元组以便落库写入**真实来源名**；注入式测试可返回纯 list。
 FetchBars = Callable[[str, str, str, int], Awaitable[Optional[list]]]
@@ -144,6 +153,11 @@ class SyncOutcome:
     ok: bool = False
     bars_written: int = 0
     error: str = ""
+    #: 因「本地已有且源未更新」而**跳过写入**的根数（写入裁剪，见
+    #: :attr:`BarsSyncer._trim_new`）。与 ``bars_written`` 分开计：
+    #: 「写了 0 根」可能是「源挂了」，也可能是「本来就没新数据」——
+    #: 混成一个数字会让「数据停更」与「一切正常」长得一模一样。
+    bars_unchanged: int = 0
     #: 最后一根 K 线的交易日（``""`` = 未知）。**有数据不等于够新**，
     #: 调用方（任务报告 / 界面）必须同时看这个字段。
     as_of: str = ""
@@ -159,6 +173,7 @@ class SyncOutcome:
     def to_dict(self) -> dict:
         return {"code": self.code, "ok": self.ok,
                 "bars_written": self.bars_written, "error": self.error,
+                "bars_unchanged": self.bars_unchanged,
                 "as_of": self.as_of, "stale": self.stale}
 
 
@@ -174,6 +189,15 @@ class SyncSummary:
     bars_written: int = 0
     elapsed_ms: int = 0
     errors: List[dict] = field(default_factory=list)
+    #: 因超过 ``ERRORS_MAX`` 而**未列入** ``errors`` 的失败条数。
+    #: 全市场 5000+ 只集体失败时（网络断了、源熔断了），把几千条明细塞进汇总
+    #: 再写进 job 结果 / 快照 manifest，只会把真正的失败原因淹掉 ——
+    #: 这里保留前 N 条 + 一个「还有多少条」的计数，既省存储又不丢事实。
+    #:
+    #: ★ 字段名与 ``app.runtime.system_jobs`` 的**对外契约**一致（前端类型里也
+    #:   是这个名）：同步链上有两处截断（本类一层、落库流一层），用两个名字会
+    #:   让「到底截了多少」永远对不上账。
+    errors_truncated: int = 0
     #: 成功但**数据陈旧**的标的数（V11 R13）。
     #: ★ 这是「假成功」的显影剂：``ok`` 很高、``stale`` 也很高 ⇒
     #: 写入了一堆历史数据却宣称完成，界面与报告必须把它摆到台面上。
@@ -196,6 +220,12 @@ class SyncSummary:
     #: 必须与 ``skipped_complete`` **分开计**：前者是「历史已补齐」、后者是「已经够新」，
     #: 混成一个 skipped 会让用户看不出这次到底做了什么（界面上两者含义完全不同）。
     skipped_fresh: int = 0
+    #: 命中写入裁剪、源数据与本地一致而**未重复写库**的根数。
+    #: 与 ``bars_written`` 配对看：``written=0 & unchanged 很大`` = 「一切正常、
+    #: 今天没有新数据」；``written=0 & unchanged=0`` = 「源可能挂了」。
+    #: 没有这个数字，EOD 只能靠 ``written > 0`` 判质量，于是「重跑一次同步」
+    #: 会被判成 ``invalid``（数据其实完整且最新）。
+    bars_unchanged: int = 0
     #: ★ 本批**真正写进** ``local_bars.batch_id`` 的批次号（``bars-<hex>``）。
     #:
     #: 为什么必须暴露出来：数据集快照（``dataset_snapshots``）要按批次回查
@@ -211,7 +241,9 @@ class SyncSummary:
             "started": self.started, "finished": self.finished,
             "total": self.total, "ok": self.ok, "failed": self.failed,
             "bars_written": self.bars_written, "elapsed_ms": self.elapsed_ms,
-            "errors": self.errors, "stale": self.stale,
+            "bars_unchanged": self.bars_unchanged,
+            "errors": self.errors, "errors_truncated": self.errors_truncated,
+            "stale": self.stale,
             "as_of_max": self.as_of_max, "as_of_min": self.as_of_min,
             "mode": self.mode, "paged": self.paged,
             "skipped_complete": self.skipped_complete,
@@ -241,6 +273,11 @@ class BarsSyncer:
     FULL_YEARS_DEFAULT = 12
     #: 退化为单次大 count 时取的根数（12 年 ≈ 2900 个交易日，留足余量）。
     FULL_COUNT_DEFAULT = 3600
+    #: 全量回补容忍的**前导空年**数：最近 ``N`` 年都取不到数据时，仍会再往前翻
+    #: 一年（第 ``N+1`` 页）才放弃。退市股 / 长期停牌股的历史就在更早年，年初
+    #: 「今年还没有交易日」也属于这一类。拿到数据后遇空年不受此限 —— 那是上市
+    #: 日边界，立即停。
+    FULL_LEAD_EMPTY_MAX = 3
 
     def __init__(
         self,
@@ -257,6 +294,8 @@ class BarsSyncer:
         full_years: int = FULL_YEARS_DEFAULT,
         full_count: int = FULL_COUNT_DEFAULT,
         skip_fresh: bool = False,
+        trim_new: bool = True,
+        rewrite_tail: int = REWRITE_TAIL_DEFAULT,
     ):
         self._store = store or get_store()
         self._fetch = fetch_bars or self._default_fetch
@@ -277,6 +316,25 @@ class BarsSyncer:
         self._source = (provider_id or "auto").strip() or "auto"
         self._batch_id = batch_id or f"bars-{uuid.uuid4().hex}"
         self._sem = asyncio.Semaphore(self._concurrency)
+        #: ★ **写入裁剪**（2026-10-10）：增量模式下只把「本地最新一根之后」的
+        #: K 线写库，外加尾部 ``rewrite_tail`` 根做修正窗口。
+        #:
+        #: 为什么必须做：实测本机 ``local_bars`` 已 395 万行、``app.db`` 1.56GB。
+        #: 增量同步每天把 ``lookback=320`` 根 **整窗口重写一遍**（7740 只 × 320
+        #: ≈ 248 万行/天），而这些行 99% 与库里逐字节相同 —— 纯写放大：
+        #: 磁盘持续膨胀、WAL 疯长、落库线程与在线请求抢写锁。
+        #:
+        #: 为什么敢裁剪：``INSERT OR REPLACE`` 的幂等保证是「重复写也一样」，
+        #: 而**复权/除权修正**只影响最近若干根（尾窗口覆盖），历史深处的行
+        #: 不会因为今天同步一次就变。真要强制全量重写就传 ``trim_new=False``。
+        #:
+        #: ★ 只在 **incremental** 生效：``full`` 要补的就是历史区间，裁剪会把它
+        #:   裁没了（那才是「假成功」）。且只在**本地已有该标的数据**时生效 ——
+        #:   库里没有 = 第一次拉，全写。
+        self._trim_new = bool(trim_new)
+        self._rewrite_tail = max(0, int(rewrite_tail or 0))
+        #: 批量读到的「本地最新一根」（code -> dt），供裁剪当基线。空 = 全部首拉。
+        self._local_latest: dict = {}
         #: ``incremental`` 下跳过「本地已有最新一根」的标的（V11 R15）。
         #: 默认关闭 = 保持「每只都问一次源」的原行为；定时/调度场景显式开启。
         self._skip_fresh = bool(skip_fresh)
@@ -329,36 +387,87 @@ class BarsSyncer:
 
         为什么从**今年往前**翻而不是从最早往今年翻：新股上市日未知，往前翻可以
         「遇到空页就停」，页数最少；从最早翻则必然多翻十几年空页。
+
+        ★ 两种「空」必须分开（2026-10-10 审计修）：:meth:`get_kline_range` 对
+        「链上无源支持区间」与「这一年确实没有数据」都返回 ``(None, None)``，
+        靠「第一页空不空」去猜会连出两个真 bug ——
+
+        - **年初空页**：1 月 1 日前后「今年还没有交易日」，第一页返回空 ⇒ 被判成
+          「没有源支持区间」，整只标的退化为单次大 count，**历史永不补齐**；
+        - **退市 / 长期停牌股**：最近几年都没有数据，第一页空就 ``break`` ⇒
+          历史同样一根不补，界面还显示「同步完成」。
+
+        因此先做一次**零 RPC 的声明式探测**（:meth:`kline_range_supported`）
+        把「能力不存在」与「这一年没数据」分开：
+
+        - 探测说不支持 ⇒ 直接退化（**一次无效 RPC 都不发**）；
+        - 探测说支持 ⇒ 逐页翻；**拿到数据之后**遇空年才停（上市日边界）；
+          始终拿不到数据的，允许最多 ``_FULL_LEAD_EMPTY_MAX`` 个前导空年继续往
+          前翻（退市股的历史在更早年），仍全空才如实放弃。
         """
         from core.clock import local_now
+        hub = get_hub()
+        supported = self._range_supported(hub)      # True / False / None(未知)
+        if supported is False:
+            log.debug("全量回补 %s：链上无源支持日期区间，直接退化为单次大 count",
+                      code)
+            return None, "", False
         today = local_now().date()
         merged: list = []
         src_name = ""
         paged = False
+        lead_empty = 0
         year = today.year
         for _ in range(self._full_years):
             start = f"{year}0101"
             end = today.strftime("%Y%m%d") if year == today.year else f"{year}1231"
             try:
-                bars, src = await get_hub().get_kline_range(
+                bars, src = await hub.get_kline_range(
                     code, self._period, adjust=self._adjust,
                     start=start, end=end, source=self._source)
             except Exception as exc:  # noqa: BLE001 单页失败不击穿整只
                 log.debug("全量回补 %s %s 区间取数失败：%s", code, year, exc)
                 bars, src = None, None
-            if bars is None and not paged:
-                # 第一页就说明「没有源支持区间」⇒ 退化，交由调用方走大 count
+            if bars is None and not paged and supported is None:
+                # 「探测未知」的旧路径：第一页拿不到就按「没有源支持区间」处理，
+                # 交由调用方走大 count —— 与改造前逐字一致（老 hub / 注入桩）。
                 return None, "", False
             paged = True
             if not bars:
-                # 该年无数据 = 早于上市日（或已到更早的边界）⇒ 停止向前翻页
-                break
-            merged.extend(bars)
-            src_name = src or src_name
+                if merged:
+                    # 已拿到数据后遇空年 = 到上市日（或更早的边界）⇒ 停止向前翻页
+                    break
+                if supported is None:
+                    break        # 未知态：保持「空页即停」的旧行为
+                # 前导空年：今年可能还没有交易日，也可能是退市股 —— 允许再往前翻几页
+                lead_empty += 1
+                if lead_empty > self.FULL_LEAD_EMPTY_MAX:
+                    break
+            else:
+                merged.extend(bars)
+                src_name = src or src_name
             year -= 1
         if not paged:
             return None, "", False
         return _dedupe_bars(merged), src_name, True
+
+    def _range_supported(self, hub) -> Optional[bool]:
+        """链上有无源支持区间取数：**True / False / None（未知）**三态。
+
+        ★ 为什么是三态而不是布尔：``get_hub()`` 在测试与部分集成路径里常被换成
+        只实现 ``get_kline_range`` 的**注入桩**，探测方法不存在。此时返回
+        ``None`` 让 :meth:`_fetch_full` 走**改造前**的判据（第一页空即退化），
+        既有行为与既有测试逐字不变；真实 hub 有探测方法才拿到新语义。
+        """
+        probe = getattr(hub, "kline_range_supported", None)
+        if not callable(probe):
+            return None
+        try:
+            return bool(probe(self._source, adjust=self._adjust,
+                              period=self._period))
+        except Exception as exc:  # noqa: BLE001 探测失败不拦路：按「未知」走原路径
+            log.debug("区间能力探测失败（按未知处理）：%s", exc)
+            return None
 
     def _target_start(self) -> str:
         """全量回补的目标起点（``YYYYMMDD``）：``full_years`` 年前的 1 月 1 日。"""
@@ -452,6 +561,11 @@ class BarsSyncer:
             # 一年多前却照样非空，不标注就会让「同步完成」变成一句谎话。
             as_of = bars_last_date(bars)
             stale = self._stale_days > 0 and _is_stale(as_of, self._stale_days)
+            # ★ as_of_min 用**裁剪前**的 bars：它回答的是「源这次给到了多早」，
+            #   裁剪只影响写多少，不该把「源覆盖范围」改成一个窗口起点。
+            as_of_min = _bars_first_date(bars)
+            # 写入裁剪：只写「本地最新之后 + 尾部修正窗口」（见 __init__ 说明）。
+            bars, unchanged = self._trim_bars(code, bars)
             if stale:
                 log.info("sync %s 数据陈旧：as_of=%s（要求 >= %s）", code, as_of,
                          self._min_date())
@@ -469,8 +583,39 @@ class BarsSyncer:
             except Exception as exc:  # noqa: BLE001
                 return SyncOutcome(code=code, error=f"落库失败：{exc}", paged=paged)
             return SyncOutcome(code=code, ok=True, bars_written=n,
+                               bars_unchanged=unchanged,
                                as_of=as_of, stale=stale, paged=paged,
-                               as_of_min=_bars_first_date(bars))
+                               as_of_min=as_of_min)
+
+    def _trim_bars(self, code: str, bars: list) -> tuple[list, int]:
+        """写入裁剪：丢掉「本地已有且不可能因本次同步而改变」的行。
+
+        返回 ``(待写 bars, 因一致而跳过的根数)``。三种情况**原样返回**（不裁剪）：
+
+        1. ``trim_new`` 关闭 / ``full`` 模式 —— 全量回补要的就是历史区间；
+        2. 本地没有这只标的的记录 —— 第一次拉，全写；
+        3. 本地记录比源还新或源日期无法解析 —— 判断不了就不动手，宁可多写。
+        """
+        if not self._trim_new or self._mode == "full":
+            return bars, 0
+        cut = str(self._local_latest.get(code) or "")
+        if not cut:
+            return bars, 0
+        dated = [(bar_date(_bar_time(b)), b) for b in bars or []]
+        if not any(d for d, _ in dated):
+            return bars, 0                       # 日期全不可解析：交给落库去丢弃
+        newer = [d for d, _ in dated if d and d > cut]
+        if not newer:
+            # 源没有任何比本地新的数据 ⇒ 一行都不写，但**如实计为 unchanged**
+            return [], len(bars)
+        if self._rewrite_tail <= 0:
+            keep = {d for d in newer}
+            return [b for d, b in dated if d in keep], len(bars) - len(newer)
+        older = sorted({d for d, _ in dated if d and d <= cut})
+        floor = older[-self._rewrite_tail] if len(older) > self._rewrite_tail else (
+            older[0] if older else newer[0])
+        keep = [b for d, b in dated if d and d >= floor]
+        return keep, len(bars) - len(keep)
 
     async def sync_many(self, codes: Sequence[str],
                         progress_cb: Optional[Callable[[int, int, str], None]] = None,
@@ -492,6 +637,23 @@ class BarsSyncer:
         t0 = time.perf_counter()
         done = 0
         total = len(codes)
+        # 写入裁剪的基线：一次 GROUP BY 拿回全部标的最新一根（不是逐只问）。
+        # 只在增量模式 + 开裁剪时读，全量回补不必付这次查询。
+        #
+        # ★ **不能**用 ``asyncio.to_thread``：``DB._read_conn`` / ``IntradayStore``
+        #   的只读连接是**惰性创建且绑定创建线程**的（sqlite3 默认
+        #   ``check_same_thread=True``）。在 worker 线程里首次触发建连，之后再从
+        #   事件循环所在线程读同一连接会抛
+        #   ``ProgrammingError: SQLite objects created in a thread ...``
+        #   （实测：分钟线数据集同步即在此炸掉）。这里与 :meth:`_filter_fresh`
+        #   保持一致——同步读，代价是一次批量 GROUP BY（全市场约 0.3s）。
+        if self._trim_new and self._mode != "full" and codes:
+            try:
+                self._local_latest = self._store.latest_dt_map(
+                    list(codes), self._period, self._adjust)
+            except Exception as exc:  # noqa: BLE001 读失败 = 按「都没有」处理（全写）
+                log.warning("写入裁剪基线读取失败（本次全量重写）：%s", exc)
+                self._local_latest = {}
 
         async def _tracked(code: str):
             nonlocal done
@@ -520,6 +682,11 @@ class BarsSyncer:
                 outcomes.append(out)
         ok = [o for o in outcomes if o.ok]
         failed = [o for o in outcomes if not o.ok]
+        err_list = [o.to_dict() for o in failed]
+        omitted = 0
+        if len(err_list) > ERRORS_MAX:
+            omitted = len(err_list) - ERRORS_MAX
+            err_list = err_list[:ERRORS_MAX]
         summary = SyncSummary(
             started=started,
             finished=now_iso(),
@@ -527,8 +694,10 @@ class BarsSyncer:
             ok=len(ok),
             failed=len(failed),
             bars_written=sum(o.bars_written for o in ok),
+            bars_unchanged=sum(o.bars_unchanged for o in ok),
+            errors=err_list,
+            errors_truncated=omitted,
             elapsed_ms=int((time.perf_counter() - t0) * 1000),
-            errors=[o.to_dict() for o in failed],
             stale=sum(1 for o in ok if o.stale),
             as_of_max=max((o.as_of for o in ok if o.as_of), default=""),
             # 全批中**最早**的一根：只报「写入了 N 根」回答不了
@@ -547,6 +716,9 @@ class BarsSyncer:
             # 回查 local_bars，否则算出来的 row_count 恒为 0。
             batch_id=self._batch_id,
         )
+        # 裁剪基线用完即清：它是**本批**的快照，留到下一批会把「上次的最新一根」
+        # 当成「这次的最新一根」，于是新数据可能被裁掉（静默漏同步）。
+        self._local_latest = {}
         # 分钟仓（IntradayStore）没有 meta 表——它有自己独立的 SQLite 文件，
         # 同步时间已由 :mod:`app.sync.datasets` 记到主库
         # ``dataset.<id>.last_sync_at``。这里必须容错，否则分钟线同步会在
@@ -557,8 +729,14 @@ class BarsSyncer:
             log.warning("同步完成：ok=%d failed=%d（%s）", summary.ok,
                         summary.failed, "; ".join(e["code"] for e in summary.errors[:5]))
         else:
-            log.info("同步完成：ok=%d bars=%d elapsed=%dms",
-                     summary.ok, summary.bars_written, summary.elapsed_ms)
+            log.info("同步完成：ok=%d bars=%d unchanged=%d elapsed=%dms",
+                     summary.ok, summary.bars_written, summary.bars_unchanged,
+                     summary.elapsed_ms)
+        # ★ 裁剪生效时必须说清楚「省了多少」：否则 written 骤降会被误读成
+        #   「源不给数据了」——而它恰恰是「一切都好，今天没有新数据」的证据。
+        if summary.bars_unchanged:
+            log.info("写入裁剪：%d 根与本地一致已跳过重写（尾部修正窗口 %d 根仍写）",
+                     summary.bars_unchanged, self._rewrite_tail)
         # ★ 陈旧必须显式报警：ok 高 + stale 高 = 写了大量历史数据却宣称完成，
         # 这是最容易被忽略的失败（界面显示「已完成」，数据其实没更新）。
         if summary.stale:

@@ -677,8 +677,14 @@ def sync_runner(params: dict) -> Runner:
         try:
             from core.db import get_db
             from datasource.snapshots import DatasetSnapshotStore
-            quality = ("complete" if not summary.failed and summary.bars_written > 0
-                       else "partial" if summary.bars_written > 0 else "empty")
+            # ★ 写入裁剪后「bars_written == 0」有两种相反的含义：源挂了（真空转）
+            #   与「本地已最新、一行都不必重写」（真正常）。只看 written 会把后者
+            #   判成 ``empty``，于是「每天重跑一次同步」天天产出空快照。
+            _written = int(summary.bars_written or 0)
+            _unchanged = int(getattr(summary, "bars_unchanged", 0) or 0)
+            quality = ("complete" if not summary.failed and _written > 0
+                       else "complete" if (not summary.failed and _unchanged > 0)
+                       else "partial" if _written > 0 else "empty")
             # ★ 批次号必须用**同步器实际写库用的那个**（``bars-<hex>``）。
             #   此前传 ``summary.finished``（ISO 时间戳）当批次号 ⇒ 快照回查
             #   ``local_bars`` 永远 0 行，于是每份快照都写着 row_count=0 却标 complete。

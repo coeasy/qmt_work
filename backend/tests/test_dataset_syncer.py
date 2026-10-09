@@ -472,7 +472,12 @@ def test_bars_dry_run_is_readonly(monkeypatch, tmp_path):
     s = _run(DatasetSyncer("bars_5m", codes=["600000.SH"], mode="incremental",
                            intraday_store=st, dry_run=True).sync())
     assert s.ok, s.problems
-    assert s.written == 1, (s.problems, s.detail)
+    # ★ 源给的最后一根（20261008）与本地已有的一致 ⇒ 写入裁剪后**真跑也写 0 根**，
+    #   dry run 必须与真跑同口径（预演不能比实跑更乐观）。被裁掉的那 1 根记在
+    #   ``bars_unchanged`` / ``skipped`` 里，不是凭空消失。
+    assert s.written == 0, (s.problems, s.detail)
+    assert s.detail.get("bars_unchanged") == 1, s.detail
+    assert s.skipped == 1, (s.skipped, s.detail)
     assert s.dry_run is True
     assert st.count("5m") == 1, "dry_run 不应写入新数据"
     assert "dry_run" in s.detail.get("dry_run_note", "")

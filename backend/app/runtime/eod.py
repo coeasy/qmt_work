@@ -87,22 +87,33 @@ async def run_eod_pipeline(params: dict) -> dict:
         summary = await primary.sync_stock_list(
             limit=int(params.get("limit") or 0) or None, progress_cb=_cb)
         sync_summary = summary.to_dict()
-        if summary.failed and str(params.get("fallback_provider") or ""):
-            fallback = BarsSyncer(
-                concurrency=int(params.get("concurrency") or 8),
-                lookback=int(params.get("lookback") or 320),
-                provider_id=str(params["fallback_provider"]),
-                batch_id=str(params.get("batch_id") or "") or None)
-            summary2 = await fallback.sync_stock_list(
-                limit=int(params.get("limit") or 0) or None, progress_cb=_cb)
-            sync_summary["fallback"] = summary2.to_dict()
-            sync_summary["fallback"]["retried_codes"] = len(summary.failed)
-            degraded.append(
-                f"sync: 主源失败 {len(summary.failed)} 只，已按备用源续跑")
-        steps["bars_sync"] = sync_summary
     except Exception as exc:  # noqa: BLE001
         degraded.append(f"bars_sync: {exc}")
         steps["bars_sync"] = {"error": str(exc)}
+    else:
+        steps["bars_sync"] = sync_summary
+        # ★ 备用源续跑**独立** try/except：这段抛异常绝不能把上面已经成功的
+        #   sync_summary 覆盖成 ``{"error": ...}``。
+        #   实测隐患（2026-10-10 审计）：原实现写 ``len(summary.failed)``，而
+        #   ``SyncSummary.failed`` 是 **int**（不是失败列表）⇒ ``len(int)``
+        #   就地 TypeError ⇒ 被外层 except 捕获 ⇒ 同步明明写进去了，步骤却被
+        #   改写为 error，快照 quality 随之被判 invalid（假失败）。
+        try:
+            if int(summary.failed or 0) > 0 and str(params.get("fallback_provider") or ""):
+                fallback = BarsSyncer(
+                    concurrency=int(params.get("concurrency") or 8),
+                    lookback=int(params.get("lookback") or 320),
+                    provider_id=str(params["fallback_provider"]),
+                    batch_id=str(params.get("batch_id") or "") or None)
+                summary2 = await fallback.sync_stock_list(
+                    limit=int(params.get("limit") or 0) or None, progress_cb=_cb)
+                sync_summary["fallback"] = summary2.to_dict()
+                sync_summary["fallback"]["retried_codes"] = int(summary.failed or 0)
+                degraded.append(
+                    f"sync: 主源失败 {int(summary.failed or 0)} 只，已按备用源续跑")
+        except Exception as exc:  # noqa: BLE001 续跑失败只降级，不否定主源结果
+            degraded.append(f"sync.fallback: {exc}")
+            sync_summary["fallback_error"] = str(exc)
     _report(70, "bars sync done")
 
     # 4) reconcile（跨源对账；冲突保留全部 raw）
@@ -131,8 +142,13 @@ async def run_eod_pipeline(params: dict) -> dict:
             #   `failed_count`。读错键 ⇒ 恒为 0 ⇒ 「全市场同步大面积失败」也算
             #   failed==0 ⇒ 快照 quality 被标成假 `final`，下游选股/回测都信它。
             failed = int(steps["bars_sync"].get("failed") or 0)
-            quality = "final" if (failed == 0 and written > 0 and not degraded) else (
-                "provisional" if written > 0 else "invalid")
+            # ★ 写入裁剪后「written=0」有两种完全相反的含义：源挂了（真失败）
+            #   与「本地已最新、一行都不必写」（真正常）。不看 ``bars_unchanged``
+            #   就会把后者判成 ``invalid``，而数据其实是完整且最新的。
+            unchanged = int(steps["bars_sync"].get("bars_unchanged") or 0)
+            have_data = written > 0 or unchanged > 0
+            quality = "final" if (failed == 0 and have_data and not degraded) else (
+                "provisional" if have_data else "invalid")
         # ★ 批次号取**同步汇总里的真实批次号**：EOD 的 params 里通常没有 batch_id，
         #   此时 BarsSyncer 会内部生成 ``bars-<hex>`` —— 必须把它捞出来回查，
         #   否则快照 row_count 恒为 0（见 datasource/snapshots.py 的说明）。

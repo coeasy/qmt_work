@@ -393,6 +393,12 @@ export interface SyncRunRecord {
     skipped_complete?: number;
     /** 降级原因（如「全量回补未生效」），有值即表示结果与名义模式不符 */
     degraded_reason?: string;
+    /**
+     * 写入裁剪后「与本地一致而未重写」的根数（2026-10-10）。
+     * 它解释了一件否则会被误读的事：`bars_written` 变小/为 0 **不是**源不给数据了，
+     * 而是本地已经最新、不必重写。没有它，「写入 0 根」会被当成同步失败。
+     */
+    bars_unchanged?: number;
     errors?: Array<{ code?: string; error?: string }>;
     errors_truncated?: number;
     params?: Record<string, unknown>;
