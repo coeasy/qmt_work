@@ -291,10 +291,21 @@ class XTPQuantAdapter(QuotesMixin, AccountMixin, TradingMixin, InstrumentMixin, 
             # 连不上并不代表另一模式也连不上——例如完整版大客户端未以「极简模式」登录、
             # 而极速版 miniQMT 已登录的情况。故按序尝试，命中即成功。
             candidate_dirs = [trade_dir]
+            # 「首选判定」快照：诊断文案与日志取证必须锚在它上面（见下方 trader is None
+            # 分支的注释）。`used_dir` 会随回退循环前进到最后一个候选，语义是
+            # 「最后试过的」，不能冒充「解析判定的」。
+            primary_dir, primary_mode = trade_dir, resolved_mode
             _alt_dir, _alt_mode = _effective_trade_dir(
                 self.client_path, "mini" if resolved_mode != "mini" else "full")
             if _alt_dir and _alt_dir != trade_dir and os.path.isdir(_alt_dir):
                 candidate_dirs.append(_alt_dir)
+            # 目录 -> 模式 的权威映射：回退后报告的是「停在了哪个模式的目录」，
+            # 而 `endswith("userdata_mini")` 这种后缀猜测在**目录未解析出来**时
+            # （_effective_trade_dir 回落 client_path + "auto"）会把它误标成 full ——
+            # 用户看到「模式 full」却连目录都没有，只会更迷惑。故优先查表，后缀仅兜底。
+            _dir_modes = {os.path.normcase(trade_dir): resolved_mode}
+            if _alt_dir:
+                _dir_modes[os.path.normcase(_alt_dir)] = _alt_mode
             trader = None
             last_err = ""
             used_dir = trade_dir
@@ -309,7 +320,8 @@ class XTPQuantAdapter(QuotesMixin, AccountMixin, TradingMixin, InstrumentMixin, 
                     budget_exhausted = True
                     break
                 used_dir = d
-                resolved_mode_final = ("mini" if d.endswith("userdata_mini") else "full")
+                resolved_mode_final = _dir_modes.get(os.path.normcase(d)) or (
+                    "mini" if d.endswith("userdata_mini") else "full")
                 for attempt in range(6):
                     if time.monotonic() >= deadline:
                         budget_exhausted = True
@@ -337,12 +349,24 @@ class XTPQuantAdapter(QuotesMixin, AccountMixin, TradingMixin, InstrumentMixin, 
             trade_dir = used_dir
             if trader is None:
                 _exe_procs = _running_client_exes()
-                _login_log = _latest_login_log(trade_dir)
+                # ★ 2026-10-09 修（真机实测）：诊断必须锚在**首选判定的模式/目录**上。
+                #
+                # 旧实现用 `trade_dir`（== `used_dir` == **最后一个试过的**目录）去做
+                # 日志取证与文案，于是实跑大客户端（首选 full / userdata）失败时：
+                #   ① 文案打成「解析判定 @mini」—— 把用户指向极简版配置，方向被带偏
+                #      （明明是 `XtItClient.exe` 在跑，解析结果本就是 full）；
+                #   ② 登录日志取到 `userdata_mini/log/XtMiniQmt_<数天前>.log`
+                #      —— 一份与当前运行客户端**无关的过期小 QMT 日志**，
+                #      真正的证据（今日 `XtClient_YYYYMMDD.log` 的授权串 / 拒绝记录）
+                #      反而被丢掉。
+                # 现改为：取证与文案一律用 primary_dir（首选目录）；备用目录只作为
+                # 「已依次回退尝试」的事实列出。
+                _login_log = _latest_login_log(primary_dir or trade_dir)
                 # ★ 客户端侧根因诊断（2026-09-28 新增）：读客户端交易日志，识别
                 # 「严格连接校验 / PID 未授权」等新版本才有的拒绝原因，把证据
                 # 直接放进报错文案——而不是让用户去猜「登录模式/路径/session/权限」。
                 try:
-                    _diag = _shell_attr("diagnose_trade_connect")(trade_dir)  # monkeypatch 兼容：经壳模块动态查找（见 _common._shell_attr）
+                    _diag = _shell_attr("diagnose_trade_connect")(primary_dir or trade_dir)  # monkeypatch 兼容：经壳模块动态查找（见 _common._shell_attr）
                 except Exception:  # noqa: BLE001  诊断失败绝不阻断报错
                     _diag = {}
                 _diag = _diag if isinstance(_diag, dict) else {}
@@ -371,7 +395,10 @@ class XTPQuantAdapter(QuotesMixin, AccountMixin, TradingMixin, InstrumentMixin, 
                     f"  1) 客户端进程：{_exe_procs or '未检测到'}；\n"
                     f"  2) 尝试的数据目录（按顺序）：{tried or (trade_dir or '（无）')}；\n"
                     f"  3) 配置客户端模式：client_mode={self._client_mode}"
-                    f"，解析判定 @{resolved_mode_final}。\n"
+                    f"，**首选判定 @{primary_mode}**（{primary_dir or '（无）'}）"
+                    f"，回退后停在 @{resolved_mode_final}。\n"
+                    f"     ↳ 首选模式才是「按实际运行客户端解析出来的事实」；"
+                    f"回退只说明另一模式的目录也试过，不代表解析结论变了。\n"
                     f"### 官方四步排查（迅投 FAQ）\n"
                     f"  ① [极简模式] QMT 登录时是否勾选「极简模式」——完整版大客户端未以"
                     f"极简模式登录时，外部 API 交易连接（XtQuantTrader）会返回 rc=-1；\n"
@@ -381,9 +408,18 @@ class XTPQuantAdapter(QuotesMixin, AccountMixin, TradingMixin, InstrumentMixin, 
                     f"间隔需 >3 秒）；\n"
                     f"  ④ [权限] 若以上均正确仍 rc=-1，才是【资金账号未开通 QMT "
                     f"「程序化交易/策略交易权限」】（仅「基础交易权限」不够），联系券商核实。\n"
-                    f"建议优先：运行并登录极速版 bin.x64\\XtMiniQmt.exe（登录时勾选极简"
-                    f"模式），或以极简模式重新登录完整版客户端后再连接。"
-                    f"（客户端登录日志 {_login_log}）")
+                    # ★ 建议必须**跟着首选模式走**：大客户端在跑却建议「去装极速版」，
+                    #   等于让用户换一套体系（另一个数据目录 / 另一套登录），成本与风险
+                    #   都被无谓放大。大客户端场景下最省事的路是「同一客户端勾极简模式」。
+                    + ("建议优先：**以极简模式重新登录完整版大客户端**"
+                       "（登录界面勾选「极简模式」）—— 这是让外部 API 交易连接可用、"
+                       "同时不改变数据目录（userdata）的最省事路径；"
+                       "若券商客户端无该勾选项，再考虑运行并登录极速版 "
+                       "bin.x64\\XtMiniQmt.exe（数据目录将变为 userdata_mini）。\n"
+                       if primary_mode == "full" else
+                       "建议优先：运行并登录极速版 bin.x64\\XtMiniQmt.exe（登录时勾选极简"
+                       "模式），或以极简模式重新登录完整版客户端后再连接。\n")
+                    + f"（客户端登录日志 {_login_log}）")
             resolved_mode = resolved_mode_final
             if self._account_type not in _acc_classes:
                 raise BrokerNotConnectedError(

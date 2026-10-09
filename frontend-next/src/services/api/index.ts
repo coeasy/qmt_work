@@ -181,6 +181,7 @@ export type {
 } from "./datasets";
 export type {
   QmtAgentBundle,
+  QmtAgentCapability,
   QmtAgentConfigResponse,
   QmtAgentDeployInput,
   QmtAgentDeployResult,

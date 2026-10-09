@@ -35,6 +35,38 @@
 
 > 行业背景：券商正逐步收紧 MiniQMT 外部直连，未来主战场是大 QMT 完整版。大 QMT 也正被同一套授权串体系收紧，所以「大 QMT 策略桥（路径 B）」是必须掌握的最终兜底形态。
 
+### 0.1 双模式自动识别与启动（2026-10-09 起）
+
+qmt_work **同时支持大小 QMT**，且**你启动哪个客户端，平台就用哪个模式**——这项判定不再靠猜，而是按本机**实际运行的进程**得出，并在界面上标明依据。
+
+**判定优先级（`discovery.mode_from_proc` + `pick_representative_proc`）：**
+
+| 本机实跑的进程 | 判定模式 | 交易数据目录 |
+| --- | --- | --- |
+| `XtItClient.exe`（大 QMT 主程序） | `full` | `<根>/userdata` |
+| `XtMiniQmt.exe`（小 QMT 主程序） | `mini` | `<根>/userdata_mini` |
+| 两者同时运行 | `full`（**确定性**优先，与连接层 `_effective_trade_dir` 口径一致） | `<根>/userdata` |
+| 只有 `miniquote.exe`（独立行情子进程） | **不判定**（由目录布局兜底） | 按目录存在性 |
+
+> **`miniquote.exe` 不是小 QMT。** 它是**行情子进程**：既可由极速版拉起，也可作为大 QMT 的「独立行情」子进程运行。它**不决定**交易数据目录，因此**不能**用来推断模式（历史缺陷：被误判为 `mini` ⇒ 大客户端机器被建议 `userdata_mini` ⇒ 交易必然 `rc=-1`）。
+
+**界面上的两条可见证据**（「券商连接」页 · 检测到的本地客户端）：
+
+- 模式徽章：`完整版（大 QMT）` / `极速版（小 QMT）` / `自动识别`；
+- 依据徽章：`按运行进程判定`（绿，实测）/ `按目录布局推断`（灰，推测）。
+  两者外观**刻意不同**——否则「实测」与「猜的」无法区分，也就无法验收。
+
+**一键启动三个入口**（每个候选都有，各自独立）：
+
+| 按钮 | 启动的 exe | 数据目录 | 何时用 |
+| --- | --- | --- | --- |
+| 启动大 QMT | `bin.x64/XtItClient.exe` | `userdata` | 要用完整版（含策略桥 B） |
+| 启动小 QMT | `bin.x64/XtMiniQmt.exe` | `userdata_mini` | 券商只给了极速版 |
+| 仅补行情 | `bin.x64/miniquote.exe` | 不涉及 | 大 QMT 已在跑但 58610 无服务 |
+
+> 三者**互不冒充**：大 QMT 在跑**不会**挡住「启动小 QMT」（历史缺陷：三者共享一个「小窗口在跑」标志 ⇒ 想启动极速版被误报「已在运行」，永远拉不起来）。
+> GUI 程序启动后需**你在弹出的窗口里完成登录**；接口只负责拉起进程。
+
 ---
 
 ## 1. 概念与本质差异
@@ -528,14 +560,22 @@ qmt_work 对上层暴露的接口（行情 / 交易 / 账户 / 持仓 / 订阅 /
 
 ## 7. 故障排查
 
-### 7.1 交易连不上：`connect ret error-1` / `pid X not allowed`
+### 7.1 交易连不上：先分清**两种**日志特征（2026-10-09 细化）
 
-- **根因**：券商下发授权串 `mdl_auth_xttrader/xtdata_strict_connection_check=1` 且 `no_pid_check=0`，QMT 对**外部 xtquant 进程做 PID 白名单校验**。日志特征：`quant session N, pid X not allowed, return` + `connect ret error-1`。
-- **行情 vs 交易**：行情 `xtdata` 通常正常，**仅交易 connect 返 `rc=-1`**。
-- **平台无法改写**：这是券商客户端内部行为。处理：
+`XtQuantTrader.connect()` 返 `rc=-1` 有**两种**互不相同的根因，处置方向**完全相反**。平台会读客户端日志自动分流（`xtquant_client/xtp/diagnostics.py::diagnose_trade_connect`），并在失败文案的**首句**给出对应结论与「别往哪查」。
+
+| 日志特征 | 授权串 | 真实含义 | 处置方向 |
+| --- | --- | --- | --- |
+| `The XtQuantServer is not allowed to start.` | `mdl_auth_gt_ipc_pair=0`、`mdl_auth_xtquant=0` | 券商**未给该资金账号下发 xtquant 模块授权** ⇒ 客户端**根本不启动**量化服务 | **申请 xtquant / 程序化交易模块授权**（**不是**加白名单！） |
+| `quant session N, pid X not allowed, return` + `connect ret error-1` | `mdl_auth_xttrader_strict_connection_check=1` | 严格连接校验按 **PID** 拉黑了调用进程 | 把 `qmt_work.exe` 加进客户端白名单，或请券商关闭严格校验 |
+| 以上均无，仅 `mdl_auth_xtquant=0` | `mdl_auth_xtquant=0` | 纯模块授权未下发，量化通道未开放 | 同第一种 |
+
+- **行情 vs 交易**：两种情况行情 `xtdata` 通常都正常，**仅交易 connect 返 `rc=-1`**。
+- **平台无法改写**：授权由券商服务端下发，属客户端内部行为。处理：
   - 小 QMT → 引导找券商放开授权（或换支持外部直连的客户端）。
-  - 大 QMT → 切到 §5 策略桥（路径 B），绕开外部直连。
-- **授权串位置**：只在客户端日志**头部**（不在 tail）；日志按 `_log_rank` 选（交易主 2 > 辅助 1 > 行情 0），不能只按 mtime 取最新。
+  - 大 QMT → 切到 §5 策略桥（路径 B），绕开外部直连（**不受 PID 白名单限制**）。
+- **⚠️ 别按错方向排查**：把第①种当成第②种，就会去「加白名单 / 重装 SDK / 检查行情登录 / 会话冲突」——**全部无效**。旧版正是这么误报的（原因与修复见 §7.10）。
+- **授权串读法**：它在客户端日志里，**偏移随当天日志增长而增大**（实测 17.2MB 的日志里在 **1.57MB** 处），因此读取必须是**全文件扫描**而非固定头/尾窗口；日志按 `_log_rank` 选（交易主 2 > 辅助 1 > 行情 0），不能只按 mtime 取最新。
 
 ### 7.2 心跳假存活（文件残留 ≠ 在跑）
 
@@ -572,6 +612,70 @@ qmt_work 对上层暴露的接口（行情 / 交易 / 账户 / 持仓 / 订阅 /
    再跑 `qmt_agent_verify.py`，当它显示心跳新鲜且 `probe_stale: false` 时，才算**真正闭环**。
 
 > 这三步是判定「大 QMT 到底能不能跑」的唯一可靠口径：**文件在 ≠ 已注册，注册了 ≠ 在运行，运行过 ≠ 现在还在跑**。
+
+### 7.7 大 QMT 直连 `rc=-1`：先看「极简模式」勾没勾（2026-10-09 细化）
+
+> 先读 §7.1 做**根因分流**：本节的「极简模式」是**环境侧**的常见诱因，而「模块未授权 / PID 拉黑」是**券商侧**的授权问题。客户端的**权威结论**以 `diagnose_trade_connect` 的分流结果为准，本节只作补充解释。
+
+`XtQuantTrader.connect()` 恒返 `-1`，而 `~/.xtquant` 不存在、58610 也没有监听——这是**大 QMT 未以「极简模式」登录**的**特征签名**（迅投 FAQ 第①条）。
+此时平台给出的诊断已改为**锚在首选判定**上，例如：
+
+```
+3) 配置客户端模式：client_mode=auto，**首选判定 @full**（...\userdata），回退后停在 @mini。
+   ↳ 首选模式才是「按实际运行客户端解析出来的事实」；回退只说明另一模式的目录也试过，不代表解析结论变了。
+```
+
+**注意读法**：`回退后停在 @mini` 只表示「另一个目录也试过」，**不代表**你的客户端是小 QMT。
+历史缺陷：旧版把这一行直接打成「解析判定 @mini」，把用户指向极简版配置，方向被带偏。
+
+**对策（按成本从低到高）**：
+
+1. 在大 QMT 登录界面**勾选「极简模式」**重新登录 —— 数据目录仍是 `userdata`，最省事；
+2. 启动 `bin.x64/XtMiniQmt.exe`（点界面上的「启动小 QMT」）—— 数据目录变为 `userdata_mini`，等于换一套登录体系；
+3. 走「大 QMT 策略桥（路径 B）」（§5）—— 完全绕开外部 `XtQuantTrader`。
+
+### 7.8 大 QMT 有行情吗？——大窗口 58600 **只管交易**（2026-10-09）
+
+| 端口 | 由谁监听 | 提供什么 |
+| --- | --- | --- |
+| 58600 | `XtItClient.exe`（大 QMT 主程序） | **仅**客户端自有 IPC / 交易，**不提供** xtdata 的行情 RPC |
+| 58610 | `miniquote.exe` | xtdata 行情 RPC（`get_full_tick` / `get_market_data`…） |
+
+所以「大 QMT 已登录」**不等于**「行情可用」。`get_full_tick` 抛 `Exception: 无法连接行情服务！` 时，agent 会在自检里如实报 `quote_call` 异常并打印根因/出路；平台会把 `quote` 能力判为**不可用**（不再是「函数在就算支持」的假绿灯）。
+
+**出路**：在大 QMT 里开「独立行情 / 极简模式」拉起 `miniquote`（界面上的「仅补行情」按钮就是干这个），或让策略以**公式模式**挂载（走 `ContextInfo` 的行情方法，不经本地 58610 服务）。
+
+### 7.9 策略进程「启动即停止」却没有报错 —— 先查宿主 `PYTHONPATH`（2026-10-09）
+
+QMT 内置解释器是 **Python 3.6.8**。若调用方（conda / pyenv / IDE / 各类工具 shim）设置了 `PYTHONPATH`，该路径下的 `sitecustomize.py` / `usercustomize.py` 会被 **QMT 的 py3.6 一并导入**。
+
+实测症状：策略日志只到「agent 就绪」就断，随后
+
+```
+[safe-delete][...] __init__() got an unexpected keyword argument 'capture_output'
+return code: 1
+```
+
+（一个为 py3.7+ 写的 `sitecustomize` 用了 `subprocess.run(capture_output=...)`，py3.6 没有该参数。）
+
+**平台已修**：`qmt_agent_local_run.py` 拉起 QMT 解释器时会剥掉 `PYTHONPATH` / `PYTHONHOME` / `PYTHONSTARTUP` / `PYTHONEXECUTABLE`（**只剥这四个**，`PATH` / `SystemRoot` 一律保留——整体丢弃 `os.environ` 会让 `pythonw.exe` 根本起不来）。
+
+> 为什么必须剥而不是保留：**QMT 客户端自己拉起策略时用的是它自己的环境**，根本不带用户 shell 的 `PYTHONPATH`。保留它 = 验证环境与真实运行环境不一致，验出来的「通过/不通过」都不作数。
+> 手工排查：`set PYTHONPATH=`（cmd）或在 PowerShell 里 `Remove-Item Env:PYTHONPATH` 后再启动策略。
+
+### 7.10 诊断报「无明确证据」，其实是**读不到**（2026-10-09 修）
+
+- **症状**：客户端日志里白纸黑字写着 `The XtQuantServer is not allowed to start.`，可 `/brokers/test` 的失败文案只说「无明确证据」，且 `auth.found=false`。
+- **根因（已修）**：旧实现只读**固定窗口** —— 授权串读「头 512KB」，拒绝行只在「尾 256KB 的末 1200 行」里找。而长跑日志里标记的偏移**会涨**：
+
+  | 标记 | 当日日志（17.2MB / 103592 行）位置 | 旧窗口能否覆盖 |
+  | --- | --- | --- |
+  | `receive module auth string` | 第 9719 行 / 偏移 **1,573,933 B** | ❌ 头 512KB 只到第 3242 行 |
+  | `The XtQuantServer is not allowed to start.` | 偏移 1,810,790 / 15,543,174 B | ❌ 尾窗口从 16.9MB 起 |
+
+  于是**同一台机器早上诊断正确、晚上静默失效** —— 不报错、也不判错，只是**不判**。这是本项目「假绿灯」家族里最难查的一类。
+- **现行为**：`_scan_marker_lines` **按块全文件扫描**（1MiB/块、上限 64MiB、跨块残行拼接、utf-8↔gb18030 容错），并记录**绝对偏移**再按窗口读原文（不假定授权串永远单行）。读日志失败时走 `core.errors.swallow` 记因并退化返回已扫到的部分，**绝不抛错**（诊断自身崩溃比诊断不到更糟）。
+- **自证**：`python -c "from xtquant_client.xtp import read_client_auth_flags as f; print(f(r'<QMT>\userdata'))"` 应返回 `found: true` 与 **649** 个 `mdl_auth_*` 键（键数随券商版本不同，量级如此）。
 
 ---
 

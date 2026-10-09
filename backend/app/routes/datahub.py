@@ -1,8 +1,13 @@
-"""G4 统一数据面：TopicPolicy 策略表（后端下发，杜绝前后端漂移）。
+"""G4 统一数据面：TopicPolicy 策略表（后端下发）+ 数据源链/健康/诊断。
 
-前端数据总线（lib/dataHub.js）以本策略表为**单一真源**：ttl_ms（快照缓存寿命）/
-min_interval_ms（同 topic 最小请求间隔）/ coalesce_within_ms（合并窗口，多个订阅
-在窗口内合并为一次网络请求）/ priority / stale_ok（陈旧快照可先行渲染）。
+策略表字段：ttl_ms（快照缓存寿命）/ min_interval_ms（同 topic 最小请求间隔）/
+coalesce_within_ms（合并窗口）/ priority / stale_ok（陈旧快照可先行渲染）。
+
+★ 消费方现状（2026-10-09 核对，勿再照抄旧注释）：前端重写为 `frontend-next` 后，
+  原 `lib/dataHub.js` topic 总线**已随旧前端移除**，本策略表**不再驱动任何前端缓存**；
+  `GET /datahub/policies` 目前由「系统状态 → 限流策略卡」**只读展示**，并继续作为
+  API/MCP 对外下发的口径（脚本/Agent 可据此对齐自己的缓存策略）。
+  因此：改这里的数值 = 改对外契约，但**不要**再宣称它驱动界面刷新节律。
 
 GET 只读 + 全简单参数 → 经 G3 自动暴露为 MCP tool。
 """

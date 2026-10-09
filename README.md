@@ -13,7 +13,7 @@
 
 所有行情 / 交易 / 账户接口均通过真实券商 SDK 调用，**零 mock**：未连接券商时端点返回 HTTP 503 + 可操作引导，绝不返回假数据、绝不用空列表冒充。
 
-- 版本：`0.5.0`（单一真源为仓库根 `VERSION`，构建时随包分发并由 `build_exe.py` 校验）
+- 版本：`0.5.1`（单一真源为仓库根 `VERSION`，构建时随包分发并由 `build_exe.py` 校验）
 - 许可证：Apache 2.0
 - 平台：Windows 10 / 11（迅投系券商依赖 xtquant 的 Windows 二进制，须与券商客户端**同机**运行）
 
@@ -416,7 +416,6 @@ print(httpx.get(f"{BASE}/paper/positions", headers=HEAD).json())
 | `docs/API接口文档.md` | 接口使用文档（REST / MCP / WebSocket 完整清单，自动生成） |
 | `docs/BROKER_ONBOARDING.md` | 券商接入指南（新增券商 / 适配器约定） |
 | `docs/G2_公式DSL参考.md` | 公式选股 DSL 语法 |
-| `docs/G4_统一数据面使用指南.md` | 统一数据面 / 多数据源 |
 | `docs/G6_任务运行时使用指南.md` | 定时任务与作业运行时 |
 | `docs/G8_NL选股使用指南.md` | 自然语言选股 |
 | `docs/DESIGN_SYSTEM.md` | 前端设计系统 |
@@ -461,7 +460,7 @@ print(httpx.get(f"{BASE}/paper/positions", headers=HEAD).json())
 
 | 层级 | 命令 | 覆盖范围 |
 |------|------|----------|
-| 后端单测 | `cd backend && for f in tests/test_*.py; do python -m pytest "$f" -q -p no:cacheprovider; done` | 189 个 `test_*.py`，2390 个用例 |
+| 后端单测 | `cd backend && for f in tests/test_*.py; do python -m pytest "$f" -q -p no:cacheprovider; done` | 192 个 `test_*.py`，2466 个用例 |
 | 后端冒烟 | `python backend/tests/smoke2.py` | REST 主要端点 + 错误语义（**需先起后端**；默认连 `data/app.db`，检测到真实券商连接时自动跳过 3 条「未连接券商 → 503」断言并提示改用下方客户端测试做权威验证） |
 | 前端类型检查 | `cd frontend-next && npm run typecheck` | TypeScript strict 零错误 |
 | 前端单测 | `cd frontend-next && npm run test:serial` | vitest，**55 文件 / 534 用例**。**必须用 `test:serial`**：并行 worker 在受限 temp 环境下会 `EPERM` 死亡并**静默丢 1~4 个文件而汇总仍全绿**（详见 TD-24）。判据：文件数应等于 `include` 匹配数（55），底部无 `unhandled errors` / `resolveConfig.*.js writeFile EPERM` |
@@ -542,7 +541,7 @@ qmt_work/
 │  ├─ connectors/ plugins/ sync/   # 外部连接器 / 插件内核 / WebSocket 同步引擎
 │  ├─ tools/ runtimes/  # 因子策略工具 / 捆绑 Python 运行时（cp311）
 │  ├─ data/ static/ dist/   # SQLite / 前端构建产物 / PyInstaller 产物
-│  ├─ tests/            # 189 个 test_*.py（2390 用例）+ 冒烟测试 smoke2.py
+│  ├─ tests/            # 192 个 test_*.py（2466 用例）+ 冒烟测试 smoke2.py
 │  ├─ scripts/          # 门禁脚本（许可 / 能力漂移 / 契约生成 / 架构校验）
 │  └─ build_exe.py      # EXE 打包脚本（含 static 闸门）
 ├─ frontend-next/         # 主前端：React 18 + Vite 5 + TS 5 strict（已退役旧 frontend/）

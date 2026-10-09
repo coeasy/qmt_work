@@ -57,6 +57,14 @@ export interface AutoDetectCandidate {
   /** ★ 建议连接路径（优先极速版 userdata_mini） */
   client_path: string;
   client_mode: "mini" | "full" | "auto" | string;
+  /**
+   * ★ 模式建议的**依据**：`process` = 按本机实际运行的客户端进程判定
+   * （用户启动了哪个就用哪个）；`layout` = 无运行进程时按目录布局推断。
+   *
+   * 这个字段是「大 QMT 用大模式 / 小 QMT 用小模式」的**可验证证据**：
+   * 界面上必须能看出模式是「实测出来的」还是「猜的」，否则两者长得一样。
+   */
+  mode_source?: "process" | "layout" | string;
   client_path_mini: string;
   client_path_full: string;
   has_userdata_mini: boolean;
@@ -300,6 +308,27 @@ export const brokerApi = {
    */
   autoDetect: () =>
     http.get<AutoDetectResult>("/brokers/auto-detect", { timeout: 60_000, retry: 0 }),
+
+  /**
+   * 按模式启动本机 QMT 客户端主程序（后端 `POST /brokers/launch`）。
+   *
+   * mode：`full` = 完整版大客户端 XtItClient（大 QMT，数据目录 userdata）；
+   *       `mini` = 极速版 XtMiniQmt（小 QMT，数据目录 userdata_mini）；
+   *       `quote` = 独立行情 miniquote（为大客户端补齐 58610 行情服务）。
+   *
+   * ★ 语义必须如实呈现给用户：
+   *   - 这是 **GUI 程序**，接口立即返回，真正的登录要用户在弹出的窗口里完成；
+   *   - `already_running=true` 是「**这个模式的进程**已在跑」——后端按模式分别判定
+   *     （大客户端在跑不会挡住极速版的启动），界面不要把它说成「启动成功」；
+   *   - `launched=false && already_running=false` = **没启动**（如未安装该模式 exe），
+   *     必须把 `hint` 原样显示，不能只报「已请求启动」。
+   */
+  launchClient: (clientPath: string, mode: "full" | "mini" | "quote") =>
+    http.post<{ launched: boolean; already_running: boolean; exe: string; hint: string }>(
+      "/brokers/launch",
+      { client_path: clientPath, mode },
+      { timeout: 30_000 },
+    ),
 
   /**
    * 端到端可观测性快照（排障用）：宿主 ABI、随包桥接运行时、各连接状态与行情泵健康。

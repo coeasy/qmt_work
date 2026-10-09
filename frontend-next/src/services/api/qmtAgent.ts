@@ -99,11 +99,40 @@ export interface QmtAgentDiagnoseHeartbeat {
   runtime_mode?: string;
   agent_ver?: string;
   probe_ok?: boolean;
+  /** agent 自检里失败的 step 名（如 quote_call / order_funcs）。 */
+  probe_bad_steps?: string[];
 }
 
 export interface QmtAgentDiagnoseProblem {
   source: string;
   msg: string;
+}
+
+/**
+ * 能力真相（agent 自检结论）。
+ *
+ * ★ 这是「能不能下单 / 能不能取行情」的**唯一权威答案**，不要让用户从行情报错
+ *   或全绿的其它面板里去猜。
+ * ★ `expected_in_mode=true` 表示该缺失由**运行模式**决定（如独立进程模式拿不到
+ *   passorder），属正常形态；`false` 表示它是真故障（如行情实调失败）。
+ */
+export interface QmtAgentCapability {
+  available: boolean;
+  reason: string;
+  expected_in_mode: boolean;
+}
+
+/**
+ * 下单接口面明细（agent 自报，与 `capabilities.trading` 同源）。
+ *
+ * `capabilities.trading` 给**结论**（能不能下单），本字段给**依据**（注入进来的下单
+ * 入口有哪些、还缺哪些）。此前它只落在 `probe_result.json` 里被脚本消费，界面拿不到
+ * ⇒ 用户只能读到「下单能力：不可用」却无从知道缺哪个入口。
+ */
+export interface QmtAgentTradeSurface {
+  present: string[];
+  missing: string[];
+  can_submit: boolean;
 }
 
 export interface QmtAgentDiagnoseResult {
@@ -116,6 +145,8 @@ export interface QmtAgentDiagnoseResult {
   config: { path: string; exists: boolean; bridge_dir: string | null };
   heartbeat: QmtAgentDiagnoseHeartbeat;
   qmt_running: string[];
+  capabilities?: { trading?: QmtAgentCapability; quote?: QmtAgentCapability };
+  trade_surface?: QmtAgentTradeSurface;
   problems: QmtAgentDiagnoseProblem[];
 }
 

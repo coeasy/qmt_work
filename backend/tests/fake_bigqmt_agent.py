@@ -52,6 +52,10 @@ class FakeBigQmtAgent:
         self.callback_hits = 0              # 回调真的被触发过几次（0 = 未绑定）
         self.direction_unknown = 0          # 方向仲裁落 unknown 的计数
         self.subscribed: set[str] = set()   # 已订阅代码（SUB_QUOTE 记账）
+        #: 行情**实调**结论 ``(ok, detail)`` 或 ``None``。``None`` = 未测（默认，
+        #: 既有用例行为不变）。★ 置 ``(False, "...")`` 可复现 2026-10-09 真机的
+        #: 「接口在 captured 里、实调却抛错」场景 —— 正是能力协商假绿灯的触发条件。
+        self.quote_call: tuple[bool, str] | None = None
         self._seq = 0
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -199,11 +203,16 @@ class FakeBigQmtAgent:
             # 真实 QMT 的 ContextInfo 带有 get_full_tick / get_market_data，
             # 此处如实上报；探针据此把 quote/kline 判为 SUPPORTED。
             # M2.1 后行情扩展函数的捕获面也在 fake 里如实体现（能力=probe 实测，不猜）。
-            return {"captured": ["passorder", "cancel", "get_trade_detail_data",
-                                 "get_full_tick", "get_market_data",
-                                 "get_stock_list_in_sector", "get_sector_list",
-                                 "get_instrument_detail", "get_trading_dates",
-                                 "download_history_data"]}
+            out = {"captured": ["passorder", "cancel", "get_trade_detail_data",
+                                "get_full_tick", "get_market_data",
+                                "get_stock_list_in_sector", "get_sector_list",
+                                "get_instrument_detail", "get_trading_dates",
+                                "download_history_data"]}
+            # ★ 真 agent 的 PROBE 应答带 quote_call（实调结论）；fake 只有显式声明
+            #   过才带 —— 保持「Fake 行为可控且显式」的纪律，默认不带。
+            if self.quote_call is not None:
+                out["quote_call"] = list(self.quote_call)
+            return out
         if op == "PLACE":
             if not self.trading_enabled:
                 raise _FakeBrokerError(

@@ -253,6 +253,44 @@ def test_capability_probe_marks_unverified_as_unknown(bridge):
     assert caps.is_definitely_unsupported("bigqmt.credit") is False
 
 
+def test_quote_live_failure_vetoes_supported_even_when_func_captured(tmp_path):
+    """**实调证伪 > 函数在场**（2026-10-09 真机假绿灯，P0）。
+
+    真机复现：大 QMT 独立进程模式会把 xtdata 的 76 个接口**转发**进入口命名空间，
+    其中就含 ``get_full_tick``。能力协商只看「函数在不在 captured 里」⇒ 把
+    ``quote`` / ``realtime`` 判成 **SUPPORTED**；而 agent 自己的**实调**是抛错的
+    （``Exception: 无法连接行情服务！``，因为客户端没提供本地行情服务）。
+    结果：**能力页全绿、行情面板永远空白** —— 正是本仓最忌的「绿灯是另一个 bug
+    遮出来的」。
+
+    现在 agent 自检把实调结论 ``quote_call`` 随 PROBE 应答带出来，协商必须用它
+    否决「函数在 ⇒ 能力可用」的推断。
+    """
+    root = str(tmp_path / "bridge")
+    agent = FakeBigQmtAgent(root, token="secret", trading_enabled=True)
+    agent.quote_call = (False, "调用 get_full_tick 抛错: Exception: 无法连接行情服务！")
+    agent.start()
+    try:
+        conn = resolve("qmt.big.bridge.file", bridge_dir=root, auth_token="secret")
+        caps = asyncio.run(conn.probe_capabilities())
+        reply = asyncio.run(conn.test_connection())
+    finally:
+        agent.stop()
+
+    # 前提校验：函数**确实**在 captured 里（否则本用例不构成对假绿灯的证伪）
+    assert "get_full_tick" in reply["captured"]
+    assert caps.level_of("quote") is CapabilityLevel.UNSUPPORTED, (
+        "实调已证伪，quote 不得再被判为 SUPPORTED")
+    assert caps.level_of("realtime") is CapabilityLevel.UNSUPPORTED, (
+        "行情取不到 ⇒ realtime 同样不可用，不能被事件语义翻绿")
+    for name in ("quote", "realtime"):
+        cap = [c for c in caps.capabilities if c.name == name][0]
+        assert "实调失败" in cap.reason and "无法连接行情服务" in cap.reason, (
+            "降级必须带上真因，否则用户无从定位（只说'不支持'等于没说）")
+    # 反向锚：其它由**捕获**支撑的能力不受行情失败牵连（别过度降级）。
+    assert caps.is_supported("trade")
+
+
 def test_capability_vocabulary_is_closed_and_contradiction_free(bridge):
     """probe 输出的能力名必须与能力词表**同名**，且不得自相矛盾。
 

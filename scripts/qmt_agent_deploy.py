@@ -444,8 +444,26 @@ def cmd_inspect(args):
             print("[!] 不存在: %s" % src)
             continue
         dst = os.path.join(bak, name)
-        shutil.copy2(src, dst)
-        raw = open(src, "rb").read()
+        # ★ 2026-10-09 修：QMT 运行期这两个文件被**整文件字节区间锁**，读取/复制会抛
+        #   `PermissionError`。旧实现没有再包一层 try ⇒ `inspect --force` 直接以
+        #   traceback 退出：另一个文件的信息也拿不到，用户更看不出「是锁、不是文件
+        #   损坏」。而 `--force` 的语义**本就是**「只做只读尝试」——只读尝试失败必须
+        #   如实降级，不能把整条命令打死。
+        #   这里逐文件降级：锁住的照实说锁住（并**保留 `PermissionError` 关键字**，
+        #   因为 qmt_diag_report.py 依赖它在输出里出现来汇总「注册树读不到」这条
+        #   问题），没锁的照常输出。
+        raw = None
+        try:
+            shutil.copy2(src, dst)
+            raw = open(src, "rb").read()
+        except PermissionError as exc:
+            print("[!] %s 读取失败：PermissionError: %s" % (name, exc))
+            print("     ↳ QMT 运行期该文件被整文件锁（策略注册树容器），属预期限制；"
+                  "关闭 QMT 后即可完整读取。")
+        except OSError as exc:
+            print("[!] %s 读取失败：%s: %s" % (name, type(exc).__name__, exc))
+        if raw is None:
+            continue
         print("[OK] %s → %s (%d bytes)" % (name, dst, len(raw)))
         for enc in ("utf-8", "gbk", "utf-16"):
             try:

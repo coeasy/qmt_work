@@ -21,7 +21,6 @@
 | [`多语言接入指南.md`](多语言接入指南.md) | 接口接入详解：鉴权与 scope 口径、错误归因约定、Python / Node / curl 示例、端点速查表 | 集成方 |
 | [`BROKER_ONBOARDING.md`](BROKER_ONBOARDING.md) | 券商接入指南：新增券商只需追加 `BrokerProfile`，适配器约定与桥接运行时 | 想接新券商的开发者 |
 | [`G2_公式DSL参考.md`](G2_公式DSL参考.md) | 公式选股 DSL 语法（运算符 / 指标函数 / 例子） | 选股用户 |
-| [`G4_统一数据面使用指南.md`](G4_统一数据面使用指南.md) | 统一数据面：数据源链、降级策略、`explicit:` 指定 | 数据接入开发者 |
 | [`G6_任务运行时使用指南.md`](G6_任务运行时使用指南.md) | 定时任务与作业运行时 | 运维 / 自动化 |
 | [`G8_NL选股使用指南.md`](G8_NL选股使用指南.md) | 自然语言选股（NL 解析，非 LLM 对话） | 选股用户 |
 | [`DESIGN_SYSTEM.md`](DESIGN_SYSTEM.md) | 前端设计系统：色彩 / 间距 / 组件约定（对应 `frontend-next/src/design/`） | 前端开发者 |
@@ -41,6 +40,7 @@
 
 | 版本 | 内容 |
 |------|------|
+| [`v0.5.1.md`](release-notes/v0.5.1.md) | R33–R35：**大 QMT 模式验证 + 三轮全链路审计**——先确证大 QMT 交易不通的根因是**券商未下发 xtquant 模块授权**（`mdl_auth_gt_ipc_pair=0` → `The XtQuantServer is not allowed to start.`，推翻此前两条假设）；再按无断链/无孤儿/无死循环/前后端贯通做三轮审计：修 **2 个真 bug**（诊断读取窗口致「早上判对晚上不判」、把服务未授权误报成 PID 白名单）+ 5 个孤儿函数 + 1 个孤儿配置（`qmt_agent_bundle_timeout` 只声明不读取）+ 1 处载荷断链（`trade_surface` 贯通到界面）+ 22 个 `while True` 逐一定性（无真死循环）；**删 1 份无效历史文档**（G4，其主体 topic 总线已随前端重写消失）+ 新增 1 条 CI 门禁（文档声明的 REST 端点必须能在契约查到，已可证伪自检）；用例 2462 → **2466** |
 | [`v0.5.0.md`](release-notes/v0.5.0.md) | R27–R32：**数据集（数据中心）+ 大 QMT 部署 API + 部署脚本通用化**——「下载来的数据」第一次能被看见/查询/验证（18 数据集 · 5 REST + 4 MCP · 本地离线查询端点 · `sync_dataset` 定时 runner · 分钟仓独立落库）；大 QMT Agent 部署搬上接口（10 REST + 界面，写盘先备份再原子替换）；`deploy/diag_*.bat` 去掉写死的 5 券商路径 + 3 本机 Python 路径，改四级降级通用发现链；修 `calendar` 的「无可用源」假告警（新增 `builtin_fallback` 契约）+ 1 处 **Windows 潜伏 bug**（同名不同表排除名单用反斜杠比较 ⇒ 从未生效）+ TD-38/TD-39 两条行尾编码债；REST 239 → **254**、MCP 129 → **133**、用例 2230 → **2390** |
 | [`v0.4.9.md`](release-notes/v0.4.9.md) | R26：**大小 QMT 贯通审计**——逐条走读大 QMT（XtItClient + agent 文件桥）与小 QMT（MiniQMT + `userdata_mini`）的「识别 → 判活 → 取数 → 下单 → 重连 → 停机」，再全仓前后端对账。修 **8 处**，其中 1 处真缺陷：**策略取 K 线漏传 `broker_id` ⇒ 走活跃连接而非 run 绑定连接**（多连接下「信号用 A 券商数据算、订单下到 B 券商」）；其余为「形参传了但没用」族（`_infer_capabilities.client_type` / `kline_cache._where` 三形参 / `_order_status.oid` / `_normalize_params.codes` / `_order_status_cache` 孤儿属性）+ 涨跌额**缺正负号**口径不一致（`fmtSigned` 补接到 4 处展示位）+ 默认页三处各写一份（`DEFAULT_PAGE` 归一）。零 mock 契约实证：`except` 内返回成功形状命中 **0** |
 | [`v0.4.8.md`](release-notes/v0.4.8.md) | R25：**断链归零 + 架构门禁回绿**——新增文档断链门禁（`audit_doc_links`，17 用例）与无出口循环/无超时等待门禁（`check_unbounded_waits`，11 用例），两条都接进 CI；Gate 4（单文件 ≤50KB）回绿靠两次 P1-1 拆分（`market.py`→`market_export.py`、`eltdx_source.py`→`eltdx_industry.py`）；过程中修掉**工具自身的两个假警报**（`.tsx` 被正则截成 `.ts` 致 20 处误报 / `read_text()` 通用换行把 CRLF 写回成 LF）；文档索引补 2 份被 5 处活代码引用却漏登记的文档；删 1 份零活引用的过期一次性计划；手抄接口计数 232/127 → **239/129** |
@@ -65,7 +65,7 @@
 
 ## 四、审计 / 验证脚本（按需手跑，非 CI 门禁）
 
-CI 上跑的门禁（`ci_reconcile` / `check_*` / `audit_doc_links` / `check_unbounded_waits` /
+CI 上跑的门禁（`ci_reconcile` / `check_*` / `audit_doc_links` / `check_doc_endpoint_links` / `check_unbounded_waits` /
 `audit_orphan_modules`）见 [`.github/workflows/ci.yml`](../.github/workflows/ci.yml)。
 下表是**需要真实数据或真机、不适合放 CI** 的按需工具 —— 列出是为了避免「写了脚本
 没人知道它存在」：
@@ -106,6 +106,16 @@ CI 上跑的门禁（`ci_reconcile` / `check_*` / `audit_doc_links` / `check_unb
   且全仓**零活引用**——只被归档目录内部和本索引本身提到过）。
   判据与 `archive/` 保留项的区别：**保留「为什么这么设计」的论证/决策类文档**（被活代码
   注释引用为理由，删了就断链），**删除「什么时候做什么」的一次性执行计划**（使命完成即失效）。
+- **2026-10-09 删除 1 份主体已消失的使用指南**：`G4_统一数据面使用指南.md`。
+  **判据（不是「看着旧」，是实测断链）**：该文档描述的前端 topic 总线
+  （`lib/dataHub.js` 的 `subscribe/peek/invalidate`）在前端重写为 `frontend-next` 后
+  **已不存在**（全仓搜索 `dataHub` / `subscribe(topic` 零命中），文档里的策略表数值
+  也已与后端 `_TOPIC_POLICIES` 漂移（如 `market:boards` coalesce 文档 500 / 后端 1000）。
+  保留的部分：`GET /datahub/policies` 仍对外下发策略表，并由「系统状态 → 限流策略卡」
+  只读展示；数据源链 / 降级 / `explicit:` 的用法以 [`API接口文档.md`](API接口文档.md)
+  与 [`多语言接入指南.md`](多语言接入指南.md) 为准。
+  同时修正了 `backend/app/routes/datahub.py` 的模块 docstring —— 它仍在宣称
+  策略表是「前端数据总线的单一真源」，属于**代码注释侧的同一处断链**。
 - 归档目录内部沿用**归档前的路径**（即：把路径里的 `archive/` 段去掉，才是它当时的位置），
   这是当时布局的真实记录，不再回改；找文件请以本索引与 [`archive/README.md`](archive/README.md) 为准。
 

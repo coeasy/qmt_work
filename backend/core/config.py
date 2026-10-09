@@ -406,8 +406,10 @@ class Settings(BaseSettings):
     # 典型值：GitHub Release raw 地址或自建 CDN 上的 manifest.json。
     # 例：https://raw.githubusercontent.com/xxx/qmt_work/main/bundle/manifest.json
     qmt_agent_bundle_url: str = ""
-    # 下发拉取超时（秒）；默认 10s，避免远端慢响应拖慢 UI
-    qmt_agent_bundle_timeout: float = 10.0
+    # 下发拉取超时（秒）。★ 默认值必须与真实拉取行为一致（此前声明 10s、
+    # 代码里硬编码 30s，改了这个旋钮却没有任何效果 = 孤儿配置，2026-10-09 已接线）。
+    # 30s 是慢 CDN 也能拿到的保守值；想让 UI 更快失败可自行调小。
+    qmt_agent_bundle_timeout: float = 30.0
 
     # CORS：允许的跨域来源（逗号分隔；空=不启用跨域，仅同源访问）
     cors_origins: str = ""

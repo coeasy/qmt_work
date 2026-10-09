@@ -311,8 +311,16 @@ def check(text):
     for name in _REQUIRED:
         if name not in top:
             problems.append("缺少顶层名字: %s" % name)
-    if "from qmt_api import" in text:
-        problems.append("仍存在 `from qmt_api import`（内联不完整）")
+    # ★ 内联完整性用 **AST** 判，不用文本匹配（2026-10-09 修）：
+    #   文本匹配 `"from qmt_api import" in text` 会把**注释里提到该写法**的说明文字
+    #   判成违规 —— 实测就是这么误伤的（注释解释「必须用无别名形式导入」直接触发
+    #   `bundle 生成有问题`，而真实导入早已被正确剥掉）。
+    #   本仓早已写过这条教训（见 `check_bigqmt_agent_py36.py` 的「只扫代码，不扫字符串」）。
+    #   内联后 qmt_api 的名字都在本文件顶层 ⇒ 任何仍存在的 qmt_api 导入都是错的。
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module == "qmt_api":
+            problems.append(
+                "仍存在 qmt_api 导入语句（第 %d 行，内联不完整）" % node.lineno)
     if text.count("from __future__ import print_function") != 1:
         problems.append("`from __future__` 行数不为 1")
     if "\t" in text:

@@ -1,7 +1,8 @@
 # G8 自然语言选股使用指南（NL → 条件树）
 
 > 交付物：`backend/app/agent/nl_screen.py` + `POST /market/screen/nl` +
-> 前端 Screen.jsx 顶部 NL 输入条（T5 接入）。
+> 前端选股工作台的 NL 输入条（`frontend-next/src/domains/research/screen/ScreenPanels.tsx`
+> → `screenApi.nl(text)`；旧前端 `Screen.jsx` 已随前端重写移除）。
 > 用自然语言生成**可编辑**的条件树（G8-1 不黑箱）：结果回显到条件构建器，
 > 用户确认/微调后再执行。
 

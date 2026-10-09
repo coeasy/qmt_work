@@ -997,5 +997,6 @@ payload 的 `data.type` 子类型（如 `order`→`order_event`）**不是**独�
 ### 必读约束
 
 - 小 QMT **只有直连**，没有「策略桥」「注册树」概念；大 QMT 策略须写入客户端注册树（GUI 动作），光放 `.py` 文件不生效。
-- 交易连接被封时日志特征 `pid X not allowed, return` + `connect ret error-1`（授权串 PID 白名单）；行情 `xtdata` 通常仍正常。平台无法改写，须引导找券商或切路径 B。
+- 交易连接被封时日志有**两种**特征，处置方向**完全不同**，不可混为一谈：① `The XtQuantServer is not allowed to start.`（伴随授权串 `mdl_auth_xtquant=0` / `mdl_auth_gt_ipc_pair=0`）⇒ 券商未给该资金账号下发 xtquant 模块授权，量化服务**根本没启动**，须申请模块授权；② `quant session N, pid X not allowed, return` + `connect ret error-1`（授权串 `mdl_auth_xttrader_strict_connection_check=1`）⇒ 严格连接校验按 PID 拉黑了调用进程，须加白名单或关闭严格校验。两者行情 `xtdata` 通常仍正常；平台均无法改写，须引导找券商或切「大 QMT 桥接·文件」路径 B。
+- 诊断读客户端日志采用**全文件标记扫描**（`xtquant_client/xtp/diagnostics.py`），不依赖固定头/尾窗口 —— 长跑日志的授权串偏移可涨到数 MB，固定窗口会让诊断「早上正确、晚上静默失效」。
 - 所有接口零 mock，未连券商返回 503，被拒返回 400，失败绝不包 `code=0`。

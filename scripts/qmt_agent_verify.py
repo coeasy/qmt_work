@@ -501,26 +501,72 @@ def evaluate(data):
         good("ContextInfo 方法面 %d 个: %s" % (
             len(details["ctx_methods"]), ", ".join(details["ctx_methods"]) or "(空)"))
 
-        missing_t = [f for f in NEED_FOR_TRADE if f not in details["injected"]]
-        missing_q = [f for f in NEED_FOR_QUERY if f not in details["injected"]]
-        if missing_t:
-            if probe_stale:
-                lines.append("  [!] 陈旧快照里未见交易函数: %s —— **不能据此断言当前终端没有**；"
-                             "注册并运行策略后重跑本工具才会得到真实数据" % ", ".join(missing_t))
-            else:
-                bad("未捕获交易函数: %s" % ", ".join(missing_t),
-                    "① 确认运行的入口是 python/qmt_work_agent.py（单文件态）而不是子目录里的旧文件；"
-                    "② 该券商版本可能不开交易函数注入")
+        # ★ 2026-10-09：agent 侧已自报**权威结论**（`capability` / `bad_steps` /
+        #   `trade_surface`）。本工具**优先消费它**，而不是自己再推一遍分类 ——
+        #   同一事实两套结论就是孤儿逻辑（改了 agent 忘改这里 ⇒ 两边说法打架，
+        #   用户拿到两个互相矛盾的诊断）。旧 probe（无这些字段）继续走兼容推导。
+        cap = probe.get("capability") or {}
+        details["capability"] = cap
+        details["probe_bad_steps"] = probe.get("bad_steps")
+        details["trade_surface"] = probe.get("trade_surface")
+        if probe.get("bad_steps"):
+            lines.append("  [!] agent 自报异常项: %s" % ", ".join(probe["bad_steps"]))
+        _CAP_HINT = {
+            "trading": ("下单能力",
+                        "独立进程模式（本文件 __main__ 自举）拿不到 passorder 属**常态**——"
+                        "终端只把下单函数注入「被挂载的那一个文件」。要真能下单，需让本策略以"
+                        "「公式策略」形态被 QMT 挂载（同系统自带策略那样走 in-process 公式引擎）"),
+            "quote": ("行情能力",
+                      "xtdata 行情走 58610 本地服务：① 客户端开「极简模式」后重启本策略；"
+                      "② 或让本策略以**公式模式**被挂载（用 ContextInfo 的行情方法，不经本地服务）"),
+        }
+        if cap:
+            for _key in ("trading", "quote"):
+                _label, _hint = _CAP_HINT[_key]
+                _c = cap.get(_key) or {}
+                if not _c:
+                    continue
+                if _c.get("available"):
+                    good("%s可用（agent 自报）" % _label)
+                elif _c.get("expected_in_mode"):
+                    # 该模式下「不可用」是**预期**的（例如独立进程模式没有下单函数）
+                    # ⇒ 只作提示，不计致命项；否则用户每次都会看到一条假失败。
+                    lines.append("  [!] %s当前不可用：%s —— %s"
+                                 % (_label, _c.get("reason") or "未说明", _hint))
+                elif probe_stale:
+                    lines.append("  [!] 陈旧快照里 %s不可用：%s —— 需运行后重测"
+                                 % (_label, _c.get("reason") or "未说明"))
+                else:
+                    bad("%s不可用: %s" % (_label, _c.get("reason") or "未说明"), _hint)
+            _ts = probe.get("trade_surface") or {}
+            if _ts:
+                if _ts.get("can_submit"):
+                    good("交易接口面就绪（present=%s）"
+                         % ", ".join(_ts.get("present") or []))
+                else:
+                    lines.append("  [!] 交易接口面 present=%s missing=%s"
+                                 % (_ts.get("present") or [], _ts.get("missing") or []))
         else:
-            good("交易函数已捕获（passorder/cancel）")
-        if missing_q:
-            if probe_stale:
-                lines.append("  [!] 陈旧快照里未见 get_trade_detail_data —— 同样不代表当前缺失，需运行后重测")
+            missing_t = [f for f in NEED_FOR_TRADE if f not in details["injected"]]
+            missing_q = [f for f in NEED_FOR_QUERY if f not in details["injected"]]
+            if missing_t:
+                if probe_stale:
+                    lines.append("  [!] 陈旧快照里未见交易函数: %s —— **不能据此断言当前终端没有**；"
+                                 "注册并运行策略后重跑本工具才会得到真实数据" % ", ".join(missing_t))
+                else:
+                    bad("未捕获交易函数: %s" % ", ".join(missing_t),
+                        "① 确认运行的入口是 python/qmt_work_agent.py（单文件态）而不是子目录里的旧文件；"
+                        "② 该券商版本可能不开交易函数注入")
             else:
-                bad("未捕获 get_trade_detail_data —— 资金/持仓/委托/成交查询全不可用",
-                    "确认跑的是单文件 agent；若仍缺失，多半是该终端版本模型研究环境不下发交易函数")
-        else:
-            good("查询函数已捕获（get_trade_detail_data）")
+                good("交易函数已捕获（passorder/cancel）")
+            if missing_q:
+                if probe_stale:
+                    lines.append("  [!] 陈旧快照里未见 get_trade_detail_data —— 同样不代表当前缺失，需运行后重测")
+                else:
+                    bad("未捕获 get_trade_detail_data —— 资金/持仓/委托/成交查询全不可用",
+                        "确认跑的是单文件 agent；若仍缺失，多半是该终端版本模型研究环境不下发交易函数")
+            else:
+                good("查询函数已捕获（get_trade_detail_data）")
 
     # ---- 3. 运行时能力 ----
     meta = (status or {}).get("meta") or (probe or {}).get("meta") or {}

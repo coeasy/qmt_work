@@ -310,7 +310,11 @@ def _probe_quote_service(client_path: str) -> dict:
         # ---- 大/小窗口识别（新增）----
         "port_map": [],          # [{port, pid, process}] 58600-58620 监听明细
         "full_client_running": False,   # 大窗口 XtItClient 在运行
-        "mini_client_running": False,   # 小窗口 XtMiniQmt 在运行
+        "mini_client_running": False,   # 小窗口：极速版 XtMiniQmt **或** 独立行情 miniquote
+        # ★ 精确到进程的两个标志（2026-10-09）：launch_client 用它们逐个把关，
+        #   不再用并集标志 —— 否则「大客户端 + 独立行情」会挡住极速版的启动。
+        "miniqmt_running": False,      # 极速版主程序 XtMiniQmt.exe 在运行
+        "miniquote_running": False,    # 独立行情子进程 miniquote.exe 在运行（或端口就绪）
         "quote_ports": [],       # miniquote 监听的行情端口（xtdata 可连）
         "trade_ports": [],       # XtItClient 监听的交易端口
         "client_type": "none",   # full / mini / both / none
@@ -420,8 +424,24 @@ def _probe_quote_service(client_path: str) -> dict:
         pass
     # miniquote 可能作为大窗口的「独立行情」子进程运行（无 XtMiniQmt 主进程）；
     # 反之 XtItClient 监听了 58600 也可确认大窗口在运行。
-    if res["quote_ports"] and not res["mini_client_running"]:
-        res["mini_client_running"] = True
+    #
+    # ★ 2026-10-09：新增**按进程精确区分**的两个标志。旧实现只有一个粗粒度的
+    #   `mini_client_running`（= XtMiniQmt **或** miniquote 任一在跑），它把
+    #   「极速版主程序」与「独立行情子进程」混为一谈。后果有两处：
+    #     ① `launch_client(path, "mini")` 与 `("quote")` 都用它把关 —— 大客户端
+    #        带着独立行情在跑时，`mini_client_running` 为真 ⇒ 想启动极速版被
+    #        误报「已在运行」，**永远拉不起来**（假绿灯的镜像：假「已在运行」）；
+    #     ② 无法如实回答「到底哪个进程在跑」，排障只能猜。
+    #   现按 exe 名分别判定（running_exes 已由 tasklist 得到），并把
+    #   `mini_client_running` 重新定义为二者的**并集**（语义与旧实现等价，
+    #   既有消费方 `client_type` / `_effective_trade_dir` 口径不变）。
+    _lex = {str(e).lower() for e in (res.get("running_exes") or [])}
+    res["miniqmt_running"] = any(
+        e in _lex for e in ("xtminiqmt.exe", "miniqmt.exe", "xtminiqt.exe"))
+    # 行情子进程也可能只监听端口而进程名未被关键字捕获 → 端口存在同样算在跑
+    res["miniquote_running"] = ("miniquote.exe" in _lex) or bool(res["quote_ports"])
+    res["mini_client_running"] = bool(
+        res["miniqmt_running"] or res["miniquote_running"])
     if res["trade_ports"] and not res["full_client_running"]:
         res["full_client_running"] = True
     res["client_type"] = (
@@ -435,6 +455,13 @@ def _probe_quote_service(client_path: str) -> dict:
 _FULL_EXE_NAMES = ("XtItClient.exe", "XtClient.exe", "XtMini.exe")
 _MINI_EXE_NAMES = ("XtMiniQmt.exe", "MiniQmt.exe", "XtMiniQt.exe")
 _QUOTE_EXE_NAMES = ("miniquote.exe",)
+
+#: 客户端模式的中文名（启动/诊断文案统一走这里，避免同一模式在界面与日志里两种叫法）
+_MODE_LABEL = {
+    "full": "完整版大客户端（大 QMT）",
+    "mini": "极速版小客户端（小 QMT / MiniQMT）",
+    "quote": "独立行情小窗口（miniquote）",
+}
 
 
 def _running_client_exes() -> list:
@@ -465,20 +492,28 @@ def _running_client_exes() -> list:
 #     (b) 壳模块 `xtquant_client.xtp`（`from .env import *`）仍持有这些符号，
 #         从而 `_common._shell_attr` 的 monkeypatch 兼容层继续有效。
 from .diagnostics import (  # noqa: F401
+    _AUTH_IPC_PAIR_KEY,
+    _AUTH_MARKER,
     _AUTH_NO_PID_KEY,
     _AUTH_SNIPPET_RE,
     _AUTH_STRICT_KEYS,
+    _AUTH_XTQUANT_KEY,
     _CLIENT_LOG_MAIN_RE,
     _CLIENT_LOG_RE,
+    _PID_DENY_RE,
     _QUOTE_LOG_RE,
+    _SERVER_BLOCKED_MARKER,
     _TRADE_LOG_MAIN_RE,
     _client_log_dirs,
+    _decode_bytes,
     _diagnose_one,
     _head_text,
     _latest_login_log,
     _log_rank,
     _newest_client_log,
+    _read_at,
     _read_window,
+    _scan_marker_lines,
     _tail_text,
     diagnose_trade_connect,
     read_client_auth_flags,
@@ -521,7 +556,16 @@ def launch_client(client_path: str, mode: str = "full") -> dict:
       - "mini"  -> 极速版 XtMiniQmt.exe（MiniQMT，数据目录 userdata_mini）
       - "quote" -> 独立行情小窗口 miniquote.exe（为完整版补齐 58610 行情服务）
     已运行则不重复启动。返回结构化结果 {launched, already_running, exe, hint}。
+
+    ★ 非法 mode **不再静默映射到 quote**（2026-10-09）：旧实现是
+    ``... if mode == "mini" else _QUOTE_EXE_NAMES``，于是一个拼错的 mode
+    （如 "Full" / "miniqmt"）会去**启动 miniquote**，而「是否已在运行」的查表
+    又落到默认的 ``full_client_running`` —— 找的是 A 的 exe、判的是 B 在不在跑，
+    两处口径不一致且用户毫不知情。现在非法值一律如实报错，绝不猜。
     """
+    if mode not in _MODE_LABEL:
+        return {"launched": False, "already_running": False, "exe": "",
+                "hint": f"未知客户端模式 {mode!r}（可选：{'/'.join(sorted(_MODE_LABEL))}）"}
     names = (_FULL_EXE_NAMES if mode == "full"
              else _MINI_EXE_NAMES if mode == "mini"
              else _QUOTE_EXE_NAMES)
@@ -535,15 +579,26 @@ def launch_client(client_path: str, mode: str = "full") -> dict:
         return {"launched": False, "already_running": False, "exe": "",
                 "hint": f"未在 {root or client_path or '客户端根'} 找到"
                         f"{'/'.join(names)}（请先安装对应模式的 QMT 客户端）"}
-    # 已运行：直接返回，避免重复拉起多个实例
+    # 已运行：直接返回，避免重复拉起多个实例。
+    #
+    # ★ 2026-10-09：**按模式查各自的进程标志**。旧实现把 "mini" 与 "quote" 合并
+    #   成同一条 `mini_client_running` 判断（该标志是二者的并集）⇒
+    #   「大客户端 + 独立行情 miniquote」在跑时，用户点「启动极速版」会被告知
+    #   「极速版/独立行情已在运行」而**永远拉不起 XtMiniQmt.exe**（假「已在运行」，
+    #   与「假绿灯」同源的镜像故障：用另一个事实（行情在跑）冒充本事实（极速版在跑））。
+    #   现在 full/mini/quote 各自查 full_client_running / miniqmt_running /
+    #   miniquote_running，三者互不冒充。
     try:
         probe = _shell_attr("_probe_quote_service")(client_path)  # monkeypatch 兼容：经壳模块动态查找（见 _common._shell_attr）
-        if mode == "full" and probe.get("full_client_running"):
+        _running_flag = {
+            "full": "full_client_running",
+            "mini": "miniqmt_running",
+            "quote": "miniquote_running",
+        }.get(mode, "full_client_running")
+        if probe.get(_running_flag):
             return {"launched": False, "already_running": True, "exe": exe,
-                    "hint": f"完整版大客户端已在运行（{probe.get('running_exes')}）"}
-        if mode in ("mini", "quote") and probe.get("mini_client_running"):
-            return {"launched": False, "already_running": True, "exe": exe,
-                    "hint": "极速版/独立行情已在运行"}
+                    "hint": f"{_MODE_LABEL.get(mode, mode)}已在运行"
+                            f"（{probe.get('running_exes')}）"}
     except Exception:  # noqa: BLE001
         pass
     try:
@@ -574,8 +629,9 @@ def _effective_trade_dir(client_path: str, mode: str = "auto") -> tuple[str, str
       - mode="auto"（默认）：按「实际运行场景 + client_path 后缀 + 目录存在性」推断——
         1) client_path 已明确带 userdata_mini / userdata 后缀 → 直接按后缀；
         2) 否则探测本机运行中的客户端（_probe_quote_service 的 client_type）：
-           mini 在跑→极速版、full 在跑→完整版、both→优先极速版（行情+交易一体）；
-        3) 仍不确定 → 按目录存在性：userdata_mini 优先，其次 userdata。
+           mini 在跑→极速版、full 在跑→完整版、both→**优先完整版**（大客户端与独立
+           行情同跑时必须读写 userdata 才能取到真实账户/持仓）；
+        3) 仍不确定 → 按目录存在性：userdata 优先，其次 userdata_mini。
     返回 (trade_dir, resolved_mode)；找不到任何存在目录时回退原始 client_path
     （由连接流程给出明确的「目录不存在」错误）。
     """
@@ -861,6 +917,7 @@ __all__ = [
     '_FULL_EXE_NAMES',
     '_MINI_EXE_NAMES',
     '_QUOTE_EXE_NAMES',
+    '_MODE_LABEL',
     '_running_client_exes',
     '_latest_login_log',
     '_CLIENT_LOG_RE',
@@ -873,6 +930,14 @@ __all__ = [
     '_tail_text',
     '_head_text',
     '_read_window',
+    '_scan_marker_lines',
+    '_read_at',
+    '_decode_bytes',
+    '_AUTH_MARKER',
+    '_AUTH_XTQUANT_KEY',
+    '_AUTH_IPC_PAIR_KEY',
+    '_SERVER_BLOCKED_MARKER',
+    '_PID_DENY_RE',
     'read_client_auth_flags',
     'diagnose_trade_connect',
     '_diagnose_one',

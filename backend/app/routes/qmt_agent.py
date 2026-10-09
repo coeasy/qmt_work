@@ -673,6 +673,7 @@ async def diagnose(request: Request, body: DiagnoseRequest):
 
     # 3. 检查 bridge_dir 里的心跳/自检文件
     heartbeat: dict[str, Any] = {"bridge_dir": bridge_dir, "alive": False, "ts": None}
+    probe_data: dict[str, Any] = {}
     if bridge_dir:
         try:
             bdir = Path(bridge_dir)
@@ -687,14 +688,59 @@ async def diagnose(request: Request, body: DiagnoseRequest):
                         heartbeat["runtime_mode"] = st.get("runtime_mode")
                         heartbeat["agent_ver"] = st.get("agent_ver")
                 if probe_file.is_file():
-                    probe = _read_json(probe_file)
-                    if probe:
+                    probe = _read_json(probe_file) or {}
+                    probe_data = probe
+                    # ★ 2026-10-09 修（假告状）：agent 的自检结果**从来没有**写 "ok"
+                    #   字段，而这里读 `probe.get("ok")` ⇒ `probe_ok` 恒为 False，
+                    #   界面永远显示「自检未通过」，哪怕 agent 一切正常。
+                    #   现在：有 ok 就直接用；旧版 agent 没有就**从 steps 现算**
+                    #   （不能默认 False —— 那是把「读不到」当成「不通过」）。
+                    if "ok" in probe:
                         heartbeat["probe_ok"] = bool(probe.get("ok"))
+                    else:
+                        steps = probe.get("steps") or []
+                        heartbeat["probe_ok"] = (
+                            bool(steps) and all(bool(s.get("ok")) for s in steps))
+                    heartbeat["probe_bad_steps"] = list(probe.get("bad_steps") or [])
+                    if probe.get("runtime_mode"):
+                        heartbeat["runtime_mode"] = probe["runtime_mode"]
         except OSError as exc:
             from core.errors import swallow
             swallow(exc, why="心跳/probe 文件读取失败（正被 agent 写入或被锁）；"
                              "按「无心跳」处理，不因此让诊断 500",
                     logger=log)
+
+    # 3b. 能力真相（2026-10-09 新增）：诊断**必须**消费 agent 的自检证据，
+    #     否则「行情实调失败 / 本进程不能下单」会被界面报成「一切正常」
+    #     —— 正是本仓最忌的假绿灯，也是用户本次困惑的直接来源。
+    capabilities: dict[str, Any] = {}
+    # ★ 下单接口面明细（2026-10-09 补齐贯通）：agent 已算出 {present, missing,
+    #   can_submit}，此前**只落在 probe_result.json 里**被脚本消费，界面拿不到 ⇒
+    #   用户只能看到「下单能力：不可用」却不知缺哪个入口。与 capabilities 同源，
+    #   避免「同一事实两套说法」的孤儿逻辑。
+    trade_surface: dict[str, Any] = {}
+    if probe_data:
+        capabilities = dict(probe_data.get("capability") or {})
+        trade_surface = dict(probe_data.get("trade_surface") or {})
+        for key, label in (("quote", "行情"), ("trading", "下单")):
+            cap = capabilities.get(key) or {}
+            if cap.get("available"):
+                continue
+            # ``expected_in_mode=True`` = 该缺失由**运行模式定义**决定（如独立进程
+            # 模式拿不到 passorder），属正常形态 ⇒ 只在 capabilities 面呈现，
+            # 不当故障告警（否则会造出反向的「假告状」）。
+            if cap.get("expected_in_mode"):
+                continue
+            problems.append({
+                "source": f"probe/{key}",
+                "msg": f"{label}能力不可用：{cap.get('reason') or '原因未上报'}",
+            })
+        # 其余失败步骤（行情实调、bridge 写权限、导入等）如实并入 problems。
+        for s in probe_data.get("steps") or []:
+            if s.get("ok") or str(s.get("name")) in ("order_funcs", "injected_funcs"):
+                continue
+            problems.append({"source": f"probe/{s.get('name')}",
+                             "msg": str(s.get("detail") or "")})
 
     # 4. QMT 客户端是否在跑
     running = _qmt_running()
@@ -715,6 +761,14 @@ async def diagnose(request: Request, body: DiagnoseRequest):
                    "bridge_dir": bridge_dir},
         "heartbeat": heartbeat,
         "qmt_running": running,
+        # ★ 能力真相（2026-10-09 新增）：{"trading": {available, reason,
+        #   expected_in_mode}, "quote": {...}}。界面**必须**显式呈现 —— 这是
+        #   「能不能下单 / 能不能取行情」的唯一权威答案，别再让用户从
+        #   行情报错或全绿的能力页里猜。
+        "capabilities": capabilities,
+        # {"present": [...], "missing": [...], "can_submit": bool} ——
+        # capabilities.trading 给结论，本字段给**依据**（缺哪个下单入口）。
+        "trade_surface": trade_surface,
         "problems": problems,
     })
 
@@ -837,6 +891,23 @@ def _bundle_url_from_settings() -> str:
         return ""
 
 
+def _bundle_timeout_from_settings() -> float:
+    """从 settings 读取下发拉取超时（秒）。
+
+    ★ 2026-10-09 修（孤儿配置）：这个旋钮此前**只声明不读取**，而实际拉取处硬编码
+      ``timeout=30.0`` ⇒ 用户改了 ``QMT_QMT_AGENT_BUNDLE_TIMEOUT`` 完全无效，
+      且注释声称的「默认 10s」与真实行为（30s）不符。改为统一走 settings。
+    """
+    try:
+        from core.config import settings
+        raw = float(getattr(settings, "qmt_agent_bundle_timeout", 30.0) or 0.0)
+    except (TypeError, ValueError):
+        return 30.0
+    # 0 / 负数不是「不超时」，而是「立刻超时」——urllib 会当场抛错，等于把功能关死。
+    # 非法值一律回退默认，绝不把明显的填错当成用户意图。
+    return raw if raw > 0 else 30.0
+
+
 def _http_get_text(url: str, timeout: float = 10.0) -> tuple[str | None, str]:
     """HTTP GET 拉取文本；返回 (text, error)。绝不抛异常。"""
     import urllib.request
@@ -942,7 +1013,8 @@ async def distribute_pull(request: Request,
     if not qmt:
         return err(400, "未找到 QMT 安装目录")
 
-    text, err_msg = _http_get_text(effective_url, timeout=30.0)
+    text, err_msg = _http_get_text(effective_url,
+                                   timeout=_bundle_timeout_from_settings())
     if text is None:
         return err(502, f"远端拉取失败：{err_msg}",
                    {"url": effective_url, "error": err_msg})

@@ -99,7 +99,12 @@ jobs:
       #   orphan-modules 抓「零引用模块」（模块还在、引用早没了，只会持续腐化）。
       - name: Doc link gate (repo-relative path references resolve)
         run: python ../scripts/audit_doc_links.py
-      - name: Unbounded wait gate (no-exit loops / timeout-less joins)
+      # ★ 2026-10-09 新增：audit_doc_links 只管「文件在不在」，管不了
+      #   「文档里写了一个**从未存在**的接口路径」。BROKER_ONBOARDING 的
+      #   `profiles/hotplug` 就是这么挂了很久 —— 读者按文档调用只会 404。
+      - name: Doc endpoint gate (every REST path written in docs exists in the contract)
+        run: python ../scripts/check_doc_endpoint_links.py
+      - name: Unbounded wait gate (no-exit loops / timeout-less loops)
         run: python ../scripts/check_unbounded_waits.py
       - name: Orphan module gate (modules with no import and no path reference)
         run: python scripts/audit_orphan_modules.py

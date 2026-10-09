@@ -58,7 +58,7 @@ INDEX_CASES = {
 def _isolate_name_memo():
     """每个用例前后都还原名称表进程缓存，避免污染其他测试。"""
     saved = EU._NAME_MEMO
-    EU._NAME_MEMO = None
+    EU.reset_name_cache()
     yield
     EU._NAME_MEMO = saved
 

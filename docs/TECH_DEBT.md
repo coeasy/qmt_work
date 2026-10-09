@@ -1331,3 +1331,61 @@ print('HEAD CRLF=%d LF=%d | NOW CRLF=%d LF=%d' % (h.count(b'\r\n'),h.count(b'\n'
 **状态**：`已修（护栏部分补齐；.md 行尾门禁仍未覆盖，见残留风险）`
 
 **关联**：TD-16 / TD-17 / TD-21 / TD-38（同一「行尾/编码」家族，本条是第 5 次、且是首个「非脚本」受害者）。
+
+---
+
+### TD-40（R22，2026-10-09）：日志诊断的**读取窗口**过小 + 归因过宽 —— 长跑日志下「早上判对、晚上静默失效」，且把「服务未授权启动」误报成「你的进程被拉黑」
+
+**现象 A（静默失效）**：客户端日志里白纸黑字写着 `The XtQuantServer is not allowed to start.`，
+可 `/brokers/test` 的失败文案只说「无明确证据」，且 `auth.found=false`。
+
+**现象 B（归因错误）**：同一句 `not allowed`，把「客户端未获授权启动量化服务」
+报成了 `pid_not_allowed`（严格校验按 PID 拉黑了调用进程）——**处置方向完全相反**。
+
+**根因 A —— 固定窗口 vs 会漂移的偏移**：
+`read_client_auth_flags` 只读「头 512KB」、`_diagnose_one` 只在「尾 256KB 的末 1200 行」里找拒绝行。
+而当日光大 QMT 主日志 `XtClient_20261009.log` = **17,196,674 B / 103,592 行**：
+
+| 标记 | 位置 | 旧窗口 |
+| --- | --- | --- |
+| `receive module auth string` | 第 9719 行 / 偏移 **1,573,933 B** | ❌ 头 512KB 只到第 3242 行 |
+| `The XtQuantServer is not allowed to start.` | 偏移 1,810,790 / 15,543,174 B | ❌ 尾窗口从 16.9MB 起 |
+
+⇒ **同一台机器早上诊断正确、晚上静默失效**：不报错、不判错，只是**不判**。
+
+**根因 B —— 用 `"not allowed" in ln` 粗判归因**：
+真机授权串（649 个 `mdl_auth_*` 键）显示 `mdl_auth_xtquant=0` / `mdl_auth_gt_ipc_pair=0`，
+而 `mdl_auth_xttrader_strict_connection_check=0` / `xtdata=0` / `no_pid_check=0`
+⇒ **本机根本不是 PID 白名单场景**。日志里与之配套的是
+`CIPCManager::init, not auth:mdl_auth_gt_ipc_pair` + `The XtQuantServer is not allowed to start.`
+（客户端**根本没启动**量化服务）。旧实现把它归为 `pid_not_allowed`，让用户去「加白名单 / 重装 SDK /
+检查行情登录 / 会话冲突」，全是无用功。
+
+**处置**：
+1. `_scan_marker_lines` **按块全文件扫描**（1MiB/块、上限 64MiB、跨块残行拼接、utf-8↔gb18030 容错），
+   并记录**绝对偏移**再按窗口读原文 —— 不假定授权串永远单行（实测是单行 49,910 B）。
+   授权取**最后一次**下发（重登会再下发一次）。
+2. 归因分流为四档：`xtquant_server_blocked` / `pid_not_allowed` / `strict_check` /
+   `xtquant_module_unauthorized`，各自带**不同的处置首句**（前两档明确告诉用户「别往哪查」）。
+3. `_PID_DENY_RE = \bpid\b[^\n]{0,40}not allowed` —— 必须同时出现 `pid` 才算 PID 拉黑。
+4. 读日志失败走 `core.errors.swallow(exc, why=...)` 并退化返回已扫到的部分，**绝不抛错**
+   （诊断自身崩溃比诊断不到更糟）。
+5. 顺带修 `adapter.py`：回退后报告的模式用「目录→模式」映射，不再用
+   `endswith("userdata_mini")` 猜 —— 目录压根没解析出来（`auto` 回落 client_path）时会误标 `full`。
+
+**护栏**：`backend/tests/test_qmt_client_log_diagnosis.py`（15 例），其中两条是**反腐烂锚**：
+- 断言 `_head_text(log)` 里**不含**授权串标记 —— 证明用例真的落在旧窗口之外（不是重复老路径）；
+- 断言 `_PID_DENY_RE` **不匹配** `XtQuantServer is not allowed to start.`，
+  且真正的 `pid 4242 not allowed` 仍判 `pid_not_allowed` —— 证明分流没有为修 B 而整体改坏。
+
+**证伪方式**：
+```bash
+cd backend && python -c "from xtquant_client.xtp import read_client_auth_flags as f; print(f(r'<QMT>\userdata'))"
+```
+应返回 `found: true`、`xtquant_auth` / `gt_ipc_pair` 有值、`flags` 数百个键；
+若 `found: false` 而日志里确有标记，说明读取又退化成固定窗口了。
+
+**状态**：`已修（读取 + 归因 + 护栏 + 文档/API 契约文案同步）`
+
+**关联**：TD-33（诊断工具「假告状」）/ TD-36（假绿灯与孤儿逻辑家族）—— 本条是**假告状**的一个新亚型：
+不是判错方向，而是「证据在文件里、工具却读不到」以及「两种根因共用一个关键字」。

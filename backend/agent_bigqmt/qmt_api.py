@@ -213,12 +213,46 @@ def _compact_date(value):
     return str(value or "").replace("-", "").replace("/", "").replace(" ", "").strip()
 
 
+#: 交易（下单 / 撤单 / 查询）所必需的**终端注入**函数名。
+#:
+#: ★ 用途严格限定为「**给已捕获的集合分类**」，**绝不**用于断言「终端应该有什么」
+#:   —— 后者就是本仓明令禁止的手抄名单（CI 的 G3 闸门专拦它，手抄名单会把桥的
+#:   bug 伪装成「终端缺能力」）。
+#: ★ 名字必须落在**实现层**（本文件本就持有 passorder / cancel 字面量）；
+#:   入口文件 BIGQMT_AGENT.py 由 G3 限制字面量 ≤3，保持零字面量。
+#: ★ xtdata 的转发面里**不存在**这些名字 ⇒ 本判据不会被转发污染。
+_TRADE_FUNCS = ("passorder", "cancel", "get_trade_detail_data")
+
+
+def trade_surface(injected):
+    """把「终端注入面」按交易 / 非交易分类，供自检如实上报下单能力。
+
+    ``injected`` **必须**是 ``capture_qmt_injected_funcs()`` 的结果（只含终端注入、
+    不含我们转发的 xtdata 接口）—— 否则会把转发当成下单能力，又是一次假绿灯。
+
+    返回 ``{"present": [...], "missing": [...], "can_submit": bool}``。
+    ``can_submit`` 只认 ``passorder``：撤单/查询可用但没有下单函数，仍不能下单。
+    """
+    injected = injected or {}
+    present = sorted(n for n in _TRADE_FUNCS if n in injected)
+    return {
+        "present": present,
+        "missing": sorted(n for n in _TRADE_FUNCS if n not in injected),
+        "can_submit": "passorder" in injected,
+    }
+
+
 class Executor(object):
     """action 路由 + 差分事件合成。"""
 
-    def __init__(self, cfg, injected, context_info):
+    def __init__(self, cfg, injected, context_info, extra=None):
         self.cfg = cfg or {}
+        #: **终端注入**的函数面（独立进程模式下为空）。能力**上报**只认它。
         self.injected = injected or {}
+        #: 额外的**函数查找面**：独立进程模式下由 BIGQMT_AGENT 放入我们转发进来的
+        #: xtdata 接口。它只用于「取函数」，**绝不**用于声明「终端注入了什么」——
+        #: 混为一谈会让能力面出现假绿灯（详见 BIGQMT_AGENT.capture_qmt_injected_funcs）。
+        self.extra = extra or {}
         self.ctx = context_info
         self.po = dict(_DEFAULT_PASSORDER)
         if isinstance(cfg.get("passorder"), dict):
@@ -235,6 +269,10 @@ class Executor(object):
         self._dir_unknown = 0
         self.subscribed = set()
         self._ascii_only = bool(self.cfg.get("ascii_only", False))
+        #: **行情实调结论** ``(ok, detail)`` 或 ``None``。由 BIGQMT_AGENT 的自检写入，
+        #: 随 PROBE 应答回给外部端。★ 存在意义：能力协商若只看「函数在不在」，
+        #: 就会把「接口存在但实调抛错」判成 SUPPORTED —— 2026-10-09 真机假绿灯。
+        self.quote_call = None
         # ★ 多标的账户类型能力表（P1 · R18）：从 po（已合并 config.passorder
         #   覆盖）读取 opAccountType_* 键，形成外部端可枚举的字典。
         #   外部端（后端 bridge_client）据此知道「这个 agent 支持哪些标的」，
@@ -322,7 +360,11 @@ class Executor(object):
         return {
             "ver": VERSION,
             "py": sys.version.split()[0],
+            # ★ ``funcs`` = **终端注入**的函数面（能力上报只认它）。
+            #   独立进程模式下这里为空 —— 那正是「不能下单」的诚实答案。
+            #   我们转发的 xtdata 接口另列 ``forwarded_funcs``（弱证据，仅供诊断）。
             "funcs": sorted(self.injected.keys()),
+            "forwarded_funcs": sorted(self.extra.keys()),
             "trading_enabled": self._shield,
             "bridge_dir": self.cfg.get("bridge_dir", ""),
             "uptime_s": int(time.time() - float(self.cfg.get("_started_at", time.time()))),
@@ -357,7 +399,10 @@ class Executor(object):
                 self._check_ttl(envelope, params)
             if op == "PROBE":
                 return {"ok": True, "result": {"agent": self.meta(),
-                                               "captured": sorted(self.injected.keys())}}
+                                               "captured": sorted(self.injected.keys()),
+                                               # ★ 实调证据随应答出去：外部端据此
+                                               #   否决「函数在 ⇒ 能力可用」的推断。
+                                               "quote_call": self.quote_call}}
             if op in ("PLACE",):
                 return {"ok": True, "result": self.do_place(params)}
             if op == "CANCEL_ORDER":
@@ -417,6 +462,11 @@ class Executor(object):
 
     def _need(self, name):
         fn = self.injected.get(name)
+        if fn is not None:
+            return fn
+        # ★ 查找面第二级：我们转发的 xtdata 接口（独立进程模式）。**只影响取用**，
+        #   不影响能力上报 —— `meta()["captured"]` 仍只列终端注入。
+        fn = self.extra.get(name)
         if fn is not None:
             return fn
         # ★ 措辞纪律：只能说「未捕获」，不能断言终端没有。
@@ -679,6 +729,8 @@ class Executor(object):
         """download_history_data 尽力调一次；不可用/失败都静默（结果面自会体现缺数据）。"""
         fn = self.injected.get("download_history_data")
         if fn is None:
+            fn = self.extra.get("download_history_data")
+        if fn is None:
             fn = getattr(self.ctx, "download_history_data", None)
         if fn is None:
             return
@@ -708,8 +760,12 @@ class Executor(object):
         raise ActionError("Unsupported", "未知 action: %s" % op)
 
     def _pick(self, name):
-        """函数优先取注入命名空间，其次取 ContextInfo 方法（都取不到 ⇒ not_captured）。"""
+        """函数优先取注入命名空间，其次取转发面，最后取 ContextInfo 方法
+        （都取不到 ⇒ not_captured）。"""
         fn = self.injected.get(name)
+        if fn is not None:
+            return fn
+        fn = self.extra.get(name)
         if fn is not None:
             return fn
         fn = getattr(self.ctx, name, None)
@@ -813,6 +869,8 @@ class Executor(object):
         if not codes:
             raise ActionError("BrokerError", "SUB_QUOTE 缺少 codes")
         sub = self.injected.get("subscribe_quote")
+        if sub is None:
+            sub = self.extra.get("subscribe_quote")
         if sub is not None:
             for c in codes:
                 try:

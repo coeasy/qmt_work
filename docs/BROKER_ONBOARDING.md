@@ -167,23 +167,53 @@ if profile.adapter == "mybroker":
 
 ## 5. 运行时热插拔（无需改代码 / 无需重启）
 
-除内置档案外，可通过 API 在运行期追加自定义券商档案（落库 + 加载）：
+> ★ 2026-10-09 更正：本节原写「热插拔专用端点 `profiles/hotplug`（在 brokers 域下）」——
+> **该端点并不存在**（契约 254 个 REST 端点里查无此项）。热插拔实际是**内建在新建连接
+> 里**的自动行为，文档此前把一个内部函数当成了对外端点。本次同时新增了
+> `scripts/check_doc_endpoint_links.py` 门禁：文档里声明的每个 REST 端点都必须能在
+> 契约里查到，防止这类「文档写了不存在的接口」再次溜过。
 
-```
-POST /api/v1/brokers/profiles/hotplug     # 见 registry.hotplug_profile
+### 5.1 实际触发方式：新建连接时自动登记
+
+`POST /api/v1/brokers`（新建连接）里，若传入的 `broker_id` **不在内置档案中**，
+路由会自动调用 `xtquant_client.registry.hotplug_profile()` 把它登记为
+「通用迅投 XTP 适配器」档案，然后照常建立连接：
+
+```jsonc
+// POST /api/v1/brokers
+{
+  "broker_id": "custom1",          // ← 任意未知 id，会被自动登记
+  "client_path": "C:\\custom\\userdata_mini",
+  "account_id": "12345678",
+  "account_type": "STOCK"
+}
 ```
 
-请求体示例：
+登记时写入的档案形如（见 `app/routes/broker.py`）：
 
 ```json
 {
-  "id": "custom1",
-  "name": "自定义券商",
+  "id": "custom1", "name": "<由 agent_broker_name 推导>",
   "adapter": "xtp",
-  "default_client_path": "C:\\custom\\userdata_mini",
-  "supported_account_types": ["STOCK"],
-  "capabilities": ["quote","kline","trade","account","positions"]
+  "supported_account_types": ["STOCK", "CREDIT", "OPTION", "FUTURES"],
+  "note": "自动登记：QMT 全券商通用迅投适配器"
 }
+```
+
+> 注意：`connector_key` 非空（大 QMT 桥接 / 文件桥等）时**不走**这条自动登记路径。
+
+### 5.2 需要在代码里显式登记时
+
+只有**后端/脚本内**才直接调函数（它不是 HTTP 端点）：
+
+```python
+from xtquant_client.registry import hotplug_profile
+hotplug_profile({
+    "id": "custom1", "name": "自定义券商", "adapter": "xtp",
+    "default_client_path": r"C:\custom\userdata_mini",
+    "supported_account_types": ["STOCK"],
+    "capabilities": ["quote", "kline", "trade", "account", "positions"],
+})
 ```
 
 内置档案不可删除；自定义档案可经 `Registry.unregister_profile` 删除。

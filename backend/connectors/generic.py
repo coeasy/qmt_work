@@ -282,12 +282,20 @@ class GenericConnector:
         ★ 这正是大 QMT 桥接的教训（"未捕获函数"被误报成"终端没有接口"会掩盖真 bug）。
         """
         captured: set[str] = set()
+        #: 行情**实调**证据 ``(ok, detail)``。agent 自检真调一次 get_full_tick 得到，
+        #: ``None`` = 没测（不产生任何结论）。
+        quote_evidence: tuple[bool, str] | None = None
         try:
             reply = await self.test_connection() or {}
             funcs = reply.get("captured") or (
                 (reply.get("agent") or {}).get("funcs"))
             if funcs:
                 captured = set(funcs)
+            qc = reply.get("quote_call")
+            if qc is None:
+                qc = (reply.get("agent") or {}).get("quote_call")
+            if isinstance(qc, (list, tuple)) and len(qc) >= 2:
+                quote_evidence = (bool(qc[0]), str(qc[1]))
         except Exception:  # noqa: BLE001  探测失败不应让 probe 整体崩
             log.warning("[connectors] probe 探测失败，退化为静态声明")
 
@@ -309,8 +317,23 @@ class GenericConnector:
 
         declared = set(self.capabilities())
         names = set(declared) | set(backed) | {"realtime"}
+        # ★ **实调证据优先于「函数在不在」**（2026-10-09 真机假绿灯）：
+        #   大 QMT 独立进程模式会把 76 个 xtdata 接口转发进入口命名空间，其中含
+        #   ``get_full_tick`` —— 只看「captured 里有它」就会把 quote/realtime 判成
+        #   SUPPORTED，而 agent 的**实调**是抛错的（``无法连接行情服务！``）。
+        #   结果就是「能力页全绿、行情面板永远空白」。
+        #   凡是实调证伪的能力，一律 UNSUPPORTED + 带上真因，不得再被 captured 翻绿。
+        quote_veto: tuple[CapabilityLevel, str] | None = None
+        if quote_evidence is not None and not quote_evidence[0]:
+            quote_veto = (CapabilityLevel.UNSUPPORTED,
+                          f"实调失败: {quote_evidence[1]}")
         out: list[Capability] = []
         for name in sorted(names):
+            if name in ("quote", "realtime") and quote_veto is not None:
+                out.append(Capability(
+                    name=name, level=quote_veto[0], reason=quote_veto[1],
+                    probed_at=now_iso()))
+                continue
             if name == "realtime":
                 out.append(Capability(
                     name="realtime", level=realtime_level,

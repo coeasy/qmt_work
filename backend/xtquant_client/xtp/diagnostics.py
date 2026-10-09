@@ -15,6 +15,8 @@
 import os
 import re
 
+from core.errors import swallow
+
 from ._common import _candidate_roots, _normalize
 
 
@@ -77,12 +79,39 @@ def _latest_login_log(trade_dir: str) -> str:
 #     平台侧     XtQuantTrader.connect() 恒返回 -1（**行情侧 xtdata 不受影响**）
 # 该开关由券商服务端下发，平台无法自行改写 —— 只能精确告知用户去申请授权，
 # 而不是把用户误导到「重装 SDK / 检查行情登录 / 会话冲突」这些无关方向上。
+#
+# ★ 2026-10-09（R22）补充第二种、更常见的根因（光大 QMT 真机实测）：
+#     授权串里 `mdl_auth_xtquant=0` / `mdl_auth_gt_ipc_pair=0`、三个 strict_* **全为 0**
+#     （即**并非** PID 白名单场景），客户端日志出现：
+#          `CIPCManager::init, not auth:mdl_auth_gt_ipc_pair`
+#          `The XtQuantServer is not allowed to start.`
+#     ⇒ 客户端**根本没有启动量化服务进程**，任何外部 connect() 必然失败。
+#     与 PID 拒绝的区别是决定性的：一个要「加白名单」，一个要「申请 xtquant 模块授权」。
+#     旧实现用 `"not allowed" in ln` 粗判，把后者误报成前者 —— 属「假告状」家族。
 _AUTH_STRICT_KEYS = (
     "mdl_auth_xttrader_strict_connection_check",
     "mdl_auth_xtdata_strict_connection_check",
     "mdl_auth_xtquant_strict_connection_check",
 )
 _AUTH_NO_PID_KEY = "mdl_auth_xtquant_no_pid_check"
+#: xtquant 模块总开关与量化 IPC 配对授权：为 0 时客户端**根本不启动** XtQuantServer
+#: （实测日志 `CIPCManager::init, not auth:mdl_auth_gt_ipc_pair` +
+#:  `The XtQuantServer is not allowed to start.`），此时任何外部进程 connect() 必 -1，
+#: 与「严格连接校验 / PID 白名单」是**两回事**，必须分开归因。
+_AUTH_XTQUANT_KEY = "mdl_auth_xtquant"
+_AUTH_IPC_PAIR_KEY = "mdl_auth_gt_ipc_pair"
+#: 授权串标记（日志原文：`[auth log] [CProxyClient] receive module auth string : { ... }`）
+_AUTH_MARKER = "receive module auth string"
+#: 客户端侧「量化服务未获授权启动」标记（与 PID 拒绝是不同根因）。
+_SERVER_BLOCKED_MARKER = "The XtQuantServer is not allowed to start."
+#: 授权串 JSON 是按单行写下的（实测 49,910 B），从偏移读 400KB 足够覆盖；
+#: 若未来客户端改成跨行，偏移读取仍能拿到完整 JSON。
+_AUTH_SEG_BYTES = 400_000
+#: 真正的「PID 白名单拒绝」行形如 `quant session N, pid X not allowed, return`。
+#: ★ 旧实现用 `"not allowed" in ln` 粗判，会把 `The XtQuantServer is not allowed to start.`
+#:   也归为 PID 拒绝 ⇒ **归因错误**（把「服务没授权启动」说成「你的进程被拉黑」，
+#:   用户按 PID 白名单方向排查必然徒劳）。改为匹配 pid + not allowed 的组合。
+_PID_DENY_RE = re.compile(r"\bpid\b[^\n]{0,40}not allowed", re.IGNORECASE)
 _AUTH_SNIPPET_RE = re.compile(
     r'"(mdl_auth_[A-Za-z0-9_]+)"\s*:\s*(\d+)')
 
@@ -159,6 +188,11 @@ def _read_window(path: str, tail: bool, max_bytes: int) -> str:
             raw = f.read(max_bytes)
     except OSError:
         return ""
+    return _decode_bytes(raw)
+
+
+def _decode_bytes(raw: bytes) -> str:
+    """utf-8 → gb18030 容错解码（两者都失败时用 gb18030 忽略坏字节，绝不抛错）。"""
     for enc in ("utf-8", "gb18030"):
         try:
             return raw.decode(enc)
@@ -167,38 +201,129 @@ def _read_window(path: str, tail: bool, max_bytes: int) -> str:
     return raw.decode("gb18030", errors="ignore")
 
 
+# ---------------- 全文件「标记扫描」 ----------------
+# ★ 2026-10-09（R22）：固定窗口（头 512KB / 尾 256KB）在长跑日志上**必然漏读**。
+#   实测当日光大 QMT 主日志 XtClient_20261009.log = 17,196,674 B / 103,592 行：
+#     · 授权串 `receive module auth string` 在**第 9719 行 / 偏移 1,573,933 B**
+#     · 拒绝行 `The XtQuantServer is not allowed to start.` 在第 10703/17483/93554 行
+#       （偏移 1,810,790 / 3,049,117 / 15,543,174 B）
+#   而「头 512KB」只覆盖前 3242 行（授权串/拒绝行全部落在窗口之外），「尾 256KB」从
+#   16.9MB 起（同样漏掉）。后果：**同一台机器早上诊断正确、晚上静默失效** —— 诊断
+#   结论随当天日志体量漂移，是「假绿灯」家族里最难查的一种（不是判错，而是不判）。
+#   改为按块前扫全文件、命中即收行；上限 _SCAN_MAX_BYTES 防止病态超大日志把连接失败
+#   路径拖死（超限时如实返回已扫到的部分，不臆测）。
+_SCAN_CHUNK = 1 << 20          # 每次读取 1 MiB
+_SCAN_MAX_BYTES = 64 << 20     # 扫描上限 64 MiB
+_SCAN_KEEP_LINES = 8           # 每个标记只保留最后 8 条（够给证据，不涨内存）
+
+
+def _scan_marker_lines(path: str, markers, max_bytes: int = _SCAN_MAX_BYTES) -> dict:
+    """按块扫描全文件，返回 ``{marker: [(绝对字节偏移, 行文本), ...]}``。
+
+    - 分块读取并保留跨块残行，避免把一行切成两半导致漏匹配；
+    - 记录**绝对偏移**，调用方据此再按窗口读取该标记之后的原文
+      （授权串 JSON 实测是单行 49,910 B，但不假定它永远单行 —— 有偏移就不怕换行）；
+    - 命中行用 `_decode_bytes` 容错解码（同一日志里可能混有 utf-8 与 gb18030 字节）；
+    - 每个标记只保留最后 `_SCAN_KEEP_LINES` 条；任何 OSError 都退回已扫到的部分，
+      绝不因读日志失败而让诊断抛错（诊断自身崩溃比诊断不到更糟）。
+    """
+    out: dict = {m: [] for m in markers}
+    pairs = [(m, m.encode("utf-8")) for m in markers]
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        return out
+    limit = min(size, max_bytes)
+    chunk_off = 0
+    carry, carry_off = b"", 0
+    try:
+        with open(path, "rb") as f:
+            while chunk_off < limit:
+                raw = f.read(min(_SCAN_CHUNK, limit - chunk_off))
+                if not raw:
+                    break
+                buf = carry + raw
+                buf_off = carry_off
+                chunk_off += len(raw)
+                pos = 0
+                while True:
+                    nl = buf.find(b"\n", pos)
+                    if nl < 0:
+                        break
+                    _collect_marker_line(out, pairs, buf_off + pos, buf[pos:nl])
+                    pos = nl + 1
+                carry, carry_off = buf[pos:], buf_off + pos
+            if carry:
+                _collect_marker_line(out, pairs, carry_off, carry)
+    except OSError as exc:
+        # 读到一半失败（文件被客户端整文件锁 / 中途被轮转）时，退回**已扫到的部分**。
+        # 理由必须写出来：诊断函数抛错会让上层连接失败路径直接崩，比「证据少一点」糟得多。
+        swallow(exc, why="读客户端日志中断：本函数退化为「仅返回已扫到的部分」，"
+                        "绝不因读日志失败而让诊断抛错（诊断自身崩溃比诊断不到更糟）")
+    return out
+
+
+def _collect_marker_line(out: dict, pairs, offset: int, bl: bytes) -> None:
+    """把一行（bytes）收进命中的标记桶（保留最后 _SCAN_KEEP_LINES 条）。"""
+    hit = [m for m, mb in pairs if mb in bl]
+    if not hit:
+        return
+    txt = _decode_bytes(bl).strip()
+    for m in hit:
+        bucket = out[m]
+        bucket.append((offset, txt))
+        if len(bucket) > _SCAN_KEEP_LINES:
+            del bucket[0]
+
+
+def _read_at(path: str, offset: int, max_bytes: int) -> str:
+    """从绝对偏移读一段文本（容错解码；失败返回 ''）。"""
+    if offset < 0:
+        offset = 0
+    try:
+        with open(path, "rb") as f:
+            f.seek(offset)
+            raw = f.read(max_bytes)
+    except OSError:
+        return ""
+    return _decode_bytes(raw)
+
+
 def read_client_auth_flags(trade_dir: str) -> dict:
     """读回券商下发给客户端的最新「模块授权」开关（读日志，只读无副作用）。
 
-    授权串写在日志**头部**（登录时下发），故先读头再读尾兜底；找不到时
-    found=False（不臆测，交由上层走通用排查文案）。
+    ★ 2026-10-09（R22）修复读取缺陷：旧实现只读**头 512KB / 尾 256KB**两个固定窗口，
+      而授权串偏移随当天日志增长而增大（实测 17.2MB 的日志里授权串在 **1.57MB** 处，
+      两个窗口都覆盖不到）⇒ 同一台机器「早上诊断正确、晚上静默失效」，且不报错、
+      只表现为「无明确证据」。现改为全文件按标记扫描，取**最后一次**下发的授权串
+      （重登会再下发一次，最后一次才是当前生效值），再从该偏移按窗口读取 JSON 原文。
+
     返回 {"found": bool, "flags": {键: 值}, "strict_xttrader": int|None,
-          "strict_xtdata": int|None, "no_pid_check": int|None, "log": str}。
+          "strict_xtdata": int|None, "no_pid_check": int|None,
+          "xtquant_auth": int|None, "gt_ipc_pair": int|None, "log": str}。
     """
     out: dict = {"found": False, "flags": {}, "strict_xttrader": None,
-                 "strict_xtdata": None, "no_pid_check": None, "log": ""}
+                 "strict_xtdata": None, "no_pid_check": None,
+                 "xtquant_auth": None, "gt_ipc_pair": None, "log": ""}
     p = _newest_client_log(trade_dir)
     if not p:
         return out
     out["log"] = p
-    seg = ""
-    for txt in (_head_text(p), _tail_text(p)):
-        if not txt:
-            continue
-        idx = txt.rfind("receive module auth string")
-        if idx >= 0:
-            seg = txt[idx:idx + 300000]
-            break
-    if not seg:
+    hits = _scan_marker_lines(p, (_AUTH_MARKER,)).get(_AUTH_MARKER) or []
+    if not hits:
         return out
+    off, _line = hits[-1]
+    seg = _read_at(p, off, _AUTH_SEG_BYTES)
     flags = {k: int(v) for k, v in _AUTH_SNIPPET_RE.findall(seg)}
     if not flags:
         return out
     out["found"] = True
     out["flags"] = flags
-    out["strict_xttrader"] = flags.get("mdl_auth_xttrader_strict_connection_check")
-    out["strict_xtdata"] = flags.get("mdl_auth_xtdata_strict_connection_check")
+    out["strict_xttrader"] = flags.get(_AUTH_STRICT_KEYS[0])
+    out["strict_xtdata"] = flags.get(_AUTH_STRICT_KEYS[1])
     out["no_pid_check"] = flags.get(_AUTH_NO_PID_KEY)
+    out["xtquant_auth"] = flags.get(_AUTH_XTQUANT_KEY)
+    out["gt_ipc_pair"] = flags.get(_AUTH_IPC_PAIR_KEY)
     return out
 
 
@@ -206,9 +331,12 @@ def diagnose_trade_connect(trade_dir: str) -> dict:
     """诊断「交易连接 rc=-1」的客户端侧真实原因（只读客户端日志，无副作用）。
 
     返回 {"reason","title","evidence","steps","auth","log"}：
-      reason == "pid_not_allowed" → 客户端启用严格连接校验、拒绝未授权进程（最优先透出）
-      reason == "strict_check"    → 授权串显示已开启严格校验，但本轮日志未见显式拒绝
-      reason == ""                → 无明确证据（上层保持原有四步排查文案，不臆测）
+      reason == "xtquant_server_blocked"     → 客户端未获授权启动量化服务
+                                               （`The XtQuantServer is not allowed to start.`）
+      reason == "pid_not_allowed"            → 严格连接校验按 PID 拉黑了本平台进程
+      reason == "strict_check"               → 授权串显示已开启严格校验，但本轮日志未见显式拒绝
+      reason == "xtquant_module_unauthorized"→ 无拒绝行/无严格校验，但 mdl_auth_xtquant=0
+      reason == ""                           → 无明确证据（上层保持原有四步排查文案，不臆测）
 
     ★ 回退策略：严格校验是**账号级授权**（券商服务端按资金账号下发），与该账号跑到
     哪个客户端模式（完整版 userdata / 极速版 userdata_mini）无关。因此当 primary
@@ -236,7 +364,18 @@ def diagnose_trade_connect(trade_dir: str) -> dict:
 
 
 def _diagnose_one(trade_dir: str) -> dict:
-    """单目录诊断（diagnose_trade_connect 的实现体，不做同根回退）。"""
+    """单目录诊断（diagnose_trade_connect 的实现体，不做同根回退）。
+
+    ★ 2026-10-09（R22）：取证从「尾 256KB + 末 1200 行」改为**全文件标记扫描**。
+      旧实现的拒绝行 `The XtQuantServer is not allowed to start.` 落在当日日志
+      1.81MB / 15.54MB 处，尾窗口（17.2MB - 256KB = 16.9MB 起）同样覆盖不到
+      ⇒ 明明有确凿证据却报「无明确证据」。
+    ★ 归因分流（同一句 "not allowed" 下藏两种完全不同的根因，不可混为一谈）：
+      · `The XtQuantServer is not allowed to start.`（+ `mdl_auth_gt_ipc_pair=0`）
+        → **客户端未获授权启动量化服务**（xtquant 模块授权未下发）；
+      · `quant session N, pid X not allowed, return`
+        → **严格连接校验 / PID 白名单**把调用进程拉黑。
+    """
     res: dict = {"reason": "", "title": "", "evidence": [], "steps": "",
                  "auth": {}, "log": ""}
     auth = read_client_auth_flags(trade_dir)
@@ -246,18 +385,31 @@ def _diagnose_one(trade_dir: str) -> dict:
     if not p:
         return res
     res["log"] = p
-    txt = _tail_text(p)
-    if not txt:
-        return res
-    lines = txt.splitlines()[-1200:]
-    not_allowed = [ln.strip() for ln in lines if "not allowed" in ln]
-    connect_err = [ln.strip() for ln in lines if "connect ret error" in ln]
-    if not_allowed:
+    found = _scan_marker_lines(
+        p, (_SERVER_BLOCKED_MARKER, "connect ret error", "not allowed"))
+    blocked = found.get(_SERVER_BLOCKED_MARKER) or []
+    connect_err = [t for _o, t in (found.get("connect ret error") or [])]
+    denies = [t for _o, t in (found.get("not allowed") or [])]
+    pid_denied = [t for t in denies if _PID_DENY_RE.search(t)]
+    if blocked:
+        res["reason"] = "xtquant_server_blocked"
+        res["title"] = (
+            "客户端**未获授权启动量化服务**：日志出现 "
+            f"`{_SERVER_BLOCKED_MARKER}`（授权串 "
+            f"{_AUTH_IPC_PAIR_KEY}={auth.get('gt_ipc_pair')}、"
+            f"{_AUTH_XTQUANT_KEY}={auth.get('xtquant_auth')}）⇒ "
+            "XtQuantServer 不监听，任何外部进程 connect() 必失败。")
+        res["evidence"] = ([blocked[-1][1][-160:]]
+                           + [f"授权串: {_AUTH_XTQUANT_KEY}="
+                              f"{auth.get('xtquant_auth')}, "
+                              f"{_AUTH_IPC_PAIR_KEY}={auth.get('gt_ipc_pair')}"]
+                           + connect_err[-1:])[:3]
+    elif pid_denied:
         res["reason"] = "pid_not_allowed"
         res["title"] = (
             "客户端启用了「量化连接严格校验」，拒绝了本平台进程的 xtquant 连接"
-            f"（客户端日志：{not_allowed[-1][-140:]}）")
-        res["evidence"] = (not_allowed[-2:] + connect_err[-1:])[:3]
+            f"（客户端日志：{pid_denied[-1][-140:]}）")
+        res["evidence"] = (pid_denied[-2:] + connect_err[-1:])[:3]
     elif (auth.get("strict_xttrader") == 1
           and auth.get("no_pid_check") in (0, None)):
         res["reason"] = "strict_check"
@@ -265,10 +417,30 @@ def _diagnose_one(trade_dir: str) -> dict:
             "客户端授权串显示已开启「xttrader 严格连接校验」"
             f"（{_AUTH_STRICT_KEYS[0]}=1，{_AUTH_NO_PID_KEY}={auth.get('no_pid_check')}）")
         res["evidence"] = connect_err[-2:]
+    elif (auth.get("xtquant_auth") == 0
+          and auth.get("strict_xttrader") != 1):
+        # 无拒绝行、无严格校验，但 xtquant 模块授权为 0 —— 同样是「通道未开放」。
+        res["reason"] = "xtquant_module_unauthorized"
+        res["title"] = (
+            f"客户端授权串显示 `{_AUTH_XTQUANT_KEY}={auth.get('xtquant_auth')}`"
+            "（该资金账号未获 xtquant 模块授权），量化通道未开放。")
+        res["evidence"] = [f"{_AUTH_XTQUANT_KEY}={auth.get('xtquant_auth')}, "
+                           f"{_AUTH_IPC_PAIR_KEY}={auth.get('gt_ipc_pair')}"]
     if not res["reason"]:
         return res
+    # ★ 按根因给**不同的首句**：三种 reason 的处置重点不同，套同一段「加白名单」文案
+    #   会把「模块未授权」的用户推去做无用功（与「假告状」同源的误导）。
+    _lead = {
+        "xtquant_server_blocked":
+            "本机**不是**被 PID 白名单拒绝，而是客户端未获授权启动量化服务 —— "
+            "请勿按「加白名单」方向排查，重点是「申请 xtquant 模块授权」。\n",
+        "xtquant_module_unauthorized":
+            "日志中**没有任何拒绝行、也没有严格校验**，纯粹是模块授权未下发 ⇒ "
+            "重点是「申请 xtquant 模块授权」；\n",
+    }.get(res["reason"], "")
     res["steps"] = (
-        "该开关由券商服务端下发的模块授权控制（xttrader/xtdata "
+        _lead
+        + "该开关由券商服务端下发的模块授权控制（xttrader/xtdata "
         "strict_connection_check=1、xtquant_no_pid_check=0），平台侧无法自行改写。\n"
         "  1) 联系券商，为该资金账号申请「程序化交易/外部策略接入」授权，"
         "并要求关闭「xtquant 严格连接校验」（或把调用进程加入 PID 白名单）；\n"
@@ -296,6 +468,14 @@ __all__ = [
     '_AUTH_STRICT_KEYS',
     '_AUTH_NO_PID_KEY',
     '_AUTH_SNIPPET_RE',
+    '_AUTH_MARKER',
+    '_AUTH_XTQUANT_KEY',
+    '_AUTH_IPC_PAIR_KEY',
+    '_SERVER_BLOCKED_MARKER',
+    '_PID_DENY_RE',
+    '_scan_marker_lines',
+    '_read_at',
+    '_decode_bytes',
     '_client_log_dirs',
     '_newest_client_log',
     '_tail_text',

@@ -345,3 +345,127 @@ def test_usage_has_common_errors_table():
     # 必须点出「日常排障第一名」
     assert "bridge_dir" in body, "§5.7 未覆盖「bridge_dir 路径不一致」这条头号排障"
     assert "注册树" in body, "§5.7 未覆盖「注册树未登记」这条头号症状"
+
+
+# --------------------------------------------------------------------------
+# B8（2026-10-09）：拉起 QMT 内置解释器时必须剥掉宿主的 PYTHON* 注入
+# --------------------------------------------------------------------------
+
+LOCAL_RUN = ROOT / "scripts" / "qmt_agent_local_run.py"
+
+
+def _load_local_run():
+    """把 scripts/qmt_agent_local_run.py 当模块加载（它不在 sys.path 上）。"""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("_qmt_local_run_under_test", LOCAL_RUN)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_child_env_strips_python_injection(monkeypatch):
+    """★ B8：宿主 `PYTHONPATH` 会被 QMT 的 py3.6 **一并导入**，必须剥掉。
+
+    真机实证：本机 shell 的 `PYTHONPATH` 指向一个为 py3.7+ 写的 shim，
+    QMT 的 Python 3.6.8 启动策略后立刻
+    `TypeError: __init__() got an unexpected keyword argument 'capture_output'`
+    → `return code:1`（在客户端里就是「点运行 → 立刻停止」）。
+    """
+    mod = _load_local_run()
+    monkeypatch.setenv("PYTHONPATH", r"C:/some/shim")
+    monkeypatch.setenv("PYTHONHOME", r"C:/py")
+    monkeypatch.setenv("PYTHONSTARTUP", r"C:/x.py")
+    monkeypatch.setenv("PYTHONEXECUTABLE", r"C:/x.exe")
+    env = mod._child_env()
+    for key in ("PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP", "PYTHONEXECUTABLE"):
+        assert key not in env, key
+
+
+def test_child_env_keeps_path_and_systemroot(monkeypatch):
+    """反向锚：**绝不能整体丢弃 os.environ** —— 丢 PATH 连 pythonw.exe 都起不来。
+
+    注意 Windows 下 ``os.environ`` 的键被规范化为**大写**，故断言用 ``SYSTEMROOT``
+    （写 ``SystemRoot`` 会取不到 —— 这本身就是环境键大小写的一个真实坑）。
+    """
+    mod = _load_local_run()
+    monkeypatch.setenv("PATH", r"C:/Windows/System32")
+    monkeypatch.setenv("SystemRoot", r"C:/Windows")
+    env = mod._child_env()
+    assert env.get("PATH") == r"C:/Windows/System32"
+    assert env.get("SYSTEMROOT") == r"C:/Windows"
+    # 反向锚：被剥的键**只有** PYTHON*，其余键一律原样保留
+    assert env.get("PYTHONPATH") is None
+
+
+def test_run_process_uses_child_env(monkeypatch, tmp_path):
+    """`run_process` 必须走 `_child_env()`（回归：别退回 `dict(os.environ)`）。"""
+    mod = _load_local_run()
+    captured: dict[str, dict] = {}
+
+    class _FakeProc:
+        def __init__(self):
+            self.returncode = None
+
+        def poll(self):
+            return 0            # 立刻「已退出」⇒ 后续判定短路，测试只需看 env
+
+        def communicate(self, timeout=None):  # pragma: no cover - 兜底
+            return b"", b""
+
+        def kill(self):         # pragma: no cover
+            pass
+
+    def _fake_popen(argv, **kw):
+        captured["env"] = kw.get("env") or {}
+        return _FakeProc()
+
+    monkeypatch.setattr(mod.subprocess, "Popen", _fake_popen)
+    monkeypatch.setenv("PYTHONPATH", r"C:/bad/shim")
+    bundle = tmp_path / "QMT_WORK_AGENT.py"
+    bundle.write_text("x = 1\n", encoding="utf-8")
+    mod.run_process(str(bundle), str(tmp_path / "wd"), "pythonw.exe", "", max_seconds=1.0)
+    assert "PYTHONPATH" not in captured.get("env", {}), captured
+
+
+# --------------------------------------------------------------------------
+# B7（2026-10-09）：inspect --force 必须在文件被独占锁时**优雅降级**
+# --------------------------------------------------------------------------
+
+def test_inspect_force_degrades_on_locked_file(monkeypatch, tmp_path, capsys):
+    """★ B7：QMT 运行期注册树被整文件锁 —— `inspect --force` 必须降级而不是崩溃。
+
+    旧实现 `raw = open(src,'rb').read()` 没有 try 包裹，直接 PermissionError
+    以 traceback 退出：另一个文件的信息拿不到，用户也看不出「是锁、不是损坏」。
+    同时**必须保留 `PermissionError` 字样**（qmt_diag_report.py 依赖它汇总问题）。
+    """
+    import importlib.util
+    import types
+
+    spec = importlib.util.spec_from_file_location("_deploy_mod_under_test", DEPLOY_SCRIPT)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    qmt = tmp_path / "gd_qmt"
+    root = qmt / "config" / "user" / "root"
+    root.mkdir(parents=True)
+    (root / "configFormula").write_bytes(b"XTF1")
+    (root / "UiSettingConfig").write_bytes(b"XTF1")
+
+    monkeypatch.setattr(mod, "find_qmt_dir", lambda d: str(qmt))
+    monkeypatch.setattr(mod, "qmt_running", lambda: ["XtItClient.exe"])
+
+    def _boom(src, dst):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(mod.shutil, "copy2", _boom)
+    monkeypatch.setattr(mod, "_ROOT", str(tmp_path))
+
+    args = types.SimpleNamespace(qmt_dir=str(qmt), force=True)
+    rc = mod.cmd_inspect(args)
+    out = capsys.readouterr().out
+    assert rc == 0, "锁住的注册树属预期限制，不该让整条命令失败"
+    assert "PermissionError" in out, "必须保留关键字供 diag_report 汇总"
+    assert "configFormula" in out and "UiSettingConfig" in out, out
+    # 反向锚：不得把异常漏出去变成 traceback
+    assert "Traceback" not in out

@@ -35,5 +35,5 @@ class RequestIDFilter(logging.Filter):
     """日志过滤器：为每条记录附加 request_id（无则 `-`）。"""
 
     def filter(self, record: logging.LogRecord) -> bool:
-        record.request_id = _request_id_ctx.get() or "-"
+        record.request_id = get_request_id() or "-"
         return True

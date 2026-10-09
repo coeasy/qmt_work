@@ -73,6 +73,7 @@ __all__ = [
     '_FULL_EXE_NAMES',
     '_MINI_EXE_NAMES',
     '_QUOTE_EXE_NAMES',
+    '_MODE_LABEL',
     '_running_client_exes',
     '_latest_login_log',
     '_find_client_exe',

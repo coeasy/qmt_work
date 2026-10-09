@@ -26,6 +26,37 @@ function isRecommended(c: AutoDetectCandidate): boolean {
 }
 
 /**
+ * 客户端模式的中文名。**模式键与语义必须与后端 `xtp/env.py::_MODE_LABEL` 一致**。
+ *
+ * 「一致」的口径是**键相同、概念相同**（full=完整版大 QMT / mini=极速版小 QMT /
+ * quote=仅行情），措辞可按界面需要精简（后端那条是日志/报错文案，更长）；
+ * 但**同一个模式在界面、日志、后端提示里不能出现互相矛盾的叫法** ——
+ * 否则排障时对不上号（例如界面说「极速版」、日志说「小客户端」是同一物，
+ * 而「独立行情」绝不能和「极速版」混为一谈，那是 miniquote 子进程）。
+ *
+ * 导出以便 `tests/brokerClientMode.test.ts` 静态校验（防后续改动把两种叫法改散）。
+ */
+export const MODE_LABEL: Record<string, string> = {
+  full: "完整版（大 QMT）",
+  mini: "极速版（小 QMT）",
+  auto: "自动识别",
+  quote: "仅行情",
+};
+
+/**
+ * 模式建议的**依据**标签。
+ *
+ * 存在意义：「大 QMT 用大模式、小 QMT 用小模式」这条要求是否被满足，
+ * 靠的就是模式是否**按实际运行进程**判定。若界面不显示依据，用户无法区分
+ * 「实测出来的模式」与「按目录猜的模式」—— 两者外观一模一样，无法验收。
+ */
+export function modeSourceLabel(src?: string): { text: string; tone: "success" | "neutral" } {
+  return src === "process"
+    ? { text: "按运行进程判定", tone: "success" }
+    : { text: "按目录布局推断", tone: "neutral" };
+}
+
+/**
  * 快速模板：让新用户在「接入模式」下拉里不用自己猜「我这种情况该选哪个」。
  * 点模板按钮只填 accessMode（券商 id 由独立下拉控制，模板不越权），
  * 用户仍然要填资金账号 / clientPath / bridgeDir —— 那部分信息我们不知道。
@@ -197,6 +228,13 @@ export function Brokers() {
   const [connectingId, setConnectingId] = useState("");
   /** 探测/一键连接的结果消息，显示在「检测到的本地客户端」面板内（与表单消息分开） */
   const [detectMsg, setDetectMsg] = useState("");
+  /**
+   * 正在启动的候选：`<root>|<mode>`；空 = 空闲。
+   *
+   * GUI 启动本身立即返回，但后端在返回前会跑一次进程/端口探测（约数秒），
+   * 且同一 exe 连点会真的拉起多个实例 ⇒ 必须禁用并发点击。
+   */
+  const [launchingKey, setLaunchingKey] = useState("");
 
   /** 批量选择（按 conn_id）。活跃连接不可删，故不计入可选集合。 */
   const [selected, setSelected] = useState<string[]>([]);
@@ -246,6 +284,42 @@ export function Brokers() {
     [candidates],
   );
 
+  /**
+   * 启动本机客户端（按模式）。
+   *
+   * 「启动大 QMT 就用大模式 / 启动小 QMT 就用小模式」这条链路的**前半段**：
+   * 由用户显式选择启动哪个模式，后端拉起对应 exe；后半段（连接时用哪个数据目录）
+   * 由候选里按运行进程判定的 `client_mode` 决定。
+   *
+   * 三种返回**必须分开呈现**（后端已如实区分，界面不得合并）：
+   *   - already_running → 「这个模式的进程已在跑」，不是「本次启动成功」；
+   *   - launched        → 确实拉起了 GUI，用户还需在窗口里登录；
+   *   - 两者皆 false    → **没启动**（未安装该模式 exe / 启动失败），原样显示原因。
+   */
+  const onLaunch = async (c: AutoDetectCandidate, mode: "full" | "mini" | "quote") => {
+    const key = `${c.root}|${mode}`;
+    setLaunchingKey(key);
+    setDetectMsg("");
+    try {
+      const r = await brokerApi.launchClient(c.client_path || c.root, mode);
+      const who = c.broker_name || c.name || c.root;
+      const label = MODE_LABEL[mode] || mode;
+      if (r.already_running) {
+        setDetectMsg(`${who}：${label}的进程已在运行${r.hint ? `（${r.hint}）` : ""}，无需重复启动`);
+      } else if (r.launched) {
+        setDetectMsg(
+          `${who}：已启动 ${r.exe || label}。${r.hint || "请在弹出的窗口中完成登录，再点「连接并设为活跃」。"}`,
+        );
+      } else {
+        setDetectMsg(`${who}：未启动 —— ${r.hint || "后端未返回原因"}`);
+      }
+    } catch (e) {
+      setDetectMsg(`启动失败：${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setLaunchingKey("");
+    }
+  };
+
   /** 一键建连：add(autoconnect) → 设为活跃 → 回读列表 */
   const onConnectCandidate = async (c: AutoDetectCandidate) => {
     setBusy(true);
@@ -267,8 +341,7 @@ export function Brokers() {
     }
   };
 
-  /** 套用快速模板：只填 accessMode，其余字段留空由用户填。 */
-  const applyTemplate = (t: (typeof QUICK_TEMPLATES)[number]) => {
+  /** 套用快速模板：只填 accessMode，其余字段留空由用户填。 */  const applyTemplate = (t: (typeof QUICK_TEMPLATES)[number]) => {
     setAccessMode(t.accessMode);
     setConnErr("");
     setMsg(`已套用「${t.label}」：${t.hint}`);
@@ -465,8 +538,9 @@ export function Brokers() {
                     <Badge tone="neutral">未运行</Badge>
                   )}
                   {isRecommended(c) && <Badge tone="info">推荐</Badge>}
-                  <Badge tone="neutral">
-                    {c.client_mode === "mini" ? "极速版" : c.client_mode || "未知模式"}
+                  <Badge tone="neutral">{MODE_LABEL[c.client_mode] || c.client_mode || "未知模式"}</Badge>
+                  <Badge tone={modeSourceLabel(c.mode_source).tone}>
+                    {modeSourceLabel(c.mode_source).text}
                   </Badge>
                 </div>
                 <div className={s.itemSub}>{c.root}</div>
@@ -481,6 +555,38 @@ export function Brokers() {
                 </div>
               </div>
               <div className={s.itemActions}>
+                {/*
+                  三个启动模式**各自独立**（后端按模式分别判定「是否已在运行」）：
+                  大客户端在跑不会挡住极速版的启动 —— 旧后端把二者混成一个标志，
+                  「启动小 QMT」会被误报「已在运行」而永远拉不起来。
+                */}
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  title="启动完整版大客户端 XtItClient.exe（数据目录 userdata）"
+                  disabled={!!launchingKey}
+                  onClick={() => void onLaunch(c, "full")}
+                >
+                  {launchingKey === `${c.root}|full` ? "启动中…" : "启动大 QMT"}
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  title="启动极速版小客户端 XtMiniQmt.exe（数据目录 userdata_mini）"
+                  disabled={!!launchingKey}
+                  onClick={() => void onLaunch(c, "mini")}
+                >
+                  {launchingKey === `${c.root}|mini` ? "启动中…" : "启动小 QMT"}
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  title="只启动独立行情 miniquote.exe，为大客户端补齐 58610 行情服务"
+                  disabled={!!launchingKey}
+                  onClick={() => void onLaunch(c, "quote")}
+                >
+                  {launchingKey === `${c.root}|quote` ? "启动中…" : "仅补行情"}
+                </Button>
                 <Button
                   size="sm"
                   variant="primary"

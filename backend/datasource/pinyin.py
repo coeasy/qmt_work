@@ -82,9 +82,3 @@ def matches_initials(name: str, q: str) -> bool:
     return True
 
 
-def starts_with_initials(name: str, q: str) -> bool:
-    """名称拼音首字母是否以 q 开头（q 须为纯字母，小写化后比较）。"""
-    if not q or not q.isalpha():
-        return False
-    ini = pinyin_initials(name)
-    return bool(ini) and ini.startswith(q.lower())

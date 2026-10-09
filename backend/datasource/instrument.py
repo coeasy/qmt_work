@@ -98,11 +98,11 @@ def classify_instrument(code: str, name: str = "") -> dict:
     num = _digits(code)
     base = classify_board(c)
     out = {"type": "unknown", "exchange": base.get("exchange", "—"),
-           "board": base.get("board", "—"), "label": TYPE_LABELS["unknown"]}
+           "board": base.get("board", "—"), "label": instrument_type_label("unknown")}
 
     def _set(t: str):
         out["type"] = t
-        out["label"] = TYPE_LABELS[t]
+        out["label"] = instrument_type_label(t)
         return out
 
     if not num:

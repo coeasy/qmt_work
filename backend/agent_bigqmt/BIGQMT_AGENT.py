@@ -165,7 +165,7 @@ def _is_self_defined(value):
         return False
 
 
-def capture_qmt_injected_funcs(ns):
+def capture_qmt_injected_funcs(ns, exclude=None):
     """从当前命名空间捕获 QMT 注入的全局函数（唯一来源）。
 
     不做任何「应该有哪些函数」的假设：这里有什么就捕获什么，
@@ -179,12 +179,29 @@ def capture_qmt_injected_funcs(ns):
       其中真正的只有 2 个）。排除判据两条，任一命中即排除：
         ① 名字在 ``_OWN_NAMES``（生成器按 bundle 的 AST 精确注入，零手抄）；
         ② 值的 ``__module__`` 正是本模块（源码直部署路径的兜底）。
+
+    ★ **2026-10-09 修（同一家族的第二次，真机实测）**：还必须排除
+      ``_forward_xtdata_funcs()`` **我们自己转发进来的 xtdata 接口**。
+      独立进程模式下那 76 个接口被塞进 ``globals()``，本函数把它们**当成了终端注入**
+      —— 实测 ``injected`` 与 ``forwarded`` **完全相同（76/76）**。两个后果：
+        ① ``run_standalone()`` 里 ``if not _STATE["injected"]`` 那条关键警告
+           （"本模式没有任何终端注入的函数 ⇒ 下单/查询能力不可用"）被**静默吞掉**：
+           用户只看到一句行情报错，完全不知道下单根本不可能（本次用户的困惑正源于此）；
+        ② ``Executor.meta()["funcs"]`` / probe 的 ``injected`` 报出 76 项，外部端
+           （``connectors/generic.probe_capabilities``）据此把 quote / realtime /
+           kline / instrument / calendar 判成 **SUPPORTED** —— 而实调是抛错的。
+      排除后 ``injected`` 只含**终端注入**，字段名与语义一致。转发的 xtdata 接口
+      仍经 ``Executor(extra=...)`` 的独立查找面使用，**能力不受影响**（``_pick`` 与
+      ``_download_once`` 本就带 ``ctx`` 兜底）。
     """
+    skip = set(exclude or ())
     injected = {}
     for name, value in list(ns.items()):
         if name.startswith("__"):
             continue
         if name in _OWN_NAMES:
+            continue
+        if name in skip:
             continue
         if not callable(value):
             continue
@@ -339,6 +356,66 @@ def _probe_quote_call(injected, ctx):
     return False, "调用未抛错但返回空（行情服务未就绪/未订阅）"
 
 
+def _diagnose_quote_service(xtdata=None):
+    """行情实调失败时的**根因 + 出路**（只用 stdlib，py3.6 可用）。
+
+    ★ 机制取自 xtquant 源码（``xtdata.py::load_global_config``），非猜测：xtdata 先
+       逐个试连 ``%USERPROFILE%\\.xtquant\\<guid>\\xtdata.cfg`` 登记的端口，全失败才
+       回落同目录 ``xtdata.ini`` 的 ``address``（出厂 ``127.0.0.1:58610``），仍连不上
+       即抛 ``Exception: 无法连接行情服务！``。xtdata.cfg 由**客户端**在对外提供行情
+       服务时写下；完整客户端（``XtItClient.exe``）只监听自身 IPC（实测 58600），
+       **不**提供 58610。故该错几乎总是：① ``~/.xtquant`` 缺失/无 xtdata.cfg ⇒
+       客户端未开「极简模式」（大小合一安装里极简模式由 ``bin.x64/XtMiniQmt.exe`` +
+       ``miniquote.exe`` 提供并拉起 58610）；② 或回落地址确实无人监听。
+    ★ 只回一句原文会把用户困在「界面正常/行情空白」之间，写清机制与两条出路才有用。
+    """
+    facts = []
+    try:
+        base = os.path.join(os.environ.get("USERPROFILE", ""), ".xtquant")
+        if not os.path.isdir(base):
+            facts.append("~/.xtquant 不存在 ⇒ xtdata 的自动发现必然落空（会回落 xtdata.ini）")
+        else:
+            cfgs = []
+            try:
+                entries = sorted(os.listdir(base))
+            except Exception:
+                entries = []
+            for name in entries:
+                cfg_path = os.path.join(base, name, "xtdata.cfg")
+                if not os.path.isfile(cfg_path):
+                    continue
+                port = None
+                try:
+                    with open(cfg_path, "r") as fh:
+                        port = (json.load(fh) or {}).get("port")
+                except Exception:
+                    port = None
+                cfgs.append("%s(port=%s)" % (name[:8], port))
+            facts.append("~/.xtquant 下的 xtdata.cfg: %s" % (", ".join(cfgs) if cfgs else "无"))
+    except Exception as exc:
+        facts.append("读 ~/.xtquant 失败: %s" % exc)
+
+    ini_addr = "?"
+    try:
+        mod = xtdata if xtdata is not None else _import_xtdata()
+        mod_file = getattr(mod, "__file__", "") or ""
+        ini_path = os.path.join(os.path.dirname(mod_file), "xtdata.ini")
+        if os.path.isfile(ini_path):
+            with open(ini_path, "r") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if line.lower().startswith("address="):
+                        ini_addr = line.split("=", 1)[1]
+                        break
+    except Exception:
+        pass
+    facts.append("xtdata.ini 回落地址=%s" % ini_addr)
+    return ("；".join(facts)
+            + "。出路：① 客户端开「极简模式」提供本地行情服务后重启本策略；"
+              "② 或让本策略以**公式模式**被 QMT 挂载（用 ContextInfo 的行情方法，"
+              "不经 xtdata 的本地服务）。")
+
+
 def self_probe(cfg, injected, ctx, executor):
     """一次性环境自检（跑在 QMT 进程内），结果写 bridge_dir/probe_result.json。
 
@@ -353,10 +430,8 @@ def self_probe(cfg, injected, ctx, executor):
         result["steps"].append({"name": name, "ok": bool(ok), "detail": detail})
 
     step("python_version", True, sys.version.replace("\n", " "))
-    # ★ 导入面必须与**真正要用的取用方式**一致（2026-10-08 实测）：
-    #   QMT 内置 Python 3.6 里 `import xtdata` 会失败，但
-    #   `from xtquant import xtdata` 是成功的 —— 拿前者当判据会得出
-    #   「行情不可用」的假结论。
+    # ★ 导入面须与**真正取用方式**一致（2026-10-08 实测）：py3.6 里 `import xtdata`
+    #   会失败，而 `from xtquant import xtdata` 成功 —— 拿前者当判据会得假结论。
     for probe_import in ("xtquant", "xtquant.xtdata", "xtquant.xttrader"):
         try:
             if probe_import == "xtquant.xtdata":
@@ -379,14 +454,52 @@ def self_probe(cfg, injected, ctx, executor):
     # ★ 「实际调用一次才知道」纪律：函数在不在 ≠ 能力可用（见 _probe_quote_call）。
     quote_probe = _probe_quote_call(injected, ctx)
     _STATE["quote_call"] = quote_probe
+    # ★ 同步给 Executor ⇒ 随 PROBE 应答回给外部端（能力协商必须看到实调结论，
+    #   否则「接口在但实调失败」会被判成 SUPPORTED —— 本仓最忌的假绿灯）。
+    _exec = _STATE.get("executor")
+    if _exec is not None:
+        try:
+            _exec.quote_call = quote_probe
+        except Exception:
+            pass
     if quote_probe is not None:
-        step("quote_call", quote_probe[0], quote_probe[1])
+        detail = quote_probe[1]
+        if not quote_probe[0]:
+            # ★ 把「一句异常」升级成「根因 + 出路」，否则用户卡在
+            #   「界面说正常 / 行情永远空白」之间（2026-10-09 真机踩到）。
+            detail = "%s。根因/出路: %s" % (detail, _diagnose_quote_service())
+        step("quote_call", quote_probe[0], detail)
+
+    # ★ 下单能力**单独成项**（2026-10-09），答案须在此而非藏在行情报错旁；分类逻辑
+    #   下沉到 qmt_api.trade_surface（入口文件受 G3 限制，保持零注入函数名字面量）。
+    #   ★ 必须**无别名**导入：qmt_api 已内联进同一文件，`as 别名` 会在 bundle 留未绑定
+    #     名字 → NameError（与 init() 里导入 Executor 同一约定）。
+    trade = None
+    try:
+        from qmt_api import trade_surface
+        trade = trade_surface(injected)
+    except Exception as exc:
+        step("order_funcs", False,
+             "无法判定下单能力（qmt_api.trade_surface 不可用: %s）" % exc)
+    if trade is not None:
+        if trade.get("can_submit"):
+            step("order_funcs", True,
+                 "已捕获终端注入的交易函数: %s ⇒ 本进程可下单" % trade.get("present"))
+        else:
+            step("order_funcs", False,
+                 "未捕获任何终端注入的交易函数（present=%s, missing=%s）⇒ 本进程"
+                 "**不能下单**。独立进程模式下这是常态（终端只把下单函数注入"
+                 "**被挂载的那一个文件**的命名空间）；要有下单能力，需让本策略以"
+                 "**公式模式**被终端 in-process 挂载。"
+                 % (trade.get("present"), trade.get("missing")))
 
     captured = sorted(injected.keys())
-    step("injected_funcs", bool(captured), json.dumps(captured, ensure_ascii=False))
-    # ★ 唯一来源纪律（G3 闸门）：只如实列出**捕获到什么**，绝不手抄
-    #   「终端应该有 X」的名单 —— 手抄名单会把桥的 bug 伪装成「终端缺能力」。
-    #   期望集由外部端持有（它读 result["injected"]），入口文件不带名单。
+    step("injected_funcs", bool(captured),
+         json.dumps(captured, ensure_ascii=False) if captured
+         else "无终端注入函数（独立进程模式的常态；注意：xtdata 转发面不算注入，"
+              "它另列在 forwarded_from_xtdata）")
+    # ★ 唯一来源纪律（G3）：只如实列出**捕获到什么**，绝不手抄「终端应该有 X」的
+    #   名单 —— 手抄会把桥的 bug 伪装成「终端缺能力」。期望集由外部端持有。
     for fn in captured:
         step("captured:" + fn, True, "在入口命名空间已捕获")
     step("contextinfo_methods", ctx is not None,
@@ -415,6 +528,40 @@ def self_probe(cfg, injected, ctx, executor):
     result["forwarded"] = sorted(_STATE.get("forwarded", []))
     result["injected"] = captured
     result["ctx_methods"] = _ctx_methods(ctx)
+    # ★ 能力结论（外部端与界面**直接消费**，不必从 steps 里猜）：trading=能否下单
+    #   （唯一判据 = 是否捕获到终端注入的 passorder）；quote=能否取行情（唯一判据 =
+    #   **实调一次**的结果）。``expected_in_mode`` 标注该结论是否由**运行模式**决定：
+    #   独立进程模式下二者不可用是设计使然，不该当成环境故障（否则出反向「假告状」）。
+    standalone = bool(_STATE.get("standalone"))
+    result["capability"] = {
+        "trading": {
+            "available": bool(trade.get("can_submit")) if trade else False,
+            "reason": ("已捕获 passorder" if (trade or {}).get("can_submit")
+                       else "未捕获终端注入的 passorder；"
+                            + ("独立进程模式拿不到（需公式模式）" if standalone
+                               else "终端未注入（请确认本文件是 QMT 挂载的入口）")),
+            # ★ 下单不可用在独立进程模式下是**模式定义**使然（终端只注入被挂载的那
+            #   一个文件），非环境故障 ⇒ 不当故障告警。
+            "expected_in_mode": standalone,
+        },
+        "quote": {
+            "available": bool(quote_probe[0]) if quote_probe else False,
+            "reason": (quote_probe[1] if quote_probe
+                       else "未发现行情 getter（既无注入也无 ContextInfo 方法）"),
+            # ★ 行情**本该**在两种模式下都可用（独立进程模式的用途正是转发真实行情）
+            #   ⇒ 取不到是客户端/环境问题，必须当故障告警，不能被「模式」二字豁免。
+            "expected_in_mode": False,
+        },
+    }
+    if trade is not None:
+        result["trade_surface"] = trade
+    # ★ 自检总判定：**严格**口径 —— 任一 step 不 ok 即 False（mode-expected 的失败也计入，
+    #   因为「能力当前不可用」是事实；是否属模式使然由 expected_in_mode 单独标注）。
+    #   历史 bug：本字段**根本不存在**，后端 qmt_agent.py 却读 probe.get("ok") ⇒
+    #   probe_ok 恒 False，界面永远显示自检未通过。
+    bad_steps = [s["name"] for s in result["steps"] if not s.get("ok")]
+    result["ok"] = not bad_steps
+    result["bad_steps"] = bad_steps
     # ★ P1 多标的账户类型能力面（R18）：外部端据此枚举 agent 支持哪些标的
     #   类型（stock/etf/future/option/credit）。key=name, value=opAccountType
     #   数值（0=stock 走标准 11-arg 签名，非 0 走扩展 12-arg 签名）。
@@ -480,14 +627,24 @@ def init(ContextInfo):
     """QMT 策略入口（老版本 QMT 用 init，新版亦有 handle_init 别名）。"""
     # ★ 先发布状态再做任何 IO
     log("agent 初始化开始")
-    _STATE["injected"] = capture_qmt_injected_funcs(globals())
+    # ★ exclude=转发名 ⇒ injected **只含终端注入**（独立进程模式下为空）。
+    #   不排除就会把「下单不可用」这条警告吞掉，并让外部端看到 76 个"注入函数"
+    #   —— 见 capture_qmt_injected_funcs 的 2026-10-09 注释。
+    _STATE["injected"] = capture_qmt_injected_funcs(
+        globals(), exclude=_STATE.get("forwarded"))
     _STATE["ctx"] = ContextInfo
     try:
         cfg = load_config()
         _STATE["cfg"] = cfg
         from qmt_api import Executor  # py3.6 相对 import 在 QMT 环境下不可靠，用同级绝对导入
 
-        _STATE["executor"] = Executor(cfg, _STATE["injected"], ContextInfo)
+        # ★ 职责分离：Executor 需要的是「**能不能取到**函数」（查找面 = 终端注入 ∪
+        #   我们自己转发的 xtdata 接口）；而「**能力面**」的上报由 _STATE["injected"]
+        #   单独负责。把两者混成一个 dict 就等于让转发冒充终端注入。
+        _lookup = dict(_STATE.get("forwarded_funcs") or {})
+        _lookup.update(_STATE["injected"])
+        _STATE["executor"] = Executor(cfg, _STATE["injected"], ContextInfo,
+                                      extra=_lookup)
         _STATE["started_at"] = time.time()
         # ★ 把启动时刻写进 cfg，使 Executor.meta() 的 uptime_s 诚实
         #   （否则 capacity 面会显示 uptime=0，违背「不伪造」纪律）。
@@ -715,9 +872,11 @@ def _forward_xtdata_funcs(ns, xtdata):
       就是拦这个）。手抄一份「行情函数应该有哪些」的清单必然随版本漂移，漏掉的
       那个会被误报成「终端没有该接口」。这里直接问模块本身（``dir(xtdata)``）。
 
-    返回转发的名字列表（排序），供 probe 如实上报。
+    返回 ``{name: fn}``（名字排序写入的普通 dict）。调用方需把它与
+    ``capture_qmt_injected_funcs`` 的 ``exclude`` 配套使用 —— 这些是**我们转发**的，
+    不是终端注入的，混为一谈会同时造成「关键警告被吞」与「能力面假绿灯」。
     """
-    forwarded = []
+    forwarded = {}
     if xtdata is None:
         return forwarded
     try:
@@ -735,8 +894,8 @@ def _forward_xtdata_funcs(ns, xtdata):
             continue
         if callable(fn):
             ns[name] = fn
-            forwarded.append(name)
-    return sorted(forwarded)
+            forwarded[name] = fn
+    return dict(sorted(forwarded.items()))
 
 
 class _StandaloneContext(object):
@@ -846,10 +1005,14 @@ def run_standalone(argv=None):
 
     xtdata = _import_xtdata()
     ctx = _StandaloneContext(xtdata, root)
-    forwarded = []
+    forwarded = {}
     if xtdata is not None:
         forwarded = _forward_xtdata_funcs(globals(), xtdata)
-    _STATE["forwarded"] = forwarded
+    # ★ 两者**必须分开记**：forwarded 是**我们自己**转发进来的 xtdata 接口，
+    #   injected 是**终端注入**的（本模式下为空）。混记会让「下单不可用」的关键
+    #   警告被吞、并让能力面出现假绿灯 —— 见 capture_qmt_injected_funcs 的注释。
+    _STATE["forwarded"] = sorted(forwarded)
+    _STATE["forwarded_funcs"] = forwarded
     log("独立进程模式: xtdata=%s 转发真实接口 %d 个"
         % ("可用" if xtdata is not None else "不可用(未导入)", len(forwarded)))
 
@@ -861,16 +1024,18 @@ def run_standalone(argv=None):
 
     # ★ 把「本模式到底能用什么」主动说出来，别让用户对着永远空白的面板猜
     #   （本仓最常见的故障形态就是"绿灯是另一个 bug 遮出来的"）。
+    #   ★ 2026-10-09 修正：独立进程模式下这里**终于会真的打印**了 —— 此前 76 个
+    #     xtdata 转发被误捕获成「终端注入」，把这条警告静默吞掉，用户只看到一句
+    #     行情报错，完全不知道下单根本不可能。
     if not _STATE["injected"]:
         log("注意: 本模式**没有任何终端注入的函数**（独立进程模式的常态）—— "
-            "下单/查询能力不可用。要拿到注入能力，需让本策略以**公式策略**的形态"
-            "被终端挂载（同系统自带策略那样走 in-process 公式引擎），"
-            "而不是以外部 Python 脚本策略运行。")
+            "下单/查询能力不可用（这也是「能不能下单」的诚实答案）。要拿到注入能力，"
+            "需让本策略以**公式策略**的形态被终端挂载（同系统自带策略那样走 "
+            "in-process 公式引擎），而不是以外部 Python 脚本策略运行。")
     quote_result = _STATE.get("quote_call")
     if quote_result is not None and not quote_result[0]:
         log("注意: 行情接口存在但**实调失败**（%s）—— 外部端会把行情判为不可用，"
-            "这是事实、不是伪造；请先把 QMT 本地行情服务打通再谈能力面。"
-            % quote_result[1])
+            "这是事实、不是伪造。%s" % (quote_result[1], _diagnose_quote_service()))
     cfg = _STATE["cfg"] or {}
     interval = max(0.05, float(cfg.get("poll_interval_ms", 500)) / 1000.0)
     bridge_dir = cfg.get("bridge_dir", "")

@@ -161,8 +161,9 @@ EXEMPT_PATHS: dict[str, str] = {
         "R19-3：ABI 运行时矩阵（排障用）；UI 经连接管理页的 /brokers/diag 承载",
     "POST /api/v1/brokers/version-info":
         "R19-3：客户端版本画像（内部会 spawn 子进程探测），运维/脚本向",
-    "POST /api/v1/brokers/launch":
-        "R19-3：拉起券商客户端由桌面壳/脚本执行，UI 不直接起进程",
+    # ★ R22（2026-10-09）：原登记「POST /api/v1/brokers/launch」为豁免（理由「UI 不直接起
+    #   进程」），但前端已接线 brokerApi.launchClient（Brokers.tsx 三按钮：启动大/小 QMT、
+    #   仅补行情），豁免因此过期。删除本条 —— 让门禁把「启动客户端」自然计入前端入口。
     # —— 账户分析 / 批量交易：分析脚本向；UI 用 Positions/AssetSummary 自有实时口径 ——
     "GET /api/v1/account/aggregate":
         "R19-3：多账户聚合视图为分析/Agent 向；UI 账户页按单连接展示",

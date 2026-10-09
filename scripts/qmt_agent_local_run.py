@@ -310,6 +310,35 @@ def _bridge_op(bridge_dir, token, op, params=None, timeout_s=12.0):
     return None, "等响应超时（%ss）" % int(timeout_s)
 
 
+#: 拉起 QMT 内置解释器前必须从子进程环境里**剥掉**的变量。
+#
+# ★ 2026-10-09 真机实证（B8）：QMT 的内置解释器是 **Python 3.6.8**，而调用本脚本的
+#   shell 常带着自己的 `PYTHONPATH`（conda / pyenv / IDE / 各类 shim 都会设）。
+#   该路径下的 `sitecustomize.py` / `usercustomize.py` 会被 **QMT 的 py3.6 一并导入**：
+#   实测一个为 py3.7+ 写的 shim 直接让策略进程在启动后立刻
+#   `TypeError: __init__() got an unexpected keyword argument 'capture_output'`
+#   → `return code:1`。这类故障在 QMT 客户端里表现为「点运行 → 立刻停止」，
+#   与编码事故一模一样地难查。
+#
+#   为什么**必须剥掉**而不是保留：QMT 客户端自己拉起策略时用的是**它自己的**环境，
+#   根本不带用户 shell 的 PYTHONPATH。保留它 = 验证环境与真实运行环境不一致，
+#   验出来的「通过/不通过」都不作数（假绿灯与假告警都由此而来）。
+#   与 `client_start_test.py::ENV_DROP` 同一口径。
+_ENV_DROP = ("PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP", "PYTHONEXECUTABLE")
+
+
+def _child_env():
+    """构造给 QMT 内置解释器的子进程环境（剥掉宿主 Python 注入，其余原样保留）。
+
+    只剥 `PYTHON*`：**绝不能**整体丢弃 `os.environ`——实测那样会丢 `PATH` /
+    `SystemRoot`，Windows 下连 `pythonw.exe` 都起不来（另一类「启动即失败」）。
+    """
+    env = dict(os.environ)
+    for key in _ENV_DROP:
+        env.pop(key, None)
+    return env
+
+
 def run_process(bundle_path, workdir, python_exe, userdata, max_seconds=25.0,
                 quote_probe=None, log=print):
     """用真实解释器把 agent 当独立进程拉起，跑完三件套判定。"""
@@ -329,7 +358,7 @@ def run_process(bundle_path, workdir, python_exe, userdata, max_seconds=25.0,
                              "transport": "file", "auth_token": "local-run-token",
                              "trading_enabled": False, "poll_interval_ms": 200},
                             ensure_ascii=False, indent=2))
-    env = dict(os.environ)
+    env = _child_env()
     env["QMT_WORK_AGENT_MAX_SECONDS"] = str(max_seconds)
     env.pop("QMT_WORK_AGENT_NO_AUTORUN", None)
     argv = [python_exe, "-u", sandbox_bundle, userdata or workdir, str(int(time.time() * 1000))]

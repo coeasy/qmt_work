@@ -15,7 +15,9 @@
 """
 from __future__ import annotations
 
+import json
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -508,3 +510,207 @@ def test_find_qmt_dir_cache_is_resettable(tmp_path, monkeypatch):
 
     qa._reset_qmt_dir_cache()
     assert qa._find_qmt_dir() == str(second), "清缓存后必须重新扫描"
+
+
+# ---------------------------------------------------------------------------
+# 诊断对「agent 自检证据」的消费（2026-10-09 真机缺陷族 D3/D4）
+#
+# 现场：用户看到界面「诊断通过，agent 一切正常」，可 agent 的自检明明写着
+#       ``异常项=['quote_call']``（get_full_tick 实调抛「无法连接行情服务！」），
+#       而「能不能下单」根本无处可查。三处断链各自独立：
+#         D3 ``probe_result.json`` 没有 ``ok`` 字段，后端却读它 ⇒ probe_ok 恒 False
+#            （假告状：一切正常也报「自检未通过」）；
+#         D4 ``problems`` 只看 bundle/config/心跳，**不看自检** ⇒ 行情实调失败被吞；
+#         且「下单能力」没有独立呈现位。
+# ---------------------------------------------------------------------------
+def _seed_bridge(fake_qmt: Path, probe: dict, *, alive: bool = True) -> Path:
+    """写 agent_config / 心跳 / 自检（模拟 agent 真跑过一轮留下的证据）。"""
+    bridge = fake_qmt / "bridge"
+    bridge.mkdir(parents=True, exist_ok=True)
+    (fake_qmt / "python" / "agent_config.json").write_text(json.dumps({
+        "bridge_dir": str(bridge).replace("\\", "/"),
+        "transport": "file", "auth_token": "t", "trading_enabled": False,
+    }, ensure_ascii=False), encoding="utf-8")
+    (bridge / "agent_status.json").write_text(json.dumps({
+        "ts": int(time.time() * 1000), "alive": alive, "agent_ver": "1.2.0",
+        "runtime_mode": "standalone_process",
+    }, ensure_ascii=False), encoding="utf-8")
+    (bridge / "probe_result.json").write_text(
+        json.dumps(probe, ensure_ascii=False), encoding="utf-8")
+    return bridge
+
+
+def _deploy_and_diagnose(client) -> dict:
+    client.post("/api/v1/qmt-agent/deploy",
+                json={"filename": "qmt_work_agent.py",
+                      "strategy": "qmt_work_agent",
+                      "dry_run": False, "txt_copy": False})
+    r = client.post("/api/v1/qmt-agent/diagnose",
+                    json={"strategy": "qmt_work_agent"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["code"] == 0, body
+    return body["data"]
+
+
+def test_probe_ok_derived_from_steps_when_agent_omits_ok(qa_module):
+    """旧版 agent 不写 ``ok`` ⇒ 必须从 ``steps`` 现算，**不得**恒报 False。
+
+    （历史行为：`probe.get("ok")` → None → bool(None) → False，
+     于是界面永远显示「自检未通过」，哪怕 agent 一切正常 —— 假告状。）
+    """
+    _, client, fake_qmt = qa_module
+    _seed_bridge(fake_qmt, probe={
+        "ts": 1, "runtime_mode": "standalone_process",
+        "steps": [{"name": "python_version", "ok": True},
+                  {"name": "bridge_dir_write", "ok": True}],
+    })
+    data = _deploy_and_diagnose(client)
+    assert data["heartbeat"]["probe_ok"] is True, (
+        "所有 step 都 ok 且 agent 未提供 ok 字段 ⇒ 必须判通过（否则是假告状）")
+
+    # 反向锚：有失败 step 时必须 False（别把「读不到」修成「一律通过」）
+    _seed_bridge(fake_qmt, probe={
+        "ts": 1, "runtime_mode": "standalone_process",
+        "steps": [{"name": "python_version", "ok": True},
+                  {"name": "bridge_dir_write", "ok": False, "detail": "写失败"}],
+    })
+    data = _deploy_and_diagnose(client)
+    assert data["heartbeat"]["probe_ok"] is False
+
+
+def test_diagnose_surfaces_quote_failure_and_trading_capability(qa_module):
+    """行情实调失败必须进 problems；下单不可用（独立进程模式使然）走 capabilities。"""
+    _, client, fake_qmt = qa_module
+    _seed_bridge(fake_qmt, probe={
+        "ts": 1, "runtime_mode": "standalone_process",
+        "ok": False,
+        "bad_steps": ["quote_call", "order_funcs", "injected_funcs"],
+        "capability": {
+            "trading": {"available": False,
+                        "reason": "未捕获终端注入的 passorder；独立进程模式拿不到（需公式模式）",
+                        "expected_in_mode": True},
+            "quote": {"available": False,
+                      "reason": "调用 get_full_tick 抛错: Exception: 无法连接行情服务！",
+                      "expected_in_mode": False},
+        },
+        "steps": [
+            {"name": "python_version", "ok": True},
+            {"name": "quote_call", "ok": False,
+             "detail": "调用 get_full_tick 抛错: Exception: 无法连接行情服务！"},
+            {"name": "order_funcs", "ok": False, "detail": "本进程**不能下单**"},
+        ],
+    })
+    data = _deploy_and_diagnose(client)
+
+    assert data["heartbeat"]["probe_ok"] is False
+
+    # 1) 能力真相必须在响应里显式可读（前端据此渲染「下单/行情」两行）
+    caps = data["capabilities"]
+    assert caps["quote"]["available"] is False
+    assert caps["trading"]["available"] is False
+    assert caps["trading"]["expected_in_mode"] is True
+
+    # 2) 行情失败是**故障**⇒ 必须进 problems
+    sources = {p["source"] for p in data["problems"]}
+    assert "probe/quote" in sources, sources
+    assert any("无法连接行情服务" in p["msg"] for p in data["problems"]), data["problems"]
+
+    # 3) 下单能力在独立进程模式不可用属**模式定义** ⇒ 不当故障告警
+    #    （否则每次 standalone 运行都飘红，是反向的「假告状」）
+    assert "probe/trading" not in sources, sources
+    assert not any("下单" in p["msg"] for p in data["problems"]), data["problems"]
+
+
+def test_diagnose_reports_trading_fault_when_formula_mode(qa_module):
+    """公式模式下**没有** passorder 才是真故障 ⇒ 必须进 problems。"""
+    _, client, fake_qmt = qa_module
+    _seed_bridge(fake_qmt, probe={
+        "ts": 1, "runtime_mode": "qmt_formula",
+        "ok": False, "bad_steps": ["order_funcs"],
+        "capability": {
+            "trading": {"available": False,
+                        "reason": "未捕获终端注入的 passorder；终端未注入（请确认本文件是 QMT 挂载的入口）",
+                        "expected_in_mode": False},
+            "quote": {"available": True, "reason": "实调成功", "expected_in_mode": False},
+        },
+        "steps": [{"name": "order_funcs", "ok": False, "detail": "不能下单"}],
+    })
+    data = _deploy_and_diagnose(client)
+    sources = {p["source"] for p in data["problems"]}
+    assert "probe/trading" in sources, sources
+    assert "probe/quote" not in sources, sources
+
+
+def test_diagnose_exposes_trade_surface_as_evidence(qa_module):
+    """★ 下单接口面明细必须贯通到诊断响应（此前只落在 probe_result.json 里被脚本消费）。
+
+    ``capabilities.trading`` 给**结论**（能不能下单），``trade_surface`` 给**依据**
+    （终端注入了哪些下单入口、还缺哪些）。少了后者，用户只能读到「下单能力：不可用」，
+    却无从知道缺的是 ``passorder`` 还是 ``cancel_order_stock`` —— 排障信息在 API 层断链。
+    """
+    _, client, fake_qmt = qa_module
+    _seed_bridge(fake_qmt, probe={
+        "ts": 1, "runtime_mode": "standalone_process",
+        "ok": False, "bad_steps": ["order_funcs"],
+        "capability": {
+            "trading": {"available": False,
+                        "reason": "未捕获终端注入的 passorder",
+                        "expected_in_mode": True},
+            "quote": {"available": True, "reason": "", "expected_in_mode": False},
+        },
+        "trade_surface": {"present": [],
+                          "missing": ["passorder", "cancel_order_stock"],
+                          "can_submit": False},
+    })
+    data = _deploy_and_diagnose(client)
+
+    ts = data.get("trade_surface")
+    assert ts is not None, "trade_surface 必须随诊断响应下发（界面据此展示依据）"
+    assert ts["can_submit"] is False
+    assert "passorder" in ts["missing"], ts
+    assert ts["present"] == [], ts
+
+
+def test_diagnose_trade_surface_absent_is_empty_not_missing(qa_module):
+    """反腐烂锚：probe 没有 trade_surface 时，响应里的键仍要存在（空 dict）。
+
+    若实现改成「没有就不给键」，前端 `trade_surface?.present` 与
+    `trade_surface === undefined` 会被混为一谈 ⇒ 「旧版 agent」和
+    「agent 上报了但确实一个入口都没有」两种情况无法区分。
+    """
+    _, client, fake_qmt = qa_module
+    _seed_bridge(fake_qmt, probe={
+        "ts": 1, "runtime_mode": "standalone_process", "ok": True,
+        "steps": [{"name": "python_version", "ok": True}],
+    })
+    data = _deploy_and_diagnose(client)
+    assert "trade_surface" in data, "键必须存在"
+    assert data["trade_surface"] == {}, data["trade_surface"]
+
+
+def test_bundle_pull_timeout_reads_settings(qa_module, monkeypatch):
+    """★ 孤儿配置治理：`qmt_agent_bundle_timeout` 必须真的被拉取路径读取。
+
+    此前该旋钮**只声明不读取**，拉取处硬编码 ``timeout=30.0`` ⇒ 运维改了环境变量
+    毫无效果，且注释声称的默认 10s 与真实行为矛盾。接线后必须锁住：
+    settings 改了，拉取超时就跟着变。
+    """
+    qa, _client, _fake = qa_module
+    from core.config import settings as real_settings
+
+    assert getattr(real_settings, "qmt_agent_bundle_timeout", None) is not None
+    monkeypatch.setattr(real_settings, "qmt_agent_bundle_timeout", 7.5, raising=False)
+    assert qa._bundle_timeout_from_settings() == 7.5
+
+
+def test_bundle_pull_timeout_falls_back_on_garbage(qa_module, monkeypatch):
+    """反腐烂锚：配置被填成非数字/0 时回退 30s，不得变成 0（0 = 立即超时）。"""
+    qa, _client, _fake = qa_module
+    from core.config import settings as real_settings
+
+    for bad in (0, "abc", None, -1):
+        monkeypatch.setattr(real_settings, "qmt_agent_bundle_timeout", bad,
+                            raising=False)
+        v = qa._bundle_timeout_from_settings()
+        assert v == 30.0, "非法值 %r 应回退 30s，实得 %r" % (bad, v)

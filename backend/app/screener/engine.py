@@ -58,10 +58,6 @@ def _cache_key(**kw: Any) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def _stock_name_map(store: LocalStore) -> Dict[str, str]:
-    return {r["code"]: r["name"] for r in store.get_stock_list()}
-
-
 def _is_st(name: str) -> bool:
     n = (name or "").upper()
     return n.startswith("ST") or n.startswith("*ST") or " 退" in name or "退市" in name

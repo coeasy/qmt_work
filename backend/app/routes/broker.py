@@ -366,12 +366,21 @@ async def test_broker(body: dict, ctx: AppContext = Depends(get_ctx)):
 @router.post("/brokers/launch")
 async def launch_broker_client(body: dict, ctx: AppContext = Depends(get_ctx)):
     """按模式启动 QMT 客户端主程序（full=完整版 XtItClient / mini=极速版 XtMiniQmt /
-    quote=独立行情 miniquote）。GUI 程序立即返回，登录需用户在弹出的窗口中完成。"""
-    from xtquant_client.xtp import launch_client
+    quote=独立行情 miniquote）。GUI 程序立即返回，登录需用户在弹出的窗口中完成。
+
+    ★ 2026-10-09（R22）：非法 mode 一律 **400 + 可选值**。
+      旧实现直接把 body 里的 mode 透传给 launch_client，后者虽已不再静默当成 quote，
+      但仍以 200 + launched=false 返回 ⇒ 客户端写错枚举值只会看到「没启动」，
+      不知道是自己传错了。请求参数非法属**客户端错误**，如实给 400。
+    """
+    from xtquant_client.xtp import _MODE_LABEL, launch_client
     client_path = body.get("client_path") or ""
     if not client_path:
         return err(400, "请提供 client_path")
-    mode = body.get("mode", "full") or "full"
+    mode = str(body.get("mode", "full") or "full").strip().lower()
+    if mode not in _MODE_LABEL:
+        return err(400, f"未知客户端模式 {mode!r}"
+                        f"（可选：{'/'.join(sorted(_MODE_LABEL))}）")
     try:
         return ok(await asyncio.to_thread(launch_client, client_path, mode))
     except Exception as exc:  # noqa: BLE001

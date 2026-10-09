@@ -10,6 +10,7 @@ import { ConfirmModal } from "@/design/primitives/Modal";
 import {
   qmtAgentApi,
   type QmtAgentBundle,
+  type QmtAgentCapability,
   type QmtAgentConfigResponse,
   type QmtAgentDeployResult,
   type QmtAgentDiagnoseResult,
@@ -36,7 +37,39 @@ import s from "../domain.module.css";
  *    提示「客户端安装包缺少工具链，请重装最新版」。
  * 5. **零 mock**：所有数据来自后端 `/qmt-agent/*`，本页不生成任何 bundle
  *    文本、不模拟任何判据。
+ * 6. **能力真相必须显式呈现**（2026-10-09 真机教训）：诊断面板此前只列
+ *    bundle/config/心跳，于是「agent 自检报了 `quote_call` 异常、
+ *    且本进程根本拿不到下单函数」时界面照样显示「一切正常」——
+ *    用户只能盯着永远空白的行情面板猜。现在把 `capabilities.trading` /
+ *    `capabilities.quote` 与自检结论直接摊开，并区分
+ *    「运行模式使然」（灰/黄）与「真故障」（红）。
  */
+
+/** 能力一行：「可用 / 不可用（运行模式使然）/ 不可用」。 */
+function CapabilityRow({ label, cap }: { label: string; cap?: QmtAgentCapability }) {
+  if (!cap) {
+    return (
+      <>
+        <dt>{label}</dt>
+        <dd>
+          <Badge tone="neutral">未上报</Badge>
+        </dd>
+      </>
+    );
+  }
+  const tone = cap.available ? "success" : cap.expected_in_mode ? "warning" : "danger";
+  const text = cap.available ? "可用" : cap.expected_in_mode ? "不可用（运行模式使然）" : "不可用";
+  return (
+    <>
+      <dt>{label}</dt>
+      <dd>
+        <Badge tone={tone}>{text}</Badge>
+        {/* 只报「不可用」等于没说：必须把 agent 给的真因带上，用户才知道下一步点哪 */}
+        {cap.available ? null : <span style={{ marginLeft: 6 }}>{cap.reason}</span>}
+      </dd>
+    </>
+  );
+}
 
 export default function QmtAgentDeploy() {
   const status = useAsync(() => qmtAgentApi.status(), []);
@@ -719,6 +752,46 @@ export default function QmtAgentDeploy() {
               )}
               {lastDiagnose.heartbeat.runtime_mode ? <> · {lastDiagnose.heartbeat.runtime_mode}</> : null}
             </dd>
+            <dt>自检</dt>
+            <dd>
+              {lastDiagnose.heartbeat.probe_ok === undefined ? (
+                <Badge tone="neutral">未上报</Badge>
+              ) : lastDiagnose.heartbeat.probe_ok ? (
+                <Badge tone="success">通过</Badge>
+              ) : (
+                <>
+                  <Badge tone="danger">未通过</Badge>
+                  {(lastDiagnose.heartbeat.probe_bad_steps || []).length > 0 && (
+                    <span style={{ marginLeft: 6 }}>
+                      异常项：<code>{(lastDiagnose.heartbeat.probe_bad_steps || []).join("、")}</code>
+                    </span>
+                  )}
+                </>
+              )}
+            </dd>
+            <CapabilityRow label="下单能力" cap={lastDiagnose.capabilities?.trading} />
+            {/* 结论之上补「依据」：只说「不可用」用户不知道缺哪个入口 */}
+            {(() => {
+              const ts = lastDiagnose.trade_surface;
+              if (!ts || (!ts.present?.length && !ts.missing?.length)) {
+                return null;
+              }
+              return (
+                <>
+                  <dt>下单接口面</dt>
+                  <dd>
+                    <Badge tone={ts.can_submit ? "success" : "warning"}>
+                      {ts.can_submit ? "就绪" : "不完整"}
+                    </Badge>
+                    <span style={{ marginLeft: 6 }}>
+                      已注入 {(ts.present || []).join("、") || "（无）"}；缺失{" "}
+                      {(ts.missing || []).join("、") || "（无）"}
+                    </span>
+                  </dd>
+                </>
+              );
+            })()}
+            <CapabilityRow label="行情能力" cap={lastDiagnose.capabilities?.quote} />
             <dt>QMT 客户端</dt>
             <dd>
               {lastDiagnose.qmt_running.length ? (

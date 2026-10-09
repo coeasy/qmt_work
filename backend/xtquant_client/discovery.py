@@ -150,7 +150,13 @@ def guess_broker_id_by_name(broker_name: str) -> str:
 #   界面推荐会填成 userdata + full —— 与运行态不符，也与 _effective_trade_dir 的
 #   运行态感知口径不一致（同一事实两套结论 = 孤儿逻辑）。
 #   现在统一：**运行中进程名（用户实际启动的 exe）优先**，无运行时才退回目录布局。
-_MINI_EXE_HINT = ("miniqmt", "miniquote", "xtminiqt")
+# ★ 2026-10-09：`miniquote.exe` **不是**极速版主程序，把它当 mini 是错的。
+#   `miniquote` 是**行情子进程**：既可由极速版 XtMiniQmt 拉起，也可作为**完整版大客户端**
+#   的「独立行情」子进程运行（见 xtp/env.py::_probe_quote_service 的注释）。它**不决定**
+#   交易数据目录（userdata / userdata_mini），因此不能用来推断模式。
+#   旧实现把它映射为 "mini" ⇒ 大客户端 + 独立行情同跑时，候选会建议
+#   `userdata_mini` + mini（与实跑相反，交易必然 rc=-1）。现已剔除。
+_MINI_EXE_HINT = ("miniqmt", "xtminiqt")
 _FULL_EXE_HINT = ("itclient", "xtclient")
 
 
@@ -158,13 +164,17 @@ def mode_from_proc(proc: str) -> str:
     """由运行中的客户端进程名推断数据目录模式；无法判定返回 ''（不臆测）。
 
     与 xtp/env.py 的 exe 白名单保持一致（_FULL_EXE_NAMES / _MINI_EXE_NAMES）。
+
+    **行情子进程 miniquote.exe 刻意返回 ''（未判定）**：它是行情服务、不决定交易
+    数据目录，见上方 _MINI_EXE_HINT 的注释。返回 '' 后由「目录布局」兜底判定，
+    对「大客户端 + 独立行情」与「纯极速版（无 userdata）」两种场景都能给出正确结论。
     """
     low = (proc or "").strip().lower()
     if not low:
         return ""
     try:
         from .xtp import _FULL_EXE_NAMES, _MINI_EXE_NAMES
-        if low in {n.lower() for n in _MINI_EXE_NAMES} or low == "miniquote.exe":
+        if low in {n.lower() for n in _MINI_EXE_NAMES}:
             return "mini"
         if low in {n.lower() for n in _FULL_EXE_NAMES}:
             return "full"
@@ -175,6 +185,37 @@ def mode_from_proc(proc: str) -> str:
     if any(k in low for k in _FULL_EXE_HINT):
         return "full"
     return ""
+
+
+#: 代表进程的模式优先级：**full > mini > 未知**。
+#  与 xtp/env.py::_effective_trade_dir 的「both -> full」口径**必须一致**——
+#  两处对「大小客户端同时运行」这一同一事实给出不同结论就是孤儿逻辑。
+#  「未知」排最后：能落到这里的只剩行情子进程 miniquote / 白标辅助进程，
+#  它们**不决定**交易数据目录，绝不能盖过真正的极速版主程序 XtMiniQmt。
+_MODE_RANK = {"full": 2, "mini": 1, "": 0}
+
+
+def pick_representative_proc(procs: list[dict]) -> dict:
+    """从**同一客户端根**下同时运行的多个 QMT 进程里选出「代表进程」。
+
+    为什么必须确定性
+    ----------------
+    `discover()` 原先按 `_ps_enum()` 的枚举顺序把同一 root 的**第一个**进程当作代表，
+    而枚举顺序不保证（psutil 按 PID 升序，PowerShell 按 WMI 顺序）。于是
+    「大客户端 + 独立行情」「大客户端 + 极速版」并存时，候选模式在 full / mini
+    之间**随机漂移** —— 界面推荐与实跑客户端不符，且同一台机器两次探测可能不同。
+
+    排序键 = (模式优先级降序, PID 升序)：既有确定的优先级，又保证结果可复现
+    （同一组进程永远选出同一个代表）。PID 可能非数字，故用 int 兜底避免抛错。
+    """
+    def _key(p: dict):
+        try:
+            pid = int(p.get("pid") or 0)
+        except (TypeError, ValueError):
+            pid = 0
+        return (-_MODE_RANK.get(mode_from_proc(p.get("name") or ""), 0), pid)
+
+    return sorted(procs, key=_key)[0]
 
 
 def _running_client_mode() -> str:
@@ -622,11 +663,27 @@ def discover() -> list[dict]:
         seen.add(key)
         cands.append(c)
 
-    # 1) 运行中的 QMT 进程（排除本平台自身 qmt_work 进程）
+    # 1) 运行中的 QMT 进程（排除本平台自身 qmt_work 进程）。
+    #    ★ 2026-10-09：**先按客户端根聚合再选代表进程**。
+    #      同一台「大小合一」安装下常同时运行多个迅投进程
+    #      （XtItClient 大客户端 / XtMiniQmt 极速版 / miniquote 独立行情），
+    #      它们推导出的 root 相同。旧实现「谁先被枚举到就用谁」⇒ 同一台机器的
+    #      模式建议会随枚举顺序（PID / WMI 顺序）漂移，且可能把 miniquote 当成
+    #      极速版 ⇒ 建议 userdata_mini（与实跑的大客户端相反，交易 rc=-1）。
+    #      改为聚合后按 pick_representative_proc 的确定优先级（full > mini > 未知，
+    #      同级取小 PID）选代表 —— 与 _effective_trade_dir 的 both→full 口径一致。
+    _by_root: dict[str, list[dict]] = {}
     for p in _ps_enum():
         if not _is_qmt_proc(p["name"], p["exe"]):
             continue
-        _add(_root_from_exe(p["exe"]) or "", running=True, pid=p["pid"], proc=p["name"])
+        _r = _root_from_exe(p["exe"]) or ""
+        if not _r:
+            continue
+        _by_root.setdefault(os.path.normcase(_r), []).append(
+            {"root": _r, "pid": p["pid"], "name": p["name"]})
+    for _procs in _by_root.values():
+        _rep = pick_representative_proc(_procs)
+        _add(_rep["root"], running=True, pid=_rep["pid"], proc=_rep["name"])
     # 2) 安装扫描（_scan_installed 已返回疑似客户端根）
     for root in _scan_installed():
         _add(root, running=False)
