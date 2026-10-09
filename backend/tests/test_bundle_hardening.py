@@ -15,6 +15,10 @@ R27 真实事故复盘（2026-10-08）：52 KB 的 bundle 以 `gb18030` 落盘�
   1. `check_bundle_syntax`     —— AST 解析能否通过
   2. `check_bundle_pollution`  —— 前 N 行是否出现非标准库 import
   3. `check_bundle_encoding`   —— 源码编码是否 QMT 内置 py3.6 能读
+
+另有第四类：**打包侧** guardrail（`test_qmt_agent_datas_dest_is_a_directory`）
+—— 锁死 PyInstaller `--add-data` 的 DEST 语义是**目录**，防止工具链被打进
+`_internal/qmt_tools/<name>.py/<name>.py`（2026-10-09 v0.5.0 首次构建真缺陷）。
 """
 from __future__ import print_function
 
@@ -22,6 +26,7 @@ import io
 import os
 import sys
 import tempfile
+from pathlib import Path
 
 import pytest
 
@@ -250,3 +255,84 @@ def test_bundle_health_missing_file():
     assert out["syntax_ok"] is False
     assert out["pollution_ok"] is True  # 读不到就没测
     assert out["encoding_ok"] is False  # 读不到 ⇒ 不能宣称安全
+
+
+# ---------------------------------------------------------------------------
+# PyInstaller --add-data 的 DEST 语义（2026-10-09 首次构建 v0.5.0 真缺陷）
+# ---------------------------------------------------------------------------
+# 事故复盘：`build_exe.py` 把 QMT Agent 工具链写成
+#     DATAS.append(f"{_src};qmt_tools/{_name}")      # ← 错
+# 而 PyInstaller 的 `--add-data=SRC;DEST` 里 **DEST 语义是目录**（不是文件路径），
+# 源文件只会按**原始基名**被放进去。于是产物变成
+#     _internal/qmt_tools/qmt_agent_deploy.py/qmt_agent_deploy.py
+#                                  ^^^^^^^^^^^^^^^^^^^ 中间这层是**目录**
+# 而 `_verify_qmt_agent_bundled()` 用 `is_file()` 逐项判定 ⇒ 如实报红：
+#     [FATAL] QMT Agent 工具链没进包，客户端「一键部署」将 500
+#
+# 这条门禁本身是好的（它拦下了真缺陷），坏的是 DATAS 的写法。所以护栏要锁在
+# **DATAS 的 DEST 段**上：一旦有人「顺手」把它改回 `qmt_tools/<name>.py`，
+# 这里立刻红，不用等到打包 20 分钟后再炸。
+#
+# 为什么不能只靠 `_verify_qmt_agent_bundled()`：它只在**构建过程中**跑，
+# 日常 `pytest` 不覆盖；缺陷会一路带到 CI 的 build job 才暴露（真金白银的返工）。
+def _load_build_exe_module():
+    """用 importlib 直接加载 build_exe.py（无副作用：顶层只 import 标准库）。"""
+    import importlib.util
+    build_exe = (Path(__file__).resolve().parent.parent / "build_exe.py")
+    assert build_exe.is_file(), f"build_exe.py 不见了：{build_exe}"
+    spec = importlib.util.spec_from_file_location("_qmt_build_exe_probe", build_exe)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_qmt_agent_datas_dest_is_a_directory():
+    """锁死：qmt_tools 类 `--add-data` 的 DEST 段必须是**目录名** `qmt_tools`。
+
+    （此测试名在 build_exe.py 的 DATAS 注释里被引用，构成可证伪闭环。）
+    """
+    mod = _load_build_exe_module()
+    datas = [str(d) for d in getattr(mod, "DATAS", [])]
+
+    agent_entries = [d for d in datas if "qmt_tools" in d.replace("\\", "/")]
+    # 若哪天工具链被整体摘掉，这里也要红 —— 否则护栏会「因为无对象可查」而假绿。
+    assert len(agent_entries) >= 7, (
+        f"qmt_tools 类 --add-data 条目过少（{len(agent_entries)}），"
+        f"Agent 工具链疑似被摘：{agent_entries}"
+    )
+
+    for entry in agent_entries:
+        src, _, dest = entry.rpartition(";")
+        assert src, f"--add-data 条目缺 SRC：{entry!r}"
+        # DEST 必须**恰好**是目录名：既不能带 `/`（否则多一层同名目录），
+        # 也不能带 os.sep（Windows 写盘时同样会多一层目录）。
+        assert dest == "qmt_tools", (
+            f"--add-data DEST 必须是目录名 'qmt_tools'，实际为 {dest!r}：{entry!r}\n"
+            "  写成 'qmt_tools/<name>.py' 会得到 "
+            "_internal/qmt_tools/<name>.py/<name>.py（中间那层是**目录**），"
+            "文件反而不在期望位置，客户端「一键部署」会 500。"
+        )
+        basename = src.replace("\\", "/").rsplit("/", 1)[-1]
+        assert basename.endswith(".py"), f"工具链条目不是 .py 源文件：{entry!r}"
+
+    # 反向锚：核对器期望的「包内相对路径」是**文件级**（qmt_tools/<name>.py）。
+    # 两条断言一起才闭环 —— DATAS 落成目录、核对器查文件，二者必须自洽。
+    verify_list = [
+        "qmt_tools/gen_qmt_agent_bundle.py",
+        "qmt_tools/qmt_agent_deploy.py",
+        "qmt_tools/qmt_agent_local_run.py",
+        "qmt_tools/qmt_agent_verify.py",
+        "qmt_tools/qmt_strategy_list_probe.py",
+        "qmt_tools/qmt_diag_report.py",
+        "qmt_tools/check_bigqmt_agent_py36.py",
+    ]
+    src_names = {
+        str(d).rpartition(";")[0].replace("\\", "/").rsplit("/", 1)[-1]
+        for d in agent_entries
+    }
+    for rel in verify_list:
+        name = rel.split("/", 1)[1]
+        assert name in src_names, (
+            f"核对器要求 {rel}，但 DATAS 里没有对应源文件 {name} —— "
+            "打包与实际校验清单已漂移。"
+        )

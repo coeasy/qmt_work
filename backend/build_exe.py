@@ -192,7 +192,15 @@ _missing_tools = []
 for _name in _QMT_AGENT_TOOLS:
     _src = _tools_src / _name
     if _src.is_file():
-        DATAS.append(f"{_src};qmt_tools/{_name}")
+        # ★ 目标**必须**是目录名（`qmt_tools`），不能写成 `qmt_tools/<name>.py`：
+        #   PyInstaller 的 `--add-data=SRC;DEST` 里 DEST 语义是**目录**，文件按
+        #   原始基名放进去。写成 `qmt_tools/<name>.py` 会得到
+        #   `_internal/qmt_tools/<name>.py/<name>.py`（中间那层是**目录**），
+        #   于是 `_verify_qmt_agent_bundled()` 的 `is_file()` 判定为缺失并 fail fast。
+        #   ——这正是 2026-10-09 首次构建 v0.5.0 时被拦下的真缺陷。
+        #   回归护栏：backend/tests/test_bundle_hardening.py::
+        #   test_qmt_agent_datas_dest_is_a_directory。
+        DATAS.append(f"{_src};qmt_tools")
     else:
         _missing_tools.append(_name)
 if _missing_tools:
@@ -493,7 +501,9 @@ def _verify_qmt_agent_bundled() -> None:
             + "\n".join(f"        - _internal/{m}" for m in missing)
             + "\n        修法：确认 build_exe.py 的 DATAS 含\n"
             "              `--add-data=<backend>/agent_bigqmt;agent_bigqmt` 与\n"
-            "              `--add-data=<repo>/scripts/<name>.py;qmt_tools/<name>.py`。")
+            "              `--add-data=<repo>/scripts/<name>.py;qmt_tools`。\n"
+            "        注意：DEST 是**目录**，写成 `qmt_tools/<name>.py` 会多出一层\n"
+            "              同名目录，文件反而不在期望位置。")
     print(f"  [agent] QMT Agent 工具链随包核对通过：{len(required)} 个文件")
 
 

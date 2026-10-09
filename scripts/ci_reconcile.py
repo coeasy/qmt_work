@@ -41,7 +41,7 @@ README = os.path.join(ROOT, "README.md")
 GITATTRIBUTES = os.path.join(ROOT, ".gitattributes")
 
 # ── 计数契约（与 README「核心能力」「项目结构」章节同步）─────────────────────
-EXPECTED_TESTS = 2389          # 后端用例收集数
+EXPECTED_TESTS = 2390          # 后端用例收集数
 EXPECTED_COMPONENTS = 75     # 前端 .tsx 组件数（components + shell + charts + domains）
 EXPECTED_PAGES = 46          # 注册页数量（routes.tsx PAGES 键；含占位）
 
