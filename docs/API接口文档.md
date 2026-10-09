@@ -10,8 +10,8 @@
 
 | 接口面 | 数量 | 来源 |
 |--------|------|------|
-| REST 端点 | **239** | `rest_endpoints.json` |
-| MCP 工具 | **129** | `mcp_tools.json` |
+| REST 端点 | **254** | `rest_endpoints.json` |
+| MCP 工具 | **133** | `mcp_tools.json` |
 | WebSocket 渠道 | **30** 渠道 / 5 子类型 | `ws_events.json` |
 
 ## 通用约定（简明，详细见多语言接入指南）
@@ -21,7 +21,7 @@
 - **统一响应包裹**：`{ code, message, data }`，`code !== 0` 即错误。健康检查探针（`/live` `/health` `/ready` `/metrics`）额外带 `service/version`。
 - **错误归因**：错误 `message` 给出根因分类（未连接券商 / 柜台拒单 / 风控拦截 / 参数错误 / 内部异常），前端按分类给出不同引导，不做「网络错误」兜底。
 
-## REST API（239 端点）
+## REST API（254 端点）
 
 所有路径前缀为 `/api/v1`，按资源分组；组内先按方法（`G`=GET `P`=POST `U`=PUT `D`=DELETE `X`=PATCH）再按路径排序。
 
@@ -179,6 +179,18 @@ API Key 的创建、轮换、启用/禁用、批量删除与清理未使用。
 |---|------|
 | G | `/api/v1/datahub/policies` |
 
+### datasets（数据集）· 5 端点
+
+可下载数据集（R28）：清单 / 源可用性 / 触发同步 / 本地查询。清单与状态来自后端 SSOT，未连券商不粉饰。
+
+| M | 路径 |
+|---|------|
+| G | `/api/v1/datasets` |
+| G | `/api/v1/datasets/sources` |
+| G | `/api/v1/datasets/{dataset_id}` |
+| G | `/api/v1/datasets/{dataset_id}/data` |
+| P | `/api/v1/datasets/{dataset_id}/sync` |
+
 ### factors（因子）· 4 端点
 
 因子计算：单标的、批量、从 K 线衍生。
@@ -321,6 +333,23 @@ Prometheus 指标暴露。
 |---|------|
 | G | `/api/v1/platform/status` |
 
+### qmt-agent（大 QMT Agent 部署）· 10 端点
+
+大 QMT Agent 一键部署 / 巡检 / 配置分发：bundle 生成、部署到策略目录、注册态与心跳诊断、agent_config 读写。
+
+| M | 路径 |
+|---|------|
+| G | `/api/v1/qmt-agent/bundle` |
+| G | `/api/v1/qmt-agent/config` |
+| G | `/api/v1/qmt-agent/distribute/status` |
+| G | `/api/v1/qmt-agent/status` |
+| G | `/api/v1/qmt-agent/tools` |
+| P | `/api/v1/qmt-agent/config` |
+| P | `/api/v1/qmt-agent/deploy` |
+| P | `/api/v1/qmt-agent/diagnose` |
+| P | `/api/v1/qmt-agent/distribute/check` |
+| P | `/api/v1/qmt-agent/distribute/pull` |
+
 ### quote-bus（行情总线）· 1 端点
 
 行情总线（quote-bus）统计。
@@ -367,7 +396,9 @@ Prometheus 指标暴露。
 | G | `/api/v1/reference/sector-stocks` |
 | G | `/api/v1/reference/sectors` |
 
-### remote-access（remote-access）· 6 端点
+### remote-access（远程访问）· 6 端点
+
+远程访问三档（off / lan / wan）：档位切换、状态查询、API Key 与 TOTP 管理。API Key 明文与 TOTP secret **仅创建时返回一次**。
 
 | M | 路径 |
 |---|------|
@@ -523,7 +554,7 @@ WAL 统计与手动检查点。
 
 ---
 
-## MCP 工具（129 个）
+## MCP 工具（133 个）
 
 FastMCP Streamable HTTP，接入点 `http://<host>:<port>/mcp`，携带 `X-API-Key`。工具集与 REST 的 `agent-visible` 端点保持同步（能力漂移门禁校验）。
 
@@ -628,7 +659,7 @@ FastMCP Streamable HTTP，接入点 `http://<host>:<port>/mcp`，携带 `X-API-K
 | `generate_rebalance` |
 | `generate_strategy` |
 
-#### get_* · 78 个
+#### get_* · 82 个
 
 只读查询（行情 / 账户 / 配置 / 任务 / 系统状态等）。
 
@@ -649,6 +680,10 @@ FastMCP Streamable HTTP，接入点 `http://<host>:<port>/mcp`，携带 `X-API-K
 | `get_data_providers_health` |
 | `get_data_source_diagnostics` |
 | `get_datahub_policies` |
+| `get_datasets` |
+| `get_datasets_by_dataset_id` |
+| `get_datasets_by_dataset_id_data` |
+| `get_datasets_sources` |
 | `get_full_tick` |
 | `get_kline` |
 | `get_live` |

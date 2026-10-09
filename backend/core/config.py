@@ -173,7 +173,8 @@ def _json_config_source() -> dict[str, Any]:
         if v is None:
             continue
         out[k.replace("-", "_").lower()] = v
-    for pkey in ("db_path", "log_dir", "bars_cold_path"):
+    # 路径型键：相对路径必须相对 **exe 同目录** 解析（frozen 下 CWD 不可预期）。
+    for pkey in ("db_path", "log_dir", "bars_cold_path", "bars_intraday_path"):
         if pkey in out and isinstance(out[pkey], str) and not Path(out[pkey]).is_absolute():
             out[pkey] = str(exe_dir() / out[pkey])
     return out
@@ -214,6 +215,30 @@ def cold_bars_path(override: str = "") -> Path:
         p = Path(raw)
         return p if p.is_absolute() else (exe_dir() / p)
     return settings.db_path.parent / "bars_cold.db"
+
+
+def intraday_bars_path(override: str = "") -> Path:
+    """分钟线仓文件路径（R28 新增，独立于主库与冷仓）。
+
+    **为什么单独一个文件**：全市场 1 分钟线约 **3 亿行/年**（5000 只 × 240 根 ×
+    250 交易日），放进主库会让主库体积与 WAL 同步膨胀——TD-25 已实测主库 585MB 就
+    让全量回归跑到 11 分钟。冷仓 ``bars_cold.db`` 装的是**日线历史**，与分钟线的
+    保留策略（默认 120 天滚动）完全不同，混在一起会导致「想清分钟线却误删了日线」。
+
+    解析优先级与 :func:`cold_bars_path` 一致：``override``（目录）> 配置
+    ``bars_intraday_path``（文件）> 跟随主库目录 ``bars_intraday.db``。
+    """
+    ov = str(override or "").strip()
+    if ov:
+        p = Path(ov)
+        if not p.is_absolute():
+            p = exe_dir() / p
+        return p / "bars_intraday.db"
+    raw = str(getattr(settings, "bars_intraday_path", "") or "").strip()
+    if raw:
+        p = Path(raw)
+        return p if p.is_absolute() else (exe_dir() / p)
+    return settings.db_path.parent / "bars_intraday.db"
 
 
 def export_dir(raw: str = "") -> Path:
@@ -359,6 +384,10 @@ class Settings(BaseSettings):
     bars_hot_days: int = 92
     # 冷仓文件路径；留空 = 主库同目录下的 bars_cold.db（跟随 db_path，便于整体搬迁/备份）
     bars_cold_path: str = ""
+    # 分钟线仓文件路径（R28）：留空 = 主库同目录下的 bars_intraday.db。
+    # ★ 必须显式声明：``intraday_bars_path()`` 的解析链里有这一档，缺了它就永远
+    #   走不到「显式指定文件」这条路径（docstring 承诺了但实际只读到空串）。
+    bars_intraday_path: str = ""
 
     # 出站 webhook（B2）：并发投递与重试退避基数（秒）
     webhook_out_retry_backoff: float = 2.0
@@ -370,6 +399,15 @@ class Settings(BaseSettings):
 
     # 通知去重静默期（秒；0=关闭）：同一通知渠道 + 事件 + 标题在窗口内只发送一次
     notify_dedup_seconds: float = 0.0
+
+    # 大 QMT Agent Bundle 远端下发源（R27 下发机制）：
+    # 空 = 关闭远端下发，只用本地打包版本；
+    # 非空 = GET 该 URL 拉取 manifest（JSON），比对本地 agent_ver 决定是否提示更新。
+    # 典型值：GitHub Release raw 地址或自建 CDN 上的 manifest.json。
+    # 例：https://raw.githubusercontent.com/xxx/qmt_work/main/bundle/manifest.json
+    qmt_agent_bundle_url: str = ""
+    # 下发拉取超时（秒）；默认 10s，避免远端慢响应拖慢 UI
+    qmt_agent_bundle_timeout: float = 10.0
 
     # CORS：允许的跨域来源（逗号分隔；空=不启用跨域，仅同源访问）
     cors_origins: str = ""

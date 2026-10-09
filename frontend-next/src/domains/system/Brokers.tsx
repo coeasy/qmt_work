@@ -524,7 +524,7 @@ export function Brokers() {
                 display: "flex",
                 gap: 6,
                 padding: 8,
-                background: "var(--panel-2, rgba(255,255,255,0.02))",
+                background: "var(--bg-3, rgba(255,255,255,0.02))",
                 border: "1px dashed var(--border)",
                 borderRadius: "var(--radius)",
                 flexWrap: "wrap",

@@ -240,13 +240,30 @@ import ast
 import pathlib
 
 
+#: 同形但**写的不是** ``local_bars`` 的模块 —— 它们也定义 ``upsert_bars``，
+#: 但落的是另一张表：
+#:   - ``datasource/snapshots.py``      -> ``dataset_snapshots``（发布终态词汇）
+#:   - ``datasource/intraday_store.py`` -> ``local_bars_intraday``（分钟仓；
+#:     ``quality_state`` 同签名接收但**刻意不落库**，见该函数 docstring）
+#: 不排除就会把另一套词汇混进 ``local_bars`` 的档位表 —— 测试自己变成误报源。
+#: ★ 这份风险本测试 docstring 早已写明，2026-10-09 分钟仓落地时第 1 次真的发生
+#:   （``-- ''`` 被当成未登记档位而报红）。
+#: ★ 反腐烂：``test_other_table_modules_never_write_local_bars`` 断言名单里的模块
+#:   确实不含任何 ``local_bars`` 写语句 —— 排除名单不可能变成藏污点。
+_OTHER_TABLE_MODULES = frozenset({
+    "datasource/snapshots.py",
+    "datasource/intraday_store.py",
+})
+
+
 def _written_quality_states() -> set[str]:
     """AST 扫全后端源码，收集所有写入 **``local_bars.quality_state``** 的字符串字面量。
 
-    ⚠️ 必须限定表：仓库里 **两张表共用 ``quality_state`` 列名但语义不同**——
+    ⚠️ 必须限定表：仓库里 **三张表共用 ``quality_state`` 列名但语义不同**——
     ``local_bars`` 走「数据质量档位」词汇（raw/unknown/final/conflict），
-    ``dataset_snapshots`` 走「发布终态」词汇（provisional/final/revised/invalid/empty）。
-    不区分表就把两套词汇混在一起，测试自己会变成误报源。
+    ``dataset_snapshots`` 走「发布终态」词汇（provisional/final/revised/invalid/empty），
+    ``local_bars_intraday`` 走「同签名接收但不落库」（分钟仓刻意保持精瘦）。
+    不区分表就把几套词汇混在一起，测试自己会变成误报源（见 ``_OTHER_TABLE_MODULES``）。
 
     覆盖 ``local_bars`` 的四种真实写法：
     - ``upsert_bars(..., quality_state="raw")`` —— 关键字实参（upsert_bars 只写 local_bars）
@@ -265,7 +282,9 @@ def _written_quality_states() -> set[str]:
             continue
         if "tests" in py.parts:
             continue
-        rel = str(py.relative_to(root))
+        # ★ 必须 as_posix()：Windows 上 str(Path) 用反斜杠，与 _OTHER_TABLE_MODULES
+        #   里的 posix 写法比较会**静默失配**（排除名单看似生效、实际一个都没排掉）。
+        rel = py.relative_to(root).as_posix()
         src = py.read_text(encoding="utf-8", errors="replace")
 
         # SQL 字面量：只认显式指向 local_bars 的 UPDATE
@@ -274,8 +293,8 @@ def _written_quality_states() -> set[str]:
                 src):
             found.add(m.group(1))
 
-        # 非 local_bars 语境的赋值不采（dataset_snapshots 有自己的终态词汇）
-        if rel == "datasource/snapshots.py":
+        # 非 local_bars 语境的赋值不采（另两张表各有自己的词汇，见 _OTHER_TABLE_MODULES）
+        if rel in _OTHER_TABLE_MODULES:
             continue
 
         try:
@@ -385,6 +404,31 @@ def test_sql_case_covers_every_quality_state_written_in_source():
     for state in sorted(written):
         assert f"WHEN '{state}'" in _QUALITY_STATE_CASE_SQL, (
             f"quality_state={state!r} 未出现在 SQL CASE 中，将落到 ELSE 兜底档")
+
+
+def test_other_table_modules_never_write_local_bars():
+    """``_OTHER_TABLE_MODULES`` 里的模块必须**真的不写** ``local_bars`` —— 反腐烂。
+
+    没有这一条，排除名单就会变成藏污点：将来有人在 ``intraday_store.py`` 里
+    顺手补一句 ``UPDATE local_bars SET quality_state='...'``，本门禁会因为
+    「该模块已被排除」而**放过**它，而那句写法的档位从没被 ``QUALITY_STATE_RANK``
+    校验过 —— 正是 TD 里那类「静默同档、晋级无效」的复发形态。
+    """
+    import re
+
+    root = pathlib.Path(__file__).resolve().parent.parent
+    writers = re.compile(
+        r"(INSERT\s+(?:OR\s+\w+\s+)?INTO\s+local_bars\b"
+        r"|UPDATE\s+local_bars\b"
+        r"|DELETE\s+FROM\s+local_bars\b"
+        r"|REPLACE\s+INTO\s+local_bars\b)", re.I)
+    for rel in sorted(_OTHER_TABLE_MODULES):
+        path = root / rel
+        assert path.exists(), f"_OTHER_TABLE_MODULES 登记了不存在的文件：{rel}"
+        src = path.read_text(encoding="utf-8", errors="replace")
+        assert not writers.search(src), (
+            f"{rel} 被登记为「不写 local_bars」，但源码里出现了对 local_bars 的写语句。"
+            f" 请改 _OTHER_TABLE_MODULES，或在 _written_quality_states 中按表细分。")
 
 
 def test_two_tables_share_quality_state_column_but_not_vocabulary():

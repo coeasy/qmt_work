@@ -32,10 +32,17 @@ def _bind(monkeypatch, db):
 
 def test_default_schedules_are_seeded_once(monkeypatch, tmp_db):
     _bind(monkeypatch, tmp_db)
+    # ★ 默认调度 = 固定字面量 + **由数据集 SSOT 动态生成**的两部分。
+    #   只比对前者会让「新增数据集后可下载但永不自动更新」这种断链漏过去。
+    expected_ids = {s["id"] for s in system_jobs.DEFAULT_SCHEDULES} | {
+        s["id"] for s in system_jobs.dataset_default_schedules()
+    }
     first = system_jobs.ensure_default_schedules()
-    assert len(first) == len(system_jobs.DEFAULT_SCHEDULES)
+    assert len(first) == len(expected_ids), (
+        f"播种 {len(first)} 条，期望 {len(expected_ids)} 条；"
+        f"差异={expected_ids ^ {r.get('id') for r in first}}")
     ids = {r.get("id") for r in first}
-    assert ids == {s["id"] for s in system_jobs.DEFAULT_SCHEDULES}
+    assert ids == expected_ids
 
     # 二次播种必须零新建 —— 否则每次启动都会重复建任务
     again = system_jobs.ensure_default_schedules()

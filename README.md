@@ -13,7 +13,7 @@
 
 所有行情 / 交易 / 账户接口均通过真实券商 SDK 调用，**零 mock**：未连接券商时端点返回 HTTP 503 + 可操作引导，绝不返回假数据、绝不用空列表冒充。
 
-- 版本：`0.4.9`（单一真源为仓库根 `VERSION`，构建时随包分发并由 `build_exe.py` 校验）
+- 版本：`0.5.0`（单一真源为仓库根 `VERSION`，构建时随包分发并由 `build_exe.py` 校验）
 - 许可证：Apache 2.0
 - 平台：Windows 10 / 11（迅投系券商依赖 xtquant 的 Windows 二进制，须与券商客户端**同机**运行）
 
@@ -29,7 +29,7 @@
 ## 目录
 
 - [核心能力](#核心能力)
-- [界面导航（6 分组 / 44 页）](#界面导航6-分组--44-页)
+- [界面导航（6 分组 / 46 页）](#界面导航6-分组--46-页)
 - [界面预览](#界面预览)
 - [环境要求](#环境要求)
 - [安装](#安装)
@@ -53,9 +53,9 @@
 
 | 模块 | 说明 |
 |------|------|
-| 可视化界面 | React + Vite + ECharts SPA，纯前端、前后端解耦；6 分组 / 44 页 + keep-alive 多标签工作区 |
+| 可视化界面 | React + Vite + ECharts SPA，纯前端、前后端解耦；6 分组 / 46 页 + keep-alive 多标签工作区 |
 | MCP 接口 | FastMCP Streamable HTTP，Cursor / Claude Desktop 直连 |
-| REST API | FastAPI `/api/v1/*`，37 个路由模块（账户 / 行情 / 下单 / 回测 / 因子 / 再平衡 / 风控 / 配置 / 远程访问…） |
+| REST API | FastAPI `/api/v1/*`，39 个路由模块（账户 / 行情 / 下单 / 回测 / 因子 / 再平衡 / 风控 / 配置 / 远程访问 / 大 QMT 部署 / 数据集…） |
 | 实时推送 | WebSocket，活跃券商只订阅一次，多客户端扇出；断线重连补发最近 30s 行情 |
 | 多账户网格 | 多券商 / 多账户统一看板，批量下单 / 撤单 / 重连 |
 | 回测引擎 | 向量化回测 + 参数扫描（与逐根信号一致），真实 K 线 |
@@ -74,18 +74,18 @@
 
 ---
 
-## 界面导航（6 分组 / 44 页）
+## 界面导航（6 分组 / 46 页）
 
-页面注册表 `frontend-next/src/app/routes.tsx` 的 `PAGES`（含 `status: "done" | "planned"`）是顶部菜单、命令面板的**单一真相来源**。6 大业务域、44 个页面（44 已实现，0 占位）。`menu: false` 的页面（报价牌 / K 线分析 / 分时图 / 盘口逐笔 / 逐笔成交，以及已下线的分仓再平衡）已合并进上层页面，不再占主菜单入口，但页面仍注册、仍可用（行情子页入口在工作台头部的「独立打开」按钮组，分仓再平衡入口在「多账户网格」），并由 `tests/routes.test.ts` 强制要求每个隐藏页声明 `entryFrom`。占位页会显式展示其后端契约，避免「看起来能用其实是空壳」。
+页面注册表 `frontend-next/src/app/routes.tsx` 的 `PAGES`（含 `status: "done" | "planned"`）是顶部菜单、命令面板的**单一真相来源**。6 大业务域、46 个页面（46 已实现，0 占位）。`menu: false` 的页面（报价牌 / K 线分析 / 分时图 / 盘口逐笔 / 逐笔成交，以及已下线的分仓再平衡）已合并进上层页面，不再占主菜单入口，但页面仍注册、仍可用（行情子页入口在工作台头部的「独立打开」按钮组，分仓再平衡入口在「多账户网格」），并由 `tests/routes.test.ts` 强制要求每个隐藏页声明 `entryFrom`。占位页会显式展示其后端契约，避免「看起来能用其实是空壳」。
 
 | 分组 | 页面 |
 |------|------|
 | 行情（11） | **行情工作台** · 报价牌 · K 线分析 · 分时图 · 盘口逐笔 · 逐笔成交 · 板块雷达 · 资金流 · ETF · 市场结构 · 自选股 |
-| 研究（5） | **选股工作台** · 条件选股 · 公式选股 · 因子研究 · 标的检索 |
-| 交易（6） | 手动交易 · 算法交易 · 条件单 · 涨停监控 · 目标持仓 · 分仓再平衡(占位) |
+| 研究（8） | **选股工作台** · 自动选股 · 条件选股 · 公式选股 · 因子研究 · 标的检索 · 策略回测 · 策略市场 |
+| 交易（6） | 手动交易 · 算法交易 · 条件单 · 涨停监控 · 目标持仓 · 分仓再平衡 |
 | 账户（4） | 多账户网格 · 委托/持仓/成交 · 对账核销 · 模拟盘 |
-| 自动化（4） | 告警规则 · 出站 Webhook · 外部信号 · 定时任务 |
-| 系统（8） | 仪表盘 · 连接管理 · 系统状态 · 审计日志 · API Key · 设置 · 系统日志 · 远程访问 |
+| 自动化（5） | 告警规则 · 出站 Webhook · 外部信号 · 通知渠道 · 定时任务 |
+| 系统（12） | 仪表盘 · 连接管理 · 系统状态 · 离线数据 · 审计日志 · API Key · MCP 工具 · 设置 · 远程访问 · 大 QMT 部署 · 数据中心 · 系统日志 |
 
 工作区（多标签）约束见 `frontend-next/src/stores/`；页面懒加载与路由见 `routes.tsx`。
 
@@ -200,7 +200,7 @@ build_all.bat                    # Windows CMD
 3. 包内入口核对 —— `index.html` 引用的 js 入口必须在包内，否则明确告警「桌面端可能白屏」
 4. `latest.yml` 硬核对（`--nsis`）—— 清单必须存在、`version` 必须等于仓库根 `VERSION`、`path` 指向的安装包必须在产物目录（缺失即中断：客户端「检查更新」会**静默失效**且界面无提示）
 5. Step 4 客户端自检里的**渲染判据以渲染进程自证为准** —— 权威判据是「**页面 DOM 已实际渲染（非空壳）**」（渲染进程经 `executeJavaScript` 自报节点数 / 正文长度，落盘 `render-proof.json`）；像素「非纯色空窗」只作**第二条独立证据**，窗口被其它窗口遮挡时**明确跳过**并打印原因（`PrintWindow` 取的是 GDI 合成层，被遮挡时 Chromium 停止出帧 ⇒ 位图恒为纯色，而此时页面其实完全正常，见 `docs/TECH_DEBT.md::TD-22`）
-6. Step 4.5 MCP 协议端到端 —— 对打包后的后端做**真握手 + tools/call**（REST 自省能列出 129 个工具 ≠ Agent 真能连上）。该步需要**真 Git Bash**：脚本按已知安装位置探测并用 `bash --version` 实测（必须回 `GNU bash`），
+6. Step 4.5 MCP 协议端到端 —— 对打包后的后端做**真握手 + tools/call**（REST 自省能列出 133 个工具 ≠ Agent 真能连上）。该步需要**真 Git Bash**：脚本按已知安装位置探测并用 `bash --version` 实测（必须回 `GNU bash`），
    Windows 自带的 `C:\Windows\System32\bash.exe` 只是 **WSL 启动器**，未装发行版时不可用，不参与判定；确实没有可用 bash 时**降级为 skip 并打印原因**，不会误判成失败（见 `docs/TECH_DEBT.md::TD-20`）
 
 常用参数：
@@ -461,10 +461,10 @@ print(httpx.get(f"{BASE}/paper/positions", headers=HEAD).json())
 
 | 层级 | 命令 | 覆盖范围 |
 |------|------|----------|
-| 后端单测 | `cd backend && for f in tests/test_*.py; do python -m pytest "$f" -q -p no:cacheprovider; done` | 183 个 `test_*.py`，2230 个用例 |
+| 后端单测 | `cd backend && for f in tests/test_*.py; do python -m pytest "$f" -q -p no:cacheprovider; done` | 189 个 `test_*.py`，2389 个用例 |
 | 后端冒烟 | `python backend/tests/smoke2.py` | REST 主要端点 + 错误语义（**需先起后端**；默认连 `data/app.db`，检测到真实券商连接时自动跳过 3 条「未连接券商 → 503」断言并提示改用下方客户端测试做权威验证） |
 | 前端类型检查 | `cd frontend-next && npm run typecheck` | TypeScript strict 零错误 |
-| 前端单测 | `cd frontend-next && npm run test:serial` | vitest，**53 文件 / 519 用例**。**必须用 `test:serial`**：并行 worker 在受限 temp 环境下会 `EPERM` 死亡并**静默丢 1~4 个文件而汇总仍全绿**（详见 TD-24）。判据：文件数应等于 `include` 匹配数（53），底部无 `unhandled errors` / `resolveConfig.*.js writeFile EPERM` |
+| 前端单测 | `cd frontend-next && npm run test:serial` | vitest，**55 文件 / 534 用例**。**必须用 `test:serial`**：并行 worker 在受限 temp 环境下会 `EPERM` 死亡并**静默丢 1~4 个文件而汇总仍全绿**（详见 TD-24）。判据：文件数应等于 `include` 匹配数（55），底部无 `unhandled errors` / `resolveConfig.*.js writeFile EPERM` |
 | 前端渲染冒烟 | `node tests/render_smoke_all.mjs` | headless 逐页渲染，判定 `.pane-leaf-body` 非空 |
 | 客户端端到端 | `python scripts/client_start_test.py --target client\|dev\|backend` | 清理 → 启动 → 就绪 → REST 冒烟 → WS → **DOM 渲染自证** + 窗口截图 → 停机 → 零残留（28 项） |
 | 契约计数门禁 | `python scripts/ci_reconcile.py` | 测试数 / 组件数 / 注册页数 / API 契约 / **行尾契约** 共 5 项与文档一致 |
@@ -531,7 +531,7 @@ qmt_work/
 ├─ backend/              # FastAPI 统一后端（V10 重构：core/ 无依赖内核 + engines/ 引擎）
 │  ├─ run.py            # 启动入口（端口自动扫描 + 单实例锁 + AppContext 装配）
 │  ├─ app/              # 装配层：main / routes / services / gateway
-│  │  ├─ routes/        # 37 个 REST 路由模块（account/market/trade/backtest/broker/remote_access/…）
+│  │  ├─ routes/        # 39 个 REST 路由模块（account/market/trade/backtest/broker/remote_access/qmt_agent/datasets/…）
 │  │  └─ gateway/       # 鉴权 / 限流 / 风控 / 审计 / 脱敏 / K 线缓存 / metrics / 日志告警
 │  ├─ core/             # 无依赖内核（context / crypto / db …）
 │  ├─ engines/          # 交易引擎（signal router / execution / backtest …）
@@ -542,7 +542,7 @@ qmt_work/
 │  ├─ connectors/ plugins/ sync/   # 外部连接器 / 插件内核 / WebSocket 同步引擎
 │  ├─ tools/ runtimes/  # 因子策略工具 / 捆绑 Python 运行时（cp311）
 │  ├─ data/ static/ dist/   # SQLite / 前端构建产物 / PyInstaller 产物
-│  ├─ tests/            # 182 个 test_*.py（2220 用例）+ 冒烟测试 smoke2.py
+│  ├─ tests/            # 189 个 test_*.py（2389 用例）+ 冒烟测试 smoke2.py
 │  ├─ scripts/          # 门禁脚本（许可 / 能力漂移 / 契约生成 / 架构校验）
 │  └─ build_exe.py      # EXE 打包脚本（含 static 闸门）
 ├─ frontend-next/         # 主前端：React 18 + Vite 5 + TS 5 strict（已退役旧 frontend/）

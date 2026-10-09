@@ -34,9 +34,17 @@ ENTRY_FILE = AGENT_DIR / "BIGQMT_AGENT.py"
 #: 允许的第三方/本地模块（其余一律视为不可用于 QMT 内置环境）
 _ALLOWED_MODULES = {
     "__future__", "json", "os", "sys", "time", "traceback",
-    "threading", "math", "re",
+    "threading", "math", "re", "ast", "io",
     "datetime", "collections", "itertools", "shelve", "csv", "shutil",
     "qmt_api",  # 同包的本地模块
+    # ★ xtquant / xtdata 是 **QMT 自带**的包（bin.x64/Lib/site-packages/xtquant），
+    #   不是「额外依赖」。2026-10-08 用内置 bin.x64/pythonw.exe (Python 3.6.8) 实测：
+    #   `import xtquant` OK、`import xtquant.xttrader` OK、
+    #   `from xtquant import xtdata` OK（注意 `import xtdata` 是失败的）。
+    #   独立进程模式（QMT「模型交易 → 运行」= pythonw -u <策略.py>）没有终端注入的
+    #   下单函数，行情只能走 xtdata —— 所以这两条 import 是必需的，且调用点都在
+    #   try/except 里，缺失时如实降级、绝不伪造数据。
+    "xtquant", "xtdata",
 }
 
 #: QMT 会注入到策略入口命名空间的代表性函数名（用于 G3 计数）

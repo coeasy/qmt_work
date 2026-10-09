@@ -175,14 +175,22 @@ qmt_work 后端（py3.11+）
    │  GenericConnector(bigqmt.v1 + file/redis/zmq transport)
    ▼
 文件 / Redis / ZMQ  ←─────── 桥 ───────→  大 QMT 内置 Python（py3.6）
-                                         │  python/qmt_work_agent.py（bundle，被 QMT 挂载执行）
+                                         │  python/<注册名>.py（bundle，被 QMT 挂载执行；本机实测 QMT_WORK_AGENT.py）
                                          │  capture_qmt_injected_funcs(globals())  ← 捕获 passorder 等
                                          │  轮询 diff 合成委托/成交事件 → events.ndjson
                                          ▼
                                     QMT 柜台（passorder / cancel / get_trade_detail_data）
 ```
 
-- **入口必须自己就是实现**：QMT 只把 `passorder` 等函数注入**被挂载的那一个文件**的命名空间。薄壳 `from X import *` 会让 `globals()` 指向被导入模块，导致注入函数一个都捕获不到。所以产物是**单文件 bundle** `python/qmt_work_agent.py`。
+- **入口必须自己就是实现**：QMT 只把 `passorder` 等函数注入**被挂载的那一个文件**的命名空间。薄壳 `from X import *` 会让 `globals()` 指向被导入模块，导致注入函数一个都捕获不到。所以产物是**单文件 bundle**（生成器默认落盘名 `qmt_work_agent.py`，但**上线时以注册树条目指向的文件名为准**）。
+- **★ 落盘文件名铁律（R27）**：文件名必须 = **注册树里那条策略指向的文件名**。
+  本机实测注册条目指向的是**大写** `QMT_WORK_AGENT.py`；若实际落盘的是小写
+  `qmt_work_agent.py`，就会出现「列表里有、点运行报错/立刻停止」这类最难查的形态。
+  用 `--filename` 显式指定（`deploy_qmt_work_agent.bat` 已内置该变量，见 §5.6）。
+- **★ 源码编码铁律（R27）**：bundle **必须 UTF-8**（`deploy` 默认即是）。QMT 内置
+  `bin.x64/pythonw.exe` 是 **Python 3.6.8**，读 `#coding:gbk` cookie 的源文件会在
+  特定内容下报 `SyntaxError: encoding problem` / `invalid token`，进程 `return code:1`
+  且**一条自检都不落盘**。详见 §5.7 / §5.8。
 - **自动验证**：bundle 启动即写 `probe_result.json`（自检）+ `agent_status.json`（心跳，每 10s）。**心跳新鲜度才是「策略在跑」的判据**——文件残留 ≠ 活着（可能已崩，见 §7.2）。
 - **自动拉起**：在 QMT 客户端开启 `tryAutoRunStrategy`，每次登录自动拉起策略。
 
@@ -193,14 +201,20 @@ qmt_work 后端（py3.11+）
 Windows 用户**推荐走这条路径**：脚本自动找 QMT 目录、生成 bundle、生成 config 模板、打开资源管理器选中 bundle，前端有「大 QMT 桥接」模板按钮一键填模式。你只需在 QMT 里点一下「导入本地策略」，其它字段照着 `agent_config.json` 抄。
 
 1. **双击 `deploy_qmt_work_agent.bat`**（仓库根目录）
-   - 自动探测 QMT 目录（先试 `P:\stock\gd_qmt` / `D:\QMT` / `C:\QMT` / 「国投证券QMT交易端」等常见路径；找不到再手动输入）
-   - 生成单文件 bundle `qmt_work_agent.py` + 一份 `.txt` 副本（备用路径 B 粘贴用）
+   - **通用探测 QMT 目录（不写死任何券商/盘位）**：先看 `QMT_DIR` 环境变量 → 再看命令行参数 →
+     再交给 `qmt_agent_deploy.py discover` 逐盘符扫 1~2 层（判据 = 该目录下有 `python\` 策略目录，
+     且命中 `bin.x64` / `userdata` / `config/user/root` / `user.dat` / `userdata_mini` / `xtitdata` 任一）
+     → 都没命中才提示你手填。**换券商、换盘位、换机器都不用改脚本。**
+   - 生成单文件 bundle（文件名由脚本里的 `AGENT_FILE` 决定，**本机实测注册树条目 = 大写 `QMT_WORK_AGENT.py`**）+ 一份 `.txt` 副本（备用路径 B 粘贴用）
+   - **写盘前先备份旧文件**为 `.bak.<epoch>.py`，再**原子替换**（先写临时文件再 `os.replace`）——
+     半写入不会留下截断的 agent，随时可回滚
+   - **写出后会立刻用 QMT 内置解释器把 bundle 真跑一遍**（前置门禁）：跑不起来就中止部署并给出三条常见原因，不会让你带着一份「跑不起来的东西」去点运行
    - 若 `agent_config.json` 不存在则从模板拷贝，存在则保留用户原配置
    - 打开资源管理器并**直接选中** bundle 文件，方便下一步拖选
    - **同时记下 `agent_config.json` 里的两个字段**（下一步要用）：`bridge_dir` 和 `auth_token`
 2. **在 QMT 里导入策略**（约 30 秒，唯一不可自动化的步骤）
-   - **路径 A（推荐）**：「模型研究」→ 策略区 → 右键 → 「导入本地策略」/「本地.rzrk导入」→ 选上一步打开的 `qmt_work_agent.py`
-   - **路径 B（备用，QMT「导入本地策略」被券商禁时才用）**：「我的」→ 新建策略 → Python 策略 → 全选删除模板 → 记事本双击 `qmt_work_agent.txt` 全选复制粘贴 → 点「编译」保存（编译/保存才会登记进注册树）
+   - **路径 A（推荐）**：「模型研究」→ 策略区 → 右键 → 「导入本地策略」/「本地.rzrk导入」→ 选上一步打开的 `QMT_WORK_AGENT.py`
+   - **路径 B（备用，QMT「导入本地策略」被券商禁时才用）**：「我的」→ 新建策略 → Python 策略 → 全选删除模板 → 记事本双击 `QMT_WORK_AGENT.txt` 全选复制粘贴 → 点「编译」保存（编译/保存才会登记进注册树）
 3. **关闭并重启 QMT**（注册树落盘要重启才生效）
 4. **双击 `diag_qmt_work_agent.bat`** 验证 QMT 端
    - 应显示：`已注册: 是`、`心跳新鲜`、`registered: true`、`alive: true`
@@ -229,14 +243,17 @@ Windows 用户**推荐走这条路径**：脚本自动找 QMT 目录、生成 bu
 ```bash
 # 生成器真源 backend/agent_bigqmt/，产物是单文件 bundle
 python scripts/gen_qmt_agent_bundle.py
-# 或直接用部署工具（推荐，一步到位含校验）
-python scripts/qmt_agent_deploy.py deploy --target <你的大QMT根>
+# 或直接用部署工具（推荐，一步到位含校验 + 前置真跑门禁）
+#   --filename 必须 = 注册树里那条策略指向的文件名（本机实测为大写 QMT_WORK_AGENT.py）
+#   --encoding 默认且必须 utf-8（gbk/gb18030 在 QMT 内置 py3.6 上会「启动即停止」）
+python scripts/qmt_agent_deploy.py deploy --qmt-dir <你的大QMT根> \
+    --filename QMT_WORK_AGENT.py --encoding utf-8 --txt
 ```
 
-产物 `qmt_work_agent.py` 须放到大 QMT 的：
+产物（默认名）须放到大 QMT 的：
 
 ```
-<大QMT根>/python/qmt_work_agent.py
+<大QMT根>/python/<注册树条目指向的文件名>        # 本机实测：QMT_WORK_AGENT.py
 ```
 
 **步骤 2 · 配置 agent**
@@ -252,7 +269,7 @@ python scripts/qmt_agent_deploy.py deploy --target <你的大QMT根>
 
 **步骤 3 · 在大 QMT 客户端写注册树（GUI 动作，无法自动）**
 
-这是最容易被忽略的一步：**bundle 放进 `python/` 不会自动出现在策略列表**。策略列表来自客户端持久化注册树，不是目录扫描。你必须在大 QMT 客户端里做「导入本地策略 / 新建策略 + 编译」这类**写注册树的 UI 动作**，把 `qmt_work_agent.py` 登记进去。
+这是最容易被忽略的一步：**bundle 放进 `python/` 不会自动出现在策略列表**。策略列表来自客户端持久化注册树，不是目录扫描。你必须在大 QMT 客户端里做「导入本地策略 / 新建策略 + 编译」这类**写注册树的 UI 动作**，把 `<注册树条目指向的文件名>`（本机实测 `QMT_WORK_AGENT.py`）登记进去。
 
 > 为什么不能自动注册？三重证据：①注册树运行期整文件字节区间锁（`ReadFile` 返 Win32 33 / Python `PermissionError`），运行期无法安全改写；②全 `config/` 文本文件按已知策略名 GBK 字节搜 = 零命中（无明文后门）；③`.rzrk` 导入包同为加密容器。逆向写入 = 写坏 35 条策略的风险，故不支持。
 
@@ -311,57 +328,87 @@ is_connected() = self._connected and not self._agent_unresponsive
 
 | 工具                                                                                          | 用途                                                                           |
 | ------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
-| **`deploy_qmt_work_agent.bat`**                                                             | **Windows 双击**：一键部署（自动找 QMT → 生成 bundle + config → 打开资源管理器 → 打印下一步指引）        |
-| **`diag_qmt_work_agent.bat`**                                                               | **Windows 双击**：一键诊断（跑 probe + verify + inspect 三合一，输出结构化状态）                  |
-| `scripts/qmt_agent_deploy.py {deploy\|register\|check\|config\|inspect} [--reveal] [--txt]` | 部署 / 登记 / 检查 / 配置 / 检视 bundle（`--txt` 额外产一份 .txt 副本供路径 B 粘贴）                 |
-| `scripts/gen_qmt_agent_bundle.py [--out X.py] [--txt] [--embed-config CFG]`                 | 从 `backend/agent_bigqmt/` 生成单文件 bundle                                       |
+| **`deploy_qmt_work_agent.bat`**                                                             | **Windows 双击**：一键部署（**通用探测 QMT 目录** → 备份 + 原子替换生成 bundle + config → **用 QMT 内置解释器实跑一遍** → 打开资源管理器 → 打印下一步指引）。可传参：`--txt` `--reveal` `--no-run-check` `--force`，首个非选项参数 = QMT 目录 |
+| **`diag_qmt_work_agent.bat`**                                                               | **Windows 双击**：一键诊断（跑 probe + verify + inspect + 结构化报告四合一）。同样**不写死任何券商路径**；可传首个参数指定 QMT 目录，或设 `QMT_DIR` 环境变量 |
+| `scripts/qmt_agent_deploy.py {deploy\|register\|check\|config\|inspect\|discover} [--reveal] [--txt] [--filename X.py] [--encoding utf-8]` | 部署 / 登记 / 检查 / 配置 / 检视 bundle / **`discover` 只读探测 QMT 安装目录**（打印 `QMT_DIR=` / `QMT_STRATEGY_DIR=` / `QMT_RUNNING=`，未找到打 `(none)`，**退出码恒 0**，供 .bat 与自动化消费）。`--txt` 额外产一份 .txt 副本供路径 B 粘贴；`--filename` **必须与注册树条目指向的文件名一致**，本机实测为大写 `QMT_WORK_AGENT.py`；`--encoding` **默认且必须 utf-8** |
+| `scripts/gen_qmt_agent_bundle.py [--out X.py] [--txt] [--embed-config CFG] [--encoding utf-8]`                 | 从 `backend/agent_bigqmt/` 生成单文件 bundle（**默认 utf-8**）                            |
+| `scripts/qmt_agent_local_run.py --bundle X.py --mode {process,framework,auto}`              | **本地跑通验证器**（R27 起）：`process` = 用真解释器按 `python -u <策略.py> <userdata> <ts>` 拉起；`framework` = 复刻终端 `exec` 加载（**故意不给 `__file__`**）。`deploy` 已把它接成前置门禁 |
 | `scripts/qmt_strategy_list_probe.py --target X [--qmt-dir ...]`                             | 探查策略注册树里是否已登记                                                                |
 | `scripts/qmt_agent_verify.py [--json]`                                                      | 注册态 + 心跳一起判（是否真在跑），JSON 输出可直接给程序消费                                           |
 | `scripts/qmt_cef_cdp.py`                                                                    | CEF 面板 CDP 诊断                                                                |
 | `scripts/check_bigqmt_agent_py36.py`                                                        | G3 校验：bundle 入口捕获的注入函数名字面量是否 ≤3（必须走 `capture_qmt_injected_funcs(globals())`） |
-| `qmt_agent_verify.py --json` → `bundle.*` 字段                                              | **P0 护栏**（R17 起）：AST 语法校验 + 污染签名检测（前缀被拼了 pandas/numpy/talib 之类） |
+| `qmt_agent_verify.py --json` → `bundle.*` 字段                                              | **P0 护栏**（R17 起语法/污染，**R27 起加编码**）：AST 语法 + 污染签名 + **源码编码是否 QMT 内置 py3.6 能读** |
+
+> **同一批能力也有两种非脚本入口**（三者共用同一套通用探测逻辑，都不写死券商路径）：
+>
+> - **Web 界面**：「系统 → 大 QMT 部署」页（`QmtAgentDeploy.tsx`）可视化状态 / 部署 / 诊断 / 配置。
+> - **REST API**：`GET /api/v1/qmt-agent/status` · `GET|POST /api/v1/qmt-agent/config` ·
+>   `POST /api/v1/qmt-agent/deploy` · `POST /api/v1/qmt-agent/diagnose` ·
+>   `GET /api/v1/qmt-agent/bundle` · `GET /api/v1/qmt-agent/tools` ·
+>   `GET /api/v1/qmt-agent/distribute/status` · `POST /api/v1/qmt-agent/distribute/{check,pull}`。
+>   字段口径与 curl 示例见 [`多语言接入指南.md`](多语言接入指南.md) §7「大 QMT Agent 部署」。
 
 ### 5.7 常见部署错误 → 解决方案
 
 | 症状                                         | 根因                                                         | 解决                                                                                                                        |
 | ------------------------------------------ | ---------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
-| 「模型交易」里看不到 `qmt_work_agent`                | 注册树未登记（bundle 已拷贝但未在 QMT GUI 里做导入动作）                       | 走 §5.2.0 步骤 2：QMT「模型研究」右键「导入本地策略」→ 选 `qmt_work_agent.py` → 重启 QMT                                                         |
+| 「模型交易」里看不到 `qmt_work_agent`                | 注册树未登记（bundle 已拷贝但未在 QMT GUI 里做导入动作）                       | 走 §5.2.0 步骤 2：QMT「模型研究」右键「导入本地策略」→ 选实际落盘的那个文件（本机实测 `QMT_WORK_AGENT.py`）→ 重启 QMT                                                         |
 | `qmt_agent_verify` 报「心跳已过期 Xs（阈值 45s）」     | 策略未在跑（未启动 / 已崩 / 未启动 autorun）                              | ①在 QMT「模型交易」手工点「运行」启动一次；②想自动拉起就勾「自动运行」（记进 `UiSettingConfig`）；③确认 `agent_config.json` 路径正确                                 |
 | `qmt_agent_verify` 报 `registered: false`   | 同上（注册树未登记）                                                 | 同「模型交易里看不到」                                                                                                               |
 | `qmt_agent_verify` 报 `probe_stale: true`   | 上面结论只是「陈旧快照里未见」，不代表当前缺失                                    | 先让策略真正启动一次（生成新的 `probe_result.json`），再跑 verify                                                                            |
 | 桥连不上但前端无错                                  | `agent_config.json` 里 `bridge_dir` 与前端桥接参数不一致（**日常排障第一名**） | 两处必须**完全一致**，包括绝对/相对路径与斜杠方向                                                                                               |
 | `trading_enabled: false`                   | 默认下单关闭（安全默认）                                               | 编辑 `agent_config.json` 改为 `true`，重启策略                                                                                     |
 | `inspect` 报「配置文件被独占锁定」/ `PermissionError`  | QMT 正在运行持有文件锁                                              | 关 QMT 再跑 inspect；`--force` 只跳过运行判定，**不做锁规避**                                                                              |
-| 「导入本地策略」菜单灰色 / 找不到                         | 券商禁用了 .rzrk 导入                                             | 改走路径 B：新建策略 → 粘贴 `qmt_work_agent.txt` 全部内容 → 编译                                                                           |
+| 「导入本地策略」菜单灰色 / 找不到                         | 券商禁用了 .rzrk 导入                                             | 改走路径 B：新建策略 → 粘贴实际落盘的 `.txt`（本机实测 `QMT_WORK_AGENT.txt`）全部内容 → 编译                                                                           |
 | 策略启动但报 `NameError` / `ModuleNotFoundError` | bundle 生成失败或编码问题                                           | 跑 `python scripts/check_bigqmt_agent_py36.py`；确保用 `gen_qmt_agent_bundle.py` 生成的 bundle 而非手改                               |
 | 策略启动即退出、无日志                                | `agent_config.json` JSON 语法错                               | 用 `python -c "import json; json.load(open('agent_config.json'))"` 校验；模板见 `backend/agent_bigqmt/agent_config.example.json` |
 | 端口 `8086` 拒绝连接（跑 CEF CDP 时）                | QMT 未开「CEF 调试」或客户端版本不支持                                    | 关闭 CEF 诊断路径，改用 `qmt_agent_verify`；`qmt_cef_cdp.py` 需要 QMT 客户端以调试模式启动                                                      |
 | 心跳一直 stale 但「模型交易」里显示运行中                   | handlebar 未触发（无行情推进，常见于收盘后或策略未订阅）                          | 这是**误判活死**的常见来源 —— 心跳新鲜度只是判据之一，不能单独作为唯一判据（TD 系列根因）。用 `is_connected()` 的「现在可用」语义判                                          |
-| 策略「运行」时 `IndentationError` 或 `SyntaxError`     | **R17 真实事故**：`qmt_work_agent.py` 头部被拼了另一支策略代码（如 `import pandas/numpy/talib`） | `qmt_agent_verify --json` → 看 `bundle.syntax_ok` / `bundle.pollution_ok`；重新 `deploy_qmt_work_agent.bat` 覆盖 |
+| 策略「运行」时 `IndentationError` 或 `SyntaxError`     | **R17 真实事故**：bundle 头部被拼了另一支策略代码（如 `import pandas/numpy/talib`） | `qmt_agent_verify --json` → 看 `bundle.syntax_ok` / `bundle.pollution_ok`；重新 `deploy_qmt_work_agent.bat` 覆盖 |
 | `bundle.pollution_hits` 非空                           | bundle 前 20 行出现 pandas/numpy/talib/sklearn/torch 等非标准库 import           | 同上，重新部署；手工改过的 bundle **禁止**再往顶部塞任何代码（会污染 agent 入口）                          |
+| 策略在列表里、点「运行」**立刻停止**（`return code:1`），且 **bridge 里连 `probe_result.json` 都没有** | **R27 真实事故**：bundle 源码编码是 `gb18030`/`gbk`。QMT 内置 `bin.x64/pythonw.exe` 是 **Python 3.6.8**，它的 tokenizer 读带 `#coding:gbk` cookie 的源文件会在特定内容下报 `SyntaxError: encoding problem` / `invalid token`。**开发机的 Python 3.11 编译得过去，所以极难联想** | 跑 `python scripts/qmt_agent_deploy.py deploy --encoding utf-8 --filename QMT_WORK_AGENT.py` 重新部署；体检判据见 `qmt_agent_verify --json` 的 `bundle.encoding_ok` / `bundle.encoding_declared` |
+| 策略在列表里、点「运行」立刻停止，但**有** `probe_result.json` | 缺 `if __name__ == "__main__":` 自举。QMT 的「运行」= `pythonw.exe -u <策略.py> <userdata> <ts>`（**独立进程**），没有自举 = 起来没代码可跑就退出 | 用生成器重新构建（`gen_qmt_agent_bundle.py` 会自检此条）；本地跑通验证见 `scripts/qmt_agent_local_run.py --mode process` |
+| `bundle.encoding_ok: false`（但 `syntax_ok: true`）      | 同上编码事故的**结构化判据** —— 语法过 ≠ QMT 能跑                                   | 按上面那条重部署；**不要**因为开发机 `python X.py` 能跑就以为没问题（两边解释器版本不同）                                |
+| probe 里 `injected: []`（一个注入函数都没有）               | 独立进程模式的**常态**：终端只把 `passorder`/`get_trade_detail_data` 等注入**被挂载的那一个文件**的命名空间；以外部进程形态运行时拿不到 | 这是事实、不是 bug。probe 会写 `runtime_mode: standalone_process` 如实标注。要有下单能力，需让策略以**公式策略**形态被终端 in-process 挂载 |
 
-### 5.8 Bundle 完整性护栏（P0 · R17 引入）
+### 5.8 Bundle 完整性护栏（P0 · R17 引入 · R27 扩充「编码 + 运行期自举」）
 
-**背景**：2026-10-02 用户实测点「运行」报 `IndentationError`，根因是 `QMT_WORK_AGENT.py` 头部被拼了 18 行另一支 CCI 策略（`import pandas/numpy/talib` + `init/handlebar` stub），Python 解释到 docstring 边界就爆。R17 引入两道护栏：
+**背景**：2026-10-02 用户实测点「运行」报 `IndentationError`，根因是 `QMT_WORK_AGENT.py` 头部被拼了 18 行另一支 CCI 策略（`import pandas/numpy/talib` + `init/handlebar` stub），Python 解释到 docstring 边界就爆。R17 引入语法/污染两道护栏；**R27 追加「源码编码」与「运行期自举」两项**（源于 2026-10-08 事故：bundle 能编译、文件就位、注册也正常，但点运行立刻 `return code:1` 且零自检 —— 根因只是编码）：
 
 | 检查 | 函数 | 判据 | 何时触发 |
 |---|---|---|---|
 | **语法校验** | `check_bundle_syntax()` | AST `parse()` 是否通过 | 每次 `qmt_agent_verify.py` 运行时 |
 | **污染签名** | `check_bundle_pollution()` | 前 20 行是否出现 `pandas/numpy/talib/sklearn/scipy/matplotlib/seaborn/plotly/torch/tensorflow` | 同上 |
+| **源码编码** | `check_bundle_encoding()` | PEP263 cookie（或默认 utf-8）是否属于 `QMT_SAFE_ENCODINGS = {utf-8, utf8, ascii, us-ascii}`。**gbk/gb18030 ⇒ 判红** | 同上 |
+
+> ★ 编码这条要单独拎出来说：它是**唯一一个「开发机绿灯、QMT 红灯」的判据**。
+> `bin.x64/pythonw.exe` 是 Python **3.6.8**，其 tokenizer 对 `#coding:gbk` cookie
+> 的容忍度**取决于内容长度**（实测 706 字节过、707 字节挂），不可依赖。
+> 所以部署口径定为 **UTF-8**，`deploy` 默认即是，且写出后会用 QMT 内置解释器
+> **实跑一遍**（跑不起来就中止部署并给出三条常见原因）。
+> 生成器 `recode()` 仍保留 `gbk`/`gb18030` 选项，但会强制打一条说清后果的告警。
 
 结构化输出（`diag_report.json` → `bundle` 字段）：
 
 ```json
 {
-  "path": "P:\\stock\\gd_qmt\\python\\qmt_work_agent.py",
-  "size_bytes": 52538, "line_count": 1297, "encoding": "gb18030",
+  "path": "P:\\stock\\gd_qmt\\python\\QMT_WORK_AGENT.py",
+  "size_bytes": 88948, "line_count": 1974, "encoding": "utf-8",
   "syntax_ok": true, "syntax_error": null,
+  "encoding_ok": true, "encoding_declared": "utf-8", "encoding_read_as": "utf-8",
+  "encoding_note": null,
   "pollution_ok": true, "pollution_hits": [], "pollution_first_line": -1,
   "ok": true
 }
 ```
 
-`ok = syntax_ok AND pollution_ok`。任一为假 → `diag_report.json` 的 `problems[]` 里会带具体化建议（"重跑 `deploy_qmt_work_agent.bat` 覆盖为干净版本"）。
+`ok = syntax_ok AND pollution_ok AND encoding_ok`。任一为假 → `diag_report.json` 的 `problems[]` 里会带具体化建议（语法/污染 → 「重跑 `deploy_qmt_work_agent.bat` 覆盖为干净版本」；编码 → 「用 `--encoding utf-8` 重新部署」）。
+
+**运行期自举（R27）**：`deploy` 在宣布成功前，会用 QMT 内置解释器按
+`pythonw.exe -u <策略.py> <userdata> <ts>` 把刚写出的 bundle **真跑一遍**
+（`scripts/qmt_agent_local_run.py --mode process`），要求「活过启动 + 心跳新鲜 + PROBE 往返 ok」。
+另有一条 `--mode framework` 复刻终端 `exec` 加载（**故意不给 `__file__`**），
+断言注入函数面**恰好等于**声明的那几个替身。两道验证都绿才叫部署成功。
 
 ### 5.9 多标的账户类型支持（P1 · R18 引入）
 
@@ -517,8 +564,8 @@ qmt_work 对上层暴露的接口（行情 / 交易 / 账户 / 持仓 / 订阅 /
 
 ### 7.6 三步自测大 QMT（推荐流程）
 
-1. **发版**：`gen_qmt_agent_bundle.py`（生成单文件 bundle）或 `qmt_agent_deploy.py deploy`（部署 + 校验一步到位），落到 `<QMT>/python/qmt_work_agent.py`。
-2. **看文件**：`qmt_strategy_list_probe.py --target <QMT>/python/qmt_work_agent.py`  
+1. **发版**：`gen_qmt_agent_bundle.py`（生成单文件 bundle）或 `qmt_agent_deploy.py deploy`（部署 + 校验一步到位），落到 `<QMT>/python/<注册树条目指向的文件名>`（本机实测 `QMT_WORK_AGENT.py`）。
+2. **看文件**：`qmt_strategy_list_probe.py --target <QMT>/python/<注册树条目指向的文件名>`  
    —— `--target` 既可传**策略名**（`qmt_work_agent`）也可传**文件名 / 路径**（过去拼 `.py` 时会误报「文件就位:否」，现已修正）。  
    正常应见「文件就位: **是**」；「已注册」通常为**否**，因为拷贝文件不会写注册树。
 3. **注册并运行**：在 QMT 客户端做一次写注册树的 UI 动作（§5.3），运行策略。  

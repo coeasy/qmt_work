@@ -7,9 +7,7 @@
 """
 from __future__ import annotations
 
-import asyncio
 import json
-import os
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -22,7 +20,6 @@ BACKEND_DIR = Path(__file__).resolve().parents[1]
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
-import importlib
 
 from core.context import AppContext, set_active_context, active_context_or_none  # noqa: E402
 

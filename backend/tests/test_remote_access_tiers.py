@@ -15,7 +15,6 @@
 from __future__ import annotations
 
 import sys
-import os
 from pathlib import Path
 from unittest.mock import patch
 
@@ -24,7 +23,6 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 # 保证 config.py 在测试进程中被干净导入（避免其他测试污染 settings 单例）
-import importlib
 
 import pytest
 

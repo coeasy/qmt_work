@@ -1,120 +1,247 @@
 @echo off
+REM ============================================================================
+REM  qmt_work ´ó QMT Ò»¼üÕï¶Ï£¨Í¨ÐÐ½Å±¾£©
+REM ----------------------------------------------------------------------------
+REM  Éè¼ÆÔ¼Êø£¨Óë deploy_qmt_work_agent.bat Í¬Ò»Ì×£©£º
+REM   1. **²»Ð´ËÀÈÎºÎ°²×°Â·¾¶/È¯ÉÌÃû** ¡ª¡ª QMT Ä¿Â¼ÓÉ qmt_agent_deploy.py µÄÍ¨ÓÃ
+REM      Ì½²âµÃµ½£¨ÖðÅÌ·ûÉ¨ 1~2 ²ã + `python\` ²ßÂÔÄ¿Â¼ + ÈÎÒ»°²×°±ê¼Ç£©¡£
+REM   2. **²»Ð´ËÀ Python Â·¾¶** ¡ª¡ª ×ß QMT_PYTHON ¡ú py -3 ¡ú where python ¡ú
+REM      ³£¼û°²×°Ä¿Â¼ ¡ú ×¢²á±í µÄ·¢ÏÖÁ´¡£
+REM   3. ÎÄ¼þ±ØÐë CRLF + GBK(ÎÞ BOM) ÇÒ chcp 936 ÓëÖ®Ò»ÖÂ£º
+REM      LF-only µÄ .bat »á±» cmd °´ÕûÐÐÆ´½Ó½âÎö£¬ÖÐÎÄÐÐÖ±½Ó±¨¡¸²»ÊÇÄÚ²¿»òÍâ²¿ÃüÁî¡¹¡£
+REM   4. ½ÓÊÜ `%~1` ÏÔÊ½Ö¸¶¨ QMT Ä¿Â¼£¨»ò²ßÂÔÃû£©£¬QMT_DIR »·¾³±äÁ¿´ÎÖ®¡£
+REM ============================================================================
 setlocal enabledelayedexpansion
-title qmt_work å¤§ QMT ä¸€é”®è¯Šæ–­
-chcp 65001 >nul
+title qmt_work ´ó QMT Ò»¼üÕï¶Ï
+chcp 936 >nul
 
 echo ============================================================
-echo  qmt_work å¤§ QMT ä¸€é”®è¯Šæ–­
-echo  ä¸€æ¬¡è·‘å®Œï¼šæ³¨å†Œæ ‘ / å¿ƒè·³ / bundle / agent_config
+echo  qmt_work ´ó QMT Ò»¼üÕï¶Ï£¨Í¨ÓÃ ¡¤ ×Ô¶¯ÊÊÅäÈÎÒâ°²×°Î»ÖÃ£©
+echo  Ò»´ÎÅÜÍê£º×¢²áÊ÷ / ÐÄÌø / bundle / agent_config
 echo ============================================================
 echo.
 
-REM ---------------- 1. æ‰¾ Python ----------------
-set "PYTHON="
-if exist "C:\Users\Administrator\.workbuddy\binaries\python\envs\default\Scripts\python.exe" (
-    set "PYTHON=C:\Users\Administrator\.workbuddy\binaries\python\envs\default\Scripts\python.exe"
-) else if exist "C:\Users\Administrator\.workbuddy\binaries\python\versions\3.11.9\python.exe" (
-    set "PYTHON=C:\Users\Administrator\.workbuddy\binaries\python\versions\3.11.9\python.exe"
-) else (
-    where python >nul 2>&1
-    if not errorlevel 1 (
-        for /f "delims=" %%i in ('where python') do (
-            if not defined PYTHON set "PYTHON=%%i"
-        )
-    )
+REM ---------------- 0. ¶¨Î»¹¤¾ßÁ´ ----------------
+REM ¡ï ÓÃ `cd /d "%~dp0"` + `%CD%` È¡½Å±¾Ä¿Â¼£º`set "X=%~dp0"` µÄÎ²Ëæ `\` »áÓë
+REM   ±ÕÒýºÅ×é³É `\"`£¬°Ñ±äÁ¿¾²Ä¬±ä³É¿Õ´®£¨±¾»úÊµ²â²È¹ý£©¡£
+cd /d "%~dp0"
+set "SCRIPT_DIR=%CD%"
+
+set "TOOL="
+if exist "!SCRIPT_DIR!\scripts\qmt_agent_deploy.py" set "TOOL=!SCRIPT_DIR!\scripts\qmt_agent_deploy.py"
+if not defined TOOL if exist "!SCRIPT_DIR!\qmt_agent_deploy.py" set "TOOL=!SCRIPT_DIR!\qmt_agent_deploy.py"
+if not defined TOOL call :find_tool_up "!SCRIPT_DIR!"
+REM ¶µµ×£¨¶ÀÁ¢ÓÚ %0£©£ºÄ³Ð©ËÞÖ÷£¨Git Bash µÄ `cmd //c`¡¢¸ö±ð IDE/CI ÖÕ¶Ë£©»á
+REM ÈÃ %~dp0 Ö¸Ïò±ð´¦¡£´Ó**µ±Ç°Ä¿Â¼**ÔÙÕÒÒ»±é ¡ª¡ª ÓÃ»§Í¨³£ÔÚ²Ö¿â¸ùÄ¿Â¼Ö´ÐÐ¡£
+if not defined TOOL if exist "%CD%\scripts\qmt_agent_deploy.py" set "TOOL=%CD%\scripts\qmt_agent_deploy.py"
+if not defined TOOL if exist "%CD%\qmt_agent_deploy.py" set "TOOL=%CD%\qmt_agent_deploy.py"
+if not defined TOOL call :find_tool_up "%CD%"
+if not defined TOOL (
+    echo [FAIL] ÕÒ²»µ½ scripts\qmt_agent_deploy.py ¡ª¡ª ¹¤¾ßÁ´È±Ê§¡£
+    echo        Çë°Ñ±¾½Å±¾·Å»Ø²Ö¿â¸ùÄ¿Â¼£¨»òÈÎÒâÄÜÏòÉÏ»ØËÝµ½ scripts\ µÄÎ»ÖÃ£©¡£
+    pause
+    exit /b 1
 )
+for %%d in ("!TOOL!") do set "TOOL_DIR=%%~dpd"
+echo [i] ¹¤¾ßÁ´  : !TOOL!
+echo.
+
+REM ---------------- Python Êä³ö±àÂë ----------------
+REM ±¾½Å±¾ÒÑ°Ñ¿ØÖÆÌ¨ÇÐµ½ 936(GBK)£¬Python ±ØÐë°´Í¬ÂëÒ³Êä³ö£¬·ñÔòÖÐÎÄÂÒÂë¡£
+REM **ÎÞÌõ¼þ¸²¸Ç**£º¸¸½ø³Ì£¨ÈçÄ³Ð©ÖÕ¶Ë/CI£©³£´ø PYTHONIOENCODING=utf-8 »ò
+REM PYTHONUTF8=1£¬`if not defined` ÊØ²»×¡ÕâÖÖÇé¿ö¡£setlocal ×÷ÓÃÓòÄÚÖ»Ó°Ïì×Ó½ø³Ì¡£
+set "PYTHONUTF8="
+set "PYTHONIOENCODING=gbk"
+
+REM ---------------- 1. ÕÒ Python ----------------
+set "PYTHON="
+if defined QMT_PYTHON if exist "%QMT_PYTHON%" set "PYTHON=%QMT_PYTHON%"
+if not defined PYTHON call :find_python
 if not defined PYTHON (
-    echo [FAIL] æ‰¾ä¸åˆ° Python è§£é‡Šå™¨ã€‚
+    echo [FAIL] ÕÒ²»µ½ Python ½âÊÍÆ÷¡£
+    echo        Çë°²×° Python 3.8+£¬»òÓÃ QMT_PYTHON »·¾³±äÁ¿ÏÔÊ½Ö¸¶¨£º
+    echo            set QMT_PYTHON=D:\Python311\python.exe
+    pause
+    exit /b 1
+)
+"%PYTHON%" -c "import sys; sys.exit(0 if sys.version_info >= (3, 8) else 1)"
+if errorlevel 1 (
+    echo [FAIL] ÕÒµ½µÄ Python µÍÓÚ 3.8£º%PYTHON%
+    echo        ÓÃ QMT_PYTHON Ö¸Ïò¸üÐÂµÄ½âÊÍÆ÷ºóÖØÅÜ¡£
     pause
     exit /b 1
 )
 echo [i] Python  : %PYTHON%
 
-REM ---------------- 2. æ‰¾ QMT ç›®å½• ----------------
-set "QMT_DIR="
-if exist "P:\stock\gd_qmt\python"              set "QMT_DIR=P:\stock\gd_qmt" & goto found_qmt
-if exist "D:\QMT\python"                       set "QMT_DIR=D:\QMT" & goto found_qmt
-if exist "C:\QMT\python"                       set "QMT_DIR=C:\QMT" & goto found_qmt
-if exist "D:\å›½æŠ•è¯åˆ¸QMTäº¤æ˜“ç«¯\python"          set "QMT_DIR=D:\å›½æŠ•è¯åˆ¸QMTäº¤æ˜“ç«¯" & goto found_qmt
-if exist "C:\å›½æŠ•è¯åˆ¸QMTäº¤æ˜“ç«¯\python"          set "QMT_DIR=C:\å›½æŠ•è¯åˆ¸QMTäº¤æ˜“ç«¯" & goto found_qmt
+REM ---------------- 2. ¶¨Î» QMT °²×°Ä¿Â¼ ----------------
+REM ÓÅÏÈ¼¶£ºQMT_DIR »·¾³±äÁ¿ ¡ú ÃüÁîÐÐ %~1 ¡ú Í¨ÓÃ×Ô¶¯Ì½²â ¡ú ÊÖ¹¤ÊäÈë¡£
+REM Ì½²âÅÐ¾ÝÊÇÍ¨ÓÃµÄ£¨python\ ²ßÂÔÄ¿Â¼ + ÈÎÒ»°²×°±ê¼Ç£©£¬ÄÜÊ¶±ðËùÓÐÈ¯ÉÌ°æ±¾¡£
+set "QMT_DIR2="
+if defined QMT_DIR set "QMT_DIR2=%QMT_DIR%"
+if not defined QMT_DIR2 if not "%~1"=="" set "QMT_DIR2=%~1"
 
-if not "%~1"=="" (
-    set "QMT_DIR=%~1"
-    goto found_qmt
+if not defined QMT_DIR2 (
+    set "DISC="
+    "%PYTHON%" "!TOOL!" discover >"%TEMP%\_qmt_disc_diag.txt" 2>nul
+    if not errorlevel 1 (
+        for /f "usebackq eol=# tokens=1,* delims==" %%a in ("%TEMP%\_qmt_disc_diag.txt") do (
+            if "%%a"=="QMT_DIR" set "DISC=%%b"
+        )
+    )
+    if defined DISC if not "!DISC!"=="(none)" set "QMT_DIR2=!DISC!"
 )
-set /p QMT_DIR="QMT ç›®å½•: "
-if not defined QMT_DIR (
-    echo [FAIL] æœªæŒ‡å®š QMT ç›®å½•ã€‚
+
+if defined QMT_DIR2 if "!QMT_DIR2:~-1!"=="\" set "QMT_DIR2=!QMT_DIR2:~0,-1!"
+if defined QMT_DIR2 if not exist "!QMT_DIR2!\python" (
+    echo [!] !QMT_DIR2! ÏÂÃ»ÓÐ python\ ²ßÂÔÄ¿Â¼ ¡ª¡ª ¿ÉÄÜ²»ÊÇ QMT °²×°¸ù¡£
+    set "QMT_DIR2="
+)
+if not defined QMT_DIR2 (
+    echo [i] ×Ô¶¯Ì½²âÎ´ÃüÖÐ¡£ÇëÊÖÌî QMT °²×°¸ùÄ¿Â¼£¨ÆäÏÂÓ¦ÓÐ python\ ×ÓÄ¿Â¼£©¡£
+    echo     Àý£º D:\¹úÍ¶Ö¤È¯QMT½»Ò×¶Ë    »ò     E:\Ä³È¯ÉÌQMT\¿Í»§¶Ë
+    echo     £¨²»±ØÌîµ½ python\ ÕâÒ»¼¶£»Ö±½Ó¸øËüµÄÉÏÒ»¼¶Ä¿Â¼¼´¿É£©
+    set /p QMT_DIR="QMT Ä¿Â¼: "
+    set "QMT_DIR2=!QMT_DIR!"
+    if defined QMT_DIR2 if "!QMT_DIR2:~-1!"=="\" set "QMT_DIR2=!QMT_DIR2:~0,-1!"
+)
+if not defined QMT_DIR2 (
+    echo [FAIL] Î´Ö¸¶¨ QMT Ä¿Â¼¡£
     pause
     exit /b 1
 )
-:found_qmt
-if not exist "%QMT_DIR%" (
-    echo [FAIL] %QMT_DIR% ä¸å­˜åœ¨ã€‚
+if not exist "!QMT_DIR2!" (
+    echo [FAIL] !QMT_DIR2! ²»´æÔÚ¡£
     pause
     exit /b 1
 )
-echo [i] QMT ç›®å½•: %QMT_DIR%
+echo [i] QMT Ä¿Â¼: !QMT_DIR2!
 echo.
 
-REM ---------------- 3. QMT è¿è¡ŒçŠ¶æ€æç¤º ----------------
-tasklist /FI "IMAGENAME eq XtItClient.exe" 2>nul | find /I "XtItClient.exe" >nul
+REM ---------------- 3. QMT ÔËÐÐ×´Ì¬ÌáÊ¾ ----------------
+REM ÓÃ findstr ¶ø·Ç find£ºGit for Windows µÄ GNU findutils ¿ÉÄÜÇÀÕ¼ PATH ÀïµÄ
+REM `find`£¬µ¼ÖÂ `find /I "..."` ±ä³É¡¸°´ÎÄ¼þÃûÕÒÎÄ¼þ¡¹¶øºãÊ§°Ü¡£
+tasklist /NH 2>nul | findstr /I "XtItClient.exe" >nul
 if not errorlevel 1 (
-    echo [!] QMT æ­£åœ¨è¿è¡Œ â€”â€” æ­¥éª¤ [3/3] å¯èƒ½è¯»ä¸åˆ°é…ç½®æ–‡ä»¶ï¼ˆQMT ç‹¬å é”å®šï¼‰ã€‚
-    echo     å¦‚éœ€å®Œæ•´ inspectï¼Œè¯·å…³é—­ QMT åŽå†è·‘ä¸€æ¬¡ã€‚
+    echo [ÌáÊ¾] QMT ÕýÔÚÔËÐÐ ¡ª¡ª ²½Öè [3/4] ¿ÉÄÜ¶Á²»µ½ÅäÖÃÎÄ¼þ£¨QMT ¶ÀÕ¼Ëø¶¨£©¡£
+    echo     ÈçÐèÍêÕû inspect£¬Çë¹Ø±Õ QMT ºóÔÙÅÜÒ»´Î¡£
     echo.
 )
 
-REM ---------------- [1/3] ç­–ç•¥æ³¨å†Œæ ‘ ----------------
+REM ---------------- [1/4] ²ßÂÔ×¢²áÊ÷ ----------------
 echo ============================================================
-echo  [1/3] ç­–ç•¥æ³¨å†Œæ ‘ï¼ˆqmt_strategy_list_probeï¼‰
+echo  [1/4] ²ßÂÔ×¢²áÊ÷£¨qmt_strategy_list_probe£©
 echo ============================================================
-"%PYTHON%" "%~dp0scripts\qmt_strategy_list_probe.py" --target qmt_work_agent --qmt-dir "%QMT_DIR%"
+"%PYTHON%" "!TOOL_DIR!qmt_strategy_list_probe.py" --target qmt_work_agent --qmt-dir "!QMT_DIR2!"
 echo.
 
-REM ---------------- [2/3] å¿ƒè·³æ–°é²œåº¦ + èƒ½åŠ›æ¸…å• ----------------
+REM ---------------- [2/4] ÐÄÌøÐÂÏÊ¶È + ÄÜÁ¦Çåµ¥ ----------------
 echo ============================================================
-echo  [2/3] å¿ƒè·³æ–°é²œåº¦ + èƒ½åŠ›æ¸…å•ï¼ˆqmt_agent_verifyï¼‰
+echo  [2/4] ÐÄÌøÐÂÏÊ¶È + ÄÜÁ¦Çåµ¥£¨qmt_agent_verify£©
 echo ============================================================
-"%PYTHON%" "%~dp0scripts\qmt_agent_verify.py"
+"%PYTHON%" "!TOOL_DIR!qmt_agent_verify.py"
 echo.
 
-REM ---------------- [3/3] bundle + agent_config ----------------
+REM ---------------- [3/4] bundle + agent_config ----------------
 echo ============================================================
-echo  [3/3] bundle + agent_config.jsonï¼ˆqmt_agent_deploy inspectï¼‰
+echo  [3/4] bundle + agent_config.json£¨qmt_agent_deploy inspect£©
 echo ============================================================
-"%PYTHON%" "%~dp0scripts\qmt_agent_deploy.py" inspect --force --qmt-dir "%QMT_DIR%"
+"%PYTHON%" "!TOOL!" inspect --force --qmt-dir "!QMT_DIR2!"
 echo.
 
-REM ---------------- [4/4] ç»“æž„åŒ– JSON æŠ¥å‘Š ----------------
+REM ---------------- [4/4] ½á¹¹»¯ JSON ±¨¸æ ----------------
 echo ============================================================
-echo  [4/4] ç”Ÿæˆç»“æž„åŒ–è¯Šæ–­æŠ¥å‘Š diag_report.json
+echo  [4/4] Éú³É½á¹¹»¯Õï¶Ï±¨¸æ diag_report.json
 echo ============================================================
-"%PYTHON%" "%~dp0scripts\qmt_diag_report.py" --qmt-dir "%QMT_DIR%" --out "%~dp0output\diag_report.json"
+if not exist "!SCRIPT_DIR!\output" mkdir "!SCRIPT_DIR!\output"
+"%PYTHON%" "!TOOL_DIR!qmt_diag_report.py" --qmt-dir "!QMT_DIR2!" --out "!SCRIPT_DIR!\output\diag_report.json"
 echo.
-echo  æŠ¥å‘Šæ–‡ä»¶: %~dp0output\diag_report.json
-echo  ç”¨é€”ï¼šæŽ’éšœæ—¥å¿—åˆ†äº« / å¼€å‘è€…å®šä½ / CI æ±‡æ€»ã€‚åŒ…å«ï¼š
+echo  ±¨¸æÎÄ¼þ: !SCRIPT_DIR!\output\diag_report.json
+echo  ÓÃÍ¾£ºÅÅÕÏÈÕÖ¾·ÖÏí / ¿ª·¢Õß¶¨Î» / CI »ã×Ü¡£°üº¬£º
 echo    timestamp / qmt_dir / probe / verify / inspect / problems[]
 echo.
 
-REM ---------------- åˆ¤è¯»è¦ç‚¹ ----------------
+REM ---------------- ÅÐ¶ÁÒªµã ----------------
 echo ============================================================
-echo  åˆ¤è¯»è¦ç‚¹ï¼ˆå¯¹ç…§ä¸Šé¢è¾“å‡ºï¼‰
+echo  ÅÐ¶ÁÒªµã£¨¶ÔÕÕÉÏÃæÊä³ö£©
 echo ============================================================
 echo.
-echo  çŠ¶æ€                    å«ä¹‰
+echo  ×´Ì¬                    º¬Òå
 echo  --------------------    ------------------------------------------------
-echo  å·²æ³¨å†Œ: æ˜¯ + å¿ƒè·³æ–°é²œ   æ¡¥å¯ç”¨ï¼Œç›´æŽ¥æŽ¥å‰ç«¯
-echo  å·²æ³¨å†Œ: å¦              QMT GUI æœªå¯¼å…¥ç­–ç•¥ â†’ åŒå‡» deploy_qmt_work_agent.bat
-echo  å·²æ³¨å†Œ: æ˜¯ + å¿ƒè·³è¿‡æœŸ   ç­–ç•¥æœªå¯åŠ¨ â†’ åŽ» QMTã€Œæ¨¡åž‹äº¤æ˜“ã€æ‰‹å·¥å¯åŠ¨ï¼Œæˆ–å‹¾ã€Œè‡ªåŠ¨è¿è¡Œã€
-echo  è‡ªåŠ¨è¿è¡Œ: æ˜¯            QMT æ¯æ¬¡å¯åŠ¨ä¼šè‡ªåŠ¨æ‹‰èµ·ï¼ˆé›¶äººå·¥ï¼‰
-echo  trading_enabled: false  åªè¿žä¸ä¸Šäº¤æ˜“æŽ¥å£ â†’ ç¼–è¾‘ agent_config.json æ”¹ true
-echo  probe_stale: true       ä¸Šé¢ç»“è®ºåªæ˜¯ã€Œé™ˆæ—§å¿«ç…§é‡Œæœªè§ã€ï¼Œä¸ä»£è¡¨å½“å‰ç¼ºå¤±
-echo  PermissionError         QMT ç‹¬å é”é…ç½® â†’ å…³ QMT å†è·‘ï¼ˆæˆ–è·³è¿‡ 3/3ï¼‰
+echo  ÒÑ×¢²á: ÊÇ + ÐÄÌøÐÂÏÊ   ÇÅ¿ÉÓÃ£¬Ö±½Ó½ÓÇ°¶Ë
+echo  ÒÑ×¢²á: ·ñ              QMT GUI Î´µ¼Èë²ßÂÔ£¬Ë«»÷ deploy_qmt_work_agent.bat
+echo  ÒÑ×¢²á: ÊÇ + ÐÄÌø¹ýÆÚ   ²ßÂÔÎ´Æô¶¯£¬È¥ QMT¡¸Ä£ÐÍ½»Ò×¡¹ÊÖ¹¤Æô¶¯»ò¹´¡¸×Ô¶¯ÔËÐÐ¡¹
+echo  ×Ô¶¯ÔËÐÐ: ÊÇ            QMT Ã¿´ÎÆô¶¯»á×Ô¶¯À­Æð£¨ÁãÈË¹¤£©
+echo  trading_enabled: false  Ö»Á¬²»ÉÏ½»Ò×½Ó¿Ú£¬±à¼­ agent_config.json ¸Ä true
+echo  probe_stale: true       ÉÏÃæ½áÂÛÖ»ÊÇ¡¸³Â¾É¿ìÕÕÀïÎ´¼û¡¹£¬²»´ú±íµ±Ç°È±Ê§
+echo  PermissionError         QMT ¶ÀÕ¼ËøÅäÖÃ£¬¹Ø QMT ÔÙÅÜ£¨»òÌø¹ý [3/4]£©
 echo.
-echo  ä¸‹ä¸€æ­¥ï¼ˆå¦‚éœ€ä¿®ï¼‰ï¼š
-echo    â€¢ éƒ¨ç½²ï¼š  deploy_qmt_work_agent.bat
-echo    â€¢ ä¿®é…ç½®ï¼š%QMT_DIR%\python\agent_config.json
+echo  ÏÂÒ»²½£¨ÈçÐèÐÞ£©£º
+echo    * ²¿Êð£º  deploy_qmt_work_agent.bat
+echo    * ÐÞÅäÖÃ£º!QMT_DIR2!\python\agent_config.json
 echo ============================================================
 echo.
 pause
+exit /b 0
+
+REM ============================================================================
+REM  ×Ó³ÌÐò£ºÕÒ Python ½âÊÍÆ÷£¨½á¹ûÐ´Èë !PYTHON!£©
+REM  Ë³Ðò£ºpy launcher ¡ú where python ¡ú ³£¼û°²×°Ä¿Â¼ ¡ú ×¢²á±í
+REM  ¡ï ²»Ð´ËÀÈÎºÎ¾ßÌå»úÆ÷µÄÂ·¾¶£¬Ö»ÓÐ¡¸±ê×¼°²×°Î»ÖÃ¡¹ÕâÒ»²ãÊÇ³£Á¿¡£
+REM ============================================================================
+:find_python
+py -3 -c "import sys;print(sys.executable)" >"%TEMP%\_qmt_py.txt" 2>nul
+if errorlevel 1 goto :fp_next1
+for /f "usebackq delims=" %%i in ("%TEMP%\_qmt_py.txt") do set "PYTHON=%%i"
+if defined PYTHON if not exist "!PYTHON!" set "PYTHON="
+if defined PYTHON goto :fp_end
+
+:fp_next1
+where python >nul 2>&1
+if not errorlevel 1 (
+    for /f "delims=" %%i in ('where python') do (
+        if not defined PYTHON if exist "%%i" set "PYTHON=%%i"
+    )
+)
+if defined PYTHON goto :fp_end
+
+if not defined PYTHON if exist "%ProgramFiles%\Python311\python.exe" set "PYTHON=%ProgramFiles%\Python311\python.exe"
+if not defined PYTHON if exist "%ProgramFiles(x86)%\Python311\python.exe" set "PYTHON=%ProgramFiles(x86)%\Python311\python.exe"
+if not defined PYTHON if exist "%LOCALAPPDATA%\Programs\Python\Python311\python.exe" set "PYTHON=%LOCALAPPDATA%\Programs\Python\Python311\python.exe"
+
+if not defined PYTHON (
+    for /f "delims=" %%i in ('dir /b /ad /o:n "%LOCALAPPDATA%\Programs\Python" 2^>nul') do (
+        if not defined PYTHON if exist "%LOCALAPPDATA%\Programs\Python\%%i\python.exe" set "PYTHON=%LOCALAPPDATA%\Programs\Python\%%i\python.exe"
+    )
+)
+if defined PYTHON goto :fp_end
+
+for /f "tokens=2,*" %%a in ('reg query "HKLM\SOFTWARE\Python\PythonCore" /s /v InstallPath 2^>nul') do (
+    if not defined PYTHON if exist "%%b\python.exe" set "PYTHON=%%b\python.exe"
+)
+if defined PYTHON goto :fp_end
+
+for /f "tokens=2,*" %%a in ('reg query "HKLM\SOFTWARE\WOW6432Node\Python\PythonCore" /s /v InstallPath 2^>nul') do (
+    if not defined PYTHON if exist "%%b\python.exe" set "PYTHON=%%b\python.exe"
+)
+
+:fp_end
+exit /b 0
+
+REM ============================================================================
+REM  ×Ó³ÌÐò£º´Ó¸ø¶¨Ä¿Â¼ÏòÉÏ»ØËÝ£¬ÕÒ scripts\qmt_agent_deploy.py
+REM  ²ÎÊý£º%~1 = ÆðÊ¼Ä¿Â¼£»½á¹ûÐ´Èë !TOOL!
+REM ============================================================================
+:find_tool_up
+set "P=%~1"
+set "DEPTH=0"
+:ftu_loop
+set /a DEPTH+=1
+if "!DEPTH!"=="6" goto :ftu_end
+for %%d in ("!P!\..") do set "P=%%~fd"
+if "!P!"=="" goto :ftu_end
+if "!P!"=="%~1" goto :ftu_end
+if exist "!P!\scripts\qmt_agent_deploy.py" set "TOOL=!P!\scripts\qmt_agent_deploy.py"
+if defined TOOL goto :ftu_end
+goto :ftu_loop
+:ftu_end
+exit /b 0

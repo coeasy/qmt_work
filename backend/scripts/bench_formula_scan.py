@@ -85,7 +85,7 @@ def main() -> int:
 
     r = _run(codes, bars_map, args.repeat)
     print("=" * 56)
-    print(f"evaluate_scan 基准（MA20 + RSI14 + close 三条件）")
+    print("evaluate_scan 基准（MA20 + RSI14 + close 三条件）")
     print(f"  标的数        : {args.codes}（× {args.bars} 根）")
     print(f"  重复          : {args.repeat}")
     print(f"  中位耗时      : {r['median_s']*1000:.0f} ms")

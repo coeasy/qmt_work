@@ -9,10 +9,8 @@
    ⇒「单位」这一格恒为空白。更隐蔽的是消费端 ``unit ?? "--"`` 兜不住空串
    （``"" ?? x`` 仍是 ``""``），于是渲染出一个空白单元格、看起来像前端坏了。
 """
-import ast
 from pathlib import Path
 
-import pytest
 
 from _phase7_support import bar_dt, tmp_db  # noqa: F401  —— 夹具
 from datasource.quality import coverage_report

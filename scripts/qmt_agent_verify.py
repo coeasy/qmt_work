@@ -22,6 +22,18 @@ Python 直接 `IndentationError`。所以除了运行时证据，还要在**运�
 2. `check_bundle_pollution` — 前 N 行是否出现 pandas/numpy/talib/sklearn 等
    非 qmt_api 白名单 import（合法 agent 只应 import 标准库）
 
+**源码编码**（R27 引入 · 2026-10-08）
+-----------------------------------
+真实事故：52 KB 的 bundle 用 ``gb18030`` 落盘，**开发机 Python 3.11 能编译**，
+QMT 内置的 ``bin.x64/pythonw.exe``（**Python 3.6.8**）却报
+``SyntaxError: encoding problem: gb18030`` / ``invalid token`` →
+进程 ``return code:1``、模型交易里只见「启动即停止」、**一条自检都不落盘**。
+
+排查结论（矩阵实测）：py3.6 的 tokenizer 对 ``#coding:gbk``/``gb18030`` cookie
+的容忍度取决于**内容长度**（706 字节过、707 字节挂），不可依赖；
+UTF-8（带/不带 cookie）在 67 KB 全量中文下稳定通过。
+⇒ 现在把「源码必须是 UTF-8」变成**可判定的体检项**，而不是靠人记。
+
 注册状态为什么必须单独验
 ------------------------
 QMT 的策略列表是**客户端持久化注册树**，不是策略目录扫描。实测判据：
@@ -87,6 +99,63 @@ _AGENT_STDLIB_IMPORTS = frozenset({
     "__future__",
 })
 
+#: QMT 内置解释器（bin.x64/pythonw.exe = Python 3.6.8）**只认这些源码编码**。
+#: 见模块 docstring「源码编码（R27）」——gbk/gb18030 会在特定内容长度下让
+#: py3.6 tokenizer 直接 SyntaxError，且失败模式是「启动即停止 + 零自检」。
+QMT_SAFE_ENCODINGS = frozenset({"utf-8", "utf8", "ascii", "us-ascii"})
+
+#: PEP263 编码 cookie：只在前两行生效。
+_CODING_COOKIE_RE = re.compile(r"^[ \t\f]*#.*?coding[:=][ \t]*([-\w.]+)")
+
+
+def _declared_encoding(text):
+    """从源码前两行取 PEP263 声明的编码（取不到返回 None ⇒ py3.6 按 UTF-8 处理）。"""
+    for i, line in enumerate(text.split("\n")[:2]):
+        m = _CODING_COOKIE_RE.match(line)
+        if m:
+            return m.group(1).lower().replace("_", "-")
+        # PEP263：cookie 必须出现在「第一行 shebang」或「第一/第二行注释」；
+        # 一旦遇到真正的代码行就不该再往下找（否则会把别处的注释误判成 cookie）。
+        if i == 0 and line.startswith("#!"):
+            continue
+        if line.strip() and not line.lstrip().startswith("#"):
+            break
+    return None
+
+
+def check_bundle_encoding(path):
+    """源码编码体检 → {'ok', 'declared', 'read_as', 'note'}。
+
+    为什么单列一项：这是 2026-10-08 事故的**唯一根因**，而它恰好是
+    「开发机编译通过、QMT 里跑不起来」——最容易被误判成别的毛病。
+    """
+    out = {"ok": True, "declared": None, "read_as": None, "note": None}
+    text, enc = _read_bundle_source(path)
+    if text is None:
+        out["ok"] = False
+        out["note"] = "读不出源码（%s）" % enc
+        return out
+    out["read_as"] = enc
+    declared = _declared_encoding(text)
+    out["declared"] = declared
+    effective = declared or "utf-8"
+    if effective not in QMT_SAFE_ENCODINGS:
+        out["ok"] = False
+        out["note"] = (
+            "源码声明编码 %s —— QMT 内置 Python 3.6.8 的 tokenizer 会在特定内容下报 "
+            "`SyntaxError: encoding problem: %s` / `invalid token`，策略进程 "
+            "return code:1 且**一条自检都不落盘**（表现为模型交易里「启动即停止」）。"
+            "请用 `python scripts/qmt_agent_deploy.py deploy --encoding utf-8` 重新部署。"
+            % (effective, effective))
+    elif declared is None and enc != "utf-8":
+        # 没有 cookie ⇒ py3.6 按 UTF-8 解码本文件，而它不是合法 UTF-8 ⇒ 必然 SyntaxError
+        out["ok"] = False
+        out["note"] = (
+            "无 coding cookie 且内容不是合法 UTF-8（实际按 %s 才读得通）—— "
+            "py3.6 默认按 UTF-8 解码源文件，该文件必然 SyntaxError。"
+            "请用 --encoding utf-8 重新部署。" % enc)
+    return out
+
 
 def _read_bundle_source(path, encoding_candidates=("utf-8", "gb18030", "gbk")):
     """按多个编码候选读 bundle 源文件。返回 (text, encoding) 或 (None, reason)。"""
@@ -104,10 +173,16 @@ def _read_bundle_source(path, encoding_candidates=("utf-8", "gb18030", "gbk")):
 def check_bundle_syntax(path):
     """AST 解析校验。返回 dict：
     {'ok': bool, 'error': str|None, 'encoding': str|None,
-     'line_count': int, 'size_bytes': int}
+     'line_count': int, 'size_bytes': int,
+     'encoding_qmt_safe': bool, 'encoding_note': str|None}
+
+    ★ 注意 ``ok`` 只表示「**开发机**能解析」。真正的部署判据要看
+    ``encoding_qmt_safe`` —— 2026-10-08 事故里，gb18030 的 bundle 在
+    Python 3.11 上是 ``ok=True``，在 QMT 的 py3.6 上却 SyntaxError。
     """
     out = {"ok": False, "error": None, "encoding": None,
-           "line_count": 0, "size_bytes": 0}
+           "line_count": 0, "size_bytes": 0,
+           "encoding_qmt_safe": False, "encoding_note": None}
     try:
         out["size_bytes"] = os.path.getsize(path)
     except OSError:
@@ -118,6 +193,9 @@ def check_bundle_syntax(path):
         return out
     out["encoding"] = enc
     out["line_count"] = text.count("\n") + 1
+    enc_chk = check_bundle_encoding(path)
+    out["encoding_qmt_safe"] = bool(enc_chk.get("ok"))
+    out["encoding_note"] = enc_chk.get("note")
     try:
         import ast  # 延迟导入，避免在没用的分支上浪费
         ast.parse(text)
@@ -158,24 +236,33 @@ def check_bundle_pollution(path, top_n=20):
 
 
 def bundle_health(path):
-    """一次跑完语法 + 污染两项检查，返回给 diag_report / 前端聚合用。
+    """一次跑完语法 + 污染 + **源码编码**三项检查，返回给 diag_report / 前端聚合用。
 
     ``checked=True``：调用方已给出确定的 bundle 路径，结论具判定力。
+
+    ★ ``encoding_ok`` 是 R27（2026-10-08）加进来的**硬判定**：
+    gb18030/gbk 的 bundle 以前会一路绿灯（开发机能编译、文件也在），
+    到了 QMT 里才「启动即停止」。现在它在这一层就被拦下。
     """
     syn = check_bundle_syntax(path)
     pol = check_bundle_pollution(path)
+    enc = check_bundle_encoding(path)
     return {
         "checked": True,
         "path": path,
         "size_bytes": syn.get("size_bytes", 0),
         "line_count": syn.get("line_count", 0),
         "encoding": syn.get("encoding"),
+        "encoding_ok": bool(enc.get("ok")),
+        "encoding_declared": enc.get("declared"),
+        "encoding_read_as": enc.get("read_as"),
+        "encoding_note": enc.get("note"),
         "syntax_ok": syn.get("ok", False),
         "syntax_error": syn.get("error"),
         "pollution_ok": pol.get("ok", True),
         "pollution_hits": pol.get("imports_found", []),
         "pollution_first_line": pol.get("first_import_line", -1),
-        "ok": bool(syn.get("ok") and pol.get("ok")),
+        "ok": bool(syn.get("ok") and pol.get("ok") and enc.get("ok")),
     }
 
 

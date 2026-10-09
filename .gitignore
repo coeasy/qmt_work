@@ -16,6 +16,9 @@ logs/
 backend/runtimes/
 # 策略生成器输出目录（tools/strategy_gen.py 生成，不入库）
 backend/qmt_strategies/
+# 仓库根 dist/：bundle 生成器的默认输出（`gen_qmt_agent_bundle.py --out dist/…`）
+# 与 qmt_agent_local_run.py 的默认加载目录，属本地产物，不入库。
+/dist/
 # ---------- 运行期数据 ----------
 # SQLite + 加密主密钥不入库
 backend/data/

@@ -100,6 +100,43 @@ describe("源码级：图表不得硬编码涨跌色", () => {
     expect(hits, `发现硬编码色值（应改用 var(--x) 令牌）：\n${hits.join("\n")}`).toEqual([]);
   });
 
+  it("★ 引用的 var(--x) 必须是**真实存在**的令牌（2026-10-09 新增）", () => {
+    // 背景：R27/R28 新增页面里写了 ``var(--color-danger,#c0392b)`` 这类
+    // **编造的令牌名** —— 它同时犯了两个错：① 令牌根本不存在（真实名是
+    // ``--danger``），解析出来是透明/继承色，界面上「红色警告」直接消失；
+    // ② 第二参数的硬编码 hex 又撞上上面的「禁止硬编码色值」门禁。
+    // 只查 hex 抓不到①，只查空值又抓不到②，所以两条都要。
+    const cssDir = path.join(SRC, "design");
+    const defined = new Set<string>();
+    for (const f of fs.readdirSync(cssDir).filter((n) => n.endsWith(".css"))) {
+      const txt = fs.readFileSync(path.join(cssDir, f), "utf8");
+      for (const m of txt.matchAll(/(--[A-Za-z0-9_-]+)\s*:/g)) defined.add(m[1] ?? "");
+    }
+    // charts/cssVar.ts 与 skins.ts 里可能以 JS 侧名字声明的令牌
+    for (const rel of ["charts/cssVar.ts", "design/skins.ts"]) {
+      const p = path.join(SRC, rel);
+      if (!fs.existsSync(p)) continue;
+      for (const m of fs.readFileSync(p, "utf8").matchAll(/["'`](--[A-Za-z0-9_-]+)["'`]/g)) {
+        defined.add(m[1] ?? "");
+      }
+    }
+    expect(defined.size, "令牌集为空 ⇒ 解析路径不对").toBeGreaterThan(20);
+
+    const unknown: string[] = [];
+    for (const f of files) {
+      const text = stripComments(read(f));
+      text.split("\n").forEach((line, i) => {
+        for (const m of line.matchAll(/var\(\s*(--[A-Za-z0-9_-]+)/g)) {
+          const tok = m[1] ?? "";
+          if (!defined.has(tok)) unknown.push(`${f}:${i + 1} ${tok}`);
+        }
+      });
+    }
+    // 去重：同一文件同一令牌只报一次，避免输出爆炸
+    expect([...new Set(unknown)],
+      `引用了不存在的 CSS 令牌（真实令牌见 design/tokens.css）：`).toEqual([]);
+  });
+
   it("★ 分时图与板块雷达必须走涨跌令牌（本轮修掉的两处）", () => {
     const m = stripComments(read("domains/market/panels/MinutesChart.tsx"));
     expect(m).toContain("var(--up)");

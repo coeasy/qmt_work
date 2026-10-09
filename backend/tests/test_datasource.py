@@ -483,15 +483,19 @@ def test_shell_detail_enrichment_still_yields_name_when_a_source_works():
 
 
 if __name__ == "__main__":
-    for fn in (test_auto_prefers_broker, test_auto_falls_back_to_eltdx,
-               test_explicit_source, test_kline_adjusted_chain_prefers_broker_then_falls_back,
-               test_all_fail_returns_none, test_breaker_trips_and_skips,
-               test_search_stocks_indexed, test_slow_source_times_out,
-               test_classify_and_limit, test_commercial_mode_blocks_eltdx_on_all_paths,
-               test_license_gate_keeps_broker_and_public_sources,
-               test_shell_detail_falls_back_to_local_name_when_network_fails,
-               test_detail_enrichment_result_is_cached,
-               test_shell_detail_network_enrichment_is_time_bounded,
-               test_shell_detail_enrichment_still_yields_name_when_a_source_works):
+    # ★ 此前这里手抄了一份函数名清单，其中一个名字
+    #   （``test_commercial_mode_blocks_eltdx_on_all_paths``）在文件里**根本不存在**
+    #   —— 真函数叫 ``test_commercial_mode_blocks_tdx_only_on_eltdx_fallback`` 且
+    #   带 ``monkeypatch`` 参数。结果是 ruff F821（undefined name）常驻，而
+    #   ``python tests/test_datasource.py`` 一跑就 NameError。
+    #   手抄清单本身就是缺陷源：改名/新增用例都会让它腐烂。改成按签名自动发现。
+    import inspect
+
+    fns = [
+        obj for name, obj in sorted(globals().items())
+        if name.startswith("test_") and inspect.isfunction(obj)
+        and not inspect.signature(obj).parameters
+    ]
+    for fn in fns:
         fn()
-    print("ALL DATASOURCE TESTS PASSED")
+    print(f"ALL DATASOURCE TESTS PASSED ({len(fns)} 个无参用例)")

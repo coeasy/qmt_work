@@ -27,6 +27,8 @@ SYSTEM_JOB_KINDS: tuple[str, ...] = (
     "system.refresh_universe", "system.reconcile_bars",
     "system.rolling_repair", "system.coverage_report", "system.publish_snapshot",
     "system.classic_screen",
+    # R28：通用数据集同步（分钟线 / 逐笔 / 财务 / 板块成分 / 股本 / 资金流…）。
+    "system.sync_dataset",
 )
 
 Runner = Callable[[dict], Any]
@@ -459,9 +461,64 @@ def _classic_screen_runner(params: dict) -> Runner:
     return _run
 
 
+def _sync_dataset_runner(params: dict) -> Runner:
+    """R28 通用数据集同步（params 必须含 ``dataset``）。
+
+    与 :func:`_sync_bars_runner` 的分工：后者是**日线专用**且带 ``sync_state``
+    摘要落库的老链路（界面「同步状态」读它）；本 runner 面向
+    :mod:`datasource.datasets` 里声明的**全部**数据集——分钟线 / 逐笔 / 财务 /
+    板块成分 / 股本 / 资金流等此前**根本无法定时下载**的数据。
+
+    ★ 为什么结果**也要**写 ``sync_state``：不写的话「上次跑成什么样」跨重启就
+    查不到，而判断「今天的数据到底同步了没有」靠的正是它。失败同样写 ——
+    只记成功等于把「没跑」和「跑了但失败」混成一件事。
+    """
+    ds_id = str(params.get("dataset") or "").strip()
+
+    async def _run(job: dict) -> dict:
+        from app.sync.datasets import DatasetSyncer
+        from app.sync.state import record_run
+
+        if not ds_id:
+            raise ValueError("缺少参数 dataset（可用值见 GET /api/v1/datasets）")
+
+        def _cb(d: dict) -> None:
+            done = int(d.get("done") or 0)
+            total = int(d.get("total") or 0)
+            pct = int(done / total * 100) if total else 0
+            job["report"](pct, f"{ds_id} 同步 {done}/{total}")
+
+        syncer = DatasetSyncer(
+            ds_id,
+            mode=str(params.get("mode") or "incremental"),
+            limit=int(params.get("limit") or 0),
+            concurrency=int(params.get("concurrency") or 8),
+            source=str(params.get("source") or "auto"),
+            dry_run=bool(params.get("dry_run")),
+            codes=list(params.get("codes") or []) or None,
+            progress_cb=_cb,
+        )
+        job["report"](0, f"开始同步 {ds_id}")
+        summary = await syncer.sync()
+        result = summary.as_dict()
+        stream = f"dataset.{ds_id}"
+        record_run(stream, status=("ok" if summary.ok else "error"),
+                   detail=result)
+        # ★ 与日线同步同一条铁律：**绝不把「一只都没同步」报成成功**。
+        #   静默空转比直接失败危险——界面显示「已完成」而数据一天没更新。
+        if not summary.ok and not result.get("written"):
+            raise RuntimeError(
+                f"数据集 {ds_id} 同步未写入任何数据："
+                f"{'; '.join(summary.problems) or '未知原因'}")
+        return result
+
+    return _run
+
+
 _FACTORIES: dict[str, Callable[[dict], Runner]] = {
     "system.eod": _eod_runner,
     "system.sync_bars": _sync_bars_runner,
+    "system.sync_dataset": _sync_dataset_runner,
     "system.sync_fundamentals": _sync_fundamentals_runner,
     "system.refresh_universe": _refresh_universe_runner,
     "system.reconcile_bars": _reconcile_runner,
@@ -527,6 +584,33 @@ DEFAULT_SCHEDULES: tuple[dict, ...] = (
 )
 
 
+def dataset_default_schedules() -> tuple[dict, ...]:
+    """由 :mod:`datasource.datasets` **动态生成**数据集默认调度。
+
+    ★ 为什么动态生成而不是再抄一份字面量：数据集清单是 SSOT（加一行就多一种
+    可下载数据），调度若另抄一份就会漂移——新增数据集忘了来这里补，界面上
+    「有这个数据集」但「永远不会自动更新」。
+
+    ⚠️ **排除 ``bars_1d``**：日线已有 ``sch-default-sync-bars``（``system.sync_bars``）
+    这条专用链路，它带 ``sync_state`` 摘要与 stale/paged 等日线特有判据。重复播种
+    会让同一个库被两条调度写，且二者都在 ``local_bars`` 互斥组里互相排队。
+    """
+    from datasource import datasets as DS
+
+    out: list[dict] = []
+    for spec in DS.enabled_by_default():
+        if spec.id == "bars_1d":
+            continue
+        out.append({
+            "id": f"sch-default-ds-{spec.id}",
+            "kind": "system.sync_dataset",
+            "cron": spec.cron,
+            "name": f"{spec.label}定时同步",
+            "params": {"dataset": spec.id, "mode": "incremental"},
+        })
+    return tuple(out)
+
+
 def ensure_default_schedules(enabled: bool = True) -> list[dict]:
     """播种默认调度（幂等）。返回本次新建的调度；失败只记日志，不影响启动。"""
     from app.runtime.schedules import ScheduleStore
@@ -534,7 +618,7 @@ def ensure_default_schedules(enabled: bool = True) -> list[dict]:
     created: list[dict] = []
     try:
         store = ScheduleStore(_db())
-        for spec in DEFAULT_SCHEDULES:
+        for spec in tuple(DEFAULT_SCHEDULES) + dataset_default_schedules():
             try:
                 if store.get(spec["id"]):
                     continue            # 已存在（含用户改过的）⇒ 绝不覆盖
@@ -567,4 +651,5 @@ def register_all(seed_schedules: bool = True) -> None:
 __all__ = [
     "SYSTEM_JOB_KINDS", "runner_for", "register_all",
     "DEFAULT_SCHEDULES", "ensure_default_schedules",
+    "dataset_default_schedules",
 ]

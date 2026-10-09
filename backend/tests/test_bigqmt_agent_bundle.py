@@ -18,7 +18,7 @@
   2. bundle 里不再残留 ``from qmt_api import``（内联完整性）；
   3. 配置查找能兼容旧部署（``agent_bigqmt/agent_config.json``）与内嵌配置；
   4. 自检 + 心跳真的会落盘（自动验证的数据来源）；
-  5. 源码编码可切 GBK（QMT 官方口径），且**注册态判定不会静默假阴性**
+  5. 源码编码必须是 **UTF-8**，且**注册态判定不会静默假阴性**
      （副日志里没有注册树行；按 mtime 取「最新」会取到副日志并把「已注册」
       全部误报成「未注册」—— 这类假阴性必须由用例锁住）。
 """
@@ -96,6 +96,73 @@ def test_bundle_has_no_residual_qmt_api_import():
 def test_generator_requires_embed_anchor():
     with pytest.raises(SystemExit):
         gen._embed("x = 1  # 没有锚点\n", {"bridge_dir": "D:/x"})
+
+
+def test_bundle_has_main_guard_for_standalone_process():
+    """QMT 的「运行」是把策略当**独立进程**拉起来的：
+    `pythonw.exe -u <策略.py> <userdata> <ts>`。没有 `if __name__ == "__main__"`
+    自举 = 进程起来后立刻退出 = 模型交易里看到「启动即停止」。
+    """
+    text = gen.build(stamp="test")
+    tree = ast.parse(text, filename="<bundle>", feature_version=(3, 6))
+    assert gen._has_main_guard(tree), "bundle 缺自举入口"
+    assert "run_standalone" in {n.name for n in tree.body
+                                if isinstance(n, ast.FunctionDef)}, (
+        "bundle 未暴露 run_standalone（独立进程主循环）")
+    assert "should_autorun" in {n.name for n in tree.body
+                                if isinstance(n, ast.FunctionDef)}
+
+
+def test_generator_check_flags_missing_main_guard():
+    """把自举入口挖掉后，生成器自检必须报错（且点名「启动即停止」）。"""
+    text = gen.build(stamp="test")
+    broken = text.replace('if __name__ == "__main__" and should_autorun():',
+                          'if False:  # 被挖掉的自举')
+    problems = gen.check(broken)
+    assert any("自举" in p for p in problems), problems
+
+
+def test_own_names_are_injected_not_placeholder():
+    """`_OWN_NAMES` 必须由生成器按 AST 填实 —— 仍是空 frozenset() 就是没注入。
+
+    它决定「哪些名字算我们自己的」，直接决定 probe 报出的注入函数面是真是假。
+    """
+    text = gen.build(stamp="test")
+    assert gen._OWN_ANCHOR not in text, "占位锚点仍存在 → 注入没生效"
+    # 必须给 __name__（否则模块末尾的 `if __name__ == "__main__"` 会 NameError）；
+    # 故意**不**给 "__main__"，以证明它不会被误判成自举场景。
+    ns: dict = {"__name__": "qmt_bundle_probe"}
+    exec(compile(text, "<bundle>", "exec"), ns)  # noqa: S102 - 测自己的产物
+    own = ns["_OWN_NAMES"]
+    assert isinstance(own, frozenset) and len(own) > 20, sorted(own)[:5]
+    # 我们自己的实现必须在里面（否则会被当成终端注入的函数）
+    for name in ("Executor", "init", "handlebar", "capture_qmt_injected_funcs",
+                 "run_standalone"):
+        assert name in own, name
+    # 终端注入的名字绝不能在里侧（否则唯一来源捕获会把真注入过滤掉）
+    for name in ("passorder", "get_trade_detail_data", "cancel"):
+        assert name not in own, name
+
+
+def test_generator_check_flags_unfilled_own_names():
+    text = gen.build(stamp="test")
+    broken = text.replace("# 由生成器按 bundle 的 AST 注入（运行时用于剔除自有名字）",
+                          "")
+    # 把注入出来的 frozenset 换回占位锚点
+    lines = broken.split("\n")
+    out, skipping = [], False
+    for ln in lines:
+        if ln.startswith("_OWN_NAMES = frozenset(["):
+            skipping = True
+            out.append(gen._OWN_ANCHOR)
+            continue
+        if skipping:
+            if ln.strip() == "])":
+                skipping = False
+            continue
+        out.append(ln)
+    problems = gen.check("\n".join(out))
+    assert any("_OWN_NAMES" in p for p in problems), problems
 
 
 # ---------------------------------------------------------------------------
@@ -280,28 +347,81 @@ def test_verify_fresh_probe_still_flags_missing_funcs(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# 4. 源码编码（QMT 官方口径 GBK）
+# 4. 源码编码（★ 部署必须 UTF-8 —— 2026-10-08 真机事故，R27）
 # ---------------------------------------------------------------------------
-def test_recode_gbk_declares_coding_and_is_lossless():
+def test_recode_utf8_is_default_and_lossless():
+    """UTF-8 是部署口径：recode 不动内容、不产告警。"""
+    text = gen.build(stamp="test")
+    out, enc, notes = gen.recode(text, "utf-8")
+    assert (out, enc, notes) == (text, "utf-8", [])
+
+
+def test_recode_gbk_still_converts_but_must_warn_loudly():
+    """gbk/gb18030 仍可转换（给「不在本机跑、只给编辑器看」的场景），
+    但**必须**带一条说清后果的强告警 —— 否则用户会以为它是推荐选项。
+
+    R27 事故：gb18030 的 52 KB bundle 在开发机 py3.11 上编译通过，
+    QMT 内置 pythonw.exe（Python 3.6.8）却 `SyntaxError: encoding problem: gb18030`，
+    进程 return code:1，**一条自检都不落盘**。
+    """
     text = gen.build(stamp="test")
     out, enc, notes = gen.recode(text, "gbk")
     assert enc in ("gbk", "utf-8")
+    assert notes, "编码降级必须报出来，不能静默"
+    assert any("3.6.8" in n or "py3.6" in n for n in notes), (
+        "告警必须点明 QMT 内置解释器是 Python 3.6.8（否则用户不知道为什么要改）")
     if enc == "gbk":
         assert out.splitlines()[0] == "#coding:gbk"
         # 内联了多个源文件，各自带 cookie —— 只能留一条，否则第一行才是生效的那条
         assert out.count("coding:") == 1
         assert out.encode("gbk").decode("gbk") == out
         assert out.count("EMBEDDED_CONFIG") == text.count("EMBEDDED_CONFIG")
-        assert notes == []
     else:
         # GBK 表示不了某些字符时必须**报出来**并退回 utf-8，不能静默写坏
-        assert notes
+        assert len(notes) >= 2
 
 
-def test_recode_utf8_is_noop():
+def test_recode_gb18030_warns_too():
+    """gb18030 分支同样必须带告警（它在 QMT 上是实测失败的那一个）。"""
+    _out, enc, notes = gen.recode(gen.build(stamp="test"), "gb18030")
+    assert notes, "gb18030 必须带告警"
+    assert enc in ("gb18030", "utf-8")
+
+
+def test_generated_utf8_bundle_is_qmt_safe(tmp_path):
+    """生成的 bundle 落盘后必须被「运行前体检」判为 QMT 安全编码。
+
+    这条把生成器与验证器**接在一起**：任一侧改了编码口径，这里立刻红。
+    """
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import qmt_agent_verify as verify
+
+    out = tmp_path / "bundle_utf8.py"
+    out.write_text(gen.build(stamp="test"), encoding="utf-8", newline="\n")
+    health = verify.bundle_health(str(out))
+    assert health["encoding_ok"] is True, health.get("encoding_note")
+    assert health["ok"] is True, health
+
+
+def test_gbk_bundle_is_rejected_by_preflight_health(tmp_path):
+    """反向对照：同一份内容落成 gb18030，体检必须判红。
+
+    没有这条，「编码判定」很容易被改回永远绿灯 —— 那正是 R27 事故的成因。
+    """
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import qmt_agent_verify as verify
+
     text = gen.build(stamp="test")
-    out, enc, notes = gen.recode(text, "utf-8")
-    assert (out, enc, notes) == (text, "utf-8", [])
+    kept = [ln for ln in text.split("\n")
+            if "coding" not in ln or not ln.lstrip().startswith("#")]
+    body = "#coding:gb18030\n" + "\n".join(kept)
+    out = tmp_path / "bundle_gbk.py"
+    out.write_bytes(body.encode("gb18030"))
+    health = verify.bundle_health(str(out))
+    assert health["syntax_ok"] is True, "开发机能解析 —— 这正是它危险的地方"
+    assert health["encoding_ok"] is False
+    assert health["ok"] is False
+    assert "3.6.8" in (health["encoding_note"] or "")
 
 
 # ---------------------------------------------------------------------------

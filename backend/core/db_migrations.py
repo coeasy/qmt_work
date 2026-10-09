@@ -725,6 +725,89 @@ UPDATE schedules SET cron = '15 16 * * 1-5', updated_at = datetime('now','localt
     (28, """
 CREATE INDEX IF NOT EXISTS idx_moneyflow_cache_ts ON moneyflow_cache(ts);
 """),
+    # ★ 29（2026-10-08 R28）：多数据类型同步的落库表。
+    #   此前「定时下载」只有日线一种（local_bars），分钟线 / tick / 财务 / 板块成分
+    #   / 股本 / 资金流**全都没有落库表**——不是源没能力，而是没地方存。
+    #   表设计三条硬约束：
+    #   ① 主键一律含 provider_id 之外的业务唯一键，跨源隔离交给
+    #      local_bars 那套 canonical 选主（本批表不含 provider 列：这些数据集
+    #      要么单源、要么整批覆盖刷新，不存在多源并存的对账需求）；
+    #   ② 时间列统一 dt TEXT "YYYYMMDD"+tm 子列，与 core.clock.bar_date 同口径，
+    #      绝不混存 "2026-09-18" 与 "20260918"（V11 R13 的实测事故）；
+    #   ③ 高频表（local_ticks / local_minutes / local_moneyflow_hist）**必须**有
+    #      按 dt 的索引——保留清理走 `WHERE dt < ?`，没索引就是全表扫。
+    (29, """
+-- 逐笔成交（tdx 源，volume=手）。按交易日切片，默认保留 7 天。
+CREATE TABLE IF NOT EXISTS local_ticks (
+    code TEXT NOT NULL,
+    dt TEXT NOT NULL,
+    seq INTEGER NOT NULL DEFAULT 0,
+    tm TEXT DEFAULT '',
+    price REAL, volume REAL, amount REAL,
+    bs_flag TEXT DEFAULT '',
+    fetched_at TEXT DEFAULT '',
+    PRIMARY KEY (code, dt, seq)
+);
+CREATE INDEX IF NOT EXISTS idx_local_ticks_dt ON local_ticks(dt);
+
+-- 当日分时（tdx 源，volume=股）。按交易日切片，默认保留 7 天。
+CREATE TABLE IF NOT EXISTS local_minutes (
+    code TEXT NOT NULL,
+    dt TEXT NOT NULL,
+    tm TEXT NOT NULL DEFAULT '',
+    price REAL, avg_price REAL, volume REAL, amount REAL,
+    fetched_at TEXT DEFAULT '',
+    PRIMARY KEY (code, dt, tm)
+);
+CREATE INDEX IF NOT EXISTS idx_local_minutes_dt ON local_minutes(dt);
+
+-- 板块成分（板块 → 成分股双向索引，对标 free-stockdb 的 bk.get）。
+CREATE TABLE IF NOT EXISTS local_board_members (
+    board_code TEXT NOT NULL,
+    board_name TEXT DEFAULT '',
+    code TEXT NOT NULL,
+    name TEXT DEFAULT '',
+    weight REAL,
+    updated_at TEXT DEFAULT '',
+    PRIMARY KEY (board_code, code)
+);
+CREATE INDEX IF NOT EXISTS idx_local_board_members_code
+    ON local_board_members(code);
+
+-- 股本结构（总股本 / 流通股本），供估值与换手率计算。
+CREATE TABLE IF NOT EXISTS local_capital (
+    code TEXT NOT NULL,
+    dt TEXT NOT NULL DEFAULT '',
+    total_shares REAL, float_shares REAL,
+    total_mv REAL, float_mv REAL,
+    fetched_at TEXT DEFAULT '',
+    PRIMARY KEY (code, dt)
+);
+
+-- 财务数据（仅券商源）。按报告期(period) + 公告日期切片。
+CREATE TABLE IF NOT EXISTS local_fundamentals (
+    code TEXT NOT NULL,
+    period TEXT NOT NULL DEFAULT '',
+    payload_json TEXT DEFAULT '{}',
+    provider_id TEXT DEFAULT '',
+    fetched_at TEXT DEFAULT '',
+    PRIMARY KEY (code, period)
+);
+CREATE INDEX IF NOT EXISTS idx_local_fundamentals_period
+    ON local_fundamentals(period);
+
+-- 资金流（收盘后历史沉淀；与 moneyflow_cache 的盘中采样互补）。
+CREATE TABLE IF NOT EXISTS local_moneyflow_hist (
+    code TEXT NOT NULL,
+    dt TEXT NOT NULL,
+    main_net REAL, retail_net REAL,
+    payload_json TEXT DEFAULT '{}',
+    provider_id TEXT DEFAULT '',
+    fetched_at TEXT DEFAULT '',
+    PRIMARY KEY (code, dt)
+);
+CREATE INDEX IF NOT EXISTS idx_local_moneyflow_hist_dt ON local_moneyflow_hist(dt);
+"""),
 ]
 
 

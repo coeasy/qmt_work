@@ -165,3 +165,33 @@ export type {
   QuantileRow,
   WalkForwardResponse,
 } from "./research";
+
+export { qmtAgentApi } from "./qmtAgent";
+export { datasetsApi } from "./datasets";
+export type {
+  DatasetCategory,
+  DatasetChainInfo,
+  DatasetDataResponse,
+  DatasetItem,
+  DatasetListResponse,
+  DatasetLocalStatus,
+  DatasetSourcesResponse,
+  DatasetSyncInput,
+  DatasetSyncResult,
+} from "./datasets";
+export type {
+  QmtAgentBundle,
+  QmtAgentConfigResponse,
+  QmtAgentDeployInput,
+  QmtAgentDeployResult,
+  QmtAgentDiagnoseBundle,
+  QmtAgentDiagnoseHeartbeat,
+  QmtAgentDiagnoseInput,
+  QmtAgentDiagnoseProblem,
+  QmtAgentDiagnoseResult,
+  QmtAgentDistributeCheckResult,
+  QmtAgentDistributePullResult,
+  QmtAgentDistributeStatus,
+  QmtAgentStatus,
+  QmtAgentToolsResponse,
+} from "./qmtAgent";

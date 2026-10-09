@@ -34,8 +34,33 @@ USAGE_MD = ROOT / "docs" / "QMT_大小版本使用说明.md"
 # --------------------------------------------------------------------------
 
 def _read_utf8(path: pathlib.Path) -> str:
-    # Windows bat 保存为 UTF-8 without BOM + `chcp 65001`；若被工具转成 GBK 则读回乱码
-    return path.read_text(encoding="utf-8", errors="replace")
+    """读 .bat 文本，**按真实编码**解码。
+
+    cmd 的批处理文件编码必须与文件里声明的 ``chcp`` 一致，否则中文行会被按错码页
+    解析成乱码（实测：UTF-8 无 BOM 的中文 ``REM`` 行在 cp936 控制台下直接报
+    「不是内部或外部命令」）。仓库里两种存法都出现过：``diag_*.bat`` 是 UTF-8 +
+    ``chcp 65001``，``deploy_*.bat`` 是 GBK + ``chcp 936``。测试只关心**文本内容**，
+    不该把某一种编码钉死 —— 这里按 utf-8 → gbk 依次尝试。
+
+    :func:`test_bat_chcp_matches_file_encoding` 单独负责「编码 == 声明的代码页」。
+    """
+    raw = path.read_bytes()
+    for enc in ("utf-8", "gbk"):
+        try:
+            return raw.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("utf-8", errors="replace")
+
+
+def _bat_encoding(path: pathlib.Path) -> str:
+    """返回 .bat 的实际字节编码名（``utf-8`` / ``gbk``）。"""
+    raw = path.read_bytes()
+    try:
+        raw.decode("utf-8")
+        return "utf-8"
+    except UnicodeDecodeError:
+        return "gbk"
 
 
 @pytest.mark.parametrize(
@@ -44,12 +69,12 @@ def _read_utf8(path: pathlib.Path) -> str:
         (
             DEPLOY_BAT,
             [
-                "chcp 65001",  # UTF-8 控制台
                 "python.exe",  # Python 解释器探测
                 "qmt_agent_deploy.py",  # 部署脚本名
                 "deploy",  # 部署子命令
                 "--txt",  # 生成 .txt 副本
-                "qmt_work_agent.py",  # 打开资源管理器选中
+                "AGENT_FILE",  # 落盘文件名变量（= 注册树条目指向的文件名）
+                "--filename",  # 显式把文件名传给 deploy（不再写死小写）
                 "导入本地策略",  # 下一步指引
                 "explorer /select",  # Windows 打开资源管理器选中文件
             ],
@@ -57,7 +82,7 @@ def _read_utf8(path: pathlib.Path) -> str:
         (
             DIAG_BAT,
             [
-                "chcp 65001",
+                "chcp 936",  # 控制台码页（必须与文件字节编码一致，见 test_bat_chcp_*）
                 "qmt_strategy_list_probe.py",
                 "qmt_agent_verify.py",
                 "qmt_agent_deploy.py",
@@ -79,22 +104,136 @@ def test_bat_scripts_exist_and_contain_key_elements(path, must_contain):
         assert token in text, f"{path.name} 缺少关键元素 {token!r}（脚本退化为半截）"
 
 
-def test_bat_find_qmt_dirs_covers_common_paths():
-    """一键脚本必须覆盖常见的 QMT 安装路径，否则自动探测形同虚设。"""
+def test_bat_chcp_matches_file_encoding():
+    """``chcp`` 声明的代码页必须与文件实际字节编码一致。
+
+    ★ 取代旧断言「必须是 chcp 65001」。旧断言把编码**当成了目的**，真实目的只有
+    一个：**中文行不被 cmd 按错码页解析**。实测（2026-10-09）：
+      * **GBK + chcp 936** —— 解析期零码页转换，中文行/多行块全对（本仓采用）；
+      * **UTF-8 + chcp 65001** —— 小文件能跑，但本仓这两支脚本中文较多、文件较大，
+        cmd 的分块读取会把 UTF-8 多字节序列**从中间切断**，表现为随机行被当成命令
+        执行（``'...' 不是内部或外部命令``）。原因：`chcp 65001` 生效之前，
+        cmd 已按默认 cp936 缓冲解析了文件开头（含大量中文注释块）。
+    所以中文 .bat 一律用 GBK + chcp 936，由本断言防回归。
+    """
     for bat_name in ("deploy_qmt_work_agent.bat", "diag_qmt_work_agent.bat"):
-        text = _read_utf8(ROOT / bat_name)
-        # 至少要探测 3 个以上的常见 QMT 目录
-        # bat 里写的是单反斜杠 `P:\stock\gd_qmt\python`；正则 `\\python` 匹配字面 `\python`
-        probes = re.findall(r'if\s+exist\s+"[^"]*\\python"', text)
-        assert len(probes) >= 3, f"{bat_name} 只探测了 {len(probes)} 个 QMT 路径，太窄"
+        p = ROOT / bat_name
+        text = _read_utf8(p)
+        m = re.search(r"chcp\s+(\d+)", text)
+        assert m, f"{bat_name} 未声明 chcp（中文输出会随宿主码页乱码）"
+        cp = m.group(1)
+        enc = _bat_encoding(p)
+        want = {"65001": "utf-8", "936": "gbk"}.get(cp)
+        assert want == enc, (
+            f"{bat_name} 编码自相矛盾：文件字节是 {enc}，却声明 chcp {cp}"
+            f"（应改成 chcp {65001 if enc == 'utf-8' else 936} 或按对应编码重存）")
 
 
-def test_bat_degrade_when_qmt_not_found():
-    """找不到 QMT 目录时，脚本必须支持手动指定（否则用户只能放弃）。"""
+def test_bat_is_portable_no_hardcoded_broker_paths():
+    """一键脚本必须是**通行脚本**：不许写死任何券商专属安装路径。
+
+    ★ 这条断言取代了旧的 ``test_bat_find_qmt_dirs_covers_common_paths`` —— 旧断言
+    要求 bat 里**至少硬编码 3 个** ``if exist "...\\python"`` 探测点（含
+    ``P:\\stock\\gd_qmt`` / ``C:\\光大证券金阳光远航版`` 这类本机路径），等于用测试
+    把「换个券商或换台机器就失效」这个坑**锁死**。这与产品要求正好相反。
+
+    通行做法：把目录发现交给 ``qmt_agent_deploy.py`` 的通用探测（逐盘符扫描 +
+    ``python`` 策略目录 + 次级标记），bat 只负责「显式参数 → 环境变量 → 自动探测 →
+    人工输入」四级降级。因此这里断言**没有**写死的绝对盘符路径，且四级降级都在。
+    """
     for bat_name in ("deploy_qmt_work_agent.bat", "diag_qmt_work_agent.bat"):
         text = _read_utf8(ROOT / bat_name)
-        assert "set /p QMT_DIR" in text, f"{bat_name} 缺少手动指定 QMT 目录的降级路径"
+        # 不许出现 `X:\...\python` 形式的写死绝对路径探测
+        baked = re.findall(r'if\s+exist\s+"[A-Za-z]:\\[^"]*\\python"', text)
+        assert not baked, (
+            f"{bat_name} 仍写死了券商专属路径 {baked} —— 换个安装环境就探测失败")
+        # 也不许写死本机/券商标识串
+        for bad in ("gd_qmt", "光大证券", "金阳光"):
+            assert bad not in text, (
+                f"{bat_name} 残留本机专属标识 {bad!r}（通行脚本不得绑定单一客户端）")
+        # 四级降级链必须在：命令行参数 / 环境变量 / 自动探测 / 人工输入
         assert "%~1" in text, f"{bat_name} 缺少命令行传参支持"
+        assert "QMT_DIR" in text, f"{bat_name} 缺少 QMT_DIR 环境变量/变量支持"
+        assert "discover" in text, f"{bat_name} 未调用通用探测（qmt_agent_deploy.py discover）"
+        assert "set /p QMT_DIR" in text, f"{bat_name} 缺少手动指定 QMT 目录的降级路径"
+
+
+def test_bats_use_crlf_eol():
+    """两支 .bat 必须是 **CRLF** 行尾，且已在 ``.gitattributes`` 登记 ``eol=crlf``。
+
+    ★ 这是本文件最重要的回归锁。同一个坑项目已记录三次（TD-16 / TD-17 / TD-21），
+    而 **2026-10-09 又踩了第四次**：``diag_qmt_work_agent.bat`` 长期以 **LF-only
+    入库**（当时 ``.gitattributes`` 只登记了 ``build_all.bat``），交付出去后用户
+    双击报「不是内部或外部命令」——中文行被 cmd 按整行拼接解析。
+
+    cmd.exe 是**逐字**读 .bat 的：LF-only 会让多行并成一条逻辑行，括号块与中文行
+    全部错位。仅在工作区修好不够（TD-17：仓库 blob 仍是 LF，新克隆照坏），
+    必须在 ``.gitattributes`` 声明 ``<file>.bat text eol=crlf`` 才能让 git 在检出时
+    强制还原 CRLF。
+    """
+    ga = (ROOT / ".gitattributes").read_text(encoding="utf-8")
+    for bat_name in ("build_all.bat", "deploy_qmt_work_agent.bat",
+                     "diag_qmt_work_agent.bat"):
+        raw = (ROOT / bat_name).read_bytes()
+        crlf = raw.count(b"\r\n")
+        lf_only = raw.count(b"\n") - crlf
+        assert lf_only == 0, (
+            f"{bat_name} 含 {lf_only} 处 LF-only 行尾 —— cmd 会解析错位，"
+            "必须改回 CRLF")
+        assert crlf > 0, f"{bat_name} 没有 CRLF（文件疑似被整体重写为 LF）"
+        assert re.search(rf"^{re.escape(bat_name)}\s+text\s+eol=crlf", ga, re.M), (
+            f".gitattributes 未登记 `{bat_name} text eol=crlf` —— "
+            "工作区修好也没用，新克隆 / CI / 源码包仍会拿到 LF 坏版本（TD-17）")
+
+
+def test_deploy_bat_agent_filename_matches_registration_tree():
+    """落盘文件名必须 = 注册树里那条策略指向的文件名（本机实测 QMT_WORK_AGENT.py）。
+
+    R27/TD-37 教训：以前 bat 把 `qmt_work_agent.py`（小写）写死进三处（deploy 不传
+    `--filename`、打印的「选文件」路径、`explorer /select`），而注册树里的条目指向的是
+    大写 `QMT_WORK_AGENT.py`。结果「部署成功 + 列表里有 + 点了跑不起来」，
+    排查方向被彻底带偏。现在三处必须由同一个变量驱动。
+    """
+    text = _read_utf8(DEPLOY_BAT)
+    m = re.search(r'set\s+"AGENT_FILE=([^"]+)"', text)
+    assert m, "deploy bat 未定义 AGENT_FILE 变量（文件名会在多处写死后再次漂移）"
+    assert m.group(1).strip() == "QMT_WORK_AGENT.py", (
+        "AGENT_FILE 必须与注册树条目一致（本机实测 QMT_WORK_AGENT.py），"
+        f"当前为 {m.group(1)!r}")
+    # ★ 三条消费路径都必须走**同一个变量**。分隔符无关紧要：脚本里用了
+    #   `setlocal enabledelayedexpansion`，所以 `!AGENT_FILE!`（延迟展开）与
+    #   `%AGENT_FILE%`（解析期展开）都是合法引用 —— 断言只认变量名。
+    assert re.search(r'--filename\s+"[%!]AGENT_FILE[%!]"', text), (
+        "deploy 调用未显式传 --filename（或未用 AGENT_FILE 变量）")
+    assert re.search(r'explorer\s+/select,"[^"]*[%!]AGENT_FILE[%!]"', text), (
+        "explorer 选中路径未使用 AGENT_FILE")
+    assert re.search(r'选文件[^\r\n]*[%!]AGENT_FILE[%!]', text), (
+        "打印的「选文件」路径未使用 AGENT_FILE")
+    # ★ 除定义行与注释/echo 外，**命令**里不许再出现写死的字面文件名（大小写不敏感）。
+    #   注释与 echo 里提到默认值是文档，不影响行为，故豁免。
+    for ln in text.splitlines():
+        s = ln.strip()
+        if not s or s.upper().startswith("REM") or s.lower().startswith("echo"):
+            continue
+        if "AGENT_FILE=" in s.upper():
+            continue
+        assert "qmt_work_agent.py" not in s.lower(), (
+            f"命令里残留写死的小写 qmt_work_agent.py —— 会被 QMT 当成另一个不存在的策略: {s}")
+
+
+def test_deploy_script_check_and_register_respect_filename():
+    """`check` / `register` 不许把 bundle 文件名写死（否则巡检对着不存在的路径报缺失）。"""
+    text = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+    assert "def cmd_check(args)" in text and "def cmd_register(args)" in text
+    for fn, sig in (("cmd_check", "args.strategy_dir or strategy_dir(qmt)"),
+                    ("cmd_register", "args.strategy_dir or strategy_dir(qmt)")):
+        body = re.search(
+            r"def %s\(args\):(?P<body>.*?)(?:\n\ndef |\Z)" % fn, text,
+            flags=re.DOTALL)
+        assert body, f"{fn} 未找到"
+        assert sig in body.group("body"), f"{fn} 未复用统一策略目录解析"
+        assert "getattr(args, \"filename\"" in body.group("body"), (
+            f"{fn} 未读取 args.filename（文件名会写死）")
 
 
 # --------------------------------------------------------------------------

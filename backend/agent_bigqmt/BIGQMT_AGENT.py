@@ -28,6 +28,24 @@
   QMT 只往**被挂载的这个入口文件**的命名空间注入全局函数。
   必须通过 ``capture_qmt_injected_funcs(globals())`` 从唯一来源取，**严禁手抄
   函数名单** —— 手抄表漏一个函数，就会把「桥的 bug」误报成「终端没有该接口」。
+
+两种运行形态（都是实测，别想当然）
+----------------------------------
+1. **公式模式**：终端把源码 ``exec(compile(src, '<string>', 'exec'), ns)`` 进它自己的
+   命名空间，注入函数在下单/查询前就位。此时**没有 __file__**
+   （本文件已改成逐级退让解析，见 ``_resolve_self_dir``）。
+2. **独立进程模式**：QMT「模型交易 → 运行」是
+   ``pythonw.exe -u <策略.py> <userdata> <时间戳>``（XtClient 日志的
+   ``execude cmd`` + ``return code`` 可自证），解释器是内置 Python 3.6.8。
+   该模式**没有任何注入函数**，但 ``xtquant.xtdata`` 可导入 —— 本文件的
+   ``__main__`` 自举（``run_standalone``）在此模式下常驻主循环并如实转发行情接口。
+
+★ 源码编码铁律（血的教训，2026-10-08）：
+  必须用 **UTF-8** 部署。QMT 内置 Python 3.6.8 的 tokenizer 在处理
+  ``#coding:gbk`` / ``#coding:gb18030`` 的源文件时会在特定内容下报
+  ``SyntaxError: encoding problem: <enc>`` / ``invalid token``，
+  导致策略进程 ``return code:1``、模型交易里只看到「启动即停止」。
+  同一个文件内容改成 UTF-8（有无 cookie 均可）在 67KB 中文下稳定跑通。
 """
 from __future__ import print_function
 
@@ -37,7 +55,50 @@ import sys
 import time
 import traceback
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
+def _resolve_self_dir():
+    """本文件所在目录。
+
+    ★ 为什么不能直接用 ``os.path.dirname(__file__)``（P0，2026-10-08 实测）：
+      QMT 的公式引擎是把源码 ``exec(compile(src, '<string>', 'exec'), ns)`` 进
+      终端自己的命名空间（日志里 ``File "<string>", line N, in <module>`` 可自证），
+      那个命名空间**没有 __file__** ⇒ 模块级引用 ``__file__`` 直接抛 NameError，
+      策略连 init 都进不去，且**一条自检都不会落盘**（表现为「点了运行没反应」）。
+      这里按 ① ``__file__`` ② ``argv[0]``（独立进程模式下就是本 .py 的路径，
+      QMT 的 ``pythonw.exe -u <策略.py> <userdata> <ts>`` 即此形态）
+      ③ ``sys.path[0]`` ④ ``cwd`` 逐级退让，绝不因为拿不到而崩。
+    """
+    try:
+        path = __file__
+    except NameError:
+        path = ""
+    if path:
+        try:
+            return os.path.dirname(os.path.abspath(path))
+        except Exception:
+            pass
+    argv0 = ""
+    try:
+        if getattr(sys, "argv", None):
+            argv0 = sys.argv[0] or ""
+    except Exception:
+        argv0 = ""
+    if argv0 and os.path.splitext(argv0)[1].lower() == ".py":
+        try:
+            return os.path.dirname(os.path.abspath(argv0))
+        except Exception:
+            pass
+    try:
+        if getattr(sys, "path", None) and sys.path[0]:
+            return os.path.abspath(sys.path[0])
+    except Exception:
+        pass
+    try:
+        return os.getcwd()
+    except Exception:
+        return "."
+
+
+_HERE = _resolve_self_dir()
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
@@ -45,7 +106,11 @@ _HERE_MARKER = "qmt_work_bigqmt_agent"
 
 #: agent 自身版本（与 qmt_api.VERSION 独立演进：这是"桥壳"的版本号）。
 #: 打在 probe/status 里，外部端能一眼区分「旧 agent 跑在新后端上」。
-_AGENT_VERSION = "1.1.0"
+_AGENT_VERSION = "1.2.0"
+
+#: 本文件自己定义的顶层名字（生成器按 bundle 的 AST **精确注入**；源码直部署时
+#: 由 ``_is_self_defined`` 兜底）。用途见 ``capture_qmt_injected_funcs``。
+_OWN_NAMES = frozenset()
 
 #: 单文件 bundle 打包时由生成器注入（一键部署）；None = 只读本地配置文件。
 #: 注入后即使 QMT 策略目录只放一个 .py 也能工作（零额外文件）。
@@ -68,6 +133,9 @@ _STATE = {
     "started_at": 0.0,
     "last_status": 0.0,   # 心跳节流
     "last_error": "",     # 主循环最近一次异常（写进心跳，外部端可见）
+    "standalone": False,  # 是否由本文件的 __main__ 自举（独立进程模式）
+    "qmt_root": "",       # 独立进程模式下从 argv[1](userdata) 反推出的 QMT 根目录
+    "forwarded": [],      # 独立进程模式下从 xtdata 转发进来的真实接口名
 }
 
 
@@ -84,18 +152,45 @@ def log(msg):
         pass
 
 
+def _is_self_defined(value):
+    """value 是否由本文件自己定义（QMT 注入的函数不满足）。
+
+    在 QMT 公式模式下源码是被 exec 进终端自己的命名空间的，于是本文件定义的
+    函数 ``__module__`` 就等于那个命名空间的 ``__name__``；终端注入的函数来自
+    别处（``__module__`` 为 None 或其它模块名）。
+    """
+    try:
+        return getattr(value, "__module__", None) == __name__
+    except Exception:
+        return False
+
+
 def capture_qmt_injected_funcs(ns):
     """从当前命名空间捕获 QMT 注入的全局函数（唯一来源）。
 
     不做任何「应该有哪些函数」的假设：这里有什么就捕获什么，
     能力的判定交给 probe（实际调用一次才知道）。
+
+    ★ 必须把**我们自己的**顶层名字排除掉（2026-10-08 修，假绿灯家族）：
+      公式模式把源码 exec 进同一个命名空间后，``globals()`` 里同时住着终端注入的
+      函数**和本文件自己定义的 30+ 个函数**。不排除就等于把 ``Executor`` /
+      ``init`` / ``handlebar`` 全报成「终端提供的下单/查询接口」，外部端据此
+      构建的能力面**整片是假的**（实测 bundle 会报出 37 个"注入函数"，
+      其中真正的只有 2 个）。排除判据两条，任一命中即排除：
+        ① 名字在 ``_OWN_NAMES``（生成器按 bundle 的 AST 精确注入，零手抄）；
+        ② 值的 ``__module__`` 正是本模块（源码直部署路径的兜底）。
     """
     injected = {}
     for name, value in list(ns.items()):
         if name.startswith("__"):
             continue
-        if callable(value):
-            injected[name] = value
+        if name in _OWN_NAMES:
+            continue
+        if not callable(value):
+            continue
+        if _is_self_defined(value):
+            continue
+        injected[name] = value
     return injected
 
 
@@ -113,7 +208,28 @@ def _config_candidates():
         os.path.join(_HERE, "agent_config.json"),
         os.path.join(_HERE, "agent_bigqmt", "agent_config.json"),
         os.path.join(os.path.dirname(_HERE), "agent_config.json"),
-    ]
+    ] + _config_candidates_from_argv()
+
+
+def _config_candidates_from_argv():
+    """从 ``argv[1]`` 反推的配置候选（补 ``_HERE`` 失准时的最后一道保险）。
+
+    QMT 的独立进程模式会把 ``<qmt>/userdata`` 作为 argv[1] 传进来，由此可以定位
+    ``<qmt>/python/agent_config.json``。而公式模式下源码是被 exec 进终端命名空间的
+    （**没有 __file__**），``_resolve_self_dir`` 只能靠 argv[0]/sys.path[0] 猜 ——
+    猜错时若没有这条保险，策略会因为「找不到配置」直接起不来。
+    """
+    out = []
+    try:
+        argv = getattr(sys, "argv", None) or []
+        userdata = argv[1] if len(argv) > 1 else ""
+    except Exception:
+        userdata = ""
+    if userdata and os.path.isdir(userdata):
+        root = os.path.dirname(os.path.abspath(userdata))
+        out.append(os.path.join(root, "python", "agent_config.json"))
+        out.append(os.path.join(os.path.abspath(userdata), "agent_config.json"))
+    return out
 
 
 def load_config():
@@ -183,6 +299,46 @@ def _ctx_methods(ctx):
     return sorted(n for n in names if not n.startswith("_"))
 
 
+def _probe_quote_call(injected, ctx):
+    """**真调一次**行情 getter —— 「带上了函数」不等于「能拿到行情」。
+
+    ★ 为什么要真调（2026-10-08 实测教训）：独立进程模式下我们把 xtdata 的接口
+      转发进了命名空间，于是 probe 的 ``injected`` 面里就出现了 ``get_full_tick``。
+      可本机实测该调用直接抛 ``Exception: 无法连接行情服务！``（xtquant 的本地
+      行情服务端口不监听）。只看"函数在不在"就会把**行情能力报成 SUPPORTED**，
+      外部端据此渲染的行情面板会永远空白 —— 正是本仓反复出现的假绿灯家族。
+
+    返回 ``(ok, detail)``；没有该接口时返回 ``None``（不产生任何结论，
+    绝不因为"我没看到"就断言"终端没有"）。
+    """
+    getter = None
+    candidates = []
+    if isinstance(injected, dict):
+        candidates.append(injected.get("get_full_tick"))
+    if ctx is not None:
+        try:
+            candidates.append(getattr(ctx, "get_full_tick", None))
+        except Exception:
+            pass
+    for fn in candidates:
+        if callable(fn):
+            getter = fn
+            break
+    if getter is None:
+        return None
+    try:
+        data = getter(["000001.SZ"])
+    except Exception as exc:
+        return False, "调用 get_full_tick 抛错: %s: %s" % (type(exc).__name__, exc)
+    try:
+        n = len(data) if data else 0
+    except Exception:
+        n = -1
+    if n > 0:
+        return True, "实调成功：000001.SZ 返回 %d 条" % n
+    return False, "调用未抛错但返回空（行情服务未就绪/未订阅）"
+
+
 def self_probe(cfg, injected, ctx, executor):
     """一次性环境自检（跑在 QMT 进程内），结果写 bridge_dir/probe_result.json。
 
@@ -197,12 +353,34 @@ def self_probe(cfg, injected, ctx, executor):
         result["steps"].append({"name": name, "ok": bool(ok), "detail": detail})
 
     step("python_version", True, sys.version.replace("\n", " "))
-    for mod in ("xtquant", "xtdata", "xtquant.xttrader"):
+    # ★ 导入面必须与**真正要用的取用方式**一致（2026-10-08 实测）：
+    #   QMT 内置 Python 3.6 里 `import xtdata` 会失败，但
+    #   `from xtquant import xtdata` 是成功的 —— 拿前者当判据会得出
+    #   「行情不可用」的假结论。
+    for probe_import in ("xtquant", "xtquant.xtdata", "xtquant.xttrader"):
         try:
-            __import__(mod)
-            step("import:" + mod, True, "导入成功")
+            if probe_import == "xtquant.xtdata":
+                from xtquant import xtdata  # noqa: F401
+            else:
+                __import__(probe_import)
+            step("import:" + probe_import, True, "导入成功")
         except Exception as exc:
-            step("import:" + mod, False, "%s: %s" % (type(exc).__name__, exc))
+            step("import:" + probe_import, False, "%s: %s" % (type(exc).__name__, exc))
+
+    mode = "standalone_process" if _STATE.get("standalone") else "qmt_formula"
+    step("runtime_mode", True,
+         "%s（%s）" % (mode, "本文件 __main__ 自举，终端未注入下单函数"
+                       if _STATE.get("standalone")
+                       else "由终端公式引擎挂载，注入函数来自 globals()"))
+    if _STATE.get("forwarded"):
+        step("forwarded_from_xtdata", True,
+             "%d 个: %s" % (len(_STATE["forwarded"]),
+                            json.dumps(sorted(_STATE["forwarded"]), ensure_ascii=False)))
+    # ★ 「实际调用一次才知道」纪律：函数在不在 ≠ 能力可用（见 _probe_quote_call）。
+    quote_probe = _probe_quote_call(injected, ctx)
+    _STATE["quote_call"] = quote_probe
+    if quote_probe is not None:
+        step("quote_call", quote_probe[0], quote_probe[1])
 
     captured = sorted(injected.keys())
     step("injected_funcs", bool(captured), json.dumps(captured, ensure_ascii=False))
@@ -232,6 +410,9 @@ def self_probe(cfg, injected, ctx, executor):
     result["auth_token_set"] = bool(cfg.get("auth_token"))
     result["trading_enabled"] = bool(cfg.get("trading_enabled"))
     result["agent_ver"] = _AGENT_VERSION
+    result["runtime_mode"] = mode
+    result["qmt_root"] = _STATE.get("qmt_root", "")
+    result["forwarded"] = sorted(_STATE.get("forwarded", []))
     result["injected"] = captured
     result["ctx_methods"] = _ctx_methods(ctx)
     # ★ P1 多标的账户类型能力面（R18）：外部端据此枚举 agent 支持哪些标的
@@ -265,6 +446,7 @@ def write_status(cfg, injected, ctx, executor, started_at, last_error=""):
         "trading_enabled": bool(cfg.get("trading_enabled")),
         "injected": sorted(injected.keys()),
         "ctx_methods": _ctx_methods(ctx),
+        "runtime_mode": "standalone_process" if _STATE.get("standalone") else "qmt_formula",
         "last_error": last_error,
     }
     if executor is not None:
@@ -450,3 +632,284 @@ def _rotate_if_huge(path, max_bytes=10485760):
 
 def after_init(ContextInfo):  # pragma: no cover - QMT 可选入口
     log("after_init: 注入函数 %d 个" % len(_STATE["injected"]))
+
+
+# ===========================================================================
+# 独立进程模式自举（QMT「模型交易 → 运行」的真实启动方式）
+#
+# 真机证据（XtClient 主日志原文，2026-10-08 20:04:32）：
+#
+#   [TC::CTradeStrategyData::doRun] execude cmd:  -u
+#       "P:\stock\gd_qmt\python\QMT_WORK_AGENT.py"
+#       "P:\stock\gd_qmt\userdata" 1791461072325
+#
+#   → 紧接着 `return code:1` + `try stop`（181 ms 后）
+#
+# 对应 Formula.dll 里 `CTradeStrategyData::doRun`（create pipe + `pythonw.exe -u`），
+# 实测该进程的参数形状为 `argv = [<策略.py>, <userdata>, <时间戳>]`，
+# 解释器是 QMT 自带的 `bin.x64/pythonw.exe` = Python 3.6.8。
+#
+# ★ 两条结论（都是实测，不是推测）：
+#   1. QMT 期待这个文件**自己跑起来并常驻**。缺 `__main__` 自举时进程定义完
+#      函数就退出 —— 即使编码修对了，QMT 侧看到的仍是「启动即结束」。
+#   2. 这种「脚本策略」模式**没有终端注入的下单/查询函数**（用内置解释器实测
+#      globals 为空），但 `xtquant.xtdata` / `xtquant.xttrader` **可导入** ——
+#      所以本模式如实提供**行情**能力；下单能力取决于能否连上 xtquant 交易
+#      服务，连不上就如实报错，**绝不伪造成功**（零 mock 契约）。
+# ===========================================================================
+def _qmt_root_from_userdata(userdata):
+    """从 QMT 传进来的 userdata 目录反推 QMT 根目录（<root>/userdata）。"""
+    if not userdata:
+        return ""
+    try:
+        return os.path.dirname(os.path.abspath(userdata))
+    except Exception:
+        return ""
+
+
+def _augment_sys_path(root):
+    """把 QMT 自带解释器的库目录补进 sys.path（只追加，绝不抢占标准库位置）。
+
+    返回实际补进去的目录列表（probe 里如实上报，不做「应该能找到」的假设）。
+    """
+    added = []
+    if not root:
+        return added
+    candidates = [
+        os.path.join(root, "bin.x64", "Lib", "site-packages"),
+        os.path.join(root, "bin.x64", "Lib"),
+        os.path.join(root, "python"),
+    ]
+    for d in candidates:
+        try:
+            if os.path.isdir(d) and d not in sys.path:
+                sys.path.append(d)
+                added.append(d)
+        except Exception:
+            pass
+    return added
+
+
+def _import_xtdata():
+    """尽力导入 QMT 行情模块；失败返回 None（绝不伪造）。
+
+    ★ `import xtdata` 在 QMT 内置解释器里是失败的（xtdata 是 xtquant 的子模块），
+      必须用 `from xtquant import xtdata` —— 拿前者当判据会误判「行情不可用」。
+    """
+    try:
+        from xtquant import xtdata as _xtd
+        return _xtd
+    except Exception:
+        pass
+    try:
+        import xtdata as _xtd2  # 某些发行版把 xtdata 直接暴露在顶层
+        return _xtd2
+    except Exception:
+        return None
+
+
+def _forward_xtdata_funcs(ns, xtdata):
+    """把 xtdata 的**全部**公开可调用接口转发进入口命名空间。
+
+    ★ 为什么是「全部」而不是挑几个：本仓铁律是**禁止手抄名单**（CI 的 G3 闸门
+      就是拦这个）。手抄一份「行情函数应该有哪些」的清单必然随版本漂移，漏掉的
+      那个会被误报成「终端没有该接口」。这里直接问模块本身（``dir(xtdata)``）。
+
+    返回转发的名字列表（排序），供 probe 如实上报。
+    """
+    forwarded = []
+    if xtdata is None:
+        return forwarded
+    try:
+        names = dir(xtdata)
+    except Exception:
+        return forwarded
+    for name in names:
+        if name.startswith("_"):
+            continue
+        if name in ns:
+            continue
+        try:
+            fn = getattr(xtdata, name)
+        except Exception:
+            continue
+        if callable(fn):
+            ns[name] = fn
+            forwarded.append(name)
+    return sorted(forwarded)
+
+
+class _StandaloneContext(object):
+    """独立进程模式下的 ContextInfo 替身。
+
+    ★ 诚实边界：所有属性**转发到真实 xtdata**；导入失败/没有该方法就不提供
+      （``Executor`` 用 ``getattr(ctx, name, None)`` 取，拿不到会如实报「未捕获」）。
+      绝不造一个返回编造行情的假 getter —— 那是零 mock 契约的红线。
+    """
+
+    def __init__(self, xtdata, root):
+        self._xtdata = xtdata
+        self._root = root
+        self.barpos = 0
+        self.period = "1d"
+        self.dividend_type = "none"
+
+    def __getattr__(self, name):
+        xt = self.__dict__.get("_xtdata")
+        if xt is not None:
+            try:
+                fn = getattr(xt, name)
+            except Exception:
+                fn = None
+            if callable(fn):
+                return fn
+        raise AttributeError(name)
+
+    def __dir__(self):
+        """唯一来源纪律：方法面直接问对象，不手抄「ContextInfo 应该有哪些方法」。"""
+        names = ["barpos", "period", "dividend_type"]
+        xt = self.__dict__.get("_xtdata")
+        if xt is not None:
+            try:
+                names += [n for n in dir(xt) if not n.startswith("_")]
+            except Exception:
+                pass
+        return sorted(set(names))
+
+
+def _is_process_main():
+    """本文件是否**真的是**被当作主程序执行的（而不是被 exec 进别人的命名空间）。
+
+    QMT 公式模式把源码 exec 进终端自己的命名空间，此时 ``sys.modules['__main__']``
+    是终端主模块、其 ``__dict__`` 与本文件的 ``globals()`` **不是同一个对象**。
+    —— 这条判别保证「独立进程自举」绝不会在公式模式下把终端线程卡死。
+    """
+    try:
+        main_mod = sys.modules.get("__main__")
+        return main_mod is not None and getattr(main_mod, "__dict__", None) is globals()
+    except Exception:
+        return False
+
+
+def should_autorun(argv=None):
+    """是否应进入独立进程自举。三条同时成立才启动主循环：
+
+      ① ``__name__ == "__main__"``（由调用点保证，这里再核一遍）
+      ② ``sys.modules['__main__'].__dict__ is globals()``（真的是主程序）
+      ③ ``argv[0]`` 指向一个 .py 文件（QMT：``pythonw.exe -u <策略.py> ...``）
+
+    这样：
+      * 公式模式（终端 exec 源码）→ ② 为假 ⇒ 只定义入口函数，不动终端线程；
+      * 独立进程模式 / 开发机 ``python QMT_WORK_AGENT.py`` → 三条全真 ⇒ 自举；
+      * 被当模块 import（测试、IDE 补全）→ ① 为假 ⇒ 不自举。
+
+    需要在不启动主循环的前提下执行本文件时，置 ``QMT_WORK_AGENT_NO_AUTORUN=1``。
+    """
+    if __name__ != "__main__":
+        return False
+    raw = os.environ.get("QMT_WORK_AGENT_NO_AUTORUN", "")
+    if raw not in ("", "0", "false", "False", "no"):
+        return False
+    if not _is_process_main():
+        return False
+    argv = list(argv if argv is not None else (getattr(sys, "argv", None) or []))
+    if not argv:
+        return False
+    try:
+        return os.path.splitext(argv[0] or "")[1].lower() == ".py"
+    except Exception:
+        return False
+
+
+def _env_float(name, default):
+    try:
+        raw = os.environ.get(name)
+        if raw is None or raw == "":
+            return default
+        return float(raw)
+    except Exception:
+        return default
+
+
+def run_standalone(argv=None):
+    """把本文件当**独立进程**跑起来（QMT 的「运行」就是这样拉起策略的）。
+
+    返回进程退出码：0 正常退出；2 初始化失败；3 主循环异常终止。
+    """
+    argv = list(argv if argv is not None else (getattr(sys, "argv", None) or []))
+    userdata = argv[1] if len(argv) > 1 else ""
+    root = _qmt_root_from_userdata(userdata) or os.path.dirname(_HERE)
+    _STATE["standalone"] = True
+    _STATE["qmt_root"] = root
+    added = _augment_sys_path(root)
+    log("独立进程模式启动: userdata=%s root=%s sys.path+=%s" % (userdata, root, added))
+
+    xtdata = _import_xtdata()
+    ctx = _StandaloneContext(xtdata, root)
+    forwarded = []
+    if xtdata is not None:
+        forwarded = _forward_xtdata_funcs(globals(), xtdata)
+    _STATE["forwarded"] = forwarded
+    log("独立进程模式: xtdata=%s 转发真实接口 %d 个"
+        % ("可用" if xtdata is not None else "不可用(未导入)", len(forwarded)))
+
+    try:
+        init(ctx)
+    except Exception:
+        log("init 失败，进程无法常驻：\n" + traceback.format_exc())
+        return 2
+
+    # ★ 把「本模式到底能用什么」主动说出来，别让用户对着永远空白的面板猜
+    #   （本仓最常见的故障形态就是"绿灯是另一个 bug 遮出来的"）。
+    if not _STATE["injected"]:
+        log("注意: 本模式**没有任何终端注入的函数**（独立进程模式的常态）—— "
+            "下单/查询能力不可用。要拿到注入能力，需让本策略以**公式策略**的形态"
+            "被终端挂载（同系统自带策略那样走 in-process 公式引擎），"
+            "而不是以外部 Python 脚本策略运行。")
+    quote_result = _STATE.get("quote_call")
+    if quote_result is not None and not quote_result[0]:
+        log("注意: 行情接口存在但**实调失败**（%s）—— 外部端会把行情判为不可用，"
+            "这是事实、不是伪造；请先把 QMT 本地行情服务打通再谈能力面。"
+            % quote_result[1])
+    cfg = _STATE["cfg"] or {}
+    interval = max(0.05, float(cfg.get("poll_interval_ms", 500)) / 1000.0)
+    bridge_dir = cfg.get("bridge_dir", "")
+    stop_file = os.path.join(bridge_dir, "STOP")
+    limit = _env_float("QMT_WORK_AGENT_MAX_SECONDS", 0.0)
+    log("主循环开始: interval=%.3fs bridge_dir=%s（置 QMT_WORK_AGENT_MAX_SECONDS "
+        "或在本目录创建 STOP 文件可正常退出）" % (interval, bridge_dir))
+    started = time.time()
+    try:
+        while True:
+            handlebar(ctx)
+            if limit > 0 and (time.time() - started) >= limit:
+                log("达到 QMT_WORK_AGENT_MAX_SECONDS=%.1f，正常退出" % limit)
+                break
+            try:
+                if os.path.exists(stop_file):
+                    log("检测到 STOP 文件，正常退出")
+                    break
+            except Exception:
+                pass
+            # 半周期休眠：handlebar 自带节流，调用频率高于 interval 才能稳定命中
+            time.sleep(max(0.05, interval / 2.0))
+    except KeyboardInterrupt:
+        log("收到键盘中断，正常退出")
+    except Exception:
+        log("主循环异常终止：\n" + traceback.format_exc())
+        return 3
+
+    try:
+        write_status(cfg, _STATE["injected"], ctx, _STATE["executor"],
+                     _STATE["started_at"], "exited")
+    except Exception:
+        pass
+    log("进程正常退出")
+    return 0
+
+
+if __name__ == "__main__" and should_autorun():
+    # QMT「模型交易 → 运行」= pythonw.exe -u <本文件> <userdata> <ts> ⇒ 自举常驻。
+    # 公式模式（终端把源码 exec 进自己的命名空间）不会被这条命中，
+    # 此时只提供 init/handlebar 等入口，不动终端线程。
+    sys.exit(run_standalone())

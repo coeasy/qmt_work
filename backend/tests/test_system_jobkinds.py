@@ -1,8 +1,9 @@
 """V9 Phase 7 DoD：system.* JobKind 注册与可提交。
 
-★ 计数演进：原为 8 个；接入「经典策略选股」定时调度后为 **9** 个
-（新增 ``system.classic_screen``，见 app/screener/classic.py）。
-本测试锁定的不是「永远是 9」，而是**注册表与 runner 工厂必须一一对应** ——
+★ 计数演进：原为 8 个 → 接入「经典策略选股」后 **9** 个 → R28 接入
+「通用数据集同步」（``system.sync_dataset``，见 :mod:`app.sync.datasets`）后
+**10** 个。
+本测试锁定的不是「永远是 N」，而是**注册表与 runner 工厂必须一一对应** ——
 新增 kind 时同步更新这里，防止出现「能提交但没有 runner」的哑任务。
 """
 import sys
@@ -19,8 +20,8 @@ from app.runtime.system_jobs import (  # noqa: E402
 )
 
 
-def test_eight_system_kinds_registered():
-    assert len(SYSTEM_JOB_KINDS) == 9
+def test_all_system_kinds_registered():
+    assert len(SYSTEM_JOB_KINDS) == 10
     expected = {
         "system.eod", "system.sync_bars", "system.sync_fundamentals",
         "system.refresh_universe", "system.reconcile_bars",
@@ -28,6 +29,8 @@ def test_eight_system_kinds_registered():
         "system.publish_snapshot",
         # 经典策略选股（复刻 Sequoia-X），含默认定时调度
         "system.classic_screen",
+        # R28：多数据类型同步（分钟线 / 逐笔 / 财务 / 板块成分 / 资金流…）
+        "system.sync_dataset",
     }
     assert set(SYSTEM_JOB_KINDS) == expected
     for kind in expected:

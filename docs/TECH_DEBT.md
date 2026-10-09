@@ -1131,3 +1131,203 @@
 `README.md` ×2 / V4 §10.5。前端 **52 文件 / 508 用例**全绿、`tsc --noEmit` 零错误；
 8 条 CI 门禁 + 2 条可证伪守卫（7 例 / 3 例）全绿。*
 
+
+---
+
+### TD-37（R27，2026-10-08）：`QMT_WORK_AGENT.py` **「能编译、文件就位、注册也正常」，却在 QMT 里点运行立刻停止**——四个叠在一起的缺陷
+
+**触发**：用户问「最新的 `QMT_WORK_AGENT.py` 是否可以真的运行？本地启动的 `qmt_agent.py` 运行失败，继续改进优化」。
+
+**症状**：QMT「模型交易」里策略可见、点「运行」立刻变成停止，`userdata/log/XtClient_20261008.log`：
+
+```
+[TradeStrategy]try run : ID:7, fromula:QMT_WORK_AGENT, ..., log:auto run timeout
+[TC::CTradeStrategyData::doRun] execude cmd:  -u "P:/stock/gd_qmt/python/QMT_WORK_AGENT.py" "P:/stock/gd_qmt/userdata" 1791461060602
+[TC::CTradeStrategyData::doRun] return code:1
+[TradeStrategy]try stop : ID:7, ...
+```
+
+`bridge_dir` 里**连 `probe_result.json` 都没有** —— 策略一条自检都没跑到。
+
+> ★ **先排除的假线索**：同一日志里 `load file [QMT_WORK_AGENT] parse error` 看着最像根因，
+> 但**系统自带策略（新股申购 / 国债逆回购 / ZT996 / VFZ）也全都有这一行**，而它们能跑。
+> 判据纪律：**不要把「和别人共有的现象」当自己的根因**。
+
+**根因（四个独立缺陷，互相掩盖，只修一个都不够）**：
+
+- **① P0 源码编码 `gb18030` × QMT 内置 Python 3.6.8 tokenizer（真正的元凶）。**
+  QMT 拉起策略用的是 `bin.x64/pythonw.exe` = **Python 3.6.8**。它读带
+  `#coding:gbk` / `#coding:gb18030` cookie 的源文件时会在**特定内容下**报
+  `SyntaxError: encoding problem: <enc>` / `SyntaxError: invalid token`。
+  排查路径（值得复刻）：先用开发机 Python 3.11 的 `compile(bytes)` / `compile(str)`
+  **两版都成功** ⇒ 排除语法问题；再用内置 `pythonw.exe` 复现 ⇒ 拿到 `invalid token`；
+  用 `tokenize.open` 做探针（`compile` 报在 `generate_tokens` 之后，直接 `ast.parse`
+  会误导）⇒ 二分到 docstring 第 15 行；逐字符测**都通过** ⇒ 发现是**长度/内容边界**：
+  **706 字节的 gb18030 片段通过、707 字节失败**，52 KB 全量稳定失败。
+  ⇒ 结论：py3.6 对 gbk cookie 的容忍度**不可依赖**；改 **UTF-8**（带/不带 cookie 均可）
+  在 67 KB 全量中文下稳定 `rc=0`。
+  **修法**：生成器/部署脚本默认编码从 `gb18030` 改 **`utf-8`**；`recode()` 对
+  gbk/gb18030 强制追加「会在 py3.6 上跑不起来」的告警；体检新增**独立判据**
+  `check_bundle_encoding()`（判 `QMT_SAFE_ENCODINGS`，读 PEP263 cookie；无 cookie 但
+  内容非 UTF-8 同样判红），`bundle_health.ok = syntax_ok AND pollution_ok AND encoding_ok`。
+
+- **② P0 模块级 `__file__` 硬依赖 ⇒ 公式模式下连自检都不落盘。**
+  QMT 的**公式策略**形态是 `exec(compile(src, "<string>", "exec"), ns)` ——
+  那个命名空间**没有 `__file__`**。原代码 `_HERE = os.path.dirname(os.path.abspath(__file__))`
+  在模块级直接 `NameError`，策略起不来、selftest 不执行、日志空白（最难查的一类故障）。
+  **修法**：`_resolve_self_dir()` 四级退让 —— ① `__file__`（try/except NameError）
+  ② `argv[0]` 且以 `.py` 结尾 ③ `sys.path[0]` ④ `os.getcwd()`。
+
+- **③ P0 缺 `if __name__ == "__main__"` 自举 ⇒ 独立进程模式「启动即退出」。**
+  日志坐实了 QMT 的第二种挂载形态：`pythonw.exe -u "…\QMT_WORK_AGENT.py" "…\userdata" <ts>`
+  —— **独立进程**。原 bundle 只有 `init/handlebar` 两个入口函数，没有任何 `__main__` 代码，
+  进程起来没东西可跑 ⇒ 立刻 `return code:1`。
+  **修法**：新增独立进程自举 `run_standalone()`（`_qmt_root_from_userdata` 反推安装根 →
+  `_augment_sys_path` → `_import_xtdata` → `_forward_xtdata_funcs` 把 xtdata 全部公开接口
+  转发进入口命名空间 → `_StandaloneContext` 取 `ContextInfo` → `init` → 主循环 →
+  `QMT_WORK_AGENT_MAX_SECONDS` / `bridge_dir/STOP` 可控退出）。
+  自举判定 `should_autorun()` **三条同时成立**才启动：`__name__=="__main__"`、
+  `sys.modules['__main__'].__dict__ is globals()`（这一条是关键 —— 公式模式是 exec 进
+  终端命名空间，判假 ⇒ **绝不会把终端线程卡死**）、`argv[0]` 以 `.py` 结尾。
+
+- **④ P0 注入面被自有函数污染（假绿灯）。** `capture_qmt_injected_funcs(globals())`
+  把 `Executor` / `init` / `handlebar` 等**我们自己的**顶层名字一起当成「终端注入的函数」
+  报出去 —— 模拟环境里报出 37 个「注入函数」，真货只有 2 个。面板看着能力齐全，其实没接上。
+  **修法**：生成器按 **AST 注入** `_OWN_NAMES`（禁止手抄名单，与 G3 闸门同源）+ 运行时
+  用 `value.__module__ == __name__` 双判据剔除自有名字。
+
+**新增「跑得起来」这道门禁（把结论变成部署前置条件）**：
+
+- `scripts/qmt_agent_local_run.py`（新建）：`process` 模式按 `python -u <策略.py> <userdata> <ts>`
+  拉起，断言「活过启动 + 心跳新鲜 + PROBE 往返 ok」；`framework` 模式复刻终端 `exec` 加载
+  （**故意不给 `__file__`**）并断言注入函数面**恰好等于**声明的替身集合。
+- `qmt_agent_deploy.py deploy` 在**宣布成功之前**调用它：跑不起来就中止部署，并打印三条
+  最常见原因（编码 / 缺自举 / bridge_dir）。**不跑起来不许说部署成功。**
+
+**顺带修掉的同类漂移**：`deploy_qmt_work_agent.bat` 把**小写** `qmt_work_agent.py` 写死进
+三处（deploy 未传 `--filename`、打印的「选文件」路径、`explorer /select`），而注册树条目
+指向的是**大写** `QMT_WORK_AGENT.py` —— 又一次「部署成功 + 列表里有 + 点了跑不起来」。
+现改为统一变量 `AGENT_FILE` 驱动；`cmd_check` / `cmd_register` 也改为尊重 `--filename`。
+
+**诚实边界（未解决、且已如实上报，不粉饰）**：
+独立进程模式下**没有任何终端注入函数**（`probe.injected == []`，`runtime_mode=standalone_process`）
+⇒ **下单/查询能力为 0**。系统自带策略在 `XtClient_Formula_*.log` 里既无 `PythonFormula construct`
+也无 `execude cmd`，强烈指向它们走 **in-process 公式引擎**；我们的策略走外部进程形态，
+拿不到注入。另外本机 **58610–58621 全 closed**，`get_full_tick` 实调返
+`Exception: 无法连接行情服务！` ⇒ probe 记 `quote_call=false`。
+两条都已变成 probe / log 里的**明确事实**，而非面板上的空白。
+
+**护栏**：`test_bigqmt_agent_runtime.py`（**新建 13 例**：无 `__file__` 可加载 / `_resolve_self_dir`
+四级退让 / 注入面**恰好等于**替身集合 / `_OWN_NAMES` 与顶层可调用集合对齐 / 自举三条判据 +
+环境开关 / **真跑**独立进程 `rc=0` 且 probe·心跳落盘且 `injected==[]` 如实上报 /
+argv 形状 = `-u <策略.py> <userdata> <ts>`）+ `test_bundle_hardening.py` 编码判据（+8）+
+`test_bigqmt_agent_bundle.py` 编码与自举自检（+5，并把「gbk 无损」旧断言改为「gbk 必须强告警」）+
+`test_bigqmt_deploy_scripts.py` 文件名一致性（+2）。
+
+---
+
+### TD-38（R31，2026-10-09）：`diag_qmt_work_agent.bat` 以 **LF-only 入库**且**写死券商路径**（★ TD-16 家族第 4 次，且伴随一次「假修复」）
+
+**触发**：用户要求「`deploy_qmt_work_agent` 需要是通行脚本，不能写死我们客户端的单独脚本，
+适配所有安装环境」，随后要求「至少检查 3 轮……达到发布条件」。
+
+**发现（三个叠在一起的缺陷）**：
+
+1. **`diag_qmt_work_agent.bat` 长期 LF-only 入库** —— 与 TD-16 完全同型：
+   cmd **逐字**读 .bat，LF-only 让多行并成一条逻辑行，中文行被切片后当命令执行，
+   报 `'呒矾寰?...' 不是内部或外部命令`。**根因**：`.gitattributes` 只登记了
+   `build_all.bat`，这两支 agent 脚本从未被覆盖 ⇒ 工作区改对也没用（TD-17 第二层）。
+2. **同一支脚本写死了 5 个券商安装路径 + 3 个本机 Python 路径**
+   （`P://stock//gd_qmt` / `D://国投证券QMT交易端` / `C://Users//Administrator//.workbuddy//...`）。
+   而**旧测试 `test_bat_find_qmt_dirs_covers_common_paths` 还在断言「至少硬编码 3 个探测点」**
+   —— 等于用测试把「换券商/换机器就失效」这个坑**锁死**。
+3. **一次「假修复」**（本轮真正值钱的教训）：为修 (1) 把 `deploy_*.bat` 由 GBK 转成
+   UTF-8 + `chcp 65001`，依据是一个 **12 行的小样本实验**（跑通了）。
+   真实脚本立刻炸：文件更大、开头有 20+ 行中文注释块，cmd 在 `chcp 65001` **被执行到之前**
+   就按默认 cp936 缓冲解析了这些行，把 UTF-8 多字节序列**从中间切断**，随机行被当命令执行。
+   症状与 LF-only **一模一样**，极易误判。
+
+**处置**：
+1. 两支 .bat 统一 **GBK(无 BOM) + `chcp 936` + CRLF**（解析期零码页转换，中文最稳）；
+   Python 子进程输出跟着码页：`set "PYTHONUTF8="` + `set "PYTHONIOENCODING=gbk"`。
+2. `.gitattributes` 补 `diag_qmt_work_agent.bat text eol=crlf` / `deploy_qmt_work_agent.bat text eol=crlf`。
+3. `diag_*.bat` 彻底去掉写死路径，复用与 `deploy_*.bat` 同一套发现链：
+   QMT 目录走 `qmt_agent_deploy.py discover`（逐盘符扫 1~2 层 + `python\` + 任一安装标记）；
+   Python 走 `QMT_PYTHON` → `py -3` → `where python` → 常见安装目录 → 注册表。
+4. `deploy_*.bat` 的 QMT 探测同步收敛（`backend/app/routes/qmt_agent.py::_find_qmt_dir`
+   此前也写死了光大/本机盘位，一并改为通用扫描 + `QMT_DIR` 环境变量覆盖）。
+
+**护栏**（`backend/tests/test_bigqmt_deploy_scripts.py`，+4 例、改 3 例）：
+- `test_bats_use_crlf_eol` —— 两支 .bat 必须 CRLF **且** `.gitattributes` 已登记 `eol=crlf`
+  （只查工作区是 TD-17，查不到仓库 blob 这层）；
+- `test_bat_is_portable_no_hardcoded_broker_paths` —— **取代**旧断言：禁止任何
+  `[A-Za-z]:\...\python` 写死探测与 `gd_qmt`/`光大证券`/`金阳光` 标识串，
+  并要求「参数 → 环境变量 → discover → 人工输入」四级降级齐全；
+- `test_bat_chcp_matches_file_encoding` —— `chcp` 必须与文件字节编码自洽
+  （取代旧的「必须是 chcp 65001」）；
+- `_read_utf8` / `_bat_encoding` 改为编码无关（utf-8 → gbk 依次尝试）。
+
+**证伪方式**：
+`python -c "d=open('diag_qmt_work_agent.bat','rb').read(); print(d.count(b'\n')-d.count(b'\r\n'))"`
+应为 `0`；`grep -c 'gd_qmt' diag_qmt_work_agent.bat deploy_qmt_work_agent.bat` 应为 `0`；
+`grep -n 'text eol=crlf' .gitattributes` 应含这两支脚本。
+
+**状态**：`已锁测试`
+
+**关联**：TD-16 / TD-17 / TD-21（同一「行尾/编码」家族）、TD-37（`AGENT_FILE` 文件名一致性）。
+
+---
+
+### TD-39（R32，2026-10-09）：AI 编辑工具**整文件改写行尾** —— `README.md` 由 CRLF 变 LF，799 行全量 diff 把真实改动淹没（★ TD-16 家族第 5 次，新的引入方式）
+
+**现象**：`git diff --stat` 显示 `README.md | 1598 +++++-----`，而本轮对 README 的**真实**改动只有 13 行。
+逐字节核对发现：HEAD 的 blob 是 **799 CRLF / 799 LF**（CRLF），工作区却是 **0 CRLF / 799 LF**（LF-only）。
+
+**根因**：本仓库 `core.autocrlf=false` 且 `README.md` **未登记在 `.gitattributes`**
+（该文件只对「行尾会决定能否运行」的 `.bat` / `.sh` 声明 eol），因此 blob 里存的就是 CRLF 字节。
+而 AI 编辑工具在改写该文件时把**整个文件**重写成了 LF —— 不是「只改动的行写成裸 LF」（那是 TD-21），
+是**全文翻转**。两者后果不同：TD-21 是「文件混排、括号块被撕裂」，本条是「diff 被淹没、
+reviewer 看不到真实改动」。
+
+**为什么门禁没拦住**：`ci_reconcile` 的第 5 项只逐字节扫描**在 `.gitattributes` 里声明了 eol 的文件**；
+`README.md` 不在名单里，故不在保护范围。这是设计使然（当时只针对脚本），不是门禁坏了。
+
+**处置**：
+1. 工作区 README.md 复原为 CRLF（归一 → 再全量转 CRLF，避免出现 `CRCRLF`），diff 从 1598 行收敛回 **13 行**。
+2. 顺带修掉一个**同源的潜伏 bug**（见下）与两个新增前端组件的行尾不一致。
+
+**顺带修掉的潜伏 bug（`test_canonical_selection` 报红暴露）**：
+该测试用**路径排除**区分「同名不同表」的 `upsert_bars`（`datasource/snapshots.py`）。
+但比较用的是 `str(py.relative_to(root))` —— **Windows 上是反斜杠**，与名单里的
+`"datasource/snapshots.py"`（正斜杠）**永远不相等** ⇒ 排除逻辑在 Windows 上**从未真正生效**
+（只因 `snapshots.py` 恰好不定义 `upsert_bars`，一直没有症状）。
+本轮新增分钟仓 `datasource/intraday_store.py::upsert_bars`（写 `local_bars_intraday`，
+`quality_state` 同签名接收但**刻意不落库**）后，它被判为「写出了未登记的档位 `''`」而报红。
+修法：`rel = py.relative_to(root).as_posix()`（统一 posix 分隔符）+
+`_OTHER_TABLE_MODULES` 具名常量 + 反腐烂用例
+`test_other_table_modules_never_write_local_bars`（断言名单里的模块**确实不写** `local_bars`，
+排除名单不可能变成藏污点）。
+
+**护栏**：
+- `test_other_table_modules_never_write_local_bars`（新增）—— 排除名单反腐烂；
+- 行尾复核改为**逐文件对比 HEAD blob 的 EOL 类别**（本轮的手工方法，已写入本条目证伪方式）。
+
+**证伪方式**（本条的「检测手法」——出现超大 diff 时先跑这个，再怀疑内容）：
+```bash
+python -c "import subprocess as s; \
+f='README.md'; \
+h=s.run(['git','show','HEAD:'+f],capture_output=True).stdout; \
+c=open(f,'rb').read(); \
+print('HEAD CRLF=%d LF=%d | NOW CRLF=%d LF=%d' % (h.count(b'\r\n'),h.count(b'\n'),c.count(b'\r\n'),c.count(b'\n')))"
+```
+两侧 `CRLF==LF` 才说明行尾类型一致（`CRLF==LF` 即「全是 CRLF」；`CRLF==0` 即「全是 LF」）。
+
+**残留风险（未闭环）**：`.md` 未纳入任何行尾门禁 ⇒ 下一次 AI 整文件改写仍可能复发。
+**刻意不做**全仓 `.md` 行尾归一：本仓库 `.md` 的现状是 **CRLF / LF 混存**
+（`docs/README.md` CRLF、`docs/项目规划.md` LF…），现在做归一会在发布提交里塞进
+上千行「纯换行符」diff，比问题本身更糟。若后续要根治，**单独一个提交**把 `.md` 统一到
+一种行尾并同时登记 `.gitattributes`，再给 `ci_reconcile` 加对应项。
+
+**状态**：`已修（护栏部分补齐；.md 行尾门禁仍未覆盖，见残留风险）`
+
+**关联**：TD-16 / TD-17 / TD-21 / TD-38（同一「行尾/编码」家族，本条是第 5 次、且是首个「非脚本」受害者）。

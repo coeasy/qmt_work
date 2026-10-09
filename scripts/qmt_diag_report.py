@@ -53,7 +53,7 @@ def _bundle_health(qmt_dir, name="qmt_work_agent"):
     except Exception:
         return {"ok": False, "path": None, "expected": name + ".py",
                 "syntax_ok": False, "syntax_error": "verify module unavailable",
-                "pollution_ok": True, "pollution_hits": []}
+                "pollution_ok": True, "pollution_hits": [], "encoding_ok": True}
 
     # Windows 大小写不敏感：先试小写再试大写
     candidates = [os.path.join(qmt_dir, "python", name + ".py"),
@@ -65,7 +65,7 @@ def _bundle_health(qmt_dir, name="qmt_work_agent"):
             return result
     return {"ok": False, "path": None, "expected": name + ".py",
             "syntax_ok": False, "syntax_error": "file_not_found",
-            "pollution_ok": True, "pollution_hits": [],
+            "pollution_ok": True, "pollution_hits": [], "encoding_ok": True,
             "size_bytes": 0, "line_count": 0, "encoding": None}
 
 
@@ -92,6 +92,21 @@ def collect(qmt_dir):
                 "fix": "bundle 可能被手工改坏了。重跑 "
                        "`python scripts/qmt_agent_deploy.py deploy --qmt-dir <QMT> --txt` "
                        "覆盖为干净版本，然后在 QMT 里重新「导入本地策略」",
+            })
+        if bundle_health.get("path") and bundle_health.get("encoding_ok") is False:
+            # ★ R27（2026-10-08 事故）：编码问题在开发机上完全看不出来
+            #   （py3.11 能编译），只有 QMT 内置 py3.6 会炸，而且**零自检落盘**。
+            #   单独列一条，就是为了让诊断报告直接指向它，而不是让人再查一天。
+            problems.append({
+                "source": "bundle",
+                "msg": "bundle 源码编码不是 UTF-8（%s）: %s"
+                       % (bundle_health.get("encoding_read_as") or "?",
+                          bundle_health.get("encoding_note") or "会触发 QMT 内置 "
+                          "Python 3.6.8 的 SyntaxError: encoding problem"),
+                "fix": "用 `python scripts/qmt_agent_deploy.py deploy --encoding utf-8 "
+                       "--filename <注册树里那个文件名>` 重新部署（gbk/gb18030 在 "
+                       "QMT 内置 py3.6 上会「启动即停止」且不落任何自检），"
+                       "然后在 QMT 里重新「导入本地策略」",
             })
         if bundle_health.get("pollution_hits"):
             problems.append({

@@ -28,14 +28,11 @@ from typing import Any
 from fastapi import APIRouter, Depends, Request
 
 from app.routes._common import err, ok, audit_log
-from core.clock import now_iso
 from core.config import (
     REMOTE_MODES,
     config_file,
     effective_host,
     exe_dir,
-    is_remote_enabled,
-    is_wan_enabled,
     normalize_remote_access,
     remote_mode_label,
     settings,

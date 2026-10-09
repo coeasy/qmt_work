@@ -547,7 +547,12 @@ class BarsSyncer:
             # 回查 local_bars，否则算出来的 row_count 恒为 0。
             batch_id=self._batch_id,
         )
-        self._store.set_meta("last_sync_at", summary.finished)
+        # 分钟仓（IntradayStore）没有 meta 表——它有自己独立的 SQLite 文件，
+        # 同步时间已由 :mod:`app.sync.datasets` 记到主库
+        # ``dataset.<id>.last_sync_at``。这里必须容错，否则分钟线同步会在
+        # **数据已经写完之后**抛 AttributeError，整批被报成「同步异常」。
+        if hasattr(self._store, "set_meta"):
+            self._store.set_meta("last_sync_at", summary.finished)
         if summary.failed:
             log.warning("同步完成：ok=%d failed=%d（%s）", summary.ok,
                         summary.failed, "; ".join(e["code"] for e in summary.errors[:5]))

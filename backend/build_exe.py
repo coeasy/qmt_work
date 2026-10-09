@@ -152,6 +152,54 @@ else:
     print(f"  [warn] 未找到版本号真源 {_version_file}，打包产物将回退内置版本号")
 
 
+# ★ QMT Agent 工具链（2026-10-08 R27 引入）：随 EXE 一起发布，让用户在**没装源码**
+#   的机器上也能一键部署大 QMT 策略桥（`/api/v1/qmt-agent/deploy` 会 importlib
+#   动态加载 `_internal/qmt_tools/gen_qmt_agent_bundle.py` 重新生成 bundle）。
+#
+#   背景：此前 agent 源码只在 backend/agent_bigqmt/ 与仓库根 scripts/ 下存在，
+#   而打包清单里一个都没纳入 ⇒ 客户端安装包里**根本没有部署能力**，用户只能
+#   回退到「双击 deploy_qmt_work_agent.bat」（需要额外 Python 解释器 + git 克隆
+#   源码），跟「桌面 App 一键部署」的承诺完全不符。
+#
+#   两条打包路径：
+#   - backend/agent_bigqmt/ → _internal/agent_bigqmt/   （分片真源）
+#   - <repo>/scripts/{gen_qmt_agent_bundle,qmt_agent_deploy,qmt_agent_local_run,
+#     qmt_agent_verify,qmt_strategy_list_probe,qmt_diag_report,
+#     check_bigqmt_agent_py36,bigqmt_relay}.py
+#     → _internal/qmt_tools/                              （部署/诊断工具链）
+#
+#   为什么必须打进 _internal/：PyInstaller onedir 只有 --add-data 才可靠，
+#   `--collect-all` 不认非包目录，`hiddenimports` 也不适用脚本文件。
+REPO_ROOT = ROOT.parent
+_agent_src = ROOT / "agent_bigqmt"
+if _agent_src.is_dir():
+    DATAS.append(f"{_agent_src};agent_bigqmt")
+else:
+    print(f"  [warn] 未找到 agent 分片真源 {_agent_src}，客户端将无法一键部署 QMT Agent")
+
+_QMT_AGENT_TOOLS = [
+    "gen_qmt_agent_bundle.py",     # bundle 生成器（真源内联）
+    "qmt_agent_deploy.py",         # 部署脚本（含前置门禁）
+    "qmt_agent_local_run.py",      # 双模式本地验证
+    "qmt_agent_verify.py",         # 注册态 + 心跳联合判定
+    "qmt_strategy_list_probe.py",  # 策略注册树探测
+    "qmt_diag_report.py",          # 诊断报告聚合
+    "check_bigqmt_agent_py36.py",  # py3.6 兼容性闸门
+    "bigqmt_relay.py",             # 桥接辅助（保留）
+]
+_tools_src = REPO_ROOT / "scripts"
+_missing_tools = []
+for _name in _QMT_AGENT_TOOLS:
+    _src = _tools_src / _name
+    if _src.is_file():
+        DATAS.append(f"{_src};qmt_tools/{_name}")
+    else:
+        _missing_tools.append(_name)
+if _missing_tools:
+    print(f"  [warn] 缺少 QMT Agent 工具链文件（部署/诊断能力会降级）："
+          f"{', '.join(_missing_tools)}")
+
+
 # P0：随包附带的嵌入式 Python 运行时（backend/runtimes/cp38 ~ cp312），
 # 供 ABI 不匹配时桥接子进程使用。该目录由 tools/fetch_runtimes.py 准备；
 # 不存在则跳过（不影响进程内直连可用的券商）。
@@ -410,6 +458,45 @@ def _verify_bridge_imports() -> None:
     print(f"  [bridge] 导入核对通过：{', '.join(_bridge_pkgs)}（{exe.parent.name}）")
 
 
+def _verify_qmt_agent_bundled() -> None:
+    """构建后核对：QMT Agent 工具链必须完整进包。
+
+    背景（2026-10-08 R27）：客户端安装包里**必须有** agent 分片真源与部署/
+    诊断工具链，否则 `/api/v1/qmt-agent/deploy` 会因 `ModuleNotFoundError`
+    直接返回 500，前端「一键部署」按钮点了没反应。而 PyInstaller 打包过程
+    本身不报错、CI 也全绿 —— 只能在用户点了按钮之后才暴雷，属于最难
+    发现的一类缺陷（静默断链）。
+
+    这里用「源文件路径 → 目标文件路径」的强断言把断链锁死：任一必需文件
+    缺失即 fail fast，且打印**完整**清单方便排错。
+    """
+    internal = DIST / "qmt_work" / "_internal"
+    if not internal.is_dir():
+        raise SystemExit(f"[FATAL] 打包产物 _internal/ 不存在：{internal}")
+
+    required = [
+        "agent_bigqmt/BIGQMT_AGENT.py",        # 分片真源
+        "agent_bigqmt/qmt_api.py",              # QMT 接口层
+        "agent_bigqmt/agent_config.example.json",  # 配置模板
+        "qmt_tools/gen_qmt_agent_bundle.py",    # bundle 生成器
+        "qmt_tools/qmt_agent_deploy.py",        # 部署脚本
+        "qmt_tools/qmt_agent_local_run.py",     # 本地验证
+        "qmt_tools/qmt_agent_verify.py",        # 注册态判定
+        "qmt_tools/qmt_strategy_list_probe.py", # 策略注册树探测
+        "qmt_tools/qmt_diag_report.py",         # 诊断报告
+        "qmt_tools/check_bigqmt_agent_py36.py", # py3.6 闸门
+    ]
+    missing = [rel for rel in required if not (internal / rel).is_file()]
+    if missing:
+        raise SystemExit(
+            "[FATAL] QMT Agent 工具链没进包，客户端「一键部署」将 500：\n"
+            + "\n".join(f"        - _internal/{m}" for m in missing)
+            + "\n        修法：确认 build_exe.py 的 DATAS 含\n"
+            "              `--add-data=<backend>/agent_bigqmt;agent_bigqmt` 与\n"
+            "              `--add-data=<repo>/scripts/<name>.py;qmt_tools/<name>.py`。")
+    print(f"  [agent] QMT Agent 工具链随包核对通过：{len(required)} 个文件")
+
+
 def main():
     _verify_static_input()
     # 控制台开关（可移植）：默认 --noconsole（发布友好，无黑框窗口）；
@@ -460,6 +547,7 @@ def main():
     _sanitize_dist_runtime()
     _verify_static_output()
     _verify_bridge_imports()
+    _verify_qmt_agent_bundled()
 
     # ★ 版本号随包校验（2026-09-22 修的真缺陷）：打包态 `app/version.py` 读不到
     #   `VERSION` 就**静默**回退内置 0.1.0 —— 必须在构建期 fail fast，

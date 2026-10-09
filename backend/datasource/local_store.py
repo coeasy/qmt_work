@@ -324,6 +324,34 @@ class LocalStore:
             "WHERE code=? AND period=? AND adjust=?", (code, period, adjust))
         return rows[0]["m"] if rows and rows[0]["m"] else None
 
+    def provider_counts(self, codes: Optional[Sequence[str]] = None,
+                        period: str = "1d", adjust: str = "",
+                        batch_id: str = "") -> Dict[str, int]:
+        """按 ``provider_id`` 统计 K 线行数 → ``{源名: 行数}``。
+
+        ★ 这是**真实溯源**：从库里读实际写入的来源名，而不是用请求时传进来的
+        ``source="auto"`` 冒充。同步汇总的 ``sources_used`` 靠它才不是空的。
+        给了 ``batch_id`` 就只数该批次——否则「本次同步」会被统计成「库里全部
+        历史」，那是另一种假数字。
+        空串源名保留为 ``""``（上游没返回来源名），由调用方标注 ``source_unknown``。
+        """
+        where = "WHERE period=? AND adjust=?"
+        args: List[Any] = [period, adjust]
+        if batch_id:
+            where += " AND batch_id=?"
+            args.append(batch_id)
+        if codes:
+            uniq = [str(c) for c in dict.fromkeys(codes) if c]
+            if not uniq:
+                return {}
+            ph = ",".join("?" for _ in uniq)
+            where += f" AND code IN ({ph})"
+            args.extend(uniq)
+        rows = self._db.query(
+            f"SELECT provider_id AS p, COUNT(*) AS n FROM local_bars "
+            f"{where} GROUP BY provider_id", tuple(args))
+        return {str(r["p"] or ""): int(r["n"]) for r in rows if r["n"]}
+
     def earliest_dt_map(self, codes: Sequence[str], period: str = "1d",
                         adjust: str = "") -> Dict[str, str]:
         """每只标的的**最早一根** K 线日期（``{code: dt}``；无数据的 code 不出现）。
@@ -495,6 +523,212 @@ class LocalStore:
             sql += f" WHERE {where}"
         rows = self._db.query(sql, params)
         return rows[0]["m"] if rows and rows[0]["m"] else None
+
+    # ------------------------------------------------------------------
+    # R28 多数据集落库（逐笔 / 分时 / 股本 / 财务 / 资金流 / 板块成分 / 日历）
+    #
+    # 这些表由迁移 v29 建立。共同约定：
+    #   ① 时间列统一 dt TEXT "YYYYMMDD"，入库前走 bar_date 归一 —— 混存
+    #      "2026-09-18" 与 "20260918" 会让区间过滤静默失效（V11 R13 实测）；
+    #   ② 复合结构（财务 / 资金流）存 payload_json，不为每种字段加列 —— 各源
+    #      字段集不一致，硬加列会让「源 A 有的字段源 B 永远是 NULL」；
+    #   ③ 写入走 INSERT OR REPLACE，重跑即覆盖，不做「增量合并」。
+    # ------------------------------------------------------------------
+    def upsert_ticks(self, code: str, dt: str, ticks: Sequence,
+                     retention_days: int = 0) -> int:
+        """逐笔成交。``dt`` 为交易日；``seq`` 按入参顺序给，保证同一天幂等。"""
+        day = _bar_date(dt)
+        if not day:
+            log.warning("upsert_ticks 跳过非法交易日：%r", dt)
+            return 0
+        rows = []
+        for i, t in enumerate(ticks or []):
+            d = t if isinstance(t, dict) else dict(t)
+            rows.append((code, day, i, str(d.get("tm") or d.get("time") or ""),
+                         _num(d.get("price")), _num(d.get("volume")),
+                         _num(d.get("amount")), str(d.get("bs_flag") or ""), _now()))
+        if not rows:
+            return 0
+        with self._lock:
+            self._db.executemany(
+                "INSERT OR REPLACE INTO local_ticks "
+                "(code,dt,seq,tm,price,volume,amount,bs_flag,fetched_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?)", rows)
+        if retention_days and retention_days > 0:
+            self.prune_dataset("local_ticks", day, retention_days)
+        return len(rows)
+
+    def upsert_minutes(self, code: str, dt: str, points: Sequence) -> int:
+        """当日分时。``points`` 元素需含 ``tm``/``price`` 等键（源给什么存什么）。"""
+        day = _bar_date(dt)
+        if not day:
+            log.warning("upsert_minutes 跳过非法交易日：%r", dt)
+            return 0
+        rows = []
+        for p in points or []:
+            d = p if isinstance(p, dict) else dict(p)
+            tm = str(d.get("tm") or d.get("time") or "")
+            if not tm:
+                continue
+            rows.append((code, day, tm, _num(d.get("price")),
+                         _num(d.get("avg_price") or d.get("avg")),
+                         _num(d.get("volume")), _num(d.get("amount")), _now()))
+        if not rows:
+            return 0
+        with self._lock:
+            self._db.executemany(
+                "INSERT OR REPLACE INTO local_minutes "
+                "(code,dt,tm,price,avg_price,volume,amount,fetched_at) "
+                "VALUES (?,?,?,?,?,?,?,?)", rows)
+        return len(rows)
+
+    def upsert_capital(self, rows: Sequence) -> int:
+        """股本结构。``dt`` 缺失时按「当前快照」存 ``"0"``（不是空串——空串会让
+        主键退化为「无日期」而互相覆盖）。"""
+        out = []
+        for r in rows or []:
+            d = dict(r)
+            code = str(d.get("code") or "")
+            if not code:
+                continue
+            out.append((code, _bar_date(d.get("dt")) or "0",
+                        _num(d.get("total_shares")), _num(d.get("float_shares")),
+                        _num(d.get("total_mv")), _num(d.get("float_mv")), _now()))
+        if not out:
+            return 0
+        with self._lock:
+            self._db.executemany(
+                "INSERT OR REPLACE INTO local_capital "
+                "(code,dt,total_shares,float_shares,total_mv,float_mv,fetched_at) "
+                "VALUES (?,?,?,?,?,?,?)", out)
+        return len(out)
+
+    def upsert_fundamentals(self, code: str, raw: Any, provider_id: str = "") -> int:
+        """财务数据。报告期取不到时记 ``"0"`` 并在 payload 里保留原始键。"""
+        d = raw if isinstance(raw, dict) else {"value": raw}
+        period = str(d.get("period") or d.get("report_period") or "0")
+        payload = json.dumps(d, ensure_ascii=False, sort_keys=True, default=str)
+        with self._lock:
+            self._db.execute(
+                "INSERT OR REPLACE INTO local_fundamentals "
+                "(code,period,payload_json,provider_id,fetched_at) VALUES (?,?,?,?,?)",
+                (code, period, payload, provider_id or "", _now()))
+        return 1
+
+    def upsert_moneyflow_hist(self, code: str, dt: str, raw: Any) -> int:
+        day = _bar_date(dt)
+        if not day:
+            return 0
+        d = raw if isinstance(raw, dict) else {}
+        with self._lock:
+            self._db.execute(
+                "INSERT OR REPLACE INTO local_moneyflow_hist "
+                "(code,dt,main_net,retail_net,payload_json,provider_id,fetched_at) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (code, day, _num(d.get("main_net")), _num(d.get("retail_net")),
+                 json.dumps(d, ensure_ascii=False, sort_keys=True, default=str),
+                 str(d.get("provider_id") or ""), _now()))
+        return 1
+
+    def upsert_board_members(self, rows: Sequence) -> int:
+        """板块 → 成分股索引（对标 free-stockdb 的 ``bk.get()`` 双向映射）。"""
+        out = []
+        for r in rows or []:
+            d = dict(r)
+            bc, c = str(d.get("board_code") or ""), str(d.get("code") or "")
+            if not bc or not c:
+                continue
+            out.append((bc, str(d.get("board_name") or ""), c,
+                        str(d.get("name") or ""), _num(d.get("weight")), _now()))
+        if not out:
+            return 0
+        with self._lock:
+            self._db.executemany(
+                "INSERT OR REPLACE INTO local_board_members "
+                "(board_code,board_name,code,name,weight,updated_at) "
+                "VALUES (?,?,?,?,?,?)", out)
+        return len(out)
+
+    def upsert_calendar(self, rows: Sequence) -> int:
+        """交易日历。
+
+        ⚠️ ``exchange_calendar`` 的主键是 ``(market, exchange, trade_date, session)``
+        ——**不是** ``(date)``。第一版按 ``(date, source)`` 写会直接撞
+        ``no such column: date``，而因为它被 try 包着，表现为「同步成功但日历永远空」，
+        是典型的静默失败。这里按真实结构写：``market="CN"``、``exchange="ALL"``
+        表示「全市场通用日历」（源给的就是一份日期列表，不区分交易所）。
+        """
+        out = []
+        for r in rows or []:
+            d = dict(r)
+            day = _bar_date(d.get("date") or d.get("dt") or d.get("trade_date"))
+            if not day:
+                continue
+            out.append((str(d.get("market") or "CN"),
+                        str(d.get("exchange") or "ALL"),
+                        day,
+                        str(d.get("session") or "regular"),
+                        str(d.get("source") or d.get("calendar_source") or ""),
+                        str(d.get("version") or d.get("calendar_version") or "")))
+        if not out:
+            return 0
+        try:
+            with self._lock:
+                self._db.executemany(
+                    "INSERT OR REPLACE INTO exchange_calendar "
+                    "(market,exchange,trade_date,session,calendar_source,"
+                    "calendar_version) VALUES (?,?,?,?,?,?)", out)
+        except Exception as exc:  # noqa: BLE001 缺表不击穿同步，但要**看得见**
+            log.warning("交易日历落库失败：%s", exc)
+            return 0
+        return len(out)
+
+    #: 允许做保留清理的表（**白名单**）。表名来自 DataSetSpec.store（内部常量），
+    #: 但仍然显式白名单——把动态表名拼进 SQL 是注入的温床，不靠「调用方很可信」。
+    _PRUNABLE = {"local_ticks": "dt", "local_minutes": "dt",
+                 "local_moneyflow_hist": "dt"}
+
+    def prune_before(self, table: str, cutoff: str) -> int:
+        """删除 ``table`` 中日期列早于 ``cutoff`` 的行（保留窗口清理）。
+
+        ``cutoff`` 非法时返回 0 —— ``WHERE dt < ''`` 会命中**所有行**，
+        等于一次误删全表，所以这里必须显式拒绝。
+        """
+        col = self._PRUNABLE.get(table)
+        if not col:
+            log.warning("prune_before 拒绝非白名单表：%r", table)
+            return 0
+        d = _bar_date(cutoff)
+        if not d:
+            log.warning("prune_before 跳过非法截止日：%r", cutoff)
+            return 0
+        with self._lock:
+            cur = self._db.execute(
+                f"DELETE FROM {table} WHERE {col} < ?", (d,))
+            n = cur.rowcount or 0
+        if n:
+            log.info("数据集保留清理：%s 删除 %d 行（%s < %s）", table, n, col, d)
+        return n
+
+    def prune_dataset(self, table: str, since: str = "",
+                      retention_days: int = 0) -> int:
+        """按保留窗口算截止日再清理。``since`` 为空时以今天为基准。"""
+        days = int(retention_days or 0)
+        if days <= 0:
+            return 0
+        base = _bar_date(since) or ""
+        if base:
+            from datetime import datetime as _dt
+            try:
+                base_d = _dt.strptime(base, "%Y%m%d").date()
+            except ValueError:
+                return 0
+        else:
+            from core.clock import local_now
+            base_d = local_now().date()
+        from datetime import timedelta
+        return self.prune_before(
+            table, (base_d - timedelta(days=days)).strftime("%Y%m%d"))
 
     # ------------------------------------------------------------------
     # 运维

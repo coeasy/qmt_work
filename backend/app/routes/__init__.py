@@ -12,6 +12,7 @@ import app.routes.broker as broker
 import app.routes.capabilities as capabilities
 import app.routes.config as config
 import app.routes.datahub as datahub
+import app.routes.datasets as datasets
 import app.routes.factors as factors
 import app.routes.health as health
 import app.routes.indicators as indicators
@@ -27,6 +28,7 @@ import app.routes.remote_access as remote_access
 import app.routes.research as research
 import app.routes.runtime as runtime
 import app.routes.screen as screen
+import app.routes.qmt_agent as qmt_agent
 import app.routes.signal as signal
 import app.routes.strategies as strategies
 import app.routes.strategy_market as strategy_market
@@ -72,4 +74,6 @@ router.include_router(screen.router)
 router.include_router(analysis.router)
 router.include_router(runtime.router)
 router.include_router(datahub.router)
+router.include_router(datasets.router)
 router.include_router(remote_access.router)
+router.include_router(qmt_agent.router)

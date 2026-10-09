@@ -31,7 +31,6 @@ from __future__ import annotations
 
 import os
 import re
-import sys
 from pathlib import Path
 
 BACKEND = Path(__file__).resolve().parents[1]

@@ -124,6 +124,56 @@ def test_diag_report_collect_degrades_on_subprocess_exception(tmp_path, monkeypa
     assert isinstance(report["problems"], list)
 
 
+def test_diag_report_flags_non_utf8_bundle(tmp_path, monkeypatch):
+    """非 UTF-8 的 bundle 必须在 problems[] 里被点名（TD-37 / R27）。
+
+    这是 2026-10-08 事故的**可判定化**：当时 bundle 语法对、文件在、注册也正常，
+    唯一的问题只是编码 —— 而编码又恰好是「开发机能编译、QMT 内置 py3.6 不能」，
+    所以诊断报告必须自己指出它，否则用户只能靠一天一夜的试错。
+    """
+    spec = importlib.util.spec_from_file_location("qmt_diag_report", DIAG_REPORT)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)  # type: ignore[union-attr]
+
+    qmt = tmp_path / "qmt"
+    sdir = qmt / "python"
+    sdir.mkdir(parents=True)
+    # 文件名故意用大写 —— 与注册树条目一致（大小写不敏感兜底也要能命中）
+    (sdir / "QMT_WORK_AGENT.py").write_bytes(
+        "#coding:gb18030\n# 中文注释\nx = 1\n".encode("gb18030"))
+
+    monkeypatch.setattr(mod, "_run", lambda args, timeout=30: (-1, "", "skip"))
+    report = mod.collect(str(qmt))
+
+    assert report["bundle"]["path"], "大写文件名未被识别（大小写兜底失效）"
+    assert report["bundle"]["syntax_ok"] is True, "开发机语法是过的 —— 这才是危险之处"
+    assert report["bundle"]["encoding_ok"] is False
+    enc_problems = [p for p in report["problems"] if "编码" in p["msg"]]
+    assert enc_problems, [p["msg"] for p in report["problems"]]
+    assert "utf-8" in enc_problems[0]["fix"], "修复建议必须给出 --encoding utf-8"
+    assert report["ok"] is False
+
+
+def test_diag_report_accepts_clean_utf8_bundle(tmp_path, monkeypatch):
+    """对照组：UTF-8 干净 bundle 不得被编码判据误伤。"""
+    spec = importlib.util.spec_from_file_location("qmt_diag_report", DIAG_REPORT)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)  # type: ignore[union-attr]
+
+    qmt = tmp_path / "qmt"
+    sdir = qmt / "python"
+    sdir.mkdir(parents=True)
+    (sdir / "QMT_WORK_AGENT.py").write_text(
+        "# -*- coding: utf-8 -*-\nimport json\nimport os\nx = 1\n",
+        encoding="utf-8", newline="\n")
+
+    monkeypatch.setattr(mod, "_run", lambda args, timeout=30: (-1, "", "skip"))
+    report = mod.collect(str(qmt))
+
+    assert report["bundle"]["encoding_ok"] is True
+    assert not [p for p in report["problems"] if "编码" in p["msg"]]
+
+
 def _argparse_options(path: pathlib.Path) -> set[str]:
     """从 argparse 定义的 add_argument 提取所有 opt 字符串（AST 静态检查）。"""
     tree = ast.parse(path.read_text(encoding="utf-8"))

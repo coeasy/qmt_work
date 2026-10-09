@@ -882,9 +882,41 @@ class DataSourceManager(QuotesMixin, TicksMixin, KlineMixin):
             note = "就绪" if ready else "未就绪（首请求惰性加载）"
             if tripped:
                 note = f"熔断冷却中（剩余 {max(0, int(open_until - time.time()))}s）"
-            out[name] = {"available": ready and not tripped,
-                         "note": note, "breaker_failures": br.get("failures", 0)}
+        out[name] = {"available": ready and not tripped,
+                     "note": note, "breaker_failures": br.get("failures", 0)}
         return out
+
+    def active_bridge(self, conn_id: Optional[str] = None):
+        """当前可用的**券商**数据源（未连接 / 未注册返回 ``None``）。
+
+        R28 新增的公开入口。此前只有 :meth:`health` 能间接判断「券商在不在」，
+        而调用方（如数据集同步器判断「财务数据能不能拉」）需要的是**桥对象本身**
+        ——没有它就只能去摸私有的 ``_broker``，那是给新代码开坏头。
+
+        返回 ``None`` 的语义是「此刻没有可用券商」，调用方应据此**明确失败并说明
+        原因**，不要退化成「拿空当成功」。
+        """
+        try:
+            return self._broker(conn_id)
+        except Exception:  # noqa: BLE001 工厂抛错等同不可用
+            return None
+
+    def chain_for(self, capability: str, source: str = "auto") -> list[str]:
+        """该能力**此刻**实际会按什么顺序尝试哪些源（公开入口）。
+
+        与 ``ProviderCatalog.resolve_chain`` 的区别：后者在不传 ``registered`` /
+        ``declared`` 时只做「声明 + 依赖 + 商用」过滤，**不知道谁真的注册了**；
+        而这里走 :meth:`_resolve_sources`，把 注册态 + 能力自述 + 熔断冷却 都算进去，
+        返回的就是本次请求真正会遍历的顺序。
+
+        ★ 用途：回答用户「现在点同步，数据会从哪来」。声明链（``DataSetSpec.chain``）
+        表达的是**意图**（券商优先），本方法给出的是**现实**（券商没连 ⇒ 第一个是 tdx）。
+        两者并列展示，用户才不会困惑于「我明明配了券商优先」。
+        """
+        try:
+            return list(self._resolve_sources(source, capability) or [])
+        except Exception:  # noqa: BLE001 解析失败按空链处理，由调用方提示
+            return []
 
 
 # ---------------- 进程级单例 ----------------

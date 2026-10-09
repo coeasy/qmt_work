@@ -16,7 +16,7 @@
 
 | 文档 | 内容 | 适用读者 |
 |------|------|----------|
-| [`API接口文档.md`](API接口文档.md) | **接口使用文档（REST / MCP / WebSocket）**：从契约自动生成的完整端点 / 工具 / 事件清单（REST 239 / MCP 129 / WS 30 渠道），含鉴权、零 mock、错误归因约定 | 集成方 / 全体 |
+| [`API接口文档.md`](API接口文档.md) | **接口使用文档（REST / MCP / WebSocket）**：从契约自动生成的完整端点 / 工具 / 事件清单（REST 254 / MCP 133 / WS 30 渠道 · 5 子类型），含鉴权、零 mock、错误归因约定 | 集成方 / 全体 |
 | [`QMT_大小版本使用说明.md`](QMT_大小版本使用说明.md) | **大小 QMT 使用说明**：概念差异、直连 / 策略桥（路径 B）部署步骤、接口与能力差异对照、故障排查、速查表 | 使用者 / 运维 |
 | [`多语言接入指南.md`](多语言接入指南.md) | 接口接入详解：鉴权与 scope 口径、错误归因约定、Python / Node / curl 示例、端点速查表 | 集成方 |
 | [`BROKER_ONBOARDING.md`](BROKER_ONBOARDING.md) | 券商接入指南：新增券商只需追加 `BrokerProfile`，适配器约定与桥接运行时 | 想接新券商的开发者 |
@@ -25,7 +25,7 @@
 | [`G6_任务运行时使用指南.md`](G6_任务运行时使用指南.md) | 定时任务与作业运行时 | 运维 / 自动化 |
 | [`G8_NL选股使用指南.md`](G8_NL选股使用指南.md) | 自然语言选股（NL 解析，非 LLM 对话） | 选股用户 |
 | [`DESIGN_SYSTEM.md`](DESIGN_SYSTEM.md) | 前端设计系统：色彩 / 间距 / 组件约定（对应 `frontend-next/src/design/`） | 前端开发者 |
-| [`TECH_DEBT.md`](TECH_DEBT.md) | 技术债 / 未决事项看板（每条可被一条测试或一个 `grep` 证伪，含 TD-09~TD-33 等门禁约束） | 全体 |
+| [`TECH_DEBT.md`](TECH_DEBT.md) | 技术债 / 未决事项看板（每条可被一条测试或一个 `grep` 证伪，含 TD-01~TD-38 等门禁约束） | 全体 |
 | [`REMOTE_ACCESS_DECISION.md`](REMOTE_ACCESS_DECISION.md) | **远程访问三档模型（`off`/`lan`/`wan`）**：对比分析、启动自检分档策略、`effective_host()` 绑定规则、API 层设计（被 `core/config.py` / `app/main.py` / `routes/remote_access.py` / `run.py` 活引用） | 部署者 / 后端 |
 | [`SECURITY_AND_DEPLOYMENT_AUDIT.md`](SECURITY_AND_DEPLOYMENT_AUDIT.md) | 部署与安全审计报告 + 改进方案：鉴权 / 加密 / 风控 / 信号路由 / 审计链 / CORS / 限流 / 打包 / 密钥管理逐项源码实查（v0.4.3 基线，与 TECH_DEBT 交叉核对） | 安全 / 发布 |
 | [`DATASTORE_SIZE_AND_SPLIT_ANALYSIS.md`](DATASTORE_SIZE_AND_SPLIT_ANALYSIS.md) | 主库体积诊断 · 拆库评估 · 数据瘦身方案：实测结论「1.35 GB 不是膨胀、**不建议拆库**，该回收的是 `local_bars` 二级索引 383.7 MB 中 137.4 MB 冗余」（被 `scripts/optimize_local_bars.py` 活引用为依据） | 数据 / 运维 |
@@ -41,6 +41,7 @@
 
 | 版本 | 内容 |
 |------|------|
+| [`v0.5.0.md`](release-notes/v0.5.0.md) | R27–R32：**数据集（数据中心）+ 大 QMT 部署 API + 部署脚本通用化**——「下载来的数据」第一次能被看见/查询/验证（18 数据集 · 5 REST + 4 MCP · 本地离线查询端点 · `sync_dataset` 定时 runner · 分钟仓独立落库）；大 QMT Agent 部署搬上接口（10 REST + 界面，写盘先备份再原子替换）；`deploy/diag_*.bat` 去掉写死的 5 券商路径 + 3 本机 Python 路径，改四级降级通用发现链；修 `calendar` 的「无可用源」假告警（新增 `builtin_fallback` 契约）+ 1 处 **Windows 潜伏 bug**（同名不同表排除名单用反斜杠比较 ⇒ 从未生效）+ TD-38/TD-39 两条行尾编码债；REST 239 → **254**、MCP 129 → **133**、用例 2230 → **2389** |
 | [`v0.4.9.md`](release-notes/v0.4.9.md) | R26：**大小 QMT 贯通审计**——逐条走读大 QMT（XtItClient + agent 文件桥）与小 QMT（MiniQMT + `userdata_mini`）的「识别 → 判活 → 取数 → 下单 → 重连 → 停机」，再全仓前后端对账。修 **8 处**，其中 1 处真缺陷：**策略取 K 线漏传 `broker_id` ⇒ 走活跃连接而非 run 绑定连接**（多连接下「信号用 A 券商数据算、订单下到 B 券商」）；其余为「形参传了但没用」族（`_infer_capabilities.client_type` / `kline_cache._where` 三形参 / `_order_status.oid` / `_normalize_params.codes` / `_order_status_cache` 孤儿属性）+ 涨跌额**缺正负号**口径不一致（`fmtSigned` 补接到 4 处展示位）+ 默认页三处各写一份（`DEFAULT_PAGE` 归一）。零 mock 契约实证：`except` 内返回成功形状命中 **0** |
 | [`v0.4.8.md`](release-notes/v0.4.8.md) | R25：**断链归零 + 架构门禁回绿**——新增文档断链门禁（`audit_doc_links`，17 用例）与无出口循环/无超时等待门禁（`check_unbounded_waits`，11 用例），两条都接进 CI；Gate 4（单文件 ≤50KB）回绿靠两次 P1-1 拆分（`market.py`→`market_export.py`、`eltdx_source.py`→`eltdx_industry.py`）；过程中修掉**工具自身的两个假警报**（`.tsx` 被正则截成 `.ts` 致 20 处误报 / `read_text()` 通用换行把 CRLF 写回成 LF）；文档索引补 2 份被 5 处活代码引用却漏登记的文档；删 1 份零活引用的过期一次性计划；手抄接口计数 232/127 → **239/129** |
 | [`v0.4.7.md`](release-notes/v0.4.7.md) | R24：**数据完整性专项**——新增字段级空值率审计脚本量化 15 族接口 14 处恒空，逐项根因修复：**QMT 代码形态 `.SH/.SZ` 被拒导致行业/题材静默恒空**（含 `.SZ` 后缀被丢弃的真 bug）+ **深市股票被当沪市查询**（传裸代码）+ **空结果永久污染缓存**（加 6h 重试窗口，实测旧缓存近半数为陈旧假空）+ MAC 快照 33 字段补齐（此前仅暴露 11 个，估值/市值/换手率离线全空）+ 字段映射单点化杜绝 `get_quote`/`get_instrument_detail` 漂移 + `limit_status`/`trade_date` 恒空修复 + 前端补「主力净流入」孤儿字段展示 + 市值口径统一 + 后端 2128 → **2154** 用例，审计 FAIL 0 / 未知恒空 0 |
@@ -90,7 +91,7 @@ CI 上跑的门禁（`ci_reconcile` / `check_*` / `audit_doc_links` / `check_unb
 
 - **改代码必须同步文档**：`scripts/ci_reconcile.py` 核对测试数 / 前端组件数 / 注册页数与文档一致，漂移即失败；`--update` 可回写期望值。
 - **新建文档按主题命名**，不引入带日期的轮次工作日志；新建后同步更新本索引。
-- **接口清单不要手抄**：REST / MCP / WS 的完整端点来自 `backend/tests/contracts/*.json`，更新接口文档请重跑 `python backend/tests/contracts/gen_api_doc.py`。计数（当前 REST 239 / MCP 129 / WS 30）**以契约为准**，改接口后别忘同步本页与 `多语言接入指南.md` 的散落数字。
+- **接口清单不要手抄**：REST / MCP / WS 的完整端点来自 `backend/tests/contracts/*.json`，更新接口文档请重跑 `python backend/tests/contracts/gen_api_doc.py`。计数（当前 REST 254 / MCP 133 / WS 30 渠道 · 5 子类型）**以契约为准**，改接口后别忘同步本页与 `多语言接入指南.md` 的散落数字。
 
 ---
 

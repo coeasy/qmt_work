@@ -5,6 +5,9 @@
 #     TD-16  文件以 LF-only **入库**          -> cmd 括号块解析错位，顶层落进 goto :eof
 #     TD-17  只改了工作区、仓库 blob 仍是 LF  -> 新克隆 / CI / 源码包拿到坏版本
 #     TD-21  编辑器（含 AI 工具）只把**改动行**写成裸 LF -> 文件混排，括号块在 LF 处被撕裂
+#     TD-39  编辑器（含 AI 工具）把**整个文件**翻转成另一种行尾（README.md 799 行）
+#            -> diff 被淹没，reviewer 看不到真实改动。**本文件未声明的文件不在门禁范围内**，
+#               所以「改完复核行尾」这条纪律对所有文本文件都成立，不只是下面这几支脚本。
 #   因此：改完本文件声明的任何文件，**必须复核行尾**。
 #   门禁：`python scripts/ci_reconcile.py` 的第 5 项会逐字节扫描工作区并按行号报错。
 #
@@ -17,6 +20,12 @@
 # `eol=crlf` 由 git 在**检出时强制**写成 CRLF —— 即使将来有人用 LF 编辑器改了
 # 这个文件并提交，下一位 Windows 用户拿到的仍然是可运行的 CRLF 版本。
 build_all.bat text eol=crlf
+# ★ 2026-10-09 补充：这两支「大 QMT 一键部署 / 一键诊断」脚本此前**漏登记**，
+#   而 diag_qmt_work_agent.bat 已经以 LF-only 入库并被交付出去 —— 与 TD-16 完全
+#   同型的事故（中文行被 cmd 拼接解析后报「不是内部或外部命令」）。
+#   注意：只有登记在这里，git 才会在检出时把 LF blob 强制还原成 CRLF。
+diag_qmt_work_agent.bat text eol=crlf
+deploy_qmt_work_agent.bat text eol=crlf
 # 反向同理：CRLF 会让 shebang 变成 `/bin/bash\r`，报 "bad interpreter"。
 build_all.sh text eol=lf
 scripts/verify_packaged_mcp_boot.sh text eol=lf

@@ -25,7 +25,7 @@ import sys
 
 import uvicorn
 
-from core.config import settings, normalize_remote_access, is_remote_enabled, is_wan_enabled, effective_host
+from core.config import settings, normalize_remote_access, effective_host
 
 log = logging.getLogger("qmt_work")
 _MAX_PORT_RETRY = int(os.environ.get("QMT_PORT_SCAN", "10") or 10)

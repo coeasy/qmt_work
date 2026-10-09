@@ -20,18 +20,23 @@
 
 编码
 ----
-QMT 官方口径是策略文件用 **GBK**（内置编辑器按 GBK 读写）。本生成器给三种选择：
+★ **部署必须用 UTF-8**（2026-10-08 真机实测，血的教训）：
 
-* ``utf-8``（默认保持向后兼容）—— 纯 py3 也能跑，但 QMT 编辑器里中文会乱；
-* ``gb18030`` —— **推荐用于部署**：GBK 的超集，对 GBK 可表示的中文**字节完全
-  一致**，同时能表示 ``⇒`` / ``★`` 这类 GBK 之外的字符，不会降级；
-* ``gbk`` —— 严格 GBK；若有 GBK 表示不了的字符，会**列出该字符并退回 utf-8**，
-  绝不静默写坏源码。
+QMT 内置的解释器是 ``bin.x64/pythonw.exe`` = **Python 3.6.8**，它的 tokenizer
+在处理带 ``#coding:gbk`` / ``#coding:gb18030`` cookie 的源文件时，会在特定内容下
+报 ``SyntaxError: encoding problem: <enc>`` 或 ``SyntaxError: invalid token``
+（实测：706 字节的 gb18030 片段通过、707 字节就失败；52 KB 的 gb18030 全量稳定失败），
+进程随即 ``return code:1`` —— 在「模型交易」里表现为**点了运行立刻停止**，
+而且**一条自检都不会落盘**（最难查的一类故障）。
+
+同一份内容改成 UTF-8（带或不带 cookie）在 67 KB 全量中文下**稳定跑通**。
+所以本生成器默认 ``--encoding utf-8``，并且 ``gbk`` / ``gb18030`` 仅作为
+「本机不跑、只给 QMT 编辑器看」的兼容选项保留（会打警告）。
 
 用法::
 
     python scripts/gen_qmt_agent_bundle.py --out dist/qmt_work_agent.py
-    python scripts/gen_qmt_agent_bundle.py --out X.py --encoding gb18030 --stamp "..."
+    python scripts/gen_qmt_agent_bundle.py --out X.py --stamp "..."
     python scripts/gen_qmt_agent_bundle.py --check          # 只做自检
 """
 from __future__ import print_function
@@ -47,7 +52,33 @@ import sys
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.dirname(_HERE)
-_SRC = os.path.join(_ROOT, "backend", "agent_bigqmt")
+
+
+def _resolve_agent_src():
+    """解析 agent 分片真源目录。
+
+    支持三种布局：
+      1. ``<repo>/backend/agent_bigqmt``  —— 源码开发态
+      2. ``<internal>/agent_bigqmt``      —— PyInstaller 打包态
+        （``--add-data=<backend>/agent_bigqmt;agent_bigqmt``）
+      3. ``<internal>/backend/agent_bigqmt`` —— 兼容旧打包清单（保留原路径）
+
+    找不到任何候选时回退到路径 1（保持向后兼容，报错信息与旧版一致）。
+    背景（2026-10-08 R27）：客户端安装包内没有 backend/ 目录，
+    而 `_SRC` 曾硬编码 ``os.path.join(_ROOT, "backend", "agent_bigqmt")``
+    ⇒ 打包态下 `gen_qmt_agent_bundle.build()` 一调就 FileNotFoundError，
+    `/api/v1/qmt-agent/bundle` 直接 500，前端「一键部署」点了没反应。
+    """
+    for cand in (
+        os.path.join(_ROOT, "backend", "agent_bigqmt"),  # 源码开发态
+        os.path.join(_ROOT, "agent_bigqmt"),              # PyInstaller 打包态
+    ):
+        if os.path.isdir(cand):
+            return cand
+    return os.path.join(_ROOT, "backend", "agent_bigqmt")
+
+
+_SRC = _resolve_agent_src()
 
 _PART_FUTURE = "from __future__ import print_function"
 
@@ -57,7 +88,17 @@ _REQUIRED = (
     "order_callback", "deal_callback",
     "Executor", "ActionError", "capture_qmt_injected_funcs",
     "load_config", "self_probe", "write_status", "_STATE", "_AGENT_VERSION",
+    # ★ 独立进程自举（2026-10-08 加）：QMT 的「运行」是
+    #   `pythonw.exe -u <策略.py> <userdata> <ts>`，没有这几个名字就是
+    #   「启动即退出」（日志里 return code 非 0 + try stop）。
+    "run_standalone", "should_autorun", "_resolve_self_dir",
+    # ★ 自有顶层名字台账：capture_qmt_injected_funcs 靠它把「我们自己的函数」
+    #   从「终端注入的函数」里剔除，否则 probe 会把 30+ 个自有名字报成注入面。
+    "_OWN_NAMES",
 )
+
+#: `_OWN_NAMES` 在源码里的占位（生成时按 bundle 的 AST 替换成真值）。
+_OWN_ANCHOR = "_OWN_NAMES = frozenset()"
 
 _HEADER = '''# -*- coding: utf-8 -*-
 """qmt_work 大 QMT 桥接 agent —— 单文件策略（自动生成，请勿手改）。
@@ -168,6 +209,74 @@ def _embed(src, cfg):
     return "\n".join(lines)
 
 
+def _top_level_names(text):
+    """bundle 自己定义的顶层名字（函数/类/赋值/导入的绑定名）。
+
+    这是 ``_OWN_NAMES`` 的真源：运行时 ``capture_qmt_injected_funcs`` 靠它把
+    「我们自己的函数」从「终端注入的函数」里剔除。**由 AST 算出来，不手抄** ——
+    手抄一份名字表就等着它随重构腐烂，然后把桥的 bug 伪装成终端缺能力。
+    """
+    tree = ast.parse(text, filename="<bundle>", feature_version=(3, 6))
+    names = set()
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.ClassDef)):
+            names.add(node.name)
+        elif isinstance(node, ast.Assign):
+            for t in node.targets:
+                if isinstance(t, ast.Name):
+                    names.add(t.id)
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            names.add(node.target.id)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            for a in node.names:
+                names.add(a.asname or a.name.split(".")[0])
+    return names
+
+
+def _inject_own_names(text):
+    """把 ``_OWN_NAMES = frozenset()`` 替换成 bundle 实际顶层名字的 frozenset。"""
+    if _OWN_ANCHOR not in text:
+        raise SystemExit("生成失败：bundle 里找不到 `%s` 锚点" % _OWN_ANCHOR)
+    names = sorted(_top_level_names(text))
+    lines = ["_OWN_NAMES = frozenset(["]
+    for i in range(0, len(names), 4):
+        lines.append("    " + " ".join('"%s",' % n for n in names[i:i + 4]))
+    lines.append("])")
+    literal = "\n".join(lines)
+    out = []
+    for line in text.splitlines():
+        if line.strip() == _OWN_ANCHOR:
+            out.append("# 由生成器按 bundle 的 AST 注入（运行时用于剔除自有名字）")
+            out.append(literal)
+            continue
+        out.append(line)
+    return "\n".join(out)
+
+
+def _has_main_guard(tree):
+    """bundle 是否自带 ``if __name__ == "__main__"`` 自举入口。"""
+    for node in tree.body:
+        if not isinstance(node, ast.If):
+            continue
+        test = node.test
+        candidates = []
+        if isinstance(test, ast.Compare):
+            candidates.append(test.left)
+            candidates.extend(test.comparators)
+        elif isinstance(test, ast.BoolOp):
+            for v in test.values:
+                if isinstance(v, ast.Compare):
+                    candidates.append(v.left)
+                    candidates.extend(v.comparators)
+        has_name = any(isinstance(n, ast.Name) and n.id == "__name__"
+                       for n in candidates)
+        has_main = any(isinstance(n, ast.Constant) and n.value == "__main__"
+                       for n in candidates)
+        if has_name and has_main:
+            return True
+    return False
+
+
 def build(embed=None, stamp=""):
     api = _strip_future(_read("qmt_api.py"))
     agent = _strip_agent_imports(_strip_future(_read("BIGQMT_AGENT.py")))
@@ -176,11 +285,13 @@ def build(embed=None, stamp=""):
     body = _HEADER.format(stamp=stamp) + api + _MID + agent + _TAIL
     if not body.endswith("\n"):
         body += "\n"
-    return body
+    # ★ _OWN_NAMES 必须在**整份 bundle 组装完之后**按 AST 注入 —— 它要覆盖
+    #   qmt_api.py + BIGQMT_AGENT.py 两个来源的全部顶层名字。
+    return _inject_own_names(body)
 
 
 def check(text):
-    """静态自检：语法 + py3.6 特性 + 必需入口齐备。"""
+    """静态自检：语法 + py3.6 特性 + 必需入口齐备 + 独立进程自举入口。"""
     problems = []
     try:
         tree = ast.parse(text, filename="<bundle>", feature_version=(3, 6))
@@ -206,6 +317,14 @@ def check(text):
         problems.append("`from __future__` 行数不为 1")
     if "\t" in text:
         problems.append("存在 Tab 缩进（QMT 内置解释器对混排敏感）")
+    if _OWN_ANCHOR in text:
+        problems.append("`_OWN_NAMES` 仍是占位 frozenset()（生成器注入没生效）——"
+                        "会导致 probe 把自有函数报成终端注入函数")
+    if not _has_main_guard(tree):
+        problems.append(
+            "缺少 `if __name__ == \"__main__\":` 自举入口 —— QMT 的「运行」是把本文件"
+            "当独立进程拉起的（pythonw.exe -u <策略.py> <userdata> <ts>），"
+            "没有自举 = 进程瞬间退出 = 模型交易里看到「启动即停止」")
     return problems
 
 
@@ -224,6 +343,12 @@ def recode(text, enc):
     notes = []
     if enc.lower().replace("_", "-") in ("utf-8", "utf8"):
         return text, "utf-8", notes
+    notes.append(
+        "%s 编码**会在 QMT 内置 Python 3.6.8 上运行失败**（实测 2026-10-08："
+        "gb18030 全量报 `SyntaxError: encoding problem: gb18030`，"
+        "进程 return code:1，模型交易里只见「启动即停止」）。"
+        "本选项仅用于「不在这台 QMT 上运行、只给编辑器阅读」的场景；"
+        "要真跑请用 --encoding utf-8。" % enc)
     kept = [ln for ln in text.split("\n") if not _CODING_RE.match(ln)]
     cand = "#coding:%s\n" % enc + "\n".join(kept)
     try:
@@ -232,8 +357,8 @@ def recode(text, enc):
     except UnicodeEncodeError as exc:
         bad = cand[exc.start:exc.end]
         notes.append("%s 无法表示字符 %r（offset %d）—— 已退回 utf-8；"
-                     "若要真 GBK，请把该字符替换成 GBK 内的等价写法"
-                     % (enc, bad, exc.start))
+                     "若要真 %s，请把该字符替换成 %s 内的等价写法"
+                     % (enc, bad, exc.start, enc, enc))
         return text, "utf-8", notes
 
 

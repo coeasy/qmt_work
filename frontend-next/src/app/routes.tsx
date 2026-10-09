@@ -367,6 +367,18 @@ export const PAGES: Record<string, PageDef> = {
     comp: P(() => import("@/domains/system/RemoteAccess")),
     status: "done",
   },
+  qmt_agent_deploy: {
+    key: "qmt_agent_deploy",
+    label: "大 QMT 部署",
+    comp: P(() => import("@/domains/system/QmtAgentDeploy")),
+    status: "done",
+  },
+  data_center: {
+    key: "data_center",
+    label: "数据中心",
+    comp: P(() => import("@/domains/system/DataCenter")),
+    status: "done",
+  },
   system_log: {
     key: "system_log",
     label: "系统日志",
@@ -436,6 +448,8 @@ export const MENU: MenuGroup[] = [
       "mcp",
       "settings",
       "remote_access",
+      "qmt_agent_deploy",
+      "data_center",
       "system_log",
     ],
   },
