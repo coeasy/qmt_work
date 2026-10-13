@@ -18,6 +18,7 @@
 |------|------|----------|
 | [`API接口文档.md`](API接口文档.md) | **接口使用文档（REST / MCP / WebSocket）**：从契约自动生成的完整端点 / 工具 / 事件清单（REST 254 / MCP 133 / WS 30 渠道 · 5 子类型），含鉴权、零 mock、错误归因约定 | 集成方 / 全体 |
 | [`QMT_大小版本使用说明.md`](QMT_大小版本使用说明.md) | **大小 QMT 使用说明**：概念差异、直连 / 策略桥（路径 B）部署步骤、接口与能力差异对照、故障排查、速查表 | 使用者 / 运维 |
+| [`BIG_QMT_LIVE_TRADING_RUNBOOK.md`](BIG_QMT_LIVE_TRADING_RUNBOOK.md) | **大 QMT 实盘下单操作手册**：当前阻塞链与证据、实盘链路全景、六阶段操作步骤（预检 → 部署 → GUI 挂载 → trading_enabled → 切 live → 首单对账）、每阶段验证命令、分级急停 Kill Switch、故障排查表 | 想开实盘的使用者 / 运维 |
 | [`多语言接入指南.md`](多语言接入指南.md) | 接口接入详解：鉴权与 scope 口径、错误归因约定、Python / Node / curl 示例、端点速查表 | 集成方 |
 | [`BROKER_ONBOARDING.md`](BROKER_ONBOARDING.md) | 券商接入指南：新增券商只需追加 `BrokerProfile`，适配器约定与桥接运行时 | 想接新券商的开发者 |
 | [`G2_公式DSL参考.md`](G2_公式DSL参考.md) | 公式选股 DSL 语法（运算符 / 指标函数 / 例子） | 选股用户 |
@@ -28,6 +29,7 @@
 | [`REMOTE_ACCESS_DECISION.md`](REMOTE_ACCESS_DECISION.md) | **远程访问三档模型（`off`/`lan`/`wan`）**：对比分析、启动自检分档策略、`effective_host()` 绑定规则、API 层设计（被 `core/config.py` / `app/main.py` / `routes/remote_access.py` / `run.py` 活引用） | 部署者 / 后端 |
 | [`SECURITY_AND_DEPLOYMENT_AUDIT.md`](SECURITY_AND_DEPLOYMENT_AUDIT.md) | 部署与安全审计报告 + 改进方案：鉴权 / 加密 / 风控 / 信号路由 / 审计链 / CORS / 限流 / 打包 / 密钥管理逐项源码实查（v0.4.3 基线，与 TECH_DEBT 交叉核对） | 安全 / 发布 |
 | [`DATASTORE_SIZE_AND_SPLIT_ANALYSIS.md`](DATASTORE_SIZE_AND_SPLIT_ANALYSIS.md) | 主库体积诊断 · 拆库评估 · 数据瘦身方案：实测结论「1.35 GB 不是膨胀、**不建议拆库**，该回收的是 `local_bars` 二级索引 383.7 MB 中 137.4 MB 冗余」（被 `scripts/optimize_local_bars.py` 活引用为依据） | 数据 / 运维 |
+| [`PLAN_COLD_HOT_SYNC.md`](PLAN_COLD_HOT_SYNC.md) | **数据同步冷热分层改造方案**：`BarsSyncer` 接入 `bars_cold.db` 的设计——按数据条件自动判定每标的热/冷/双跳（`SyncPlan`），热数据只维护最近 `bars_hot_days` 天、冷历史缺失才一次性补齐，新增 `cold_complete` 标记避免反复重拉；含现状根因、设计原则、数据流与回补触发链 | 数据 / 后端 |
 | [`项目规划.md`](项目规划.md) | 后续演进方向（券商广度 / 策略量化 / 交易风控 / 体验部署 / 可观测合规） | 全体 / 产品 |
 | [`项目宣传.md`](项目宣传.md) | 产品宣传文档：定位、核心卖点、适用人群、三分钟上手 | 全体 / 市场 |
 | [`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md) | 第三方依赖许可说明（TDX 传输已切换为 `easy_tdx`（MIT，商用安全）；`eltdx` Research-Only 仅作回退且默认不安装） | 合规 / 发布 |
@@ -40,6 +42,7 @@
 
 | 版本 | 内容 |
 |------|------|
+| [`v0.5.2.md`](release-notes/v0.5.2.md) | R37：**热锁挂死 / 冷历史不可分 / paper 口径错位 —— 三轮全链路审计收敛**——按「无断链 / 无孤儿 / 无死循环 / 前后端贯通」继续审计本轮新增代码（冷热分层 + paper 分流 + 幂等键）。P0 四条：`asyncio.Semaphore` 自我阻塞致日常增量永久挂死（`_sync_one_zones` 外层持锁 + `sync_one` 内层再取同一非重入锁，槽满即死且日志零输出）→ 槽只由叶子取；`_pfx6` 在无 easy_tdx 环境把**所有**代码判非法（`_MARKET_BY_PFX` 未装依赖时整表置空，纯逻辑函数被一起带走）→ 拆 `_MARKET_PFXES`（纯字符串表）与 `_MARKET_BY_PFX`（枚举表）；paper 持仓 `profit_pct` 与实盘错位 **100 倍**（透传分数而非百分数，`+0.05%` vs `+5.28%`）；冷仓 `dt` 未归一（`_covered` 断点续传判定因 `'-'` 字典序小于 `'0'` 失效）→ 全部 `bar_date`。P1 七条：`sync.bars` 双流覆盖（热/冷调度共用同一流，后跑覆盖先跑致假告警）拆成 `sync.bars.hot`/`sync.bars.cold` 且 `_last_hot_bars_run()` 对旧库回退遗留流；`_detail` 补 `cold_written`；四个端点（`/trade/target`、`/account/slippage`、`/account/aggregate`、`/account/grid`）补 paper 模式归因；`test_system_schedules` 按 kind 取值踩中重复 kind 改按 `id`；`test_license_chain_filter` / `test_datasource` / `test_bigqmt_relay_redis` 三处假失败各修根因。新增回归测试 3 条（Semaphore 挂死守护 / 冷仓日期 4 形状 / paper profit_pct 100x 口径）。**全量回归 196 文件 0 失败**，14/14 门禁全绿，ruff F+E9 全过；新增 TD-42（TD-31 家族的三个新成员：`single_flight.duplicated` / `cold_coverage` / `AccountStatus.mode` 三个后端多算字段前端零消费）；清理 `output/` 下 32 MB 一次性产物（含 `master.key` + `app.db` 敏感残留）+ 1 个零引用的 1 行 stub |
 | [`v0.5.1.md`](release-notes/v0.5.1.md) | R33–R35：**大 QMT 模式验证 + 三轮全链路审计**——先确证大 QMT 交易不通的根因是**券商未下发 xtquant 模块授权**（`mdl_auth_gt_ipc_pair=0` → `The XtQuantServer is not allowed to start.`，推翻此前两条假设）；再按无断链/无孤儿/无死循环/前后端贯通做三轮审计：修 **2 个真 bug**（诊断读取窗口致「早上判对晚上不判」、把服务未授权误报成 PID 白名单）+ 5 个孤儿函数 + 1 个孤儿配置（`qmt_agent_bundle_timeout` 只声明不读取）+ 1 处载荷断链（`trade_surface` 贯通到界面）+ 22 个 `while True` 逐一定性（无真死循环）；**删 1 份无效历史文档**（G4，其主体 topic 总线已随前端重写消失）+ 新增 1 条 CI 门禁（文档声明的 REST 端点必须能在契约查到，已可证伪自检）；用例 2462 → **2466** |
 | [`v0.5.0.md`](release-notes/v0.5.0.md) | R27–R32：**数据集（数据中心）+ 大 QMT 部署 API + 部署脚本通用化**——「下载来的数据」第一次能被看见/查询/验证（18 数据集 · 5 REST + 4 MCP · 本地离线查询端点 · `sync_dataset` 定时 runner · 分钟仓独立落库）；大 QMT Agent 部署搬上接口（10 REST + 界面，写盘先备份再原子替换）；`deploy/diag_*.bat` 去掉写死的 5 券商路径 + 3 本机 Python 路径，改四级降级通用发现链；修 `calendar` 的「无可用源」假告警（新增 `builtin_fallback` 契约）+ 1 处 **Windows 潜伏 bug**（同名不同表排除名单用反斜杠比较 ⇒ 从未生效）+ TD-38/TD-39 两条行尾编码债；REST 239 → **254**、MCP 129 → **133**、用例 2230 → **2390** |
 | [`v0.4.9.md`](release-notes/v0.4.9.md) | R26：**大小 QMT 贯通审计**——逐条走读大 QMT（XtItClient + agent 文件桥）与小 QMT（MiniQMT + `userdata_mini`）的「识别 → 判活 → 取数 → 下单 → 重连 → 停机」，再全仓前后端对账。修 **8 处**，其中 1 处真缺陷：**策略取 K 线漏传 `broker_id` ⇒ 走活跃连接而非 run 绑定连接**（多连接下「信号用 A 券商数据算、订单下到 B 券商」）；其余为「形参传了但没用」族（`_infer_capabilities.client_type` / `kline_cache._where` 三形参 / `_order_status.oid` / `_normalize_params.codes` / `_order_status_cache` 孤儿属性）+ 涨跌额**缺正负号**口径不一致（`fmtSigned` 补接到 4 处展示位）+ 默认页三处各写一份（`DEFAULT_PAGE` 归一）。零 mock 契约实证：`except` 内返回成功形状命中 **0** |
@@ -81,6 +84,7 @@ CI 上跑的门禁（`ci_reconcile` / `check_*` / `audit_doc_links` / `check_doc
 | `scripts/verify_gpu_safe_mode_persistence.py` | 改 Electron 启动逻辑后 | 真启三次客户端验 GPU 安全模式判定不被改写（需打包产物） |
 | `scripts/verify_remote_access_safety.py` | 改鉴权/限流后 | 远程访问三档的边界校验 |
 | `scripts/qmt_diag_report.py` | 现场排障 | 大 QMT 环境一键诊断报告 |
+| `scripts/qmt_live_preflight.py` | 实盘下单前后 | 实盘就绪一键预检：把「客户端进程 → 心跳 → 运行时形态 → 注入函数 → trading_enabled → 部署新鲜度 → 注册树 → 信号模式 → 账户快照」整条阻塞链一次列全，每项带下一步动作；`--json` 供自动化。配 [`BIG_QMT_LIVE_TRADING_RUNBOOK.md`](BIG_QMT_LIVE_TRADING_RUNBOOK.md) 使用 |
 
 > 「脚本存在但没人知道」与「代码里的孤儿逻辑」是同一类问题：**没有消费者的生产者**。
 > 新增按需脚本时请在本表补一行；确实用不上的一律删除，不要留在仓库里积灰。

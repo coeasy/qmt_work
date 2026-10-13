@@ -576,14 +576,18 @@ def self_probe(cfg, injected, ctx, executor):
     return result
 
 
-def write_status(cfg, injected, ctx, executor, started_at, last_error=""):
+def write_status(cfg, injected, ctx, executor, started_at, last_error="", alive=True):
     """心跳：外部端据此知道「策略真的在跑」，而不是靠超时反推。
 
     文件极小、写入频率有界（STATUS_INTERVAL_S），不会成为磁盘负担。
+
+    ★ ``alive`` 必须由调用方显式给（2026-10-12 修）：退出时写的那一份心跳过去
+      恒为 ``alive: true`` —— 一个**已经死掉**的 agent 的最后遗言却自称活着，
+      属假绿灯家族（外部端若直接读该字段、不看心跳年龄，就会被这句遗言骗过）。
     """
     payload = {
         "ts": int(time.time() * 1000),
-        "alive": True,
+        "alive": bool(alive),
         "agent_ver": _AGENT_VERSION,
         "py": sys.version.split()[0],
         "started_at": int(started_at or 0),
@@ -649,6 +653,10 @@ def init(ContextInfo):
         # ★ 把启动时刻写进 cfg，使 Executor.meta() 的 uptime_s 诚实
         #   （否则 capacity 面会显示 uptime=0，违背「不伪造」纪律）。
         cfg["_started_at"] = _STATE["started_at"]
+        # ★ 桥壳版本注入 cfg：协议层信封（qmt_api.meta）据此如实上报
+        #   「跑的是哪个 agent」。否则外部端只能看到协议层 VERSION，
+        #   两个常量独立演进必然漂移（曾实测健康端点显示 1.0.0 而实跑 1.2.0）。
+        cfg["_agent_version"] = _AGENT_VERSION
         log("agent 就绪: bridge_dir=%s funcs=%d trading=%s"
             % (cfg.get("bridge_dir"), len(_STATE["injected"]),
                cfg.get("trading_enabled", False)))
@@ -814,181 +822,12 @@ def after_init(ContextInfo):  # pragma: no cover - QMT 可选入口
 #      所以本模式如实提供**行情**能力；下单能力取决于能否连上 xtquant 交易
 #      服务，连不上就如实报错，**绝不伪造成功**（零 mock 契约）。
 # ===========================================================================
-def _qmt_root_from_userdata(userdata):
-    """从 QMT 传进来的 userdata 目录反推 QMT 根目录（<root>/userdata）。"""
-    if not userdata:
-        return ""
-    try:
-        return os.path.dirname(os.path.abspath(userdata))
-    except Exception:
-        return ""
 
-
-def _augment_sys_path(root):
-    """把 QMT 自带解释器的库目录补进 sys.path（只追加，绝不抢占标准库位置）。
-
-    返回实际补进去的目录列表（probe 里如实上报，不做「应该能找到」的假设）。
-    """
-    added = []
-    if not root:
-        return added
-    candidates = [
-        os.path.join(root, "bin.x64", "Lib", "site-packages"),
-        os.path.join(root, "bin.x64", "Lib"),
-        os.path.join(root, "python"),
-    ]
-    for d in candidates:
-        try:
-            if os.path.isdir(d) and d not in sys.path:
-                sys.path.append(d)
-                added.append(d)
-        except Exception:
-            pass
-    return added
-
-
-def _import_xtdata():
-    """尽力导入 QMT 行情模块；失败返回 None（绝不伪造）。
-
-    ★ `import xtdata` 在 QMT 内置解释器里是失败的（xtdata 是 xtquant 的子模块），
-      必须用 `from xtquant import xtdata` —— 拿前者当判据会误判「行情不可用」。
-    """
-    try:
-        from xtquant import xtdata as _xtd
-        return _xtd
-    except Exception:
-        pass
-    try:
-        import xtdata as _xtd2  # 某些发行版把 xtdata 直接暴露在顶层
-        return _xtd2
-    except Exception:
-        return None
-
-
-def _forward_xtdata_funcs(ns, xtdata):
-    """把 xtdata 的**全部**公开可调用接口转发进入口命名空间。
-
-    ★ 为什么是「全部」而不是挑几个：本仓铁律是**禁止手抄名单**（CI 的 G3 闸门
-      就是拦这个）。手抄一份「行情函数应该有哪些」的清单必然随版本漂移，漏掉的
-      那个会被误报成「终端没有该接口」。这里直接问模块本身（``dir(xtdata)``）。
-
-    返回 ``{name: fn}``（名字排序写入的普通 dict）。调用方需把它与
-    ``capture_qmt_injected_funcs`` 的 ``exclude`` 配套使用 —— 这些是**我们转发**的，
-    不是终端注入的，混为一谈会同时造成「关键警告被吞」与「能力面假绿灯」。
-    """
-    forwarded = {}
-    if xtdata is None:
-        return forwarded
-    try:
-        names = dir(xtdata)
-    except Exception:
-        return forwarded
-    for name in names:
-        if name.startswith("_"):
-            continue
-        if name in ns:
-            continue
-        try:
-            fn = getattr(xtdata, name)
-        except Exception:
-            continue
-        if callable(fn):
-            ns[name] = fn
-            forwarded[name] = fn
-    return dict(sorted(forwarded.items()))
-
-
-class _StandaloneContext(object):
-    """独立进程模式下的 ContextInfo 替身。
-
-    ★ 诚实边界：所有属性**转发到真实 xtdata**；导入失败/没有该方法就不提供
-      （``Executor`` 用 ``getattr(ctx, name, None)`` 取，拿不到会如实报「未捕获」）。
-      绝不造一个返回编造行情的假 getter —— 那是零 mock 契约的红线。
-    """
-
-    def __init__(self, xtdata, root):
-        self._xtdata = xtdata
-        self._root = root
-        self.barpos = 0
-        self.period = "1d"
-        self.dividend_type = "none"
-
-    def __getattr__(self, name):
-        xt = self.__dict__.get("_xtdata")
-        if xt is not None:
-            try:
-                fn = getattr(xt, name)
-            except Exception:
-                fn = None
-            if callable(fn):
-                return fn
-        raise AttributeError(name)
-
-    def __dir__(self):
-        """唯一来源纪律：方法面直接问对象，不手抄「ContextInfo 应该有哪些方法」。"""
-        names = ["barpos", "period", "dividend_type"]
-        xt = self.__dict__.get("_xtdata")
-        if xt is not None:
-            try:
-                names += [n for n in dir(xt) if not n.startswith("_")]
-            except Exception:
-                pass
-        return sorted(set(names))
-
-
-def _is_process_main():
-    """本文件是否**真的是**被当作主程序执行的（而不是被 exec 进别人的命名空间）。
-
-    QMT 公式模式把源码 exec 进终端自己的命名空间，此时 ``sys.modules['__main__']``
-    是终端主模块、其 ``__dict__`` 与本文件的 ``globals()`` **不是同一个对象**。
-    —— 这条判别保证「独立进程自举」绝不会在公式模式下把终端线程卡死。
-    """
-    try:
-        main_mod = sys.modules.get("__main__")
-        return main_mod is not None and getattr(main_mod, "__dict__", None) is globals()
-    except Exception:
-        return False
-
-
-def should_autorun(argv=None):
-    """是否应进入独立进程自举。三条同时成立才启动主循环：
-
-      ① ``__name__ == "__main__"``（由调用点保证，这里再核一遍）
-      ② ``sys.modules['__main__'].__dict__ is globals()``（真的是主程序）
-      ③ ``argv[0]`` 指向一个 .py 文件（QMT：``pythonw.exe -u <策略.py> ...``）
-
-    这样：
-      * 公式模式（终端 exec 源码）→ ② 为假 ⇒ 只定义入口函数，不动终端线程；
-      * 独立进程模式 / 开发机 ``python QMT_WORK_AGENT.py`` → 三条全真 ⇒ 自举；
-      * 被当模块 import（测试、IDE 补全）→ ① 为假 ⇒ 不自举。
-
-    需要在不启动主循环的前提下执行本文件时，置 ``QMT_WORK_AGENT_NO_AUTORUN=1``。
-    """
-    if __name__ != "__main__":
-        return False
-    raw = os.environ.get("QMT_WORK_AGENT_NO_AUTORUN", "")
-    if raw not in ("", "0", "false", "False", "no"):
-        return False
-    if not _is_process_main():
-        return False
-    argv = list(argv if argv is not None else (getattr(sys, "argv", None) or []))
-    if not argv:
-        return False
-    try:
-        return os.path.splitext(argv[0] or "")[1].lower() == ".py"
-    except Exception:
-        return False
-
-
-def _env_float(name, default):
-    try:
-        raw = os.environ.get(name)
-        if raw is None or raw == "":
-            return default
-        return float(raw)
-    except Exception:
-        return default
-
+from agent_runtime import (  # bundle: 已内联，生成器会剔除本行
+    _StandaloneContext, _augment_sys_path, _consume_stop_file,
+    _env_float, _forward_xtdata_funcs, _import_xtdata,
+    _is_process_main, _qmt_root_from_userdata, should_autorun,
+)
 
 def run_standalone(argv=None):
     """把本文件当**独立进程**跑起来（QMT 的「运行」就是这样拉起策略的）。
@@ -1044,15 +883,20 @@ def run_standalone(argv=None):
     log("主循环开始: interval=%.3fs bridge_dir=%s（置 QMT_WORK_AGENT_MAX_SECONDS "
         "或在本目录创建 STOP 文件可正常退出）" % (interval, bridge_dir))
     started = time.time()
+    stop_reason = "exited"
     try:
         while True:
             handlebar(ctx)
             if limit > 0 and (time.time() - started) >= limit:
                 log("达到 QMT_WORK_AGENT_MAX_SECONDS=%.1f，正常退出" % limit)
+                stop_reason = "max_seconds"
                 break
             try:
                 if os.path.exists(stop_file):
-                    log("检测到 STOP 文件，正常退出")
+                    _consume_stop_file(stop_file)
+                    log("检测到 STOP 文件，正常退出（已消费 STOP：改名 STOP.consumed.<ts> —— "
+                        "避免下次启动被立即杀死，并留下「确被 STOP 停过」的物证）")
+                    stop_reason = "stopped_by_stop_file"
                     break
             except Exception:
                 pass
@@ -1060,13 +904,15 @@ def run_standalone(argv=None):
             time.sleep(max(0.05, interval / 2.0))
     except KeyboardInterrupt:
         log("收到键盘中断，正常退出")
+        stop_reason = "keyboard_interrupt"
     except Exception:
         log("主循环异常终止：\n" + traceback.format_exc())
         return 3
 
     try:
+        # ★ 退出时 alive=False：已死的 agent 不得在最后一份心跳里自称活着
         write_status(cfg, _STATE["injected"], ctx, _STATE["executor"],
-                     _STATE["started_at"], "exited")
+                     _STATE["started_at"], stop_reason, alive=False)
     except Exception:
         pass
     log("进程正常退出")

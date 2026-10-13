@@ -69,7 +69,10 @@ def test_empty_list_falls_back_to_broker_sector():
     syncer = BarsSyncer(store=store)
     seen: dict = {}
 
-    async def _fake_sync_many(codes, progress_cb=None, skipped_complete=0):
+    async def _fake_sync_many(codes, progress_cb=None, skipped_complete=0, plans=None):
+        # ★ plans 是冷热分层后 sync_many 的新契约参数（plan.code→SyncPlan）；
+        #   fake 必须签名兼容，否则 sync_all 转发时 TypeError —— 该异常与
+        #   「空列表→券商板块兜底」被测行为无关，会让本用例假失败。
         seen["codes"] = list(codes)
         seen["skipped_complete"] = skipped_complete
         from app.sync.bars import SyncSummary
@@ -126,7 +129,8 @@ def test_no_codes_at_all_returns_empty_summary():
     syncer = BarsSyncer(store=_StubStore())
     called = {"v": False}
 
-    async def _fake_sync_many(codes, progress_cb=None, skipped_complete=0):
+    async def _fake_sync_many(codes, progress_cb=None, skipped_complete=0, plans=None):
+        # ★ 同上：签名必须含 plans（冷热分层新增），否则同步路径被 TypeError 提前打断。
         called["v"] = True
         raise AssertionError("没有代码就不该进同步流程")
 

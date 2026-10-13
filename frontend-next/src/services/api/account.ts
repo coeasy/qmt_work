@@ -35,6 +35,16 @@ export interface BatchBroadcast {
  *   - status 返回 assets（非 total_assets），并带 positions 数组
  *   - batch/order 的 body 是 {orders:[...]} 或广播字段，**不是** {conn_ids, items}
  *   - batch/cancel 的 body 是 {items:[{conn_id,order_id}]}，**不是** {conn_ids, order_ids}
+ *
+ * ★ 零消费方法登记（2026-10-13 R2 审计）：
+ *   `status` / `batchOrder` / `batchCancel` 目前无前端调用点，但**刻意保留**：
+ *   三者都是后端已实现且契约稳定的账户域能力（/account/status 是模拟盘账本的
+ *   入口，/account/batch/* 是多账户批处理的入口）。当前页面走的是各自的领域页
+ *   （Paper / Accounts），并未直接引这里的封装，但「批量下单 / 批量撤单」是
+ *   账户域的核心能力，一旦 UI 需要就会用到。删除会误导后续开发者以为这些
+ *   端点不存在；因此显式声明「零调用但合法」，而非默默留着。
+ *   若后续 6 个月内仍无人调用，再评估删除（参照 services/http.ts 里
+ *   「零调用但合法」的先例处理方式：先声明，不急于删）。
  */
 export const accountApi = {
   status: (connId = "") =>

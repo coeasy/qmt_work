@@ -37,6 +37,8 @@ _ALLOWED_MODULES = {
     "threading", "math", "re", "ast", "io",
     "datetime", "collections", "itertools", "shelve", "csv", "shutil",
     "qmt_api",  # 同包的本地模块
+    "agent_runtime",  # 同包的本地模块：独立进程模式运行环境层（2026-10-13 从
+                      # BIGQMT_AGENT.py 按职责拆出，降 50KB 上帝文件）
     # ★ xtquant / xtdata 是 **QMT 自带**的包（bin.x64/Lib/site-packages/xtquant），
     #   不是「额外依赖」。2026-10-08 用内置 bin.x64/pythonw.exe (Python 3.6.8) 实测：
     #   `import xtquant` OK、`import xtquant.xttrader` OK、

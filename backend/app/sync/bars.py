@@ -24,235 +24,29 @@ import asyncio
 import logging
 import time
 import uuid
-from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
-from typing import Awaitable, Callable, List, Optional, Sequence
+from datetime import timedelta
+from typing import Callable, Optional, Sequence
 
 from core.clock import bar_date, local_now  # 唯一时钟在 core.clock（V11 R8 收敛）
 from core.clock import now_iso  # noqa: F401  —— 唯一实现在 core.clock（V11 R8 收敛）
+from datasource.cold_store import get_cold_store
 from datasource.local_store import LocalStore, get_store
 from datasource.registry import bars_last_date, get_hub
 
 log = logging.getLogger("qmt_work.sync.bars")
 
-#: 日线「新鲜」的默认判定窗口（自然日）。A 股最长休市是春节（约 9~10 天），
-#: 取 10 可覆盖长假而不误判；周末 3 天、清明/五一等短假 3~5 天均在窗口内。
-STALE_DAYS_DEFAULT = 10
-
-#: 写入裁剪时**附带的尾部修正窗口**（根）：只写新数据时，仍把这 N 根旧数据一起
-#: 重写一遍，用于消化复权/除权修正与源端的历史修订。``0`` = 连窗口都不写（最省）。
-#: 取值理由：A 股除权除息与复权因子回溯通常只影响最近几个交易日的收盘价序列，
-#: 10 根（约两周）足以覆盖，代价却只有原来的 3%。
-REWRITE_TAIL_DEFAULT = 10
-
-#: 汇总里保留的失败明细条数上限（超出部分只记数，不记明细）。
-ERRORS_MAX = 200
-
-#: 抓取器签名：(code, period, adjust, count) -> Optional[list[dict|Bar]]
-#: 生产路径返回 ``(bars, source)`` 元组以便落库写入**真实来源名**；注入式测试可返回纯 list。
-FetchBars = Callable[[str, str, str, int], Awaitable[Optional[list]]]
+# 数据模型 / 纯函数 / 冷仓集成已按职责拆出（Gate 4：源码 50KB 上限）。
+# 下列名字在此**原样转出**，既有调用方（含测试）无需改动；冷仓方法是 mixin。
+from app.sync.bars_model import (  # noqa: F401
+    ERRORS_MAX, FetchBars, REWRITE_TAIL_DEFAULT, STALE_DAYS_DEFAULT,
+    SyncOutcome, SyncPlan, SyncSummary, _bar_time, _bars_first_date,
+    _dedupe_bars, _hot_fetch_count, _is_stale, _resolve_provider_id,
+    _split_fetch_result, weekday_calendar,
+)
+from app.sync.bars_cold import ColdZoneMixin
 
 
-def _split_fetch_result(raw) -> tuple[Optional[list], str]:
-    """兼容两种抓取器返回：``(bars, source)`` 元组 / 纯 ``bars`` 列表。
-
-    元组形态携带真实命中来源名，用于 ``local_bars.provider_id`` 溯源（P3-4：
-    拒绝把真实来源丢成 ``"auto"`` 的假溯源）。
-    """
-    if isinstance(raw, tuple):
-        bars = raw[0] if raw else None
-        src = raw[1] if len(raw) > 1 and raw[1] else ""
-        return bars, str(src).strip()
-    return raw, ""
-
-
-def _bar_time(b) -> object:
-    """从 dict / 模型对象里取 K 线时间字段（两种形态都支持）。"""
-    if isinstance(b, dict):
-        return b.get("time")
-    return getattr(b, "time", None)
-
-
-def _bars_first_date(bars: Sequence) -> str:
-    """这一批 K 线里**最早**的一根交易日（``""`` = 未知）。
-
-    与 ``datasource.registry.bars_last_date`` 对称：全量回补只报「写入了 N 根」
-    说明不了「历史推到了哪一年」，必须同时给出最早一根。
-    取 **min** 而不是 ``bars[0]`` —— 不假设源的返回顺序。
-    """
-    ds = [d for d in (bar_date(_bar_time(b)) for b in bars or []) if d]
-    return min(ds) if ds else ""
-
-
-def _dedupe_bars(bars: Sequence) -> list:
-    """按交易日去重并升序排列（逐年翻页的相邻年份不会重叠，但接口可能回边界日）。
-
-    只做**内存内**去重：真正的幂等由 ``local_bars`` 主键
-    (code, period, adjust, dt, provider_id) 保证（重复日期覆盖、旧数据不删）。
-    这里去重的意义是少写一遍库，不是正确性来源。
-    """
-    seen: dict = {}
-    for b in bars or []:
-        key = bar_date(_bar_time(b)) or str(_bar_time(b) or "")
-        if key:
-            seen[key] = b
-    return [seen[k] for k in sorted(seen)]
-
-
-def _is_stale(as_of: str, stale_days: int = STALE_DAYS_DEFAULT) -> bool:
-    """最后一根交易日是否陈旧（距今超过 ``stale_days`` 个自然日）。
-
-    ``as_of`` 为空 / 无法解析时返回 **False** —— 不是「判它新鲜」，而是
-    「无从判断」：这种行由 :meth:`SyncOutcome.as_of` 的空值单独暴露，
-    不应被计进陈旧统计而淹没真正陈旧的标的。
-    """
-    d = bar_date(as_of)
-    if not d:
-        return False
-    try:
-        day = datetime.strptime(d, "%Y%m%d").date()
-    except ValueError:
-        return False
-    return (local_now().date() - day).days > int(stale_days)
-
-
-def _resolve_provider_id(real_src: str, configured: str) -> str:
-    """落库溯源解析：**真实命中来源优先**。
-
-    - 拿到真实来源名 → 直接采用（不因调用方传了别的标签而说谎）；
-    - 未拿到来源但配置了具体源名 → 用配置值；
-    - 配置为 ``auto``（按能力链自动降级）且无来源信息 → 记 ``""``（未知），
-      **绝不伪造 ``"auto"``** —— 空值在 ``local_store`` 读路径中按最低优先级处理。
-    """
-    real = (real_src or "").strip()
-    if real:
-        return real
-    cfg = (configured or "").strip()
-    if cfg and cfg.lower() != "auto":
-        return cfg
-    return ""
-
-
-def weekday_calendar(end: date, count: int) -> List[str]:
-    """交易日历：最近 ``count`` 个交易日（升序 "YYYY-MM-DD"）。
-
-    G1-5b：已由「周一至周五启发式」升级为真实 A 股节假日日历
-    （app/sync/calendar.py：内置 2024-2026 交易所休市安排，
-    runtime_config `market.calendar.holidays/workdays` 可热扩展；
-    超出覆盖年份回退工作日启发式并显式打日志）。函数名保留兼容既有调用。
-    """
-    from app.sync.calendar import trading_calendar
-    return trading_calendar(end, count)
-
-
-@dataclass
-class SyncOutcome:
-    """单标的同步结果。"""
-
-    code: str
-    ok: bool = False
-    bars_written: int = 0
-    error: str = ""
-    #: 因「本地已有且源未更新」而**跳过写入**的根数（写入裁剪，见
-    #: :attr:`BarsSyncer._trim_new`）。与 ``bars_written`` 分开计：
-    #: 「写了 0 根」可能是「源挂了」，也可能是「本来就没新数据」——
-    #: 混成一个数字会让「数据停更」与「一切正常」长得一模一样。
-    bars_unchanged: int = 0
-    #: 最后一根 K 线的交易日（``""`` = 未知）。**有数据不等于够新**，
-    #: 调用方（任务报告 / 界面）必须同时看这个字段。
-    as_of: str = ""
-    #: 数据是否陈旧（最后一根距今超过 ``stale_days`` 个自然日）。
-    stale: bool = False
-    #: 本次是否**真的按日期区间向前翻页**（V11 §5.3 P0-3 III）。
-    #: ``False`` 且 ``mode=full`` 表示没有支持区间的源、已退化为「单次大 count」——
-    #: 必须在报告里说出来，否则用户会以为历史已经全部补齐。
-    paged: bool = False
-    #: 本次写入的 K 线里最早的一根（``""`` = 未知），用于判断回补到了哪一年。
-    as_of_min: str = ""
-
-    def to_dict(self) -> dict:
-        return {"code": self.code, "ok": self.ok,
-                "bars_written": self.bars_written, "error": self.error,
-                "bars_unchanged": self.bars_unchanged,
-                "as_of": self.as_of, "stale": self.stale}
-
-
-@dataclass
-class SyncSummary:
-    """一批同步的总览（供日志 / 后续 G6 进度事件 / 运维展示）。"""
-
-    started: str
-    finished: str = ""
-    total: int = 0
-    ok: int = 0
-    failed: int = 0
-    bars_written: int = 0
-    elapsed_ms: int = 0
-    errors: List[dict] = field(default_factory=list)
-    #: 因超过 ``ERRORS_MAX`` 而**未列入** ``errors`` 的失败条数。
-    #: 全市场 5000+ 只集体失败时（网络断了、源熔断了），把几千条明细塞进汇总
-    #: 再写进 job 结果 / 快照 manifest，只会把真正的失败原因淹掉 ——
-    #: 这里保留前 N 条 + 一个「还有多少条」的计数，既省存储又不丢事实。
-    #:
-    #: ★ 字段名与 ``app.runtime.system_jobs`` 的**对外契约**一致（前端类型里也
-    #:   是这个名）：同步链上有两处截断（本类一层、落库流一层），用两个名字会
-    #:   让「到底截了多少」永远对不上账。
-    errors_truncated: int = 0
-    #: 成功但**数据陈旧**的标的数（V11 R13）。
-    #: ★ 这是「假成功」的显影剂：``ok`` 很高、``stale`` 也很高 ⇒
-    #: 写入了一堆历史数据却宣称完成，界面与报告必须把它摆到台面上。
-    stale: int = 0
-    #: 全批中最新的最后一根交易日（``""`` = 全部未知）。
-    as_of_max: str = ""
-    #: 全批中最**早**的一根交易日（``""`` = 全部未知）。全量回补用它回答
-    #: 「这次到底把历史推到了哪一年」——只报写入根数说明不了这件事。
-    as_of_min: str = ""
-    #: ``incremental`` / ``full``（V11 §5.3 P0-3 III）。
-    mode: str = "incremental"
-    #: 本次是否**真的按日期区间向前翻页**取数（见 :attr:`SyncOutcome.paged`）。
-    #: ``mode=full`` 而这里为 ``False`` ⇒ 已退化为单次大 count，**历史未真正补齐**。
-    paged: bool = False
-    #: 全量模式下因「本地历史已覆盖到目标起点」而**跳过**的标的数。
-    #: 这就是断点续传的可见证据：中断后重跑，这个数会明显变大。
-    skipped_complete: int = 0
-    #: 增量模式下因「本地已有最近一根」而**跳过**的标的数（V11 R15）。
-    #:
-    #: 必须与 ``skipped_complete`` **分开计**：前者是「历史已补齐」、后者是「已经够新」，
-    #: 混成一个 skipped 会让用户看不出这次到底做了什么（界面上两者含义完全不同）。
-    skipped_fresh: int = 0
-    #: 命中写入裁剪、源数据与本地一致而**未重复写库**的根数。
-    #: 与 ``bars_written`` 配对看：``written=0 & unchanged 很大`` = 「一切正常、
-    #: 今天没有新数据」；``written=0 & unchanged=0`` = 「源可能挂了」。
-    #: 没有这个数字，EOD 只能靠 ``written > 0`` 判质量，于是「重跑一次同步」
-    #: 会被判成 ``invalid``（数据其实完整且最新）。
-    bars_unchanged: int = 0
-    #: ★ 本批**真正写进** ``local_bars.batch_id`` 的批次号（``bars-<hex>``）。
-    #:
-    #: 为什么必须暴露出来：数据集快照（``dataset_snapshots``）要按批次回查
-    #: ``local_bars`` 才能算出真实的 ``row_count`` / 覆盖区间。此前调用方只能
-    #: 拿 ``finished``（ISO 时间戳）当批次号传进去，而落库用的是内部生成的
-    #: ``bars-<hex>`` ⇒ 回查**永远命中 0 行**，于是每个快照都写着
-    #: 「row_count=0、覆盖为空」却标着 ``complete``（实测 2026-09-20）。
-    #: 批次号是「这批数据到底写了什么」的唯一钥匙，必须随汇总一起返回。
-    batch_id: str = ""
-
-    def to_dict(self) -> dict:
-        return {
-            "started": self.started, "finished": self.finished,
-            "total": self.total, "ok": self.ok, "failed": self.failed,
-            "bars_written": self.bars_written, "elapsed_ms": self.elapsed_ms,
-            "bars_unchanged": self.bars_unchanged,
-            "errors": self.errors, "errors_truncated": self.errors_truncated,
-            "stale": self.stale,
-            "as_of_max": self.as_of_max, "as_of_min": self.as_of_min,
-            "mode": self.mode, "paged": self.paged,
-            "skipped_complete": self.skipped_complete,
-            "skipped_fresh": self.skipped_fresh,
-            "batch_id": self.batch_id,
-        }
-
-
-class BarsSyncer:
+class BarsSyncer(ColdZoneMixin):
     """日线窗口同步器（并发闸门 + 幂等合并 + 结果汇总）。
 
     两种模式（V11 §5.3 P0-3 III）：
@@ -296,6 +90,7 @@ class BarsSyncer:
         skip_fresh: bool = False,
         trim_new: bool = True,
         rewrite_tail: int = REWRITE_TAIL_DEFAULT,
+        zone: str = "auto",
     ):
         self._store = store or get_store()
         self._fetch = fetch_bars or self._default_fetch
@@ -305,6 +100,15 @@ class BarsSyncer:
         self._mode = "full" if str(mode).strip().lower() == "full" else "incremental"
         self._full_years = max(1, int(full_years or self.FULL_YEARS_DEFAULT))
         self._full_count = max(1, int(full_count or self.FULL_COUNT_DEFAULT))
+        #: 冷热分层（2026-10-10）：``auto`` = 热必做 + 冷按需；``hot`` = 只维护热窗口；
+        #: ``cold`` = 只补齐冷历史（不碰热表）；``both`` = 热+冷全量（等价旧 ``mode=full``）。
+        self._zone = str(zone or "auto").strip().lower()
+        if self._zone not in ("hot", "cold", "auto", "both"):
+            self._zone = "auto"
+        # ``mode=full`` 向后兼容：等价于 ``zone=both``（热窗口 + 冷历史都补）。
+        # 仅当调用方没显式给 zone 时生效，避免覆盖显式选择。
+        if self._mode == "full" and self._zone == "auto":
+            self._zone = "both"
         self._period = period
         self._adjust = adjust
         #: 新鲜度门槛：最后一根距今超过该自然日数即判「陈旧」。
@@ -333,6 +137,21 @@ class BarsSyncer:
         #:   库里没有 = 第一次拉，全写。
         self._trim_new = bool(trim_new)
         self._rewrite_tail = max(0, int(rewrite_tail or 0))
+        #: 热窗口天数（单一真源 = ``settings.bars_hot_days``，默认 92 ≈ 3 个月）。
+        #: 与 ``KlineCache.hot_cutoff`` 共用同一输入，确保「写入路由」与「读取边界」
+        #: 永不过两套公式（否则会出现「刚搬进冷仓又被热同步写回热表」的抖动）。
+        try:
+            from core.config import settings as _settings
+            self._hot_days = int(getattr(_settings, "bars_hot_days", 92) or 92)
+        except Exception:  # noqa: BLE001 配置不可用时按默认
+            self._hot_days = 92
+        #: 热窗口回源根数：由 ``_hot_fetch_count`` 换算，且**不低于** ``lookback``，
+        #: 保证旧调度（``lookback=120``）的日线覆盖不受影响，同时日常回源根数
+        #: 不再无谓放大（热窗口之外由冷仓承载）。
+        self._hot_count = max(_hot_fetch_count(self._hot_days), self._lookback)
+        #: 冷仓单例（``bars_cold.db``）。为 ``None`` 时（极少数：冷仓未初始化）
+        #: 冷同步降级为「跳过并标记 reason」，绝不抛异常中断整批热同步。
+        self._cold = get_cold_store()
         #: 批量读到的「本地最新一根」（code -> dt），供裁剪当基线。空 = 全部首拉。
         self._local_latest: dict = {}
         #: ``incremental`` 下跳过「本地已有最新一根」的标的（V11 R15）。
@@ -539,6 +358,16 @@ class BarsSyncer:
     # 核心
     # ------------------------------------------------------------------
     async def sync_one(self, code: str) -> SyncOutcome:
+        """同步单只标的。
+
+        ★ 热路径的并发槽**只在这里取**；冷路径的槽在
+        :meth:`app.sync.bars_cold.ColdZoneMixin._sync_one_cold` 各取各的，
+        :meth:`_sync_one_zones` **不占槽**只做编排。
+
+        绝对不要写「先占槽再调 sync_one」的包裹层：``asyncio.Semaphore``
+        **不可重入**，外层槽占满后内层永远拿不到 ⇒ 整个同步任务永久挂死且
+        日志零输出（2026-10-13 实测 P0，见 :meth:`_sync_one_zones` 的历史教训注释）。
+        """
         async with self._sem:
             paged = False
             try:
@@ -548,7 +377,8 @@ class BarsSyncer:
                            else await self._fetch(code, self._period, self._adjust,
                                                   self._full_count))
                 else:
-                    raw = await self._fetch(code, self._period, self._adjust, self._lookback)
+                    raw = await self._fetch(code, self._period, self._adjust,
+                                           self._hot_count)
             except Exception as exc:  # noqa: BLE001
                 return SyncOutcome(code=code, error=f"抓取异常：{exc}")
             bars, real_src = _split_fetch_result(raw)
@@ -617,9 +447,151 @@ class BarsSyncer:
         keep = [b for d, b in dated if d and d >= floor]
         return keep, len(bars) - len(keep)
 
+    # ------------------------------------------------------------------
+    # 冷热分层（2026-10-10）：按数据条件自动决定"热/冷"要不要同步
+    # ------------------------------------------------------------------
+    def _build_plans(self, codes: Sequence[str]) -> tuple[dict, int, int]:
+        """为每只标的算出冷热同步计划（见 :class:`SyncPlan`）。
+
+        判定**只用库里真实已有的起止日期**当事实游标（与 :meth:`_filter_fresh` /
+        :meth:`_filter_backfilled` 同哲学），不引入额外游标表，崩了也不丢进度：
+
+        - ``needs_hot``：热表最新一根早于「预期交易日」⇒ 今天的新数据还没拉回来。
+        - ``needs_cold``：冷仓最早一根**晚于**目标起点（``full_years`` 年前）⇒
+          历史还没补齐；且未被标记 ``cold_complete``（补齐后不再重拉，避免每天
+          把已退市/近期上市股的冷历史重拉一遍）。
+        - 新股（上市 < 热窗口）天然没有冷区间 ⇒ 不参与冷同步；
+        - ``zone`` 直接决定范围：``hot`` 只热、``cold`` 只冷、``auto``/``both`` 按上式。
+
+        返回 ``(plans, skipped_fresh, skipped_cold)``。
+        """
+        plans: dict = {}
+        hot_target = (self._fresh_target()
+                      if (self._zone != "cold" and self._skip_fresh) else "")
+        hot_latest: dict = {}
+        hot_earliest: dict = {}
+        # 热表最新/最早日期：非 cold 区都要读（hot/both/auto 都可能需要）。
+        # 一次 GROUP BY 同批取回 latest 与 earliest，不付两次查询代价。
+        if self._zone != "cold":
+            try:
+                hot_latest = self._store.latest_dt_map(
+                    list(codes), self._period, self._adjust)
+                hot_earliest = self._store.earliest_dt_map(
+                    list(codes), self._period, self._adjust)
+            except Exception as exc:  # noqa: BLE001 读不到 = 全部当作需同步
+                log.warning("冷热分区读取热表日期失败：%s", exc)
+                hot_latest = {}
+                hot_earliest = {}
+        # 热窗口起点（YYYYMMDD）：早于它的数据才属于「冷区间」。与 KlineCache.hot_cutoff
+        # 同源（都由 bars_hot_days 换算），避免出现「刚搬进冷仓又被热同步写回热表」抖动。
+        hot_cutoff = (local_now().date() - timedelta(days=self._hot_days)).strftime("%Y%m%d")
+        cold_earliest: dict = {}
+        cold_complete: set = set()
+        if self._zone != "hot" and self._cold is not None:
+            try:
+                cold_earliest = self._cold.earliest_dt_map(
+                    list(codes), self._period, self._adjust)
+            except Exception as exc:  # noqa: BLE001 冷仓不可读 = 全部当作需补齐
+                log.warning("冷热分区读取冷仓最早日期失败：%s", exc)
+                cold_earliest = {}
+            cold_complete = self._cold_complete_map(list(codes))
+        cold_target = self._target_start()
+
+        def _covered(c: str) -> bool:
+            """历史是否已覆盖到目标起点（热表或冷仓任一即可）。
+
+            用于全量/冷补齐的**断点续传跳过**——等价旧 ``mode=full`` 的
+            :meth:`_filter_backfilled` 语义：某只票本地（含冷仓）最早一根已 ≤ 目标起点，
+            说明历史已经补齐，整只跳过（热也不必刷），崩了重跑不会把已补齐的再拉一遍。
+            """
+            he = hot_earliest.get(c)
+            ce = cold_earliest.get(c)
+            best = None
+            if he:
+                best = he
+            if ce and (best is None or str(ce) < str(best)):
+                best = ce
+            return best is not None and str(best) <= cold_target
+
+        for c in codes:
+            # ★ zone="cold" 严格只补冷历史、**绝不**碰热表（写 local_bars）。
+            # 此前 do_hot 默认 True、仅在 zone!="cold" 分支里才可能被置 False ⇒
+            # zone="cold" 时 do_hot 恒为 True，热同步照样跑（把冷补齐任务变成
+            # 「又热又冷」），既违背 plan 的语义，又让冷仓调度平白写一遍热表。
+            do_hot = self._zone != "cold"
+            if do_hot and hot_target:
+                if c in hot_latest and str(hot_latest[c]) >= hot_target:
+                    do_hot = False
+            do_cold = False
+            if self._zone != "hot":
+                if self._zone in ("cold", "both"):
+                    # 全量/冷补齐：历史已覆盖到目标起点 ⇒ **整只跳过**（热也不必刷），
+                    # 等价旧 mode=full 的断点续传——已补齐的票不再重拉。
+                    covered = _covered(c)
+                    do_cold = (c not in cold_complete) and not covered
+                    if covered:
+                        do_hot = False
+                else:  # auto：缺失且「确实有冷区间」才补
+                    ce = cold_earliest.get(c)
+                    # ★ 新股 / 近期上市股：本地最早一根仍在热窗口内 ⇒ 根本没有冷区间，
+                    # 不应触发一次全量冷回补（首次补完标记 complete 后虽会跳过，但那次
+                    # 回补拉的全是热窗口内的重复数据，纯浪费）。只在「最早一根早于热窗口」
+                    # 时才认为该股真正需要冷历史。
+                    he = hot_earliest.get(c)
+                    has_cold_interval = he is not None and str(he) < hot_cutoff
+                    do_cold = (c not in cold_complete) and has_cold_interval and (
+                        ce is None or str(ce) > cold_target)
+            plans[c] = SyncPlan(hot=do_hot, cold=do_cold)
+        skipped_fresh = sum(
+            1 for c in codes if self._zone != "cold" and hot_target
+            and c in hot_latest and str(hot_latest[c]) >= hot_target)
+        skipped_cold = sum(1 for c in codes if not plans[c].cold
+                           and self._zone != "hot")
+        return plans, skipped_fresh, skipped_cold
+
+    async def _sync_one_zones(self, code: str, plan: SyncPlan) -> SyncOutcome:
+        """按计划执行单标的的冷热同步（热/冷可独立成失败，互不拖累）。
+
+        ★ 本方法**不占并发槽**，只做编排：槽由叶子操作各自取（
+        :meth:`sync_one` / :meth:`_sync_one_cold`）。
+
+        历史教训（2026-10-13 实测 P0）：本方法曾 ``async with self._sem``
+        包住 ``await self.sync_one(code)``，而 ``sync_one`` 内部也取**同一个**
+        ``asyncio.Semaphore`` —— 该锁**不可重入**，``concurrency`` 个槽被外层
+        占满后内层永远拿不到，于是**整个同步任务永久挂死**：``gather`` 无超时、
+        进程仍活着、日志零输出，且 :meth:`sync_many` 每只标的都走这条路径，
+        所以日常增量 / EOD 全市场同步都会中招。
+        """
+        hot_out = None
+        cold_out = None
+        if plan.hot:
+            hot_out = await self.sync_one(code)
+        if plan.cold:
+            cold_out = await self._sync_one_cold(code)
+        outs = [o for o in (hot_out, cold_out) if o is not None]
+        if not outs:
+            return SyncOutcome(code=code, ok=False, error="无同步计划")
+        if len(outs) == 1:
+            return outs[0]
+        merged = SyncOutcome(code=code)
+        merged.ok = any(o.ok for o in outs)
+        merged.bars_written = sum(o.bars_written for o in outs)
+        merged.cold_written = sum(o.cold_written for o in outs)
+        merged.bars_unchanged = sum(o.bars_unchanged for o in outs)
+        merged.stale = any(o.stale for o in outs)
+        merged.paged = any(o.paged for o in outs)
+        merged.error = " | ".join(o.error for o in outs if o.error)
+        dates = [o.as_of for o in outs if o.as_of]
+        merged.as_of = max(dates) if dates else ""
+        mins = [o.as_of_min for o in outs if o.as_of_min]
+        merged.as_of_min = min(mins) if mins else ""
+        return merged
+
     async def sync_many(self, codes: Sequence[str],
                         progress_cb: Optional[Callable[[int, int, str], None]] = None,
-                        skipped_complete: int = 0) -> SyncSummary:
+                        skipped_complete: int = 0,
+                        plans: Optional[dict] = None,
+                        skipped_cold: int = 0) -> SyncSummary:
         """批量同步（G6 进度钩子：progress_cb(done, total, code) 每完成一只回调）。
 
         ``skipped_complete``（V11 §5.3 P0-3 III）：全量回补时**因本地历史已覆盖到
@@ -657,7 +629,9 @@ class BarsSyncer:
 
         async def _tracked(code: str):
             nonlocal done
-            out = await self.sync_one(code)
+            plan = (plans or {}).get(
+                code, SyncPlan(hot=True, cold=(self._zone != "hot")))
+            out = await self._sync_one_zones(code, plan)
             done += 1
             if progress_cb:
                 progress_cb(done, total, code)
@@ -694,6 +668,7 @@ class BarsSyncer:
             ok=len(ok),
             failed=len(failed),
             bars_written=sum(o.bars_written for o in ok),
+            cold_written=sum(o.cold_written for o in ok),
             bars_unchanged=sum(o.bars_unchanged for o in ok),
             errors=err_list,
             errors_truncated=omitted,
@@ -708,7 +683,9 @@ class BarsSyncer:
             #   ``mode=full`` ⇒ 当前环境没有支持区间的源，已退化为单次大 count，
             #   历史**并未**补齐 —— 界面与报告必须如实说出来。
             paged=(self._mode == "full" and any(o.paged for o in ok)),
-            skipped_complete=int(skipped_complete or 0),
+            # 冷历史补齐跳过数（与全量回补的 skipped_complete 同源：都是
+            # 「因本地已满足而跳过」，避免把「跳了 4000 只」藏起来）。
+            skipped_complete=int(skipped_cold or skipped_complete or 0),
             # 用完即清：避免上一批的跳过数串到下一批报告里（「这次没跳过」会说谎成
             # 「这次跳了很多」，而用户正是据此判断要不要手动补同步的）。
             skipped_fresh=int(self._skipped_fresh or 0),
@@ -794,31 +771,40 @@ class BarsSyncer:
         codes = [str(i.get("code")) for i in items if i.get("code")]
         if limit:
             codes = codes[: int(limit)]
-        # ★ 全量模式的**断点续传**：先按「本地最早一根是哪天」筛掉已补齐的标的。
-        #   放在 ``limit`` 之后 —— limit 是用户显式的「只跑前 N 只」，
-        #   不该被跳过数稀释成「前 N 只里再挑几只」。
-        #   中断后重跑，已补齐的自动跳过 ⇒ 不需要额外的游标表，也不会与真实进度不一致。
-        skipped = 0
-        self._skipped_fresh = 0
-        if self._mode == "full":
-            codes, skipped = self._filter_backfilled(codes)
-            if not codes and skipped:
-                log.info("全量回补：%d 只标的本地历史均已覆盖目标起点，无需回补", skipped)
-        elif self._skip_fresh:
-            pending = len(codes)
-            codes, self._skipped_fresh = self._filter_fresh(codes)
-            skipped_fresh = self._skipped_fresh
-            if not codes and skipped_fresh:
-                log.info("增量同步：%d 只标的本地日线已达 %s，全部跳过",
-                         skipped_fresh, self._fresh_target())
-            elif skipped_fresh:
-                # ★ 显式报「应跑/实跑」：汇总的 total 是**实际拉取**的只数，跳过数由
-                #   skipped_fresh 单列。两个数都在，界面才既能显示「省了多少 RPC」，
-                #   又不会把「实拉 24 只」误读成「全市场只有 24 只」。
-                log.info("增量同步：应同步 %d 只 → 实拉 %d 只（跳过已最新 %d 只）",
-                         pending, len(codes), skipped_fresh)
-        return await self.sync_many(codes, progress_cb=progress_cb,
-                                    skipped_complete=skipped)
+        # ★ 冷热分区（2026-10-10）：一次性算出每只标的的「热/冷」要不要同步，
+        #   用库里真实已有的起止日期当游标（与旧 ``_filter_fresh`` / ``_filter_backfilled``
+        #   同哲学，但统一到一张计划表上，避免热冷两套判定各写一遍）。
+        #   放在 ``limit`` 之后 —— limit 是用户显式的「只跑前 N 只」，不该被跳过数稀释。
+        #   中断后重跑，已最新的 / 冷历史已补齐的自动跳过 ⇒ 不需要额外游标表。
+        plans, skipped_fresh, skipped_cold = self._build_plans(codes)
+        self._skipped_fresh = skipped_fresh
+        # 过滤掉「热冷都不需要」的标的：否则会产生一串空 outcome（total 虚高、界面误读）。
+        run_codes = [c for c in codes
+                     if (plans.get(c) or SyncPlan()).hot
+                     or (plans.get(c) or SyncPlan()).cold]
+        if not run_codes:
+            if skipped_fresh or skipped_cold:
+                log.info("同步：热跳过 %d 只、冷跳过 %d 只 —— 全部已最新 / 冷历史已补齐",
+                         skipped_fresh, skipped_cold)
+            else:
+                log.info("同步：无待同步标的（代码池为空）")
+            # ★ 提前返回也必须把跳过数带出去：调用方（jobs.py）据此区分
+            # 「真空转」与「断点续传/已最新」。漏带会让 weekly 冷调度在「已全部补齐」时
+            # 被误判为「未获取到任何股票」而报失败（实测风险，见 jobs.py 的同名判据）。
+            return SyncSummary(started=now_iso(), finished=now_iso(), total=0,
+                               ok=0, failed=0, errors=[], elapsed_ms=0, mode=self._mode,
+                               skipped_complete=skipped_cold,
+                               skipped_fresh=skipped_fresh)
+        if skipped_fresh:
+            # ★ 显式报「应跑/实跑」：汇总的 total 是**实际拉取**的只数，跳过数单列。
+            log.info("增量同步：应同步 %d 只 → 实拉 %d 只（热跳过已最新 %d 只）",
+                     len(codes), len(run_codes), skipped_fresh)
+        if skipped_cold:
+            log.info("冷历史：%d 只已补齐跳过（仅 %d 只需补冷）",
+                     skipped_cold, sum(1 for c in run_codes
+                                       if (plans.get(c) or SyncPlan()).cold))
+        return await self.sync_many(run_codes, progress_cb=progress_cb,
+                                    skipped_complete=skipped_cold, plans=plans)
 
 
 async def _main(limit: int, concurrency: int, lookback: int) -> int:

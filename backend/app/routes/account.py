@@ -16,14 +16,49 @@ from app.routes._common import (
 )
 from app.services import account_store
 from app.services.positions import enrich_positions
+# paper 模式账本映射：/account/status 与 /trade/positions|orders|deals 同族
+# （2026-10-12 一起补的模式分流，详见 routes/trade.py 文件头注释）。
+from app.services import paper_ledger as _paper_ledger
 from gateway.execution import get_execution_service
 from core.clock import now_iso
 
 router = APIRouter()
 
+
+def _exec_mode(ctx) -> str:
+    """当前执行模式（SignalRouter.mode：live / paper / dry_run）。"""
+    return str(getattr(ctx.signal_router, "mode", "") or "")
+
+
+def _ledger_engine(ctx):
+    """paper 账本引擎：优先 SignalRouter 持有实例（成交由它写入），
+    回落 active_context().paper_engine。"""
+    sr = ctx.signal_router
+    pe = getattr(sr, "paper_engine", None) if sr is not None else None
+    if pe is None:
+        from core.context import active_context
+        pe = getattr(active_context(), "paper_engine", None)
+    return pe
+
 @router.get("/account/status")
 async def account_status(conn_id: str = "", ctx: AppContext = Depends(get_ctx)):
-    """获取account / status（GET /account/status）。"""
+    """获取account / status（GET /account/status）。
+
+    ★ 2026-10-12：按执行模式分流（与 /trade/positions|orders|deals 同族修复）。
+    paper 模式返回**模拟盘账本**（``connected=False`` + ``mode="paper"`` 显式
+    标注来源，防止消费方把模拟持仓当成券商真实持仓）；此前无条件捅券商，
+    paper 模式下恒 503「缺少券商 SDK」——大QMT 桥明明已连接。
+    dry_run 模式无账本可查（预演只生成计划），503 + 模式归因。
+    """
+    mode = _exec_mode(ctx)
+    if mode == "paper":
+        pe = _ledger_engine(ctx)
+        if pe is None:
+            return err(503, "模拟盘引擎未初始化（paper 模式不可查账户）")
+        return ok(_paper_ledger.paper_account_status(pe))
+    if mode == "dry_run":
+        return err(503, "当前为「预演（dry_run）」模式：不连接券商、不维护账本，"
+                         "没有账户视图可查。切换到模拟盘或实盘模式后再查。")
     b = _need(conn_id or None)
     if b is None:
         return no_broker()
@@ -51,6 +86,11 @@ async def account_status(conn_id: str = "", ctx: AppContext = Depends(get_ctx)):
 @router.get("/account/aggregate")
 async def account_aggregate(ctx: AppContext = Depends(get_ctx)):
     """多账户聚合视图：遍历所有已连接券商账户，汇总资产/持仓/委托/成交。"""
+    # ★ 模式归因：paper 下没有任何券商账户可聚合，落到 no_broker() 会把
+    #   「当前是模拟盘」误报成「没连券商」，用户会跑去券商连接页排查。
+    if _exec_mode(ctx) == "paper":
+        return err(503, "多账户聚合视图需要至少一个券商账户；当前为模拟盘模式，"
+                        "单一账本由 /account/status 提供。")
     conns = [c for c in ctx.broker_manager.all_connections() if c.connected]
     if not conns:
         return no_broker()
@@ -134,6 +174,11 @@ async def account_slippage(code: str = "", conn_id: str = "", ctx: AppContext = 
     """
     if not code:
         return err(400, "code 必填（指定要分析滑点的标的代码）")
+    # ★ 模式归因：滑点 = 成交价 vs 当日行情基准的差，依赖券商成交记录（含成交价）。
+    #   模拟盘撮合是即时成交（无排队、无部分成交），根本不存在滑点概念。
+    if _exec_mode(ctx) == "paper":
+        return err(503, "滑点分析需要券商成交记录（含成交价）与行情基准对照；"
+                        "当前为模拟盘模式，撮合即时成交无排队，不存在滑点。")
     b = _need(conn_id or None)
     if b is None:
         return no_broker()
@@ -248,6 +293,11 @@ async def account_grid(ctx: AppContext = Depends(get_ctx)):
     """
     conns = ctx.broker_manager.all_connections()
     if not conns:
+        # ★ 模式归因：模拟盘下不需要任何券商连接，把「没连券商」报出来会
+        #   引导用户去做一件无意义的事（连券商才能看模拟盘网格）。
+        if _exec_mode(ctx) == "paper":
+            return err(503, "多账户网格看板需要券商账户；当前为模拟盘模式，"
+                            "单一账本由 /account/status 提供。")
         return err(503, "尚未添加任何券商连接：请到「券商连接」页添加券商。")
     rows: list[dict] = []
     pos_by_conn: list[tuple[object, list[dict]]] = []

@@ -591,6 +591,54 @@ def test_flow3_manual_order_with_confirmation(h):
     h.run(scenario())
 
 
+def test_flow3b_mode_switch_same_params_is_not_deduped(h):
+    """★ 2026-10-12：**模式切换后**的同参数单不得被路由层幂等缓存顶替。
+
+    实测复现（本机 21118 真实链路）：``/trade/order`` 的 ``single_flight``
+    key 曾只含 code/direction/volume/price/price_type —— dry_run 下单后 5s
+    内切 live 再下同参单，**直接返回上一单 dry_run 的计划**（连 remark 都是
+    旧的）。用户以为实盘单已报，实则零真实委托 —— 假成功。
+
+    key 纳入 mode + conn_id 后：模式/账户切换 = 不同意图，不合并；
+    同上下文双击仍旧合并（duplicated=True，防抖动语义不被修死）。
+    """
+    async def scenario():
+        async with h.client() as c:
+            # 1) dry_run：只生成计划，不碰柜台
+            await c.post("/api/v1/signal/mode", json={"mode": "dry_run"})
+            plan = _ok(await c.post("/api/v1/trade/order", json={
+                "code": "600519.SH", "direction": "buy", "volume": 10,
+                "price": 1000.0, "remark": "mode-switch-plan"}))
+            assert plan.get("mode") == "dry_run", plan
+            assert plan.get("would_execute") is True, plan
+            assert h.bridge.gateway.orders == [], "dry_run 不得向柜台报单"
+
+            # 2) 切 live 同参再下单 —— 必须**重新评估**，不得返回 plan 的缓存
+            await c.post("/api/v1/signal/mode", json={"mode": "live"})
+            live_resp = await c.post("/api/v1/trade/order", json={
+                "code": "600519.SH", "direction": "buy", "volume": 10,
+                "price": 1000.0, "remark": "mode-switch-live"})
+            # duplicated 在顶层信封（single_flight 包的是 ok(res) 整个响应）
+            assert _data(live_resp).get("duplicated") is not True, (
+                f"切模式后的同参单被幂等缓存顶替：{_data(live_resp)}")
+            live = _ok(live_resp)
+            assert live.get("mode") != "dry_run", live
+            assert live.get("would_execute") is not True, live
+            # FakeRisk 放行 ⇒ 真的向柜台报了一单（不是拿 dry_run 计划充数）
+            assert len(h.bridge.gateway.orders) == 1, "live 单未真实下发"
+
+            # 3) 同上下文双击仍旧合并（防抖动不能被修死）。
+            #    注意：duplicated 标记在**顶层信封**（single_flight 包的是
+            #    ``ok(res)`` 整个响应），data 内层没有，故不过 _ok 解包。
+            dbl_resp = await c.post("/api/v1/trade/order", json={
+                "code": "600519.SH", "direction": "buy", "volume": 10,
+                "price": 1000.0, "remark": "mode-switch-doubleclick"})
+            assert _data(dbl_resp).get("duplicated") is True, _data(dbl_resp)
+            assert len(h.bridge.gateway.orders) == 1, "双击又下一单"
+
+    h.run(scenario())
+
+
 # ============================ 流程 4：算法交易 TWAP ============================
 
 def test_flow4_algo_twap_slices_and_control(h):

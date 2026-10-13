@@ -170,9 +170,15 @@ export interface Deal {
 /**
  * GET /account/status 的真实返回（account.py:account_status）。
  * 注意：字段是 assets 而非 total_assets；且带 positions 数组。
+ *
+ * ★ 2026-10-12：paper 模式下返回的是**模拟盘账本**——connected=false 且
+ *   mode="paper"（后端 app/services/paper_ledger.py 的诚实标注：这些持仓
+ *   不是券商真实持仓）。dry_run 模式无账本，后端返回 503 + 模式归因。
  */
 export interface AccountStatus {
   connected: boolean;
+  /** "paper" = 模拟盘账本来源标注（仅 paper 模式返回；live 模式无此字段）。 */
+  mode?: string;
   assets?: number;
   cash?: number;
   position_count?: number;

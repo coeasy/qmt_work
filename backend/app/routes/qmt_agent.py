@@ -495,13 +495,22 @@ async def status(request: Request):
 
     deployed: dict[str, Any] = {"exists": False}
     if qmt:
+        sdir = Path(_strategy_dir(qmt))
         for name in ("qmt_work_agent.py", "QMT_WORK_AGENT.py"):
-            p = Path(_strategy_dir(qmt)) / name
+            p = sdir / name
             if p.is_file():
                 stat = p.stat()
+                # Windows 文件系统大小写不敏感：注册树登记的是大写
+                # QMT_WORK_AGENT.py，但循环先试的小写名也能打开**同一个**文件
+                # ⇒ 用小写名上报等于给 Operator 指一个「盘上不存在」的路径
+                # （手册/注册树/部署脚本 --filename 全用大写）。报告磁盘真名。
+                real_name = next(
+                    (f.name for f in sdir.iterdir()
+                     if f.name.lower() == name.lower()),
+                    name)
                 deployed = {
                     "exists": True,
-                    "path": str(p),
+                    "path": str(sdir / real_name),
                     "size_bytes": stat.st_size,
                     # 唯一时钟入口：文件 mtime → ISO 本地时间（不用裸 time.strftime）
                     "mtime": datetime.fromtimestamp(

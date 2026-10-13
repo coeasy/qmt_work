@@ -261,6 +261,11 @@ def test_commercial_mode_blocks_tdx_only_on_eltdx_fallback(monkeypatch):
             assert await m.search_stocks("E") == [{"code": "E.SH", "name": "E"}]
 
             # --- 商用 + easy_tdx（MIT）：tdx 保留，不被许可证过滤 ---
+            # ★ 必须显式钉住后端：``is_commercial_ok`` 按**实际安装的传输后端**
+            #   动态判定（``active_backend() == "easy_tdx"``），本机没装 easy_tdx
+            #   时返回 ``"none"``，此断言会**假失败**（2026-10-13 实测）。
+            #   与下方 eltdx 分支对称：那段早已显式 monkeypatch，这段却漏了。
+            monkeypatch.setattr(tt, "active_backend", lambda: "easy_tdx")
             m.set_commercial_mode(True)
             assert m._license_ok("tdx") is True
             assert (await m.get_quote("X.SH"))["source"] == "tdx"
@@ -285,12 +290,18 @@ def test_license_gate_keeps_broker_and_public_sources():
     m = _m()
     m.set_commercial_mode(True)
     assert m._license_ok("broker") is True   # 券商授权终端，授权即合规
-    assert m._license_ok("tdx") is True      # easy_tdx: MIT（默认后端）
+    # ★ tdx 的商用判定是**动态**的（看实际后端是否 easy_tdx），必须显式钉住，
+    #   否则本用例的结论取决于「这台机器装没装 easy_tdx」—— 默认配置下 eltdx
+    #   Research-Only 且不随包分发，active_backend() 返回 "none" ⇒ 假失败。
+    orig = tt.active_backend
+    try:
+        tt.active_backend = lambda: "easy_tdx"
+        assert m._license_ok("tdx") is True  # easy_tdx: MIT
+    finally:
+        tt.active_backend = orig
     assert m._license_ok("baostock") is True  # BSD-3-Clause
     assert m._license_ok("akshare") is True   # MIT
     # 回退后端（eltdx, Research-Only）→ 商用必须过滤；测后恢复
-    import datasource.tdx_transport as tt
-    orig = tt.active_backend
     try:
         tt.active_backend = lambda: "eltdx"
         assert m._license_ok("tdx") is False

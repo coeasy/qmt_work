@@ -279,10 +279,29 @@ def test_standalone_process_boots_and_exits_cleanly(bundle_file, tmp_path):
     assert probe.get("injected") == []
 
     status = json.loads((bridge / "agent_status.json").read_text(encoding="utf-8"))
-    assert status["alive"] is True
+    # ★ 进程已按 max_seconds 正常退出 ⇒ 最后一份心跳必须**诚实**说 alive=false。
+    #   旧实现退出时恒写 alive=true —— 一个已死 agent 的遗言却自称活着（假绿灯），
+    #   外部端若直接读该字段而不看心跳年龄就会被骗。此断言锁死修复后的语义。
+    assert status["alive"] is False, "退出后的最后一份心跳不得自称 alive=true"
+    assert status.get("last_error") == "max_seconds", "退出原因须如实写明"
     assert status["runtime_mode"] == "standalone_process"
     assert status["agent_ver"], "心跳必须带 agent 版本（外部端据此判断版本一致性）"
     assert int(time.time() * 1000) - int(status["ts"]) < 3600_000
+
+
+def test_stop_file_is_consumed_not_left_to_kill_every_start(bundle_text, tmp_path):
+    """★ 2026-10-12：STOP 必须被**消费**（改名），否则每次启动都被第一轮杀死。
+
+    真机教训：STOP 留在原处 → QMT 每次拉起策略都「启动即停止」，而 QMT **不会**
+    自动重启 graceful 退出的策略 → 桥静默变黑。改名后下次启动恢复正常，
+    并留下 `STOP.consumed.<ts>` 作为「确被 STOP 停过」的物证。
+    """
+    ns = _load_as_namespace(bundle_text)
+    stop = tmp_path / "STOP"
+    stop.write_text("", encoding="utf-8")
+    assert ns["_consume_stop_file"](str(stop)) is True
+    assert not stop.exists(), "STOP 必须被消费掉（否则下次启动会被立即杀死）"
+    assert list(tmp_path.glob("STOP.consumed.*")), "应留下 STOP.consumed.<ts> 物证"
 
 
 def test_standalone_process_does_not_pretend_to_have_trading(bundle_file, tmp_path):

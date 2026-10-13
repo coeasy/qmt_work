@@ -22,6 +22,7 @@ const healthy = {
   actions: ["PLACE", "CANCEL_ORDER", "QUERY_POSITION", "QUERY_KLINE"],
   agent: {
     ver: "1.0.0",
+    agent_ver: "1.2.0",
     py: "3.6.8",
     funcs: ["passorder", "cancel", "get_trade_detail_data", "get_trading_dates"],
     trading_enabled: true,
@@ -58,6 +59,14 @@ describe("describeBigQmtProbe · 健康态", () => {
     expect(v.subscribed).toBe(3);
     expect(v.callbackBound).toBe(true);
     expect(v.headline).toContain("可下单");
+    // ★ 版本展示必须优先桥壳版 agent_ver（协议层 ver 会滞后，运维据此判断
+    //   「要不要重部署」会被骗——2026-10-12 单源注入修复）
+    expect(v.headline).toContain("agent v1.2.0");
+    expect(v.headline).not.toContain("agent v1.0.0");
+    // 老 agent（未注入桥壳版）诚实回退协议层 ver，不得显示「?」
+    const legacy = describeBigQmtProbe({
+      ...healthy, agent: { ...healthy.agent, agent_ver: undefined } });
+    expect(legacy.headline).toContain("agent v1.0.0");
     expect(v.livenessTone).toBe("ok");
     expect(v.available).toBe(true);
     expect(v.livenessLabel).toContain("现在可用");
@@ -118,12 +127,16 @@ describe("describeBigQmtProbe · 四种根因必须互相可区分", () => {
     const v = describeBigQmtProbe({
       ...healthy,
       agent: { ...healthy.agent, funcs: [] },
-      root_cause: "agent 已就绪但一个注入函数都没捕获到：策略运行在错误的位置",
+      root_cause: "agent 已就绪但一个终端注入函数都没有：当前以独立进程运行",
     });
     expect(v.funcsCount).toBe(0);
     expect(v.headline).not.toBe("agent 未应答");   // agent 其实活着
     expect(v.headline).toContain("注入函数 0");
     expect(v.rootCause).toContain("注入函数");
+    // ★ 2026-10-12：无 passorder 时不得把模式问题说成配置问题（后端 root_cause
+    //   同族缺陷已修，前端 headline 不得复刻误导）
+    expect(v.headline).not.toContain("trading_enabled=false");
+    expect(v.headline).toContain("下单不可用");
   });
 
   it("④ trading_enabled=false：必须明说只读，不能让用户以为是连接问题", () => {
@@ -131,6 +144,16 @@ describe("describeBigQmtProbe · 四种根因必须互相可区分", () => {
       ...healthy, agent: { ...healthy.agent, trading_enabled: false } });
     expect(v.headline).toContain("只读");
     expect(v.headline).toContain("trading_enabled=false");
+  });
+
+  it("④边角 trading_enabled=false 但无 passorder：模式问题优先于配置问题", () => {
+    const v = describeBigQmtProbe({
+      ...healthy,
+      agent: { ...healthy.agent, funcs: [], trading_enabled: false },
+    });
+    // 有 passorder 时才轮到 trading_enabled 说话；否则改了也下不了单
+    expect(v.headline).toContain("下单不可用");
+    expect(v.headline).not.toContain("trading_enabled=false");
   });
 
   it("⑤ 行情泵没跑：pumpOk=false 且文案是「未运行」", () => {

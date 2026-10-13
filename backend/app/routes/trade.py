@@ -9,6 +9,13 @@ from app.routes._common import (MSG_NO_BROKER, _call, _need, envelope_ok, err,
 # /trade/positions 与 /account/status（仪表盘「持仓盈亏」）必须共用同一实现，
 # 否则两页会各说各话（实测：持仓页 -10.4、仪表盘 0）。
 from app.services.positions import enrich_names, enrich_positions
+# paper 模式的账本查询映射（PaperEngine → 平台契约形状）。查询端点按执行模式
+# 分流：live 走券商，paper 读本地账本 —— 见各端点注释与 paper_ledger docstring。
+from app.services.paper_ledger import (
+    paper_deals as _paper_deals,
+    paper_orders as _paper_orders,
+    paper_positions as _paper_positions,
+)
 from app.services.order_contract import normalize_deals, normalize_orders
 
 # --- stdlib imports injected by fix_route_imports ---
@@ -19,6 +26,43 @@ log = logging.getLogger("qmt_work.routes.trade")
 
 # 兼容别名：既有调用方/测试仍以 routes.trade._enrich_names 引用
 _enrich_names = enrich_names
+
+
+# ---------------- 查询端点的执行模式分流 ----------------
+#
+# ★★ 2026-10-12：positions / orders / deals 三个查询端点补上与 /trade/order
+#    （2026-09-20 已修）对称的模式分流。修复前它们无条件 ``_need()`` 捅券商，
+#    实测形态（paper 模式、大QMT 桥 connected、agent 无注入函数）：
+#
+#       POST /trade/order  → 200 PAPER-9 filled      ← 模拟盘成交成功
+#       GET  /trade/orders → 503「缺少券商 SDK：未捕获到 get_trade_detail_data」
+#
+#    「单成交了却永远查不回来」：Trade 页三个页签在 catch{} 静默兜底下恒为空。
+#    归因规则沿用本文件既有口径（见 /trade/cancel 注释）：
+#       live    → 券商路径（不变）；
+#       paper   → 本地 PaperEngine 账本（契约形状映射见 services/paper_ledger）；
+#       dry_run → 503 + 模式归因（预演不产生任何委托/持仓/成交）；
+#       模式未知/路由未初始化 → 保持原券商路径（不改变既有行为）。
+
+_DRY_RUN_NO_DATA = ("当前为「预演（dry_run）」模式：信号只生成交易计划，"
+                    "不连接券商、不维护账本，因此没有{what}可查。"
+                    "切换到模拟盘或实盘模式后再查。")
+
+
+def _exec_mode(ctx) -> str:
+    """当前执行模式（SignalRouter.mode：live / paper / dry_run）。"""
+    return str(getattr(ctx.signal_router, "mode", "") or "")
+
+
+def _ledger_engine(ctx):
+    """paper 账本引擎：优先取 SignalRouter 持有的实例（成交由它写入），
+    回落 active_context().paper_engine（bootstrap 注入的是同一个对象）。"""
+    sr = ctx.signal_router
+    pe = getattr(sr, "paper_engine", None) if sr is not None else None
+    if pe is None:
+        from core.context import active_context
+        pe = getattr(active_context(), "paper_engine", None)
+    return pe
 
 router = APIRouter()
 
@@ -102,7 +146,18 @@ async def trade_order(body: dict, ctx: AppContext = Depends(get_ctx)):
 
     # 幂等：显式 idempotency_key（前端/重试传）优先；否则按委托内容哈希去重，
     # 双击/超时重试同参数在窗口内只下一单，杜绝重复成交。
-    key = idem or f"manual:{code}:{direction}:{volume}:{price}:{price_type}"
+    #
+    # ★ 2026-10-12：key 必须含**执行上下文**（mode + conn_id）。
+    #   此前 key 只有 code/direction/volume/price/price_type —— 实测复现：
+    #   paper 下单（PAPER-N）→ 5s 内切 live → 同参再下单 → 命中窗口缓存，
+    #   **返回上一单 paper 的成交结果**（连 remark/order_id 都是旧的）。
+    #   用户以为 live 单已报，实则零真实委托 —— 假成功。
+    #   「防双击」要合并的是**完全相同上下文**的重复投递；模式/账户切换后的
+    #   同参数单是两笔不同意图，绝不能合并。
+    _idem_mode = str(getattr(ctx.signal_router, "mode", "") or "")
+    _idem_conn = str(body.get("conn_id", "") or "")
+    key = idem or (f"manual:{code}:{direction}:{volume}:{price}:{price_type}"
+                   f":{_idem_mode}:{_idem_conn}")
     return await single_flight(key, _run, window=5.0)
 
 @router.post("/trade/cancel")
@@ -172,7 +227,20 @@ async def trade_positions(symbol: str = "", ctx: AppContext = Depends(get_ctx)):
 
     券商只回 code/name/volume/avail/cost/market_value；本接口在此之上按真实行情
     补算 price / profit / profit_pct（拿不到行情则留空，见 app.services.positions）。
+
+    ★ 2026-10-12：按执行模式分流（详见文件头「查询端点的执行模式分流」）。
+    paper 模式返回本地模拟盘账本 —— 此前无条件捅券商，表现为「模拟盘成交了
+    但持仓页签恒为空」（券商侧 503 被前端 catch{} 静默吞掉）。
     """
+    mode = _exec_mode(ctx)
+    if mode == "paper":
+        pe = _ledger_engine(ctx)
+        if pe is None:
+            return err(503, "模拟盘引擎未初始化（paper 模式不可查持仓）")
+        rows = _paper_positions(pe, symbol)
+        return envelope_ok(enrich_names(rows))
+    if mode == "dry_run":
+        return err(503, _DRY_RUN_NO_DATA.format(what="持仓"))
     b = _need()
     if b is None:
         return no_broker()
@@ -188,7 +256,20 @@ async def trade_orders(ctx: AppContext = Depends(get_ctx)):
     ``direction`` / ``dealt``，界面与消费方读 ``side`` / ``filled``；两者**都给**，
     既有调用方不受影响。``status`` 一律归一到平台标准词表
     （partial/cancelled/...），原始值留 ``status_raw``。
+
+    ★ 2026-10-12：按执行模式分流（详见文件头）。paper 模式返回本地模拟盘账本
+    （PaperEngine 即时撮合 ⇒ 恒 filled，order_id 为 PAPER-{id}，撤单路径经
+    ``is_paper_order_id`` 识别后如实说明「券商柜台不存在这笔委托」）。
     """
+    mode = _exec_mode(ctx)
+    if mode == "paper":
+        pe = _ledger_engine(ctx)
+        if pe is None:
+            return err(503, "模拟盘引擎未初始化（paper 模式不可查委托）")
+        rows = _paper_orders(pe)
+        return envelope_ok(normalize_orders(_enrich_names(rows)))
+    if mode == "dry_run":
+        return err(503, _DRY_RUN_NO_DATA.format(what="委托"))
     b = _need()
     if b is None:
         return no_broker()
@@ -201,7 +282,19 @@ async def trade_deals(ctx: AppContext = Depends(get_ctx)):
 
     ★ 归一说明见 ``/trade/orders``。成交无独立成交号，``deal_id`` 由
     ``order_id`` + ``seq`` 兜底（界面要用它做列表 key，必须有值）。
+
+    ★ 2026-10-12：按执行模式分流（详见文件头）。paper 模式返回本地模拟盘账本
+    （一笔委托即一笔成交，deal_id 与 order_id 同为 PAPER-{id}）。
     """
+    mode = _exec_mode(ctx)
+    if mode == "paper":
+        pe = _ledger_engine(ctx)
+        if pe is None:
+            return err(503, "模拟盘引擎未初始化（paper 模式不可查成交）")
+        rows = _paper_deals(pe)
+        return envelope_ok(normalize_deals(_enrich_names(rows)))
+    if mode == "dry_run":
+        return err(503, _DRY_RUN_NO_DATA.format(what="成交"))
     b = _need()
     if b is None:
         return no_broker()
@@ -211,6 +304,13 @@ async def trade_deals(ctx: AppContext = Depends(get_ctx)):
 @router.post("/trade/target")
 async def trade_target(body: dict, ctx: AppContext = Depends(get_ctx)):
     """创建/提交trade / target（POST /trade/target）。"""
+    # ★ paper / dry_run 明确归因，而不是落到 no_broker() 的「请去连接券商」。
+    #   目标持仓调仓依赖券商实时返回的可用资金与持仓市值（get_cash /
+    #   get_positions / get_quote）做差额计算，模拟盘账本没有「券商实时口径」
+    #   可对齐 —— 强行走文件账本会算出一份与真实账户不一致的目标单。
+    if _exec_mode(ctx) == "paper":
+        return err(503, "目标持仓调仓需要券商实时返回的可用资金与持仓市值做差额计算，"
+                        "模拟盘账本没有券商口径可对齐，故不支持该操作（请用逐笔下单）。")
     b = _need()
     if b is None:
         return no_broker()

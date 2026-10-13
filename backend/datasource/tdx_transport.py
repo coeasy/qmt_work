@@ -72,7 +72,21 @@ if _HAS_EASY_TDX:
         "1d": Period.DAILY, "1w": Period.WEEKLY, "1mo": Period.MONTHLY,
     }
 
-_MARKET_BY_PFX = {"sh": Market.SH, "sz": Market.SZ, "bj": Market.BJ} if _HAS_EASY_TDX else {}
+# 市场前缀 → 规范市场串（**不依赖 easy_tdx**，纯逻辑判定表）。
+#
+# ★ 历史缺陷（2026-10-13 R1，全量回归实锤）：本表曾写成
+# ``{...: Market.SH/SZ/BJ} if _HAS_EASY_TDX else {}`` —— 未装 easy_tdx 时**整体退化为空表**，
+# 于是纯逻辑函数 :func:`_pfx6` 的最后一道判定 ``s[:2] not in _MARKET_BY_PFX``
+# 把**所有**代码形态（'sh600519' / '600519.SH' / '600519'）统统判成「非法 TDX 代码」，
+# 整条 TDX 查询链路在无 easy_tdx 的环境（含测试运行时 runtimes/cp311）上直接不可用，
+# 且没有任何日志可查 —— 静默不可用。
+# 规范要求：市场串前缀的识别是**字符串协议**，不该依赖可选依赖是否装上了。
+_MARKET_PFXES = ("sh", "sz", "bj")
+
+# 市场前缀 → easy_tdx ``Market`` 枚举。仅在 easy_tdx 可用时非空；
+# 消费方（``get_belong_board`` / ``get_symbol_info`` 等）必须先过 :func:`is_available`。
+_MARKET_BY_PFX = ({"sh": Market.SH, "sz": Market.SZ, "bj": Market.BJ}
+                  if _HAS_EASY_TDX else {})
 
 # 各交易所代码段分类（与 eltdx_utils.is_index_code 同一口径，见其 docstring）
 _STOCK_PFX = {
@@ -131,11 +145,11 @@ def _pfx6(ec: str) -> tuple[str, str]:
         code_part, _, suf = s.partition(".")
         # 后缀（sh/sz/bj）是**权威**市场标识，必须采信——否则 '000001.SZ'
         # 会被截成 '000001' 再按代码段推断成 sh，深市个股被错当成上证指数口径。
-        code_part = code_part[2:] if code_part[:2] in _MARKET_BY_PFX else code_part
-        s = (suf + code_part) if suf in _MARKET_BY_PFX else code_part
+        code_part = code_part[2:] if code_part[:2] in _MARKET_PFXES else code_part
+        s = (suf + code_part) if suf in _MARKET_PFXES else code_part
     if len(s) == 6 and s.isdigit():               # 纯数字：按代码段推断市场
         s = _MARKET_BY_NUM.get(s[:2], _MARKET_BY_NUM.get(s[:1], "sh")) + s
-    if len(s) != 8 or s[:2] not in _MARKET_BY_PFX:
+    if len(s) != 8 or s[:2] not in _MARKET_PFXES:
         raise ValueError(f"非法 TDX 代码：{ec!r}")
     return s[:2], s[2:]
 

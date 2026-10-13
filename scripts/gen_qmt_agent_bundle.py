@@ -103,7 +103,7 @@ _OWN_ANCHOR = "_OWN_NAMES = frozenset()"
 _HEADER = '''# -*- coding: utf-8 -*-
 """qmt_work 大 QMT 桥接 agent —— 单文件策略（自动生成，请勿手改）。
 
-来源   : backend/agent_bigqmt/qmt_api.py + backend/agent_bigqmt/BIGQMT_AGENT.py
+来源   : backend/agent_bigqmt/{{qmt_api.py, agent_runtime.py, BIGQMT_AGENT.py}}
 生成器 : scripts/gen_qmt_agent_bundle.py
 生成于 : {stamp}
 
@@ -146,6 +146,13 @@ from __future__ import print_function
 _MID = '''
 # ===========================================================================
 # END qmt_api.py
+# BEGIN agent_runtime.py（内联）
+# ===========================================================================
+'''
+
+_MID2 = '''
+# ===========================================================================
+# END agent_runtime.py
 # BEGIN BIGQMT_AGENT.py（内联）
 # ===========================================================================
 '''
@@ -173,16 +180,37 @@ def _strip_future(src):
 
 
 def _strip_agent_imports(src):
-    """把 agent 里 `from qmt_api import Executor` 换成内联说明。
+    """把 agent 里 `from qmt_api import ...` / `from agent_runtime import ...`
+    换成内联说明。
 
-    内联后 Executor 已是本文件的顶层名字，导入行会变成循环/无效导入。
+    内联后这些名字都已是本文件的顶层名字，导入行会变成循环/无效导入。
+    开发态需要这些导入来保证 IDE 补全与单独 import 可用；发布态必须剥掉。
+
+    ★ 必须处理**多行括号导入**（`from x import (\n  a,\n  b,\n)`）：
+      只剥首行会留下悬空的续行与未闭合括号，bundle 直接 SyntaxError。
     """
     out = []
+    skipping = False
+    depth = 0
     for line in src.splitlines():
         stripped = line.strip()
-        if stripped.startswith("from qmt_api import"):
-            indent = line[:len(line) - len(line.lstrip())]
-            out.append(indent + "# bundle: Executor 已在本文件内联定义（无外部依赖）")
+        if not skipping:
+            if stripped.startswith("from qmt_api import"):
+                note = "# bundle: qmt_api 的名字已在本文件内联定义（无外部依赖）"
+            elif stripped.startswith("from agent_runtime import"):
+                note = "# bundle: agent_runtime 的名字已在本文件内联定义（无外部依赖）"
+            else:
+                note = None
+            if note is not None:
+                indent = line[:len(line) - len(line.lstrip())]
+                out.append(indent + note)
+                depth = line.count("(") - line.count(")")
+                skipping = depth > 0
+                continue
+        else:
+            depth += line.count("(") - line.count(")")
+            if depth <= 0:
+                skipping = False
             continue
         out.append(line)
     return "\n".join(out)
@@ -279,14 +307,16 @@ def _has_main_guard(tree):
 
 def build(embed=None, stamp=""):
     api = _strip_future(_read("qmt_api.py"))
+    runtime = _strip_future(_read("agent_runtime.py"))
     agent = _strip_agent_imports(_strip_future(_read("BIGQMT_AGENT.py")))
     if embed:
         agent = _embed(agent, embed)
-    body = _HEADER.format(stamp=stamp) + api + _MID + agent + _TAIL
+    body = (_HEADER.format(stamp=stamp) + api + _MID + runtime + _MID2
+            + agent + _TAIL)
     if not body.endswith("\n"):
         body += "\n"
     # ★ _OWN_NAMES 必须在**整份 bundle 组装完之后**按 AST 注入 —— 它要覆盖
-    #   qmt_api.py + BIGQMT_AGENT.py 两个来源的全部顶层名字。
+    #   qmt_api.py + agent_runtime.py + BIGQMT_AGENT.py 三个来源的全部顶层名字。
     return _inject_own_names(body)
 
 
@@ -318,9 +348,10 @@ def check(text):
     #   本仓早已写过这条教训（见 `check_bigqmt_agent_py36.py` 的「只扫代码，不扫字符串」）。
     #   内联后 qmt_api 的名字都在本文件顶层 ⇒ 任何仍存在的 qmt_api 导入都是错的。
     for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.module == "qmt_api":
+        if isinstance(node, ast.ImportFrom) and node.module in ("qmt_api", "agent_runtime"):
             problems.append(
-                "仍存在 qmt_api 导入语句（第 %d 行，内联不完整）" % node.lineno)
+                "仍存在 %s 导入语句（第 %d 行，内联不完整）"
+                % (node.module, node.lineno))
     if text.count("from __future__ import print_function") != 1:
         problems.append("`from __future__` 行数不为 1")
     if "\t" in text:

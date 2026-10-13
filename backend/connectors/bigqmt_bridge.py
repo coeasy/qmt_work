@@ -196,7 +196,12 @@ class BigQmtBridge:
     def client_version(self) -> str:
         meta = getattr(self.connector.transport, "agent_meta", None)
         meta = meta() if callable(meta) else (meta or {})
-        return "agent " + str((meta or {}).get("ver") or "?")
+        # ★ 桥壳版本（agent_ver）优先：它才是「跑的 agent 是哪个版本」。
+        #   ver 是协议层版本，两者独立演进，只看 ver 会低估 agent
+        #   （曾实测：显示 1.0.0 而实跑 1.2.0）。
+        ver = ((meta or {}).get("agent_ver")
+               or (meta or {}).get("ver") or "?")
+        return "agent " + str(ver)
 
     # ---------------- 工作线程池（自建 + 有界停机） ----------------
     def _ensure_pool(self) -> ThreadPoolExecutor:
@@ -604,7 +609,22 @@ class BigQmtBridge:
         local_dir = str(getattr(tp, "bridge_dir", "") or "")
         out["local_bridge_dir"] = local_dir
         out["bridge_dir_match"] = self._bridge_dir_match(local_dir, agent)
-        out["root_cause"] = self._root_cause(agent, out["bridge_dir_match"])
+        # ★ root_cause 单独兜底：它是最容易因 agent 字段形态意外而抛异常的一段
+        #   （2026-10-12：int(list) TypeError 曾把整个 bigqmt 诊断块换成
+        #   {"error": ...}，can_submit/available 全部陪葬）。失败时只降级这一个
+        #   字段，其余诊断字段照常上浮。
+        try:
+            out["root_cause"] = self._root_cause(agent, out["bridge_dir_match"])
+        except Exception as exc:  # noqa: BLE001  单字段降级，不拖垮整面
+            out["root_cause"] = ""
+            out["root_cause_error"] = "root_cause 计算失败（%s），其余字段可信" % exc
+        # ---- 下单能力（can_submit）：**唯一**判据是终端注入的 ``passorder`` 是否被捕获 ----
+        # ★ 与 ``available``（桥往返可用 = 只读可用）语义**不同**，必须分开暴露：
+        #   独立进程模式下 agent 能收发请求（available=True）却拿不到 passorder
+        #   （can_submit=False）—— 行情/查询可用、下单不可用。只给一个 available
+        #   会让「连接绿灯」被读成「能下单」，正是假绿灯家族最常见的形态。
+        # ★ 转发面（xtdata 行情函数，如 get_full_tick）**不含** passorder ⇒ 不会被转发污染。
+        out["can_submit"] = "passorder" in (agent.get("funcs") or [])
         return out
 
     @staticmethod
@@ -631,8 +651,15 @@ class BigQmtBridge:
     def _root_cause(agent: dict, dir_match: bool | None) -> str:
         """把排障四分法压成**一个**可展示的结论串（空串 = 未发现问题）。
 
-        四分法：agent 未运行 / bridge_dir 两端不一致 / 注入函数缺失 / token 不匹配。
+        四分法：agent 未运行 / bridge_dir 两端不一致 / 下单函数缺失 / token 不匹配。
         顺序按「先看有没有连上，再看配置对不对」的排查习惯排列。
+
+        ★ 交易能力（``passorder``）判据**先于** ``trading_enabled``（2026-10-12 修）。
+          独立进程（standalone）模式下 agent 只**转发** xtdata 行情函数、**拿不到**
+          终端注入的 ``passorder`` —— 此时把 ``trading_enabled`` 置 true 也**下不了单**。
+          旧实现只判「funcs 是否为空」，而转发面本就非空 ⇒ 漏判，把根因误报成
+          ``trading_enabled=false``，引导用户去改一个改不好的开关（假绿灯家族：
+          按它排查永远查不到，因为真实原因是模式不对）。现改为先看 ``passorder``。
         """
         if not agent:
             return "agent 未运行或从未应答（桥目录里没有任何响应信封）"
@@ -640,12 +667,39 @@ class BigQmtBridge:
             return ("bridge_dir 两端不一致：agent 读的是另一个目录，"
                     "请求永远等不到响应。请让 agent_config.json 与连接配置指向同一目录")
         funcs = agent.get("funcs") or []
-        if not funcs:
-            return ("agent 已就绪但**一个注入函数都没捕获到**："
-                    "说明策略运行在错误的位置，或终端版本不提供这些函数")
+        # ★ ``passorder`` 判据**先于**一切（2026-10-12 修）。
+        #   ``funcs`` 为空是它的**子情形**（空列表当然不含 passorder），不是并列分支：
+        #   转发来的 xtdata 行情函数已按 ``forwarded`` 单列、不再冒充注入 ⇒ funcs 为空
+        #   恰恰说明「一个终端函数都没拿到」，归因必须落到**运行模式不对**
+        #   （独立进程）。旧文案「终端版本不提供这些函数」是版本背锅式误导——
+        #   同一版本下公式策略就能拿到，问题在挂载形态而非版本。
+        if "passorder" not in funcs:
+            # ★ ``forwarded_funcs`` 在 agent meta 里是 **list**（sorted(extra.keys())，
+            #   「弱证据，仅供诊断」）；老 bundle / 不同版本可能给 int 或不给。
+            #   2026-10-12 实测教训：这里直接 int(list) 抛 TypeError，被 health 端点
+            #   的兜底整块替换成 {"error": ...} ⇒ can_submit/root_cause 全部不可见
+            #   ——「一个诊断字段类型意外」演变成「整个诊断面报废」。
+            raw_fwd = agent.get("forwarded_funcs")
+            if isinstance(raw_fwd, (list, tuple, set)):
+                forwarded = len(raw_fwd)
+            elif isinstance(raw_fwd, int):
+                forwarded = raw_fwd
+            else:
+                forwarded = 0
+            if not funcs:
+                return ("agent 已就绪但**一个终端注入函数都没有**（只转发了 %d 个 xtdata "
+                        "行情接口）——当前以**独立进程**运行，下单 / 撤单 / 账户查询均不可用。"
+                        "把 agent_config.json 的 trading_enabled 置 true **无效**；"
+                        "需让本策略以「公式策略」形态被 QMT in-process 挂载"
+                        "（同系统自带策略），而不是以外部 Python 脚本策略运行" % forwarded)
+            return ("agent 已捕获 %d 个注入函数但**没有 passorder** —— 当前以**独立进程**运行"
+                    "（终端未把交易函数注入），下单 / 撤单 / 账户查询均不可用。"
+                    "把 agent_config.json 的 trading_enabled 置 true **无效**；"
+                    "需让本策略以「公式策略」形态被 QMT in-process 挂载（同系统自带策略）"
+                    % len(funcs))
         if not agent.get("trading_enabled"):
-            return ("agent 已连通但 trading_enabled=false：只读可用，"
-                    "下单会被 agent 拒绝（确认无误后在 agent_config.json 置 true）")
+            return ("agent 已连通且已捕获 passorder，但 trading_enabled=false："
+                    "只读可用，下单会被 agent 拒绝（确认无误后在 agent_config.json 置 true）")
         return ""
 
     # ---------------- adapter 面：账户 / 持仓 / 委托 / 成交（async，与网关同形） ----------------

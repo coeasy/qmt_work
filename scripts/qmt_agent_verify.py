@@ -235,18 +235,80 @@ def check_bundle_pollution(path, top_n=20):
     return out
 
 
+#: bundle 头部的「生成于 :」时间戳行 —— 每次生成都不同，比对源码一致性时必须去掉。
+_BUNDLE_STAMP_RE = re.compile(r"^\s*生成于\s*[:：]")
+
+
+def _normalize_bundle(text):
+    """归一化 bundle 文本：去「生成于」戳行 + 去行尾空白 + 去尾部空行。
+
+    只留**代码内容**，供「部署件 vs 源码现生成件」逐行比对。
+    """
+    out = []
+    for line in (text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        if _BUNDLE_STAMP_RE.match(line):
+            continue
+        out.append(line.rstrip())
+    while out and not out[-1]:
+        out.pop()
+    return out
+
+
+def _load_bundle_generator():
+    """导入生成器模块 ``scripts/gen_qmt_agent_bundle.py``（与本脚本同目录）。"""
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    import gen_qmt_agent_bundle  # noqa: E402  (按需导入，避免无谓依赖)
+    return gen_qmt_agent_bundle
+
+
+def bundle_freshness(path):
+    """部署件是否与**当前源码现生成的 bundle** 一致（防「源码已修、部署件滞后」）。
+
+    ★ 2026-10-12 真机事故（部署漂移型假绿灯）：源码已含「转发函数不得冒充终端注入」
+      的修复（``capture_qmt_injected_funcs(..., exclude=_STATE["forwarded"])``），
+      但 QMT 里跑的部署件是修复**前 10 分钟**生成的 —— 于是 agent 报出 ``funcs=76``
+      （假），且「本模式没有任何终端注入的函数 ⇒ 下单不可用」这条关键告警被静默吞掉。
+      文件在、语法对、进程能跑，别的检查全绿，**只有内容比对**才发现它是旧的。
+
+    返回 ``{"fresh": bool|None, "reason": str, ...}``；生成器不可用或读不到文件时
+    ``fresh=None``（**不**断定滞后 —— 宁可不说也不说错）。
+    """
+    deployed, enc = _read_bundle_source(path)
+    if deployed is None:
+        return {"fresh": None, "reason": "cannot_read(%s)" % enc}
+    try:
+        gen = _load_bundle_generator()
+        expected = gen.build(stamp="")
+    except Exception as exc:  # noqa: BLE001  生成器不可用不得让校验崩
+        return {"fresh": None, "reason": "generator_unavailable: %r" % (exc,)}
+    dl, el = _normalize_bundle(deployed), _normalize_bundle(expected)
+    if dl == el:
+        return {"fresh": True, "reason": "", "deployed_lines": len(dl),
+                "expected_lines": len(el)}
+    first = next((i for i in range(min(len(dl), len(el))) if dl[i] != el[i]), -1)
+    return {"fresh": False, "reason": "content_differs",
+            "deployed_lines": len(dl), "expected_lines": len(el),
+            "first_diff_line": (first + 1) if first >= 0 else -1}
+
+
 def bundle_health(path):
-    """一次跑完语法 + 污染 + **源码编码**三项检查，返回给 diag_report / 前端聚合用。
+    """一次跑完语法 + 污染 + **源码编码** + **源码一致性**四项检查，返回聚合用 dict。
 
     ``checked=True``：调用方已给出确定的 bundle 路径，结论具判定力。
 
     ★ ``encoding_ok`` 是 R27（2026-10-08）加进来的**硬判定**：
     gb18030/gbk 的 bundle 以前会一路绿灯（开发机能编译、文件也在），
     到了 QMT 里才「启动即停止」。现在它在这一层就被拦下。
+
+    ★ ``source_fresh`` 是 2026-10-12 加进来的**部署漂移判据**：光看「文件在、语法对」
+      挡不住「源码修了但没重发」——那是文件正确、内容过期，属假绿灯家族。
     """
     syn = check_bundle_syntax(path)
     pol = check_bundle_pollution(path)
     enc = check_bundle_encoding(path)
+    fresh = bundle_freshness(path)
     return {
         "checked": True,
         "path": path,
@@ -262,6 +324,11 @@ def bundle_health(path):
         "pollution_ok": pol.get("ok", True),
         "pollution_hits": pol.get("imports_found", []),
         "pollution_first_line": pol.get("first_import_line", -1),
+        "source_fresh": fresh.get("fresh"),
+        "source_fresh_reason": fresh.get("reason", ""),
+        "source_drift_line": fresh.get("first_diff_line", -1),
+        "deployed_lines": fresh.get("deployed_lines", 0),
+        "expected_lines": fresh.get("expected_lines", 0),
         "ok": bool(syn.get("ok") and pol.get("ok") and enc.get("ok")),
     }
 
@@ -295,22 +362,29 @@ def registration(qmt_dir, name):
     out["log"] = log
     with open(log, "rb") as fh:
         raw = fh.read().decode("utf-8", "replace")
-    names = set(m.group(2).strip() for m in
-                re.finditer(r"from configFormula, index:(\d+), utfName:([^,]+),", raw))
+    names = [m.group(2).strip() for m in
+             re.finditer(r"from configFormula, index:(\d+), utfName:([^,]+),", raw)]
     if not names:
         # 主日志里一条注册树记录都没有 ⇒ 无法判定，**不能**报「未注册」
         out["registered"] = None
         return out
-    out["registered"] = name in names
+    # ★ 名字比对**大小写不敏感**（2026-10-12 修，假告状家族）：
+    #   注册树里的显示名与 `--strategy` 默认值（`qmt_work_agent`）大小写常不一致
+    #   —— 本机实测注册名是 `QMT_WORK_AGENT`。精确比对会把**已注册**误报成
+    #   「不在注册树里」，用户据此白做一次导入（诊断工具的假告状和漏报同样有害）。
+    #   QMT 的策略名/文件名在 Windows 上本就大小写不敏感（本文件对 .py 的探测
+    #   早已按大小写不敏感处理，此处保持一致）。
+    lname = name.lower()
+    out["registered"] = any(n.lower() == lname for n in names)
     # ★ 字段名是客户端自己的拼写 `FomrulaName`；写错会 0 命中并伪装成
-    #   「没配自动运行」。两种拼写都收。
+    #   「没配自动运行」。两种拼写都收；同样大小写不敏感。
     pat = (r"\[CStrategyLoadSetting\]Account:\S+ , Fom(?:rula|rla)Name: %s, "
            r"startupAutorun: (\w+), ID:" % re.escape(name))
-    m = re.search(pat, raw)
+    m = re.search(pat, raw, re.I)
     if not m:
         m = re.search(r"CStrategyLoadSetting\].*?Name: %s, startupAutorun: (\w+), ID:"
-                      % re.escape(name), raw)
-    out["autorun"] = (m.group(1) == "true") if m else False
+                      % re.escape(name), raw, re.I)
+    out["autorun"] = (m.group(1).lower() == "true") if m else False
     return out
 
 
@@ -412,6 +486,19 @@ def evaluate(data):
             % ", ".join(bundle.get("pollution_hits", [])),
             "顶部 N 行出现了 pandas/numpy/talib 等非标准库 import —— 说明文件被"
             " 前缀污染（另一支策略被拼进来）。重新部署覆盖。")
+    # ---- 0b. 部署件是否与源码一致（部署漂移 · 2026-10-12 引入）----
+    # 文件在、语法对、能跑 ≠ 内容是**当前源码**生成的。源码修了却没重发时，
+    # 上面每一项都绿，只有内容比对能发现 —— 典型「假绿灯」（真机事故：漏发修复
+    # 导致 agent 报 funcs=76 且吞掉「下单不可用」告警）。
+    if bundle_checked and bundle.get("path") and bundle.get("source_fresh") is False:
+        bad("部署件与源码现生成的 bundle **不一致**（疑似滞后/被改）："
+            "部署件 %s 行 vs 源码生成 %s 行，首个差异在第 %s 行"
+            % (bundle.get("deployed_lines"), bundle.get("expected_lines"),
+               bundle.get("source_drift_line")),
+            "源码已更新但部署件没重发。重跑 `python scripts/qmt_agent_deploy.py deploy "
+            "--qmt-dir <QMT> --filename %s.py` 覆盖，再在 QMT 里重启该策略" % name)
+    elif bundle_checked and bundle.get("path") and bundle.get("source_fresh") is True:
+        good("部署件与源码一致（无部署漂移）")
 
     # ---- 1. 策略有没有被客户端**登记**（这是「看不到」的根因面）----
     reg = data.get("reg") or {}
@@ -465,9 +552,27 @@ def evaluate(data):
             bad("心跳已过期 %.0fs（阈值 %ds）—— 策略当前**没有在运行**"
                 % (age, STALE_S),
                 "QMT 里确认策略状态为「运行中」；若 QMT 刚重启，勾选该策略的「自动运行」")
+        # ★ 主动停止的原因要**说清楚**（2026-10-12）：过去一律报「主循环最近异常: exited」，
+        #   运维看不出是「被 STOP 文件主动停的 / 到点自停的」还是「崩了」，也不知道下一步。
+        _STOP_REASON_HINT = {
+            "stopped_by_stop_file":
+                "策略是被 bridge_dir 下的 **STOP 文件主动停掉**的（QMT 不会自动重启 graceful "
+                "退出的策略）。agent 已在退出时把 STOP 改名消费为 STOP.consumed.<ts>，"
+                "现在到 QMT「模型交易」点「运行」即可恢复",
+            "max_seconds":
+                "策略因环境变量 QMT_WORK_AGENT_MAX_SECONDS 到点自停（调试用）；"
+                "去掉该变量后到 QMT「模型交易」点「运行」重启",
+            "keyboard_interrupt":
+                "策略收到键盘中断而退出；到 QMT「模型交易」点「运行」即可恢复",
+        }
         if status.get("last_error"):
-            bad("主循环最近异常: %s" % status["last_error"],
-                "把 QMT 输出面板里 [qmt_work_bigqmt_agent] 的完整堆栈贴出来定位")
+            _le = str(status["last_error"])
+            if _le in _STOP_REASON_HINT:
+                lines.append("  [!] 上一次是**主动停止**（%s）：%s"
+                             % (_le, _STOP_REASON_HINT[_le]))
+            else:
+                bad("主循环最近异常: %s" % _le,
+                    "把 QMT 输出面板里 [qmt_work_bigqmt_agent] 的完整堆栈贴出来定位")
 
     # ---- 2. 环境自检 ----
     if not probe:

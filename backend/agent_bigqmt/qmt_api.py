@@ -359,6 +359,10 @@ class Executor(object):
     def meta(self):
         return {
             "ver": VERSION,
+            # ★ 桥壳版本（agent 自身版本，与 VERSION 独立演进）优先由构造方
+            #   经 cfg["_agent_version"] 注入；缺失时回退协议层版本。
+            #   外部端（连接健康/列表）应优先显示它 —— 只看 ver 会低估 agent。
+            "agent_ver": self.cfg.get("_agent_version") or VERSION,
             "py": sys.version.split()[0],
             # ★ ``funcs`` = **终端注入**的函数面（能力上报只认它）。
             #   独立进程模式下这里为空 —— 那正是「不能下单」的诚实答案。

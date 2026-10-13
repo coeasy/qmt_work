@@ -87,6 +87,12 @@ def count_table(store: str, period: str = "") -> Dict[str, Any]:
     """统计某张数据集表的真实行数 / 覆盖区间。
 
     ``store`` 不认识（或表尚未迁移、库被锁）时返回全 0 —— **不抛、不估算**。
+
+    冷热分层（2026-10-10）：对 ``local_bars``（热表），覆盖区间**额外并入冷仓**
+    ``kline_archive``（``bars_cold.db``）的起止日期，使界面上报的「数据跨度」能反映
+    完整历史，而不只是热窗口那 92 天。``rows`` / ``codes`` 仍取自热表（快照 / 股票池
+    / degrade 的真实消费对象），避免与冷仓重复计数（两仓当前在迁移期有日期重叠，
+    直接相加会虚高）；冷仓自身的统计单独放在 ``cold`` 块里，供界面按需展示总量。
     """
     from core.db import get_db
 
@@ -103,8 +109,36 @@ def count_table(store: str, period: str = "") -> Dict[str, Any]:
     r = rows[0] if rows else None
     if not r:
         return _empty()
-    return {"rows": int(r["c"] or 0), "codes": int(r["codes"] or 0),
-            "first_dt": str(r["d0"] or ""), "last_dt": str(r["d1"] or "")}
+    out = {"rows": int(r["c"] or 0), "codes": int(r["codes"] or 0),
+           "first_dt": str(r["d0"] or ""), "last_dt": str(r["d1"] or "")}
+    # 冷热分层：把冷仓覆盖区间并入「数据跨度」并补充冷仓统计块。
+    if store == "local_bars":
+        try:
+            from datasource.cold_store import get_cold_store
+            cold = get_cold_store()
+            if cold is not None:
+                crows = cold.query(
+                    "SELECT COUNT(*) AS c, COUNT(DISTINCT code) AS codes, "
+                    "MIN(dt) AS d0, MAX(dt) AS d1 FROM kline_archive WHERE period=?",
+                    (period or "1d",))
+                cr = crows[0] if crows else None
+                if cr:
+                    cd0, cd1 = str(cr.get("d0") or ""), str(cr.get("d1") or "")
+                    # 跨度取二者并集（历史在冷仓、近期在热表，互不重叠才是理想态；
+                    # 迁移期重叠也不影响区间正确性）。
+                    if cd0 and (not out["first_dt"] or cd0 < out["first_dt"]):
+                        out["first_dt"] = cd0
+                    if cd1 and (not out["last_dt"] or cd1 > out["last_dt"]):
+                        out["last_dt"] = cd1
+                    out["cold"] = {
+                        "rows": int(cr.get("c") or 0),
+                        "codes": int(cr.get("codes") or 0),
+                        "first_dt": cd0, "last_dt": cd1,
+                    }
+        except Exception as exc:  # noqa: BLE001
+            from core.errors import swallow  # 局部 import：避免与冷仓模块循环依赖
+            swallow(exc, why="数据跨度统计时冷仓不可读，退化为仅热表区间，主结果不受影响")
+    return out
 
 
 # ---------------------------------------------------------------------------

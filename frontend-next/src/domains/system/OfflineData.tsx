@@ -60,6 +60,15 @@ export function OfflineData() {
   const [lookback, setLookback] = useState(30);
   /** 全量回补的目标年数（越久越慢，默认 12 年已覆盖内置策略与绝大多数回测） */
   const [fullYears, setFullYears] = useState(12);
+  /**
+   * 手动同步的冷热分区（zone）：
+   * - `hot` 只维护热窗口（日常增量，默认）；
+   * - `cold` 只补齐冷历史、**不碰热表**（一次性归档，日常不会跑）；
+   * - `both` 热 + 冷全量（等价于旧 `mode=full`，但不带 full_years 语义时按默认 12 年）；
+   * - `auto` 由后端按「本地已有起止日期」自动决定（热必做、冷仅当存在冷区间才补）。
+   * 透传给 `system.sync_bars` 的 params，jobs.py 再转给 BarsSyncer.zone。
+   */
+  const [zone, setZone] = useState("hot");
   /** 同步状态接口的失败原因（不可静默 —— 静默会显示成「未启用」） */
   const [err, setErr] = useState("");
   /** 覆盖度接口的失败原因（与 err 分开：一个挂了不代表另一个也挂了） */
@@ -109,14 +118,28 @@ export function OfflineData() {
   const triggerSync = () => {
     setBusy(true);
     setMsg("");
+    const zoneLabel: Record<string, string> = {
+      hot: "热维护",
+      cold: "补齐冷历史",
+      both: "热+冷全量",
+      auto: "自动判定",
+    };
     void systemApi
       .submitJob({
         kind: "system.sync_bars",
-        name: "手动同步日线",
-        params: { period: "1d", adjust: "qfq", lookback: 120, concurrency: 4 },
+        name: `手动同步日线（${zoneLabel[zone] ?? zone}）`,
+        params: {
+          period: "1d",
+          adjust: "qfq",
+          lookback: 120,
+          concurrency: 4,
+          zone,
+        },
       })
       .then((r) => {
-        setMsg(`已提交同步任务（${r.id}，状态 ${r.status}）。完成后点「刷新」查看结果。`);
+        setMsg(
+          `已提交同步任务（${r.id}，状态 ${r.status}，${zoneLabel[zone] ?? zone}）。完成后点「刷新」查看结果。`,
+        );
         setBusy(false);
       })
       .catch((e: unknown) => {
@@ -430,6 +453,19 @@ export function OfflineData() {
                   <Button size="sm" onClick={load}>
                     刷新
                   </Button>
+                  {/* ★ 冷热分区选择：决定本次手动同步只维护热窗口（默认日常），
+                      还是连带补齐冷历史、或全部全量。透传给后端 BarsSyncer.zone。 */}
+                  <span className={s.hint}>范围</span>
+                  <Select
+                    value={zone}
+                    onChange={(e) => setZone(e.target.value)}
+                    options={[
+                      { value: "hot", label: "热维护" },
+                      { value: "cold", label: "补齐冷历史" },
+                      { value: "both", label: "热+冷全量" },
+                      { value: "auto", label: "自动判定" },
+                    ]}
+                  />
                   <Button size="sm" variant="primary" disabled={busy} onClick={triggerSync}>
                     {busy ? "提交中…" : "立即同步日线"}
                   </Button>

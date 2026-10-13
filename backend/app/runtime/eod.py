@@ -83,7 +83,11 @@ async def run_eod_pipeline(params: dict) -> dict:
             concurrency=int(params.get("concurrency") or 8),
             lookback=int(params.get("lookback") or 320),
             provider_id=str(params.get("primary_provider") or "auto"),
-            batch_id=str(params.get("batch_id") or "") or None)
+            batch_id=str(params.get("batch_id") or "") or None,
+            # ★ 冷热分层（2026-10-10）：日常 EOD 只维护**热窗口**（zone="hot"），
+            # 廉价且恒定体积；冷历史由独立的每周调度补齐（见 system_jobs 的
+            # sch-default-sync-cold）。不传 zone 时按 "hot" 兜底，保持「日常只拉新」语义。
+            zone=str(params.get("zone") or "hot"))
         summary = await primary.sync_stock_list(
             limit=int(params.get("limit") or 0) or None, progress_cb=_cb)
         sync_summary = summary.to_dict()
@@ -104,7 +108,8 @@ async def run_eod_pipeline(params: dict) -> dict:
                     concurrency=int(params.get("concurrency") or 8),
                     lookback=int(params.get("lookback") or 320),
                     provider_id=str(params["fallback_provider"]),
-                    batch_id=str(params.get("batch_id") or "") or None)
+                    batch_id=str(params.get("batch_id") or "") or None,
+                    zone=str(params.get("zone") or "hot"))
                 summary2 = await fallback.sync_stock_list(
                     limit=int(params.get("limit") or 0) or None, progress_cb=_cb)
                 sync_summary["fallback"] = summary2.to_dict()
@@ -153,15 +158,27 @@ async def run_eod_pipeline(params: dict) -> dict:
         #   此时 BarsSyncer 会内部生成 ``bars-<hex>`` —— 必须把它捞出来回查，
         #   否则快照 row_count 恒为 0（见 datasource/snapshots.py 的说明）。
         _batch = str(params.get("batch_id") or sync_summary.get("batch_id") or "")
-        snap = DatasetSnapshotStore(db).publish_local_bars(
-            "cn_equity_daily", _batch,
-            str(params.get("primary_provider") or "auto"),
-            _batch,
-            quality_state=quality,
-            calendar_version=str(steps.get("calendar", {}).get("days", "")),
-            adjustment_version=str(params.get("adjust") or "qfq"),
-            manifest={"eod": steps, "degraded": degraded})
-        steps["snapshot"] = {"id": snap.get("id"), "quality_state": quality}
+        # ★ 批次号为空 ⇒ 本轮没有可发布的同步批次（bars_sync 整步失败/被跳过）。
+        #   必须**显式落一个 skipped 快照**而不是让 publish_local_bars 抛
+        #   「必须提供 dataset_id/version/provider_id/batch_id」：那会让本步骤
+        #   走 except 分支，``steps["snapshot"]`` 从结果里**整个消失**，
+        #   下游 ``result["steps"]["snapshot"]`` 直接 KeyError —— 消费方分不清
+        #   「没跑快照」和「快照失败」，而真实原因（同步挂了）只埋在 degraded。
+        if not _batch:
+            degraded.append(
+                "snapshot: 跳过（无同步批次，bars_sync 未产出可发布数据）")
+            steps["snapshot"] = {"skipped": True, "reason": "无同步批次",
+                                 "quality_state": "invalid"}
+        else:
+            snap = DatasetSnapshotStore(db).publish_local_bars(
+                "cn_equity_daily", _batch,
+                str(params.get("primary_provider") or "auto"),
+                _batch,
+                quality_state=quality,
+                calendar_version=str(steps.get("calendar", {}).get("days", "")),
+                adjustment_version=str(params.get("adjust") or "qfq"),
+                manifest={"eod": steps, "degraded": degraded})
+            steps["snapshot"] = {"id": snap.get("id"), "quality_state": quality}
     except Exception as exc:  # noqa: BLE001
         degraded.append(f"snapshot: {exc}")
 

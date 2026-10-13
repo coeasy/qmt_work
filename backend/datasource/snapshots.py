@@ -163,10 +163,64 @@ class DatasetSnapshotStore:
             "provider_id,batch_id,checksum,schema_version,quality_state "
             "FROM local_bars WHERE batch_id=? ORDER BY code,dt",
             (batch_id,))
+        # 冷热分层（2026-10-10）：把本批次涉及标的的**冷仓覆盖区间**并入选 manifest，
+        # 让快照能展示「这批热数据之外还有多少历史冷数据可用」。
+        # ★ 只进 manifest，**不**改写 coverage_start/end / row_count / checksum ——
+        # 后者只描述本批次热数据本身，掺入冷数据会让 per-batch 校验和失真。
+        sup = dict(manifest or {})
+        if rows:
+            try:
+                from datasource.cold_store import get_cold_store
+                cold = get_cold_store()
+                if cold is not None:
+                    cov = self._cold_coverage_for_codes(
+                        cold, rows, period=str(rows[0].get("period") or "1d"),
+                        adjust=str(rows[0].get("adjust") or ""))
+                    if cov:
+                        sup["cold_coverage"] = cov
+            except Exception as exc:  # noqa: BLE001
+                from core.errors import swallow  # 局部 import：避免与冷仓模块循环依赖
+                swallow(exc, why="快照 manifest 冷仓覆盖补充失败，跳过该字段，主快照不受影响")
         return self.publish(dataset_id, version, provider_id, batch_id, rows,
-                            quality_state=quality_state, manifest=manifest,
+                            quality_state=quality_state, manifest=sup,
                             calendar_version=calendar_version,
                             adjustment_version=adjustment_version)
+
+    @staticmethod
+    def _cold_coverage_for_codes(cold, rows: list, period: str,
+                                 adjust: str) -> dict:
+        """统计本批次标的在冷仓 ``kline_archive`` 里的覆盖（行数 / 区间）。
+
+        分批 IN 查询（≤500/批，避开 SQLite 变量上限）。冷仓无数据时返回空 dict。
+        """
+        codes = [str(r.get("code")) for r in rows if r.get("code")]
+        if not codes:
+            return {}
+        total = 0
+        d0, d1 = "", ""
+        seen: set = set()
+        try:
+            uniq = [c for c in dict.fromkeys(codes) if c not in seen and not seen.add(c)]
+            for i in range(0, len(uniq), 500):
+                part = uniq[i:i + 500]
+                ph = ",".join("?" for _ in part)
+                crows = cold.query(
+                    f"SELECT COUNT(*) AS c, MIN(dt) AS d0, MAX(dt) AS d1 "
+                    f"FROM kline_archive WHERE period=? AND adjust=? "
+                    f"AND code IN ({ph})", (period, adjust, *part))
+                cr = crows[0] if crows else None
+                if cr:
+                    total += int(cr.get("c") or 0)
+                    if cr.get("d0") and (not d0 or cr["d0"] < d0):
+                        d0 = str(cr["d0"])
+                    if cr.get("d1") and (not d1 or cr["d1"] > d1):
+                        d1 = str(cr["d1"])
+        except Exception:  # noqa: BLE001 冷仓异常 → 视为无冷数据，返回空
+            return {}
+        if not total:
+            return {}
+        return {"rows": total, "first_dt": d0, "last_dt": d1,
+                "codes": len(uniq)}
 
     def latest_batch_id(self) -> str:
         """最近一次写入 ``local_bars`` 的批次号（未显式给批次时的回退值）。

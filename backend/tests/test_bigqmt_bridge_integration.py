@@ -323,6 +323,44 @@ def test_order_error_event_is_classified_by_ssot(wired):
 # 5) 诊断面：四类根因必须可区分（读缓存、零 IO）
 # ---------------------------------------------------------------------------
 
+def test_client_version_prefers_shell_version():
+    """★ 2026-10-12：``client_version`` 必须优先显示**桥壳版本**（agent_ver）。
+
+    协议层 ``ver``（qmt_api.VERSION）与桥壳 ``_AGENT_VERSION`` 是两个独立演进
+    的常量。只看协议层版本会低估 agent —— 曾实测连接列表显示 "agent 1.0.0"
+    而实跑 1.2.0（运维据此判断「要不要重部署」会被骗）。
+    """
+    class _Transport:
+        def __init__(self, meta):
+            self._meta = meta
+
+        @property
+        def agent_meta(self):
+            return dict(self._meta)
+
+    class _Connector:
+        def __init__(self, transport):
+            self.transport = transport
+
+    # 新 agent：两版都在 → 显示桥壳版本
+    bridge = BigQmtBridge(
+        _Connector(_Transport({"ver": "1.0.0", "agent_ver": "1.2.0"})),
+        "c-ver-new", connector_key="qmt.big.bridge.file")
+    assert bridge.client_version == "agent 1.2.0"
+
+    # 老 agent：只有协议层版本 → 回退，不编造
+    bridge_old = BigQmtBridge(
+        _Connector(_Transport({"ver": "1.0.0"})),
+        "c-ver-old", connector_key="qmt.big.bridge.file")
+    assert bridge_old.client_version == "agent 1.0.0"
+
+    # 空 meta：不炸，显示 ?
+    bridge_none = BigQmtBridge(
+        _Connector(_Transport({})),
+        "c-ver-none", connector_key="qmt.big.bridge.file")
+    assert bridge_none.client_version == "agent ?"
+
+
 def test_connector_probe_exposes_root_cause_fields(wired):
     """``connector_probe`` 必须能区分「agent 未运行 / 函数缺失 / 路径不一致 / token 错」."""
     agent, bridge = wired
@@ -355,6 +393,127 @@ def test_connector_probe_exposes_root_cause_fields(wired):
     assert probe["agent"]["funcs"], "funcs 清单是「注入函数缺失」判据，不能为空"
     # root_cause 只返回一个结论串（不给多值让 UI 猜）
     assert isinstance(probe["root_cause"], str)
+
+
+def test_root_cause_prioritizes_missing_passorder_over_trading_enabled():
+    """★ 2026-10-12：独立进程模式（只转发行情、无 passorder）必须**先**报「下单函数缺失」，
+    不得把根因误报成 ``trading_enabled=false`` —— 改那个开关**无效**（假绿灯家族）。
+
+    真实场景：QMT 以 ``pythonw -u <策略.py> <userdata> <ts>`` 拉起策略 → 转发 76 个
+    xtdata 行情函数、但拿不到终端注入的 ``passorder``。此时旧实现只见「funcs 非空」，
+    直接落到 trading_enabled 归因，把用户引向改一个改不好的开关。
+    """
+    rc = BigQmtBridge._root_cause
+    forwarded = {"funcs": ["get_full_tick", "get_market_data", "subscribe_quote"],
+                 "trading_enabled": False}
+    msg = rc(forwarded, True)
+    assert "passorder" in msg and "独立进程" in msg
+    assert "trading_enabled" in msg and "无效" in msg, "必须点明「改 trading_enabled 无效」"
+    # trading_enabled=true 但依旧没 passorder ⇒ 仍是「下单不可用」（不能被配置掩盖）
+    assert "passorder" in rc(dict(forwarded, trading_enabled=True), True)
+
+
+def test_root_cause_trading_enabled_only_when_passorder_present():
+    """有 passorder 时，``trading_enabled=false`` 才是真正的「只读可用」根因。"""
+    rc = BigQmtBridge._root_cause
+    base = {"funcs": ["passorder", "cancel", "get_trade_detail_data"],
+            "trading_enabled": False}
+    msg = rc(base, True)
+    assert "trading_enabled=false" in msg and "passorder" in msg
+    assert "独立进程" not in msg
+    # 全绿 → 空串；funcs 为空（standalone 修复后的实况）→ 必须归因到「运行模式不对」
+    assert rc(dict(base, trading_enabled=True), True) == ""
+    empty = rc({"funcs": [], "forwarded_funcs": 76, "trading_enabled": True}, True)
+    assert "一个终端注入函数都没有" in empty and "公式策略" in empty, empty
+    assert "76" in empty, "必须给出「只转发了 76 个行情接口」的实据佐证"
+    # trading_enabled=true 也盖不住模式问题（不能被配置掩盖）
+    assert "公式策略" in rc({"funcs": [], "forwarded_funcs": 0,
+                             "trading_enabled": True}, True)
+
+
+def test_probe_exposes_can_submit_separate_from_available(wired):
+    """探针必须把「能下单（can_submit）」与「桥往返可用（available）」分开暴露。
+
+    两者是不同的量：独立进程模式下 available=True（能收发请求）但 can_submit=False
+    （拿不到 passorder）。只给一个 available 会让「连接绿灯」被读成「能下单」。
+    """
+    _agent, bridge = wired
+    bridge.connect_sync()
+
+    async def _main():
+        await bridge.call(bridge.gateway.test_connection)
+
+    asyncio.run(_main())
+    probe = bridge.connector_probe()
+    assert "can_submit" in probe
+    assert probe["can_submit"] is True  # fake agent 的 funcs 含 passorder
+    assert probe["available"] is True
+
+
+def test_probe_can_submit_false_comes_with_actionable_root_cause(wired, monkeypatch):
+    """``can_submit=False`` 时 ``root_cause`` 必须非空且说清「模式不对、改开关无效」。
+
+    一致性护栏（两个字段同源派生）：2026-10-12 实测抓到过的误导形态——
+    standalone 修复后 ``funcs=[]``（转发函数不再冒充注入），旧归因顺序先命中
+    「一个注入函数都没捕获到 / 终端版本不提供」，把**运行模式问题**说成**版本
+    问题**，且不给「公式策略挂载」的出路。现在 funcs 为空是 passorder 判据的
+    子情形，归因必须落到可操作的指引上。
+    """
+    agent, bridge = wired
+    bridge.connect_sync()
+    real = agent.meta
+    monkeypatch.setattr(agent, "meta", lambda: dict(
+        real(), funcs=[], forwarded_funcs=76, trading_enabled=True))
+
+    async def _main():
+        await bridge.call(bridge.gateway.test_connection)
+
+    asyncio.run(_main())
+    probe = bridge.connector_probe()
+    assert probe["can_submit"] is False, "funcs 为空却报能下单"
+    rc = probe.get("root_cause") or ""
+    assert rc, "can_submit=False 却给不出根因 = 让用户对着绿灯干瞪眼"
+    assert "一个终端注入函数都没有" in rc and "公式策略" in rc, rc
+    assert "无效" in rc, "必须点明「置 trading_enabled 无效」"
+    assert "76" in rc, "必须给出「只转发了 76 个行情接口」的实据"
+
+
+def test_root_cause_forwarded_funcs_accepts_list_form():
+    """``forwarded_funcs`` 是 agent meta 的 list 形态（sorted(extra.keys())）。
+
+    2026-10-12 实测教训：直接 ``int(forwarded_funcs)`` 会抛 TypeError，被 health
+    端点兜底整块替换成 ``{"error": ...}`` ⇒ can_submit/root_cause 全部不可见。
+    list/int/缺失三种形态都必须正常产出归因。
+    """
+    rc = BigQmtBridge._root_cause
+    base = {"funcs": [], "trading_enabled": True}
+    msg = rc(dict(base, forwarded_funcs=["get_full_tick", "subscribe_quote"]), True)
+    assert "公式策略" in msg and "2" in msg, msg
+    # int 形态（老 bundle）不炸
+    assert "公式策略" in rc(dict(base, forwarded_funcs=76), True)
+    # 字段缺失不炸
+    assert "公式策略" in rc(dict(base), True)
+
+
+def test_probe_root_cause_failure_does_not_nuke_other_fields(wired, monkeypatch):
+    """root_cause 计算失败时只降级这一个字段，其余诊断字段必须照常上浮。
+
+    「一个诊断字段类型意外」不得演变成「整个诊断面报废」——health 端点的兜底
+    会把 probe 异常整块换成 ``{"error": ...}``，can_submit/available 全部陪葬。
+    """
+    agent, bridge = wired
+    bridge.connect_sync()
+
+    def _boom(agent, dir_match):
+        raise ValueError("simulated field-shape surprise")
+
+    monkeypatch.setattr(BigQmtBridge, "_root_cause", staticmethod(_boom))
+    probe = bridge.connector_probe()
+    assert probe.get("root_cause") == ""
+    assert "root_cause_error" in probe, "降级必须留痕（不得静默吞）"
+    assert probe.get("can_submit") is True, "root_cause 炸了不等于不能下单"
+    assert probe.get("available") is True
+    assert probe.get("bridge_dir_match") is True
 
 
 def test_probe_on_a_wrong_bridge_dir_reports_agent_not_running(tmp_path):

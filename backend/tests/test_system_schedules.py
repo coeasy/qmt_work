@@ -120,9 +120,15 @@ def test_default_schedules_run_sync_before_screen():
     """
     from datetime import datetime
 
-    specs = {s["kind"]: s for s in system_jobs.DEFAULT_SCHEDULES}
-    sync_spec = specs["system.sync_bars"]
-    screen_spec = specs["system.classic_screen"]
+    specs = {s["id"]: s for s in system_jobs.DEFAULT_SCHEDULES}
+    # ★ 必须按**调度 id** 取值，不能按 kind：默认调度里有两条
+    #   ``kind == "system.sync_bars"``（热窗口增量 ``sch-default-sync-bars`` +
+    #   冷历史补齐 ``sch-default-sync-cold``，二者靠 ``zone`` 区分）。按 kind
+    #   建字典会让冷补齐条目静默覆盖热同步，断言就会拿周日 03:00 去和周五
+    #   16:15 比，直接假失败。（2026-10-13 R1，全量回归实锤）
+    sync_spec = specs["sch-default-sync-bars"]
+    screen_spec = specs["sch-default-classic-screen"]
+    assert sync_spec["params"].get("zone") in (None, "hot")
 
     # 2026-09-18 是周五，两者都应在当天触发
     day = datetime(2026, 9, 18, 0, 0)

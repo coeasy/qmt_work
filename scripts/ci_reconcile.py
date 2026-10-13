@@ -41,7 +41,7 @@ README = os.path.join(ROOT, "README.md")
 GITATTRIBUTES = os.path.join(ROOT, ".gitattributes")
 
 # ── 计数契约（与 README「核心能力」「项目结构」章节同步）─────────────────────
-EXPECTED_TESTS = 2478          # 后端用例收集数
+EXPECTED_TESTS = 2510          # 后端用例收集数（+1 test_qmt_agent_routes deployed 磁盘真名大小写；+7 test_paper_mode_queries：paper 账本读回且零券商触碰/契约形状 PAPER- 前缀/symbol 过滤/account/status 来源标注/引擎缺失 503/dry_run 模式归因/live 券商路径不变；+5 test_sync_cold_hot；+3 bigqmt 桥 root_cause/can_submit；+5 qmt_agent_verify 部署漂移/注册大小写；+1 STOP 消费/alive 诚实；+3 agent_ver 版本单源/client_version 优先桥壳版；+1 trade/order 幂等 key 纳入 mode/conn；+3 forwarded_funcs list 兼容/root_cause 单字段降级/can_submit 一致性）
 EXPECTED_COMPONENTS = 75     # 前端 .tsx 组件数（components + shell + charts + domains）
 EXPECTED_PAGES = 46          # 注册页数量（routes.tsx PAGES 键；含占位）
 

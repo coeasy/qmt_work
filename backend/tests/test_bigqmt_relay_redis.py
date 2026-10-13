@@ -69,9 +69,23 @@ def test_relay_moves_request_to_file_bridge(env):
         time.sleep(0.02)
     assert agent.received, "中继没把 req 队列搬成文件桥请求（20s 内 agent 未读到任何请求）"
     assert os.listdir(os.path.join(root, "resp")), "agent 已读请求但没写 resp"
-    relay.pump_once(root, client, NS, tailer)
-    got = client.blpop(f"{NS}:resp:s1", timeout=2)
-    assert got and json.loads(got[1])["ok"] is True
+    # ★ 轮询「pump_once → blpop」而不是一次 pump 配一次 blpop：中继的
+    #   resp→redis 转发是**按轮次**发生的，测试侧单次 pump 可能正落在
+    #   agent 的原子写（tmp + os.replace）之前的瞬时窗口里 —— 那一次泵
+    #   什么也没搬，紧接着的 blpop 就 2s 超时返回 None。
+    #   判据（2026-10-13 R1 全量回归实锤）：本文件单独连跑 3 次，1 次失败
+    #   且断言点恒为 `got is None`（resp 文件确实存在，第 71 行已过）。
+    #   真正的语义是「转发轮次一旦跑过，回复必然可取」，不是「恰好这一次
+    #   泵就一定能取到」，所以按轮次循环等待才是正确的契约表达。
+    got = None
+    for _ in range(50):                                  # 50 × 20ms = 1s 预算
+        relay.pump_once(root, client, NS, tailer)
+        got = client.blpop(f"{NS}:resp:s1", timeout=0.2)
+        if got is not None:
+            break
+    assert got is not None, (
+        "中继未把 resp 文件搬到 redis 响应队列（1s 内 50 轮泵取空）")
+    assert json.loads(got[1])["ok"] is True
     # resp 转发后即删，不重复投递
     assert os.listdir(os.path.join(root, "resp")) == []
 

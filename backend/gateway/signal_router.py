@@ -84,6 +84,18 @@ class SignalRouter:
         self._auto_idem_window = float(
             getattr(settings, "signal_auto_idem_window", 2.0) or 0.0)
 
+    @property
+    def paper_engine(self):
+        """模拟盘账本引擎（paper 成交由它维护；未注入时为 None）。
+
+        查询端点（``/trade/orders|positions|deals``、``/account/status``）在
+        paper 模式下读**同一实例**展示账本。必须经此属性取，而不是各路由自己
+        ``active_context().paper_engine``：写侧是 ``_paper`` 经
+        ``self._paper_engine`` 成交的，两边若指的不是同一个对象，就会复现
+        「下单成功（PAPER-9）却查不到账」的断链形态。
+        """
+        return self._paper_engine
+
     def _prune_pending(self) -> None:
         """清理超时未确认的下单令牌（P2-4）。"""
         if not self._pending:

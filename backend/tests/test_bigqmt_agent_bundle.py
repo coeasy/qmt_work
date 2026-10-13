@@ -250,6 +250,45 @@ def test_status_reports_executor_meta(tmp_path):
     assert status["meta"]["actions"] == ["PROBE", "PLACE"]
 
 
+def test_meta_reports_shell_version_injected_by_init(tmp_path):
+    """协议层信封必须带**桥壳版本**（agent_ver），且以 init 注入的值为准。
+
+    背景：qmt_api.VERSION 与 _AGENT_VERSION 是两个独立演进的常量，只看
+    协议层 ver 会让外部端低估 agent（曾实测健康显示 1.0.0 而实跑 1.2.0）。
+    init() 负责把桥壳版本注入 cfg，Executor.meta() 如实转述。
+    """
+    bridge = tmp_path / "bridge"
+    bundle = _write_bundle(tmp_path, embed={
+        "bridge_dir": str(bridge), "auth_token": "t", "trading_enabled": False,
+    })
+    module = _load(bundle)
+
+    ex = module.Executor({"bridge_dir": str(bridge)}, {}, None)
+    # 未注入（退化路径）：回退协议层版本，不编造
+    assert ex.meta()["agent_ver"] == module.VERSION
+    # init 注入后：转述桥壳版本（模拟 _AGENT_VERSION）
+    ex.cfg["_agent_version"] = module._AGENT_VERSION
+    assert ex.meta()["agent_ver"] == module._AGENT_VERSION
+    assert ex.meta()["agent_ver"] != module.VERSION or \
+        module._AGENT_VERSION == module.VERSION
+
+
+def test_init_injects_shell_version_into_cfg(tmp_path):
+    """init() 必须把 _AGENT_VERSION 写进 cfg（否则 meta 只能报协议层版本）。"""
+    bridge = tmp_path / "bridge"
+    bundle = _write_bundle(tmp_path, embed={
+        "bridge_dir": str(bridge), "auth_token": "t", "trading_enabled": False,
+    })
+    module = _load(bundle)
+
+    class _Ctx:
+        pass
+
+    module.init(_Ctx())
+    cfg = module._STATE.get("cfg") or {}
+    assert cfg.get("_agent_version") == module._AGENT_VERSION
+
+
 def test_verify_script_flags_missing_agent(tmp_path):
     """验证器对「从未启动」必须给出未通过与下一步动作，而不是沉默通过。"""
     sys.path.insert(0, str(ROOT / "scripts"))

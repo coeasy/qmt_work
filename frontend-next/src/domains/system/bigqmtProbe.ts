@@ -10,7 +10,8 @@ import type { BigQmtProbe } from "@/services/api";
  *
  *   ① agent 没运行（策略没在终端里跑）
  *   ② bridge_dir 两端不一致（请求写进了另一个目录，永远等不到响应）
- *   ③ 注入函数缺失（终端版本不提供这些函数）
+ *   ③ 注入函数缺失（策略以独立进程运行，终端未把 passorder 等注入；
+ *     需以「公式策略」形态被 QMT in-process 挂载——不是终端版本问题）
  *   ④ trading_enabled=false（只读可用，下单被 agent 拒绝）
  *   ⑤ 行情泵没跑（`pump_running=false`，界面永远空白）
  *   ⑥ 事件泵没跑（成交回报永远到不了前端）
@@ -186,9 +187,18 @@ export function describeBigQmtProbe(probe: BigQmtProbe | undefined | null): BigQ
     livenessLabel = "未连接（尚无一次成功往返）";
   }
 
+  // ★ trading 行的判据是 **passorder 是否被注入**，不是 trading_enabled（2026-10-12）：
+  //   独立进程模式下 agent 只转发行情函数、funcs 为空/无 passorder —— 此时把
+  //   trading_enabled 置 true 也下不了单。旧文案「只读（trading_enabled=false）」
+  //   把**运行模式问题**说成**配置问题**，诱导用户去改一个改不好的开关（后端
+  //   root_cause 同族缺陷已修，前端 headline 不得复刻）。
+  const hasPassorder = (agent.funcs ?? []).includes("passorder");
+  const tradingLabel = !hasPassorder
+    ? "无终端注入的 passorder ⇒ 下单不可用（需公式策略挂载）"
+    : agent.trading_enabled ? "可下单" : "只读（trading_enabled=false）";
   const headline = hasAgent
-    ? `agent v${agent.ver ?? "?"} / py${agent.py ?? "?"} · 注入函数 ${funcsCount} 个 · `
-      + `${agent.trading_enabled ? "可下单" : "只读（trading_enabled=false）"} · 已订阅 ${subscribed}`
+    ? `agent v${agent.agent_ver ?? agent.ver ?? "?"} / py${agent.py ?? "?"} · `
+      + `注入函数 ${funcsCount} 个 · ${tradingLabel} · 已订阅 ${subscribed}`
     : "agent 未应答";
 
   const parts = [`本端 ${opsLocal} 项`, `agent ${opsRemote} 项`];

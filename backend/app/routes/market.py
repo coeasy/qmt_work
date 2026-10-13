@@ -18,7 +18,9 @@ from app.services.market import (
     quote_error,
 )
 # V11 §5.3 F：同步状态落库（「上次同步跑成什么样」跨重启可见）
-from app.sync.state import STREAM_MARKET_SYNC, STREAM_SYNC_BARS, last_run
+from app.sync.state import (
+    STREAM_MARKET_SYNC, STREAM_SYNC_BARS,
+    STREAM_SYNC_BARS_COLD, STREAM_SYNC_BARS_HOT, last_run)
 
 # 常量定义在 common.py，从源头直接导入。ETF_LIST_TTL / ETF_QUOTE_CAP 的真实消费者是
 # market_multidim.py（本模块不用）——2026-09-28 移除未使用导入，避免「看着像 re-export、
@@ -29,6 +31,18 @@ from app.services.market.common import (
 )
 from datasource.board import classify_board
 from datasource.instrument import with_exchange_suffix
+
+
+def _last_hot_bars_run() -> dict | None:
+    """热窗口日线同步的最近一次运行；旧库尚无 ``sync.bars.hot`` 时回退遗留流。
+
+    冷热分层（2026-10-13）把日线同步拆成 ``sync.bars.hot`` / ``sync.bars.cold``
+    两条流。分区之前所有记录都落在 ``sync.bars`` 上 —— 升级后若只读新流名，
+    老库用户看到的「上次同步」会瞬间变成「尚无记录」，恰好丢在最需要线索的时刻。
+    回退仅针对**热流**：冷流没有历史数据，无需兜底。
+    """
+    return last_run(STREAM_SYNC_BARS_HOT) or last_run(STREAM_SYNC_BARS)
+
 from datasource.periods import (
     UnknownPeriodError,
     UnsupportedPeriodError,
@@ -692,7 +706,8 @@ async def kline_sync_status(ctx: AppContext = Depends(get_ctx)):
         #   唯一的线索（上次跑到哪、成没成）。
         return ok({"initialized": False,
                    "last_run_persisted": last_run(STREAM_MARKET_SYNC),
-                   "last_bars_run": last_run(STREAM_SYNC_BARS)})
+                   "last_bars_run": _last_hot_bars_run(),
+                   "last_cold_bars_run": last_run(STREAM_SYNC_BARS_COLD)})
     rc = getattr(ctx, "runtime_config", None)
     kc = getattr(ctx, "kline_cache", None)
     hot = {}
@@ -728,7 +743,13 @@ async def kline_sync_status(ctx: AppContext = Depends(get_ctx)):
         #   ⚠️ 界面若把全量回补的字段从 ``last_run_persisted`` 读，会**永远读不到**
         #   （热刷新的 detail 里根本没有这些键），表现为「全量回补按钮点了没反应」。
         #   所以这里必须把两条流都如实给出，由界面各自取用。
-        "last_bars_run": last_run(STREAM_SYNC_BARS),
+        "last_bars_run": _last_hot_bars_run(),
+        # ★ 冷补齐是**独立的一条流**（每周日 03:00，zone=cold）。此前它与热增量
+        #   共用 ``sync.bars``，后跑的覆盖先跑的 —— 冷补齐在无券商连接时报
+        #   ``RuntimeError("股票池为空")`` 落 ``status="error"``，界面读到的
+        #   「上次日线同步」就成了冷补齐的失败，把正常热同步显示成故障
+        #   （假告警）。分区后热/冷各自可查，互不掩盖。
+        "last_cold_bars_run": last_run(STREAM_SYNC_BARS_COLD),
         "hot": hot,
         "config": rc.all().get("market.sync.enabled") if rc else None,
     }
@@ -763,7 +784,8 @@ async def market_coverage(period: str = "1d", adjust: str = "qfq",
     rep["days_with_data"] = len(per_day)
     # 同步状态（落库）一并返回：覆盖度与「上次同步跑成什么样」必须放在一起看 ——
     # 只给覆盖度，用户不知道是「没跑」还是「跑了但源没数据」。
-    rep["sync"] = last_run(STREAM_SYNC_BARS)
+    rep["sync"] = _last_hot_bars_run()
+    rep["sync_cold"] = last_run(STREAM_SYNC_BARS_COLD)
     return ok(rep)
 
 

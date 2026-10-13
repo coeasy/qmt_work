@@ -98,7 +98,8 @@ export interface ConditionCreated {
  *
  * ⚠ 契约要点：positions / orders / deals **只作用于 active 连接**，
  *   且 positions 的 query 参数是 symbol（按标的过滤），不是 conn_id。
- *   多账户视图请用 accountApi.grid / accountApi.aggregate。
+ *   多账户视图请用 accountApi.grid（看板）或 accountApi.aggregate（后端端点存在，
+ *   前端尚未封装）。
  */
 export const tradeApi = {
   precheck: (body: SubmitOrderPayload) => http.post<PrecheckResult>("/trade/precheck", body),

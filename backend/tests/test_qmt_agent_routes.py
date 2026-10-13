@@ -714,3 +714,24 @@ def test_bundle_pull_timeout_falls_back_on_garbage(qa_module, monkeypatch):
                             raising=False)
         v = qa._bundle_timeout_from_settings()
         assert v == 30.0, "非法值 %r 应回退 30s，实得 %r" % (bad, v)
+
+
+def test_status_reports_true_ondisk_filename(qa_module):
+    """deployed.path 必须报告磁盘上的**真实文件名**（大小写）。
+
+    实测背景（2026-10-12）：Windows 文件系统大小写不敏感，注册树登记的是
+    大写 ``QMT_WORK_AGENT.py``，但探测循环先试小写名也能打开同一个文件
+    ⇒ 曾经把小写路径上报给界面/Operator，而盘上只有大写文件——按图索骥
+    找不到文件。真名由目录扫描解析，与大小写敏感性无关（Linux 同样通过）。
+    """
+    qa, client, fake_qmt = qa_module
+    target = fake_qmt / "python" / "QMT_WORK_AGENT.py"
+    target.write_text("# agent bundle placeholder\n", encoding="utf-8")
+    r = client.get("/api/v1/qmt-agent/status")
+    assert r.status_code == 200
+    dep = r.json()["data"]["deployed"]
+    assert dep["exists"] is True
+    assert dep["size_bytes"] == target.stat().st_size
+    # 关键断言：末段就是大写真名，不是探测用的小写候选名
+    assert dep["path"].endswith("QMT_WORK_AGENT.py"), dep["path"]
+    assert dep["path"].endswith("qmt_work_agent.py") is False

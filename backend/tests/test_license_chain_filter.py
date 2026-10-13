@@ -12,9 +12,16 @@ from app.screener.source_policy import resolve_policy
 from _phase4_support import force_deps, REG_ALL
 
 
-def test_commercial_keeps_tdx_when_easy_tdx_backend():
+def test_commercial_keeps_tdx_when_easy_tdx_backend(monkeypatch):
+    # ★ 本用例断言的是「后端 = easy_tdx 时商用不过滤 tdx」，所以必须
+    #   **显式钉住后端**，而不是依赖「默认后端就是 easy_tdx」这个隐含前提。
+    #   本机未装 easy_tdx 时 ``active_backend()`` 返回 ``"none"``，tdx 会被
+    #   当成无后端而漏出链外，断言假失败 —— 与本文件第二个用例（已显式 patch
+    #   为 ``eltdx``）不对称。（2026-10-13 R1，全量回归实锤）
+    import datasource.tdx_transport as tt
+    monkeypatch.setattr(tt, "active_backend", lambda: "easy_tdx")
     with force_deps():
-        # 默认后端即 easy_tdx（MIT）：商用不因许可证过滤 tdx
+        # 后端 = easy_tdx（MIT）：商用不因许可证过滤 tdx
         r = resolve_policy("auto", "kline", commercial_mode=True,
                            registered=REG_ALL, qmt_connected=True)
         assert r.chain[0] == "broker", r.chain

@@ -106,7 +106,10 @@ export interface BigQmtProbe {
   supported_ops?: string[];
   /** agent 上报的元数据（进程内 Python 版本、注入函数、桥目录、订阅数…） */
   agent?: {
+    /** 协议层版本（qmt_api.VERSION）；桥壳版本看 agent_ver */
     ver?: string;
+    /** 桥壳版本（agent_bigqmt._AGENT_VERSION，init() 注入单源）——运维判断「要不要重部署」看这个 */
+    agent_ver?: string;
     py?: string;
     funcs?: string[];
     trading_enabled?: boolean;

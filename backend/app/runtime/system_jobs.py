@@ -51,8 +51,11 @@ def _sync_bars_runner(params: dict) -> Runner:
     """
     from app.runtime.jobs import sync_runner
     inner = sync_runner(params)
+    # ★ 落库摘要的参数白名单：这里少一个 key，界面「上次同步参数」就少一项。
+    #   2026-10-13 补 zone / skip_fresh —— 冷热分层后周调度是 zone="cold"，
+    #   若摘要里看不到 zone，用户会把「每周只补冷仓」误读成「每周全量同步」。
     _keys = ("period", "adjust", "lookback", "concurrency", "limit",
-             "mode", "full_years")
+             "mode", "zone", "skip_fresh", "full_years")
 
     def _detail(job: dict, summary: dict) -> dict:
         """只留可展示的摘要 —— ``errors`` 在全市场量级可能上千条，不该整条塞进库里。"""
@@ -71,6 +74,10 @@ def _sync_bars_runner(params: dict) -> Runner:
             "bars_written": int(summary.get("bars_written") or 0),
             # 写入裁剪后「与本地一致而未重写」的根数：解释「为什么这次只写了这么点」。
             "bars_unchanged": int(summary.get("bars_unchanged") or 0),
+            # 冷仓写入根数（冷热分层，2026-10-10）。zone=hot 的调度恒为 0；
+            # zone=cold/both 的调度靠这个数判断「冷补齐真的写了多少」——
+            # 没有它，界面无法区分「冷补齐成功写入 N 根」与「冷补齐跑了但空转」。
+            "cold_written": int(summary.get("cold_written") or 0),
             "as_of_max": summary.get("as_of_max") or "",
             "elapsed_ms": int(summary.get("elapsed_ms") or 0),
             # ---- 全量回补（V11 §5.3 P0-3 III）：这三项缺一不可 ----
@@ -96,11 +103,22 @@ def _sync_bars_runner(params: dict) -> Runner:
         }
 
     async def _run(job: dict) -> dict:
-        from app.sync.state import STREAM_SYNC_BARS, record_run
+        from app.sync.state import sync_bars_stream, record_run
+        # ★ 按 zone 分流：热增量（zone=hot/both）写 ``sync.bars.hot``，
+        #   冷补齐（zone=cold）写 ``sync.bars.cold``。
+        #   历史缺陷（2026-10-13 R2）：默认调度有两条 ``kind == "system.sync_bars"``
+        #   （每交易日热增量 + 每周日冷补齐），此前二者共用同一条 ``sync.bars`` 流，
+        #   而 ``record_run`` 以 stream 为唯一键 ON CONFLICT DO UPDATE ——
+        #   周日冷补齐写完，周一热增量覆盖；反之若冷补齐在无券商连接时以
+        #   ``status="error"`` 落库，界面读到的「上次日线同步」就会是一条冷补齐的
+        #   报错，把「热同步正常」显示成「同步失败」（假告警，最耗排查时间的一类）。
+        #   zone 缺省推断与 jobs.sync_runner 完全一致：mode=full ⇒ both，否则 hot。
+        stream = sync_bars_stream(str(params.get("zone") or (
+            "both" if str(params.get("mode") or "") == "full" else "hot")))
         try:
             result = await inner(job)
         except Exception as exc:
-            record_run(STREAM_SYNC_BARS, status="error",
+            record_run(stream, status="error",
                        detail={"mode": "sync_bars",
                                "job_id": str(job.get("id") or ""),
                                "params": {k: params.get(k) for k in _keys},
@@ -112,7 +130,7 @@ def _sync_bars_runner(params: dict) -> Runner:
         stale = int(summary.get("stale") or 0)
         # 部分成功（有失败或有陈旧）也是**要看得见**的状态，不能压成 ok。
         status = "ok" if not (failed or stale) else ("error" if not ok else "partial")
-        record_run(STREAM_SYNC_BARS, status=status, detail=_detail(job, summary))
+        record_run(stream, status=status, detail=_detail(job, summary))
         return result
 
     return _run
@@ -577,8 +595,25 @@ DEFAULT_SCHEDULES: tuple[dict, ...] = (
         #   开启后日常同步从「每只都打一次源」降到「只问还没更新的那几只」，实测收益
         #   等价于把 RPC 调用量压到个位数百分比。注意它对 index/code 的配置无关，
         #   只看本地库真实的最近一根 ⇒ 无需额外游标表，中断重跑也天然自增式补漏。
+        # - zone=hot（2026-10-10 冷热分层）：日常 EOD 只维护**热窗口**（最近
+        #   bars_hot_days≈92 天），不触碰冷历史；冷历史由下方 sch-default-sync-cold
+        #   每周补齐。这样主库 local_bars 恒定只装热数据，WAL 不再随历史膨胀。
         "params": {"period": "1d", "adjust": "qfq", "mode": "incremental",
-                   "concurrency": 4, "lookback": 120, "skip_fresh": True},
+                   "concurrency": 4, "lookback": 120, "skip_fresh": True,
+                   "zone": "hot"},
+    },
+    {
+        # ★ 冷热分层（2026-10-10）：每周日 03:00 补齐**冷历史**。
+        # 与每日热同步错峰：冷补齐走全量翻页（_fetch_full），耗时较长且不紧急，
+        # 放在周末凌晨避开交易时段与日常热同步（二者同处 local_bars 互斥组，天然排队）。
+        # zone=cold 只补冷仓（kline_archive / bars_cold.db），不打热表；
+        # 已标记 cold_complete 的标的自动跳过（含退市/近期无历史股）。
+        "id": "sch-default-sync-cold",
+        "kind": "system.sync_bars",
+        "cron": "0 3 * * 0",              # 每周日 03:00
+        "name": "每周补齐冷历史（K线冷仓）",
+        "params": {"period": "1d", "adjust": "qfq", "zone": "cold",
+                   "concurrency": 4, "full_years": 12},
     },
     {
         "id": "sch-default-classic-screen",

@@ -30,8 +30,27 @@ log = logging.getLogger("qmt_work.sync.state")
 
 #: 行情定时刷新（热窗口）的流名
 STREAM_MARKET_SYNC = "market.sync"
-#: 全量/增量日线同步（``system.sync_bars``）的流名
+#: 全量/增量日线同步（``system.sync_bars``）的**历史遗留**流名。
+#:
+#: ⚠️ 保留只为读取旧库（冷热分层改造前的运行记录都落在这条流上）；
+#:    新写入走 :func:`sync_bars_stream` 返回的分区流名。
 STREAM_SYNC_BARS = "sync.bars"
+#: 热窗口日线同步流（``zone=hot`` / ``both``）
+STREAM_SYNC_BARS_HOT = "sync.bars.hot"
+#: 冷历史补齐流（``zone=cold``）
+STREAM_SYNC_BARS_COLD = "sync.bars.cold"
+
+
+def sync_bars_stream(zone: str) -> str:
+    """按冷热分区返回日线同步的流名。
+
+    默认调度有两条 ``kind == "system.sync_bars"``（每交易日热增量 +
+    每周日冷补齐），``record_run`` 以 stream 为唯一键 —— 若两条共用
+    ``sync.bars``，后跑的覆盖先跑的：冷补齐的失败会把「上次热同步」
+    显示成 error，反过来也一样。分区后两条互不覆盖。
+    """
+    z = str(zone or "").strip().lower()
+    return STREAM_SYNC_BARS_COLD if z == "cold" else STREAM_SYNC_BARS_HOT
 
 
 def record_run(stream: str, *, status: str = "ok", detail: dict | None = None,

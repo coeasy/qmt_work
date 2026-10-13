@@ -33,7 +33,7 @@ import logging
 import sqlite3
 import threading
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any, Dict, Iterable, Optional, Sequence
 
 from core.errors import swallow
 
@@ -152,6 +152,50 @@ class ColdStore:
         except sqlite3.Error:
             return 0
         return int((row or {}).get("c") or 0)
+
+    def earliest_dt_map(self, codes: Sequence[str], period: str = "1d",
+                        adjust: str = "") -> Dict[str, str]:
+        """每只标的在冷仓里的**最早一根** K 线日期（``{code: dt}``；无数据的 code 不出现）。
+
+        与 :meth:`LocalStore.earliest_dt_map` 同语义，但作用在冷仓
+        ``kline_archive`` 上 —— 批量同步用它判断「某只票的冷历史是否已经补齐到
+        目标起点」，从而做到「缺失才补、补齐即跳过」（冷热分层的核心去重逻辑）。
+        分批 IN 查询，避免 SQLite 变量上限。
+        """
+        if not codes:
+            return {}
+        out: Dict[str, str] = {}
+        try:
+            uniq = [str(c) for c in dict.fromkeys(codes) if c]
+            for i in range(0, len(uniq), 500):
+                part = uniq[i:i + 500]
+                ph = ",".join("?" for _ in part)
+                rows = self.query(
+                    f"SELECT code, MIN(dt) AS m FROM kline_archive "
+                    f"WHERE period=? AND adjust=? AND code IN ({ph}) "
+                    f"GROUP BY code",
+                    (period, adjust, *part))
+                for r in rows:
+                    if r.get("m"):
+                        out[str(r["code"])] = str(r["m"])
+        except sqlite3.Error as exc:  # noqa: BLE001 冷仓不可读 → 视为全部未补齐
+            log.warning("冷仓读取最早日期失败（将全部视为需回补）：%s", exc)
+        return out
+
+    def bulk_upsert_bars(self, rows: Sequence[tuple]) -> int:
+        """批量写入冷仓 K 线（``kline_archive``），行格式同 :meth:`KlineCache.put`
+        的归档行：``(code, period, dt, open, high, low, close, volume, amount,
+        fetched_at, adjust)``。``INSERT OR REPLACE`` 幂等。返回写入行数。
+        """
+        if not rows:
+            return 0
+        placeholders = ",".join("?" * 11)
+        cols = ("code,period,dt,open,high,low,close,volume,amount,"
+                "fetched_at,adjust")
+        self.executemany_in_txn(
+            f"INSERT OR REPLACE INTO kline_archive ({cols}) VALUES ({placeholders})",
+            list(rows))
+        return len(rows)
 
     def migrate_from(self, db, table: str = "kline_archive",
                      batch: int = 5000) -> dict:

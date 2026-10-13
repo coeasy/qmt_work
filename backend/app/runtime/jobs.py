@@ -622,6 +622,13 @@ def sync_runner(params: dict) -> Runner:
             # 新鲜度门槛：最后一根距今超过 N 个自然日即判陈旧并继续降级换源。
             # 传 0/负 = 关闭（恢复「非空即算数」的旧行为）。
             stale_days=int(params.get("stale_days") or STALE_DAYS_DEFAULT),
+            # 冷热分层（2026-10-10）：透传 zone（auto/hot/cold/both）。
+            # 缺省时由 mode 推断：``mode=full``（旧「全量回补」）⇒ zone="both"
+            # （热窗口 + 冷历史全补，等价于旧 full）；否则 ⇒ zone="hot"（日常只拉新）。
+            # 旧调用只传 mode 不传 zone 时行为不变：mode=full 仍做全量回补，
+            # mode=incremental 仍只维护热窗口。显式传 zone 永远优先。
+            zone=str(params.get("zone") or (
+                "both" if str(params.get("mode") or "") == "full" else "hot")),
             # 全量回补（V11 §5.3 P0-3 III）：``mode=full`` 按自然年向前逐页补齐历史，
             # 并基于「本地最早一根」做断点续传。非法值由 BarsSyncer 内部按
             # incremental 处理 —— **绝不静默变全量**（那是几小时的作业）。
