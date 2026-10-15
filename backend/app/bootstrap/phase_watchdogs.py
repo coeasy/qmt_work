@@ -203,7 +203,7 @@ async def _auto_connect_once() -> str:
     return cid
 
 
-async def _install_auto_connect_guard(app) -> None:
+def _install_auto_connect_guard(app) -> None:
     """装配自动连接守护任务；``broker_auto_connect=False`` 时**不装配**。
 
     ★ 为什么开关关闭也要拦住装配（2026-10-15）：该开关的语义是「完全不介入」，
@@ -213,6 +213,17 @@ async def _install_auto_connect_guard(app) -> None:
 
     该开关只从配置文件读取、无运行时切换口（``phase_broker`` 同样只在启动读），
     故按启动时取值决定装配是完备的；用户改开关后重启即生效。
+
+    ★ 为什么是**同步**函数而不是 ``async def``（2026-10-15 真机取证，P0）：
+    ``asyncio.create_task`` 本身是同步调用，这个函数没有任何需要 ``await`` 的
+    动作。40b53a8 曾把它抽成 ``async def`` 而 ``setup()`` 调用点漏写 ``await``
+    ⇒ 协程对象创建后永不执行（RuntimeWarning: coroutine
+    '_install_auto_connect_guard' was never awaited）⇒ **守护任务从未创建** ⇒
+    「启动预算 8s 被路径 A 慢失败烧掉后，由守护首轮接力气探文件桥」整条链路
+    静默停摆。dev 端 e2e 33/33 是假绿灯（桥连接实为旧 profile 持久化连接的
+    恢复，与守护无关），打包产物 fresh-profile 复测才暴露。保持同步 ⇒ 调用点
+    不可能「忘了 await」；接线回归见 ``test_autoconnect.py``
+    （行为 + AST 双锁：不 await 也必须真建 task，且函数体不得再 async 化）。
 
     抽成独立函数是为了能对「开 ⇒ 装配 / 关 ⇒ 不装配」两面都上回归锁 ——
     装配条件写反的后果是自动连接**整体停摆**（即用户报过的那个故障），必须可证伪。
@@ -294,6 +305,9 @@ async def setup(app: FastAPI) -> dict:
     # 仅当「没有连接真正连上」时自动接入本机运行中的客户端，尊重「用户手动断开」
     # (连接列表非空但均 inactive) —— 此时不自动连，交给用户操作。
     # 开关关闭时不装配（见 _install_auto_connect_guard）。
+    # ★ 同步调用、**故意不写 await**：装配器是同步函数（create_task 本身同步），
+    #   写成 async + 漏 await 会让守护静默不装配（2026-10-15 真机 P0，见该函数
+    #   docstring 与 test_autoconnect.py 的接线回归锁）。
     _install_auto_connect_guard(app)
 
     # 涨停监控 + 算法单引擎 + 条件单引擎 + 订单守护

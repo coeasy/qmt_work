@@ -1241,19 +1241,93 @@ def test_guard_installed_only_when_switch_on(monkeypatch):
     async def _fake_guard():
         return None
 
+    async def _call_installer(mod, app):
+        # 与 phase_watchdogs.setup() 同形：循环内同步调用（不 await）。
+        # 装配器是同步函数（create_task 需要运行中的循环，故仍需 loop 上下文）。
+        mod._install_auto_connect_guard(app)
+
     monkeypatch.setattr(pw, "_broker_auto_connect_guard", _fake_guard)
 
     monkeypatch.setattr(settings, "broker_auto_connect", False)
     app_off = _FakeApp()
-    asyncio.run(pw._install_auto_connect_guard(app_off))
+    asyncio.run(_call_installer(pw, app_off))
     assert getattr(app_off.state, "_broker_acg", None) is None, (
         "开关关闭时不得装配守护 —— 那是个每 30s 空转一圈的任务")
 
     monkeypatch.setattr(settings, "broker_auto_connect", True)
     app_on = _FakeApp()
-    asyncio.run(pw._install_auto_connect_guard(app_on))
+    asyncio.run(_call_installer(pw, app_on))
     assert getattr(app_on.state, "_broker_acg", None) is not None, (
         "开关开启时必须装配守护，否则「先开软件后开券商客户端」永远连不上")
+
+
+def test_guard_installer_is_sync_contract_and_wiring():
+    """★ 接线双锁（2026-10-15 真机取证 P0）：装配器**同步契约** + setup() 接线。
+
+    40b53a8 把装配器抽成 ``async def`` 且 ``setup()`` 调用点漏写 ``await`` ⇒
+    协程创建后永不执行（打包产物日志实锤：
+    ``RuntimeWarning: coroutine '_install_auto_connect_guard' was never awaited``）
+    ⇒ 守护任务从未创建 ⇒ 路径 B（文件桥）在打包客户端上永远不自动接。
+    dev 端 33/33 是假绿灯：桥连接其实是旧 profile 里持久化连接的**恢复**，
+    与守护无关（复测见 docs/BIG_QMT_ORDER_BLOCKER_FORENSICS.md §7.2.3）。
+
+    两把锁：
+    1) 行为锁：**不 await** 的直接调用也必须真的创建 task（``_broker_acg`` 就位）
+       —— 谁再把它改回 async，这里立刻红；
+    2) AST 锁：模块里该函数必须是 ``def``（非 ``async def``），且任何调用点
+       不得位于 ``await`` 之下。
+    """
+    import ast
+    from pathlib import Path
+
+    from app.bootstrap import phase_watchdogs as pw
+    from core.config import settings
+
+    class _FakeApp:
+        def __init__(self):
+            self.state = types.SimpleNamespace()
+
+    async def _fake_guard():
+        return None
+
+    # ---- 锁 1：同步契约（与 setup() 同形：循环内直接调用，不 await）----
+    orig = pw._broker_auto_connect_guard
+    pw._broker_auto_connect_guard = _fake_guard
+    try:
+        app = _FakeApp()
+        old = settings.broker_auto_connect
+        settings.broker_auto_connect = True
+        try:
+            async def _setup_like_call():
+                # 与 phase_watchdogs.setup() 的调用点完全同形：不 await
+                pw._install_auto_connect_guard(app)
+
+            asyncio.run(_setup_like_call())
+        finally:
+            settings.broker_auto_connect = old
+        task = getattr(app.state, "_broker_acg", None)
+        assert task is not None, (
+            "setup() 同形调用必须真的创建守护任务；拿不到 task 说明装配器被 async "
+            "化后调用点漏了 await（守护静默不装配 —— 2026-10-15 真机 P0）")
+        task.cancel()
+    finally:
+        pw._broker_auto_connect_guard = orig
+
+    # ---- 锁 2：AST（函数体 + 调用点）----
+    src = Path(pw.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    fn = next((n for n in ast.walk(tree)
+               if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+               and n.name == "_install_auto_connect_guard"), None)
+    assert fn is not None, "找不到 _install_auto_connect_guard 定义"
+    assert isinstance(fn, ast.FunctionDef) and not isinstance(fn, ast.AsyncFunctionDef), (
+        "装配器必须保持同步 def：create_task 本身同步，async 化只会制造"
+        "「调用点漏 await ⇒ 守护静默不装配」的坑（2026-10-15 真机 P0）")
+    awaited = [n.lineno for n in ast.walk(tree)
+               if isinstance(n, ast.Await) and isinstance(n.value, ast.Call)
+               and isinstance(n.value.func, ast.Name)
+               and n.value.func.id == "_install_auto_connect_guard"]
+    assert not awaited, "同步装配器不得被 await（行 %s）" % awaited
 
 
 # ---------------- 路径 A 挂起不得饿死路径 B（2026-10-15 真机取证） ----------------

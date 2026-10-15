@@ -4,9 +4,11 @@
 > 能看到真实订单；客户端**没有自动连接大 QMT**；检查还存在哪些潜在问题，全部优化修改。
 >
 > 日期：2026-10-14（首轮）· 2026-10-15（二轮：自动连接时序 + 归因修复 + 真机复验）
-> 机器：本机（大 QMT `P:\stock\gd_qmt`，账号 22453951，客户端 **v0.5.3 已交付**：
-> 2026-10-15 构建，`qmt_work-Setup-0.5.3.exe` + zip + latest.yml，构建后自检
-> 29/29、MCP 端到端 133 工具通过、包内无运行期状态）
+> · 2026-10-15 深夜（三轮：**打包产物复测又抓出守护漏 await P0**，修复后 v0.5.4 交付）
+> 机器：本机（大 QMT `P:\stock\gd_qmt`，账号 22453951，客户端 **v0.5.4 已交付**：
+> 2026-10-15 构建，`qmt_work-Setup-0.5.4.exe` + zip + latest.yml，构建后自检
+> 29/29、MCP 端到端 133 工具通过、包内无运行期状态；**打包产物 fresh-profile
+> 下单/自动连接 e2e 35/35 全绿、paper 模式下单 e2e 32/32 全绿**，见 §7.2.3）
 
 ---
 
@@ -389,7 +391,10 @@ $ echo $?
   `latest.yml` version=0.5.3），构建后自检 **29/29**（启动 / REST 冒烟 / RSI 契约 /
   SPA / WS / 窗口渲染 / 零残留）、MCP 端到端 **133 工具**通过、zip 根项仅
   `_internal` + `qmt_work.exe`（无 master.key / app.db / 配置 / 日志）。
-  换构建后 `ORDER_FLOW_E2E_VERIFICATION.md` 与本文 §7.2 的实测记录需按新构建复测。
+  **2026-10-15 深夜追加**：v0.5.3 打包产物 fresh-profile 复测**又抓出一个 P0**
+  （§7.2.3：守护装配漏 `await` ⇒ 自动连接在打包客户端上从未生效），已修并升级
+  **v0.5.4** 重新交付。这印证了本仓库的一条元规则：**dev 端全绿 ≠ 交付物全绿**，
+  换构建后必须按打包产物复测，且必须用 fresh profile（§7.2.3 的假绿灯复盘）。
 
 ---
 
@@ -439,18 +444,26 @@ $ echo $?
 三进程抢 CPU 时事件循环被饿过 2.5s。**判定为非回归、不churn 该护栏**
 （改阈值会削弱它抓「原 5.6s 无时限」回归的能力），改为登记进 flake 清单。
 
-### 7.2 二轮真机复验：`output/order_e2e/live_autoconnect_e2e.py`（33/33 全绿）
+### 7.2 二轮真机复验：`output/order_e2e/live_autoconnect_e2e.py`（dev 33/33；打包产物复测见 7.2.3，又抓出一个 P0）
 
 fresh profile + dev Electron + 自动连接开启，全流程可复算、零 mock。**2026-10-15 19:0x
 两连跑：首跑 32/33（唯一失败是验证脚本自己的判据缺陷，见 7.2.2），修正判据后复跑 33/33，
-耗时 59.8s。**
+耗时 59.8s。** ⚠️ 该 33/33 后来被证明是**假绿灯**（profile 不 fresh，桥连接实为遗留
+持久化连接的恢复）——打包产物 fresh-profile 复测（7.2.3）才暴露守护从未运行，
+修复后 dev fresh-profile 复跑 **34/34**。
 
 #### 7.2.1 自动连接提速的实测效果（用户反馈的核心故障）
 
 | 时点 | 首轮验证（08:42，修复前） | 复验（19:05，修复后） |
 |---|---|---|
 | 客户端就绪 | 13.5s | 18.1s |
-| 桥连上时刻 | **就绪后 +38.1s 仍未连**（脚本关机时连接列表 `[]`） | **就绪时已连上**（轮询等待 0.0s） |
+| 桥连上时刻 | **就绪后 +38.1s 仍未连**（脚本关机时连接列表 `[]`） | 「就绪时已连上」（轮询等待 0.0s）※ |
+
+※ **假绿灯脚注（7.2.3 复盘）**：19:05 那跑的 profile 不 fresh，桥连接是遗留持久化
+连接被 `start_persisted_connections` 恢复的，与守护无关；当时守护其实从未运行
+（调用点漏 `await`）。fresh profile 下的真实时序是**轮询 41.2s 后守护首轮把桥接上**
+（7.2.3 修复后复测）。本表的「提速」结论在**方向上**仍成立（修复前 38s+ 未连、
+修复后 41s 连上且成为 active），但「就绪即连通」的表述是脏 profile 造成的误读。
 | 路径 A 状态 | 慢失败 41.87s 起，把整轮拖死 | 启动预算 8s 内未连上即交后台，last_error 如实「已转入后台自动重连」 |
 | 桥连接 | 无 | `841ae96f08cc` connected=true **active=true** |
 
@@ -479,7 +492,53 @@ agent meta。**"PLACE" 字样来自每个响应都内嵌的 agent meta `actions`
 复跑该检查的输出本身就是审计素材：
 `新响应 21 个（agent meta×1、live查询503×8、行情探测失败×11、其他×1），下单证据 0 个`。
 
-#### 7.2.3 其余阶段的实测结论
+#### 7.2.3 打包产物复测（v0.5.3 安装包同源 win-unpacked）——**又抓出一个 P0**
+
+§6 遗留项写明「换构建后需按新构建复测」。2026-10-15 21:4x 用 v0.5.3 打包产物
+（`frontend-next/dist-electron/win-unpacked/qmt_work.exe`，exe_mtime=20:23，
+src 新于 exe 的文件数 **0** ⇒ 打的包就是当前代码）+ **fresh profile** 复跑同一脚本
+（`live_autoconnect_e2e.py --packaged`）：**28/31，三条全在自动连接** ——
+路径 B 轮询 150s 未出现，连接列表只有路径 A 一条（`connected=false`）。
+dev 端同一份代码 19:05 还是 33/33 ⇒ **dev 全绿 ≠ 交付物全绿**。
+
+**根因（日志实锤，非推测）**：打包客户端日志第 49 行
+`app\bootstrap\phase_watchdogs.py:297: RuntimeWarning: coroutine
+'_install_auto_connect_guard' was never awaited`。40b53a8 把守护装配从 setup() 里的
+内联 `create_task` 抽成 `async def _install_auto_connect_guard`，**调用点漏写
+`await`** ⇒ 协程对象创建后永不执行 ⇒ **守护任务从未创建** ⇒ 「启动预算 8s 被路径 A
+慢失败烧掉后由守护首轮接力气探文件桥」整条链路静默停摆。单测全绿是因为它直接
+`await` 调函数本身——**测了单元、没测接线**。
+
+**为什么 dev 的 33/33 是假绿灯（本节最重要的复盘）**：19:05 那跑用的 profile 不是
+fresh 的——里面的桥连接 `841ae96f08cc` 是**上一轮遗留的持久化连接**，启动时由
+`start_persisted_connections` 直接恢复（dev 日志 19:04:47 `broker connection started:
+大QMT桥接·文件（自动连接） connected=True`，**早于**路径 A 的 8s 延迟消息 19:04:55），
+与守护毫无关系。带着脏 profile 跑，「自动连接修复了没有」根本测不出来。
+⇒ e2e 脚本已加 **hermetic 化**：开跑前清空自有 profile（先杀自带 profile 的进程再
+rmtree，只删 `output/order_e2e/` 下自管目录）。
+
+**修复（v0.5.4）**：`_install_auto_connect_guard` 改回**同步函数**——
+`asyncio.create_task` 本身就是同步调用，该函数没有任何需要 await 的动作；同步化从
+根上消灭「忘了 await」这个 bug 类。双回归锁（`test_autoconnect.py`）：
+① 行为锁——setup() 同形调用（循环内、不 await）必须真的建出 `app.state._broker_acg`；
+② AST 锁——函数必须保持 `def`（非 `async def`）且任何调用点不得位于 `await` 之下。
+**反向验证过**：临时改回 `async def`，两把锁同时红。
+
+**修复后 dev 端 fresh-profile 复跑**（22:0x，90.2s）：**34/34 全绿**。守护首轮如期
+接力：轮询 41.2s 后桥 `0fe5ec06fe62` connected=true **active=true**（时序 =
+探测 ~3s + 路径 A 32s 硬超时 + 路径 B 建桥），日志有「已自动连接大 QMT 文件桥」；
+路径 A 如实未连（rc=-1，授权封死）；live 能力门禁 503 归因诚实；订单零进 QMT
+（resp 无下单结构化证据 + QMT 日志 513090 命中 67→67）；paper 回归、health
+needs_action 降级、零残留全部通过。
+
+**修复后打包产物（v0.5.4）fresh-profile 复跑**（22:0x，88.5s）：**35/35 全绿**。
+win-unpacked（exe_mtime=21:57、src newer=0）上轮询 39.3s 后桥 `fa0e34f30738`
+connected=true **active=true**，后端日志有「已自动连接大 QMT 文件桥」（此前该行在
+v0.5.3 产物上永远缺席）；其余阶段与 dev 端同构全过。同期 paper 模式下单 e2e
+（`run_client_order_e2e.py`，同一 v0.5.4 产物）**32 PASS / 0 FAIL**（UI 委托
+PAPER-21 前后端闭环、账本可核、零真实券商、零残留）。
+
+#### 7.2.4 其余阶段的实测结论（7.2.3 之前的内容，顺延）
 
 * **能力门禁归因**（§4A.4）：live 下单 503 消息含「不具备下单能力 / 独立进程 / 公式策略」，
   不含「未连接任何券商客户端」、不含「账户快照未就绪」；显式带桥 conn_id 同样被门禁拦；
