@@ -384,10 +384,21 @@ class SyncEngine:
                         # 导致 account 事件长期漏出 ws_events 基线（前端收不到却当成 unknown）；
                         # 经 _notify 后 account 与 order/deal/risk 一致地同步投递 webhook。
                         await self._notify("account", {"type": "account_snapshot", "data": snap, "broker": conn.cfg.name})
+                        # 快照成功 ⇒ 清空降噪标记，下次失败会重新告警一次
+                        self._last_snapshot_error = None
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
-                    log.warning("account snapshot failed: %s", exc)
+                    # ★ 降噪（2026-10-15 真机取证）：账号快照失败在本机是**每 60s
+                    #   一条同样原因**的 WARNING，实测凌晨 00:16~00:54 连刷 38 条，
+                    #   既淹没真正需要看的连接类告警，也让日志涨到 GB 级。
+                    #   同一原因只在**首次**与**原因变化**时告警，重复降 DEBUG。
+                    _msg = str(exc)
+                    if _msg != getattr(self, "_last_snapshot_error", None):
+                        log.warning("account snapshot failed: %s", _msg)
+                        self._last_snapshot_error = _msg
+                    else:
+                        log.debug("account snapshot failed（同上，已降噪）: %s", _msg)
                 # 间隔计算与 sleep 一并放进 try：此前它们在 try 之外，
                 # 一旦 runtime_config.snapshot_interval 取到非法值（None/负数/字符串），
                 # sleep 抛错就会**打死整个快照循环** —— 账户/持仓/成交从此静默停更。

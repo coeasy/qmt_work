@@ -31,7 +31,7 @@ def store(tmp_path):
 
 @pytest.fixture()
 def cold(tmp_path):
-    from datasource.cold_store import get_cold_store, init_cold_store, reset_cold_store
+    from datasource.cold_store import init_cold_store, reset_cold_store
     reset_cold_store()
     cs = init_cold_store(tmp_path / "cold.db")
     yield cs

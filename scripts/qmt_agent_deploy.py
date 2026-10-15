@@ -35,6 +35,7 @@ import argparse
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -141,6 +142,153 @@ def qmt_running():
 
 def strategy_dir(qmt_dir):
     return os.path.join(qmt_dir, "python")
+
+
+#: 外部进程启动行：``[TC::CTradeStrategyData::doRun] execude cmd:  -u "<file>" "<userdata>" <ts>``
+_RE_EXTERNAL_RUN = re.compile(r"execude cmd:\s+-u\s+\"([^\"]+)\"")
+#: 公式（内置 Python）启动行：``doRun: m_type:0, ... m_luaFile:<file>, ... m_scriptType:1 ...``
+_RE_INPROC_RUN = re.compile(r"m_luaFile:([^,]+),\s*m_startTime")
+
+
+def _repair_mojibake(s):
+    """把 QMT 日志里「utf-8 字节被按 cp1252/latin-1 解码」的中文文件名还原。
+
+    QMT 主日志同时写 utf-8 与 GBK 两份文件名，其中一份是 mojibake
+    （实测：``P:\\...\\å›½å€ºé€†å›žè´­.py`` 即 ``国债逆回购.py``）。比文件名前先还原，
+    否则中文策略名永远匹配不上，会得出「没找到启动记录」的假结论。
+
+    ★ 必须优先试 **cp1252**：``国`` 的 utf-8 首字节 0x9B 在 cp1252 里是 ``›``
+    （U+203A），**不在 latin-1 范围**；先按 latin-1 解会把该字节静默丢掉，
+    还原出的名字是错的（实测踩过）。
+    """
+    for codec in ("cp1252", "latin-1"):
+        try:
+            fixed = s.encode(codec, "strict").decode("utf-8", "strict")
+            if fixed:
+                return fixed
+        except Exception:  # noqa: BLE001
+            continue
+    return s
+
+
+def run_mode_of_strategy(qmt_dir, filename, max_logs=4):
+    """判定某策略**实际以哪种形态被 QMT 运行**：内置Python（公式，可下单）还是独立进程（不可下单）。
+
+    为什么必须判这个（2026-10-14 真机取证）
+    -------------------------------------
+    QMT 只把 ``passorder`` / ``get_trade_detail_data`` 等交易函数注入
+    **在终端进程内被公式引擎挂载**的那个文件命名空间。若策略登记成
+    「独立进程 / 原生 Python」，QMT 走的是
+    ``pythonw.exe -u <file> <userdata> <ts>``（主日志出现 ``execude cmd: -u ...``），
+    该进程**一个注入函数都拿不到** —— agent 心跳正常、PROBE 正常，但
+    ``injected=[]``、``trade_surface.can_submit=false``，**永远下不了单**。
+
+    本机实测（`P:\\stock\\gd_qmt`）：
+      * ``QMT_WORK_AGENT`` → 全部日志里**唯一**出现 ``execude cmd -u`` 的策略
+        （14 次），对应文件是**明文源码** ⇒ 独立进程 ⇒ 不能下单；
+      * ``新股申购`` / ``国债逆回购`` / ``ZT996`` → 走
+        ``doRun: ... m_scriptType:1 ... m_runMode:1``（进程内），对应文件是
+        **单行不透明容器**（QMT 编译后的公式体）⇒ 有账户/下单能力。
+
+    判据（两条独立证据，任一命中即可；冲突时以日志为准并如实标注）
+    ------------------------------------------------------------
+    1. **主日志**：最新若干份 ``XtClient_*.log`` 里，该文件名出现在
+       ``execude cmd -u`` ⇒ ``independent``；出现在 ``m_luaFile:`` 且同行有
+       ``m_scriptType:`` ⇒ ``formula``。
+    2. **文件形态**：单行、前 200 字节无空格、非 ``#`` 开头 ⇒ 编译容器
+       （``formula``）；以 ``#``/``#coding`` 开头的明文源码 ⇒ ``independent``。
+
+    返回 ``{"mode": "formula"|"independent"|"unknown", "evidence": [...], ...}``。
+    只读，不碰 QMT 进程、不写任何文件。
+    """
+    sdir = strategy_dir(qmt_dir)
+    target = os.path.basename(filename or "")
+    stem = os.path.splitext(target)[0]
+    res = {"mode": "unknown", "certain": False, "evidence": [],
+           "log": "", "file": os.path.join(sdir, target)}
+
+    # ---- 证据 1：主日志里的启动形态 ----
+    logdir = os.path.join(qmt_dir, "userdata", "log")
+    logs = []
+    try:
+        for n in _listdir(logdir):
+            # 主日志只有 XtClient_<YYYYMMDD>.log 这一种形态；
+            # XtClient_datasource_ / _Message_ / _Formula_ / _FormulaOutput_ /
+            # _PerformanceFile_ 都是旁路日志，不含 doRun 启动行。
+            # ★ 别用「名字里有下划线」去排除 —— 主日志恰好没有下划线，会把它一起滤掉
+            #   （2026-10-14 实测踩过：判据写反 ⇒ 永远取不到日志证据，只剩文件形态兜底）。
+            if not (n.startswith("XtClient_") and n.endswith(".log")):
+                continue
+            tail = n[len("XtClient_"):-4]
+            if len(tail) == 8 and tail.isdigit():
+                logs.append(os.path.join(logdir, n))
+    except Exception:  # noqa: BLE001
+        logs = []
+    logs.sort(key=lambda p: os.path.getmtime(p) if os.path.exists(p) else 0, reverse=True)
+    logs = logs[:max_logs]
+    if logs:
+        res["log"] = logs[0]
+
+    ext_hits, inproc_hits = [], []
+    for lp in logs:
+        try:
+            with open(lp, "r", encoding="utf-8", errors="replace") as fh:
+                for line in fh:
+                    if "doRun" not in line:
+                        continue
+                    m = _RE_EXTERNAL_RUN.search(line)
+                    if m and os.path.basename(m.group(1).replace("/", "\\")) == target:
+                        ext_hits.append((os.path.basename(lp), m.group(1)))
+                        continue
+                    m2 = _RE_INPROC_RUN.search(line)
+                    if m2:
+                        got = os.path.basename(_repair_mojibake(m2.group(1))
+                                               .replace("/", "\\").replace("\\", "/"))
+                        if got == target:
+                            inproc_hits.append((os.path.basename(lp), m2.group(1)))
+        except Exception:  # noqa: BLE001
+            continue
+
+    if ext_hits:
+        res["mode"] = "independent"
+        res["certain"] = True
+        res["evidence"].append(
+            "主日志出现外部进程启动行（最新一次在 %s，最近 %d 份主日志共 %d 次）："
+            "execude cmd: -u \"%s\""
+            % (ext_hits[0][0], len(logs), len(ext_hits), ext_hits[0][1]))
+    if inproc_hits:
+        res["evidence"].append(
+            "主日志出现进程内公式启动行（最新一次在 %s）：m_luaFile=%s"
+            % (inproc_hits[0][0], inproc_hits[0][1]))
+        if not ext_hits:
+            res["mode"] = "formula"
+            res["certain"] = True
+
+    # ---- 证据 2：文件形态 ----
+    fpath = res["file"]
+    if os.path.exists(fpath):
+        try:
+            with open(fpath, "rb") as fh:
+                head = fh.read(2048)
+            first_line = head.split(b"\r\n")[0].split(b"\n")[0]
+            is_container = (not head.lstrip().startswith(b"#")
+                            and len(first_line) > 200 and b" " not in first_line[:200])
+            res["container"] = is_container
+            res["evidence"].append(
+                "文件形态：%s" % ("单行不透明容器（QMT 编译后的公式体）"
+                                  if is_container else "明文源码（未经公式编译）"))
+            if res["mode"] == "unknown":
+                # 没有启动记录时只能据文件形态推断 —— **如实标注是推断**，
+                # 不冒充「已确认」（这正是本项目反复强调的「判断 ≠ 缺陷」）。
+                res["mode"] = "formula" if is_container else "independent"
+                res["certain"] = False
+                res["evidence"].append(
+                    "（无启动记录 ⇒ 运行形态是**据文件形态推断**，未由日志确认）")
+        except Exception as exc:  # noqa: BLE001
+            res["evidence"].append("文件形态：读取失败（%s）" % exc)
+    else:
+        res["evidence"].append("文件形态：**文件不存在**（%s）" % fpath)
+    return res
 
 
 def reveal(path):
@@ -313,9 +461,12 @@ def cmd_deploy(args):
     print("\n[!!] 重要：拷贝文件**不会**让策略出现在「模型交易」里。")
     print("     策略列表来自客户端持久化注册树（实测：md5 完全相同的两个文件，")
     print("     一个在列表一个不在）。必须做一次注册动作 —— 见 `register` 子命令。")
+    print("     ★ 注册时**必须选「内置Python」形态**：登记成「独立进程 / 原生Python」")
+    print("       会得到 `pythonw.exe -u <file> <userdata>` 的外部进程，")
+    print("       终端**不注入** passorder/get_trade_detail_data ⇒ 永远下不了单。")
     if getattr(args, "reveal", False):
         if reveal(out):
-            print("\n[i] 已打开资源管理器并选中该文件 —— 直接拖/选进 QMT 导入框。")
+            print("\n[i] 已打开资源管理器并选中该文件（供「新建策略→粘贴」时对照路径）。")
     return 0
 
 
@@ -345,16 +496,30 @@ def cmd_register(args):
     print()
     print("二选一，在 QMT 客户端里操作（约 30 秒）：")
     print()
-    print("  路径 A（导入本地策略）")
+    print("  ★ 只有「内置Python」形态才有下单能力 —— 见下面 [!!] 说明。")
+    print()
+    print("  路径 A（推荐：新建 + 粘贴，得到**内置Python**形态）")
+    print("    1. 「我的」页 → 新建策略 → Python 策略")
+    print("    2. 在编辑器的**类型/运行方式**里选「内置Python」")
+    print("       （**不要**选「原生Python / 独立进程」—— 那种形态拿不到交易函数）")
+    print("    3. 全选删除模板代码，粘贴 %s 的全部内容" % os.path.basename(sfile))
+    print("    4. 点「编译」保存（编译/保存才会登记进注册树，并把源码编译成")
+    print("       公式体写入该 .py；文件会由明文变成单行不透明容器）")
+    print()
+    print("  路径 B（导入本地策略 —— **仅行情/回测可用**）")
     print("    1. 左侧进「模型研究」（找不到就走「模型交易」）")
     print("    2. 在策略区（图标/列表）空白处 **右键**")
     print("    3. 选「导入本地策略」/「本地.rzrk导入」→ 文件类型选 *.py")
     print("    4. 选中：%s" % sfile)
     print()
-    print("  路径 B（新建 + 粘贴）")
-    print("    1. 「我的」页 → 新建策略 → Python 策略")
-    print("    2. 全选删除模板代码，粘贴 %s 的全部内容" % os.path.basename(sfile))
-    print("    3. 点「编译」保存（编译/保存才会登记进注册树）")
+    print("  [!!] 为什么路径 A 是推荐、路径 B 只够查行情：")
+    print("       QMT 只把 passorder / get_trade_detail_data 注入**在终端进程内被公式")
+    print("       引擎挂载**的那个文件命名空间。登记成独立进程时 QMT 走")
+    print("       `pythonw.exe -u <file> <userdata>`，该进程**一个注入函数都拿不到** ——")
+    print("       agent 心跳新鲜、PROBE 通过，但 injected=[]、can_submit=false，")
+    print("       下单/查询一律失败。2026-10-14 本机实测：QMT_WORK_AGENT 是全部日志里")
+    print("       **唯一**出现 `execude cmd: -u ...` 的策略，而 QMT 自带的可交易策略")
+    print("       （新股申购 / 国债逆回购 / ZT996）都走 `doRun: ... m_scriptType:1`。")
     print()
     print("  注册后：在「模型交易」里找到它 → 右键勾选「自动运行」")
     print("          （startupAutorun=true 记进 UiSettingConfig，之后 QMT 每次")
@@ -380,6 +545,19 @@ def cmd_register(args):
         reg = ver.registration(qmt, target)
         if reg.get("registered"):
             print("[OK] 已登记进注册树（autorun=%s）" % reg.get("autorun"))
+            # ★ 登记 ≠ 能下单：还要看它被 QMT 以哪种形态运行。独立进程形态
+            #   （明文源码 + `execude cmd -u`）永远拿不到交易函数注入。
+            mode = run_mode_of_strategy(qmt, fname)
+            if mode["mode"] == "independent":
+                print("[FAIL] 但运行形态是**独立进程** ⇒ 仍不能下单。")
+                for ev in mode["evidence"]:
+                    print("       · %s" % ev)
+                print("       请在编辑器里把类型改成「内置Python」并重新编译，然后重启策略。")
+                return 2
+            if mode["mode"] == "formula":
+                print("[OK] 运行形态：内置Python（公式，进程内）—— 具备下单能力")
+            else:
+                print("[i] 运行形态尚未判定（策略还没被 QMT 启动过？）")
             return 0
         time.sleep(5)
     print("[FAIL] 超时仍未在注册树里看到 %r —— 导入动作没生效（或客户端未重启）" % target)
@@ -566,6 +744,43 @@ def cmd_check(args):
         print("\n下一步: 到「模型交易」找到 %s → 右键勾选「自动运行」，之后零人工。" % target)
     else:
         print("\n下一步: 启动 QMT（已登记的策略会出现在列表里）。")
+
+    # ---- 运行形态：这才是「连上了却永远下不了单」的直接判据 ----
+    #
+    # ★ 为什么必须查：QMT 只把 passorder / get_trade_detail_data 注入**在终端进程内
+    #   被公式引擎挂载**的那个文件命名空间。登记成「独立进程 / 原生 Python」时，
+    #   QMT 走 `pythonw.exe -u <file> <userdata>`，该进程拿不到任何注入函数
+    #   （实测 injected=[]、trade_surface.can_submit=false）⇒ agent 心跳/ PROBE
+    #   全绿，却**永远下不了单**。2026-10-14 本机取证见 run_mode_of_strategy。
+    mode = run_mode_of_strategy(qmt, fname)
+    label = {"formula": "内置Python（公式，进程内）—— 具备下单能力",
+             "independent": "**独立进程（原生 Python）—— 永远下不了单**",
+             "unknown": "无法判定"}[mode["mode"]]
+    if not mode.get("certain") and mode["mode"] != "unknown":
+        label += "（推断，未由日志确认）"
+    print("\n运行形态     : %s" % label)
+    for ev in mode["evidence"]:
+        print("               · %s" % ev)
+    if mode["mode"] == "independent":
+        print("\n" + "!" * 70)
+        print("[FAIL] 该策略被 QMT 以**独立进程**方式运行 ⇒ 终端不会注入任何交易函数。")
+        print("       症状：agent 心跳新鲜、PROBE 通过，但 injected=[]、")
+        print("             trade_surface.can_submit=false，下单/查询一律失败。")
+        print("       修法：在 QMT 的策略编辑器里把它改成**内置Python**形态")
+        print("             （编辑器里的类型/运行方式选择；不要选「原生Python/独立进程」），")
+        print("             重新**编译/保存**后重启策略。")
+        print("       自证：本机日志里该策略应只出现 `doRun: ... m_scriptType:1 ...`，")
+        print("             且**不再**出现 `execude cmd: -u \"<本文件>\"`；")
+        print("             且 bridge_dir/agent_status.json 的 runtime_mode 变成")
+        print("             `qmt_formula`、injected 含 passorder。")
+        print("!" * 70)
+        # ★ 退出码必须如实（2026-10-14）：体检**打出 [FAIL] 却 return 0** 属于本项目
+        #   最忌讳的「假绿灯」—— `if qmt_agent_deploy.py check; then echo ok; fi`
+        #   会得到「一切正常」，而这台机器**一单都下不出去**。
+        #   2 = 「已部署但需要人工动作才能下单」，与 `register --wait` 超时的退出码
+        #   以及 `qmt_agent_verify.py` 的 0/2 语义保持一致；1 仍留给「环境缺失」
+        #   （QMT 未找到）。本机实测：改前此形态恒 0，改后返回 2。
+        return 2
     return 0
 
 
@@ -607,7 +822,7 @@ def main(argv=None):
     ap.add_argument("--txt", action="store_true",
                     help="deploy: 同目录额外产一份 .txt 副本（内容与 .py 相同，后缀改 .txt）。"
                          "用途：QMT「新建策略 → 粘贴代码」路径 —— 记事本打开 .txt 粘贴比 IDE 打开 .py 稳。"
-                         "默认关闭（主路径 A「导入本地策略」用 .py 即可）。")
+                         "默认关闭（可用 --reveal 定位 .py 文件）。")
     args = ap.parse_args(argv)
     return {"deploy": cmd_deploy, "config": cmd_config, "inspect": cmd_inspect,
             "check": cmd_check, "register": cmd_register,

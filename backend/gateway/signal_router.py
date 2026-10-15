@@ -26,6 +26,7 @@ from gateway.idempotency import single_flight
 # P0-1：WAL 写前日志的操作语义常量（单一真源定义在 gateway.wal，此处复用）
 from gateway.wal import WAL_OP_INTENT, WAL_OP_INTENT_FAILED, WAL_OP_RESULT  # noqa: E402
 from core.clock import now_iso
+from core.errors import swallow
 from core.quote_fields import pick_order_ref_price
 
 log = logging.getLogger("qmt_work.signal")
@@ -58,7 +59,7 @@ class Signal:
 
 class SignalRouter:
     def __init__(self, manager, risk=None, db=None, wal=None, notifier=None, on_event=None,
-                 runtime_config=None, paper_engine=None):
+                 runtime_config=None, paper_engine=None, quote_fn=None):
         from core.config import settings
         self._manager = manager
         self._risk = risk
@@ -69,6 +70,11 @@ class SignalRouter:
         self._runtime_config = runtime_config
         # P0-6：模拟盘统一到 PaperEngine（与策略运行共用同一账户）。
         self._paper_engine = paper_engine
+        #: 无券商连接时的取价兜底 ``async (code) -> float``（**仅 paper 模式**使用）。
+        #: 由 app/bootstrap 注入 DataSourceManager 取价闭包 —— gateway 层**不 import**
+        #: datasource（分层纪律 core→engines→datasource→app），由上层接线。
+        #: None = 无兜底（市价单按「取不到行情」挂起/拒绝，绝不臆造价格）。
+        self._quote_fn = quote_fn
         # P0-1：模式持久化 + 安全默认。启动时从 runtime_config 读取；读取失败或无记录
         # 时默认 paper（而非 live），避免升级/崩溃/自动更新重启后无提示恢复实盘。
         self.mode = self._load_persisted_mode("paper")
@@ -214,17 +220,56 @@ class SignalRouter:
             self._emit({"type": "signal_dry_run", "data": plan})
             return {"ok": True, **plan}
 
-        # ★ 未知连接闸门（统一 live / paper，修复 paper 模式静默兜底成成功）：
-        #   broker_id 非空但对应连接不存在 → 明确拒绝，绝不走 paper 物理旁路假装成交。
-        #   此前 paper 模式只经 PaperEngine 撮合、完全不校验连接，导致连一个不存在的
-        #   conn_id 都能返回 ok:1，违反「失败绝不包 code=0」契约
-        #   （test_batch_order_unknown_conn_zero_ok / test_batch_cancel_unknown_conn_all_failed）。
+        # ★ 连接闸门（按**连接三态 × 执行模式**分流，2026-10-14 本地下单流程实测）：
+        #   broker_id 非空 → 先判三态（manager.connection_state）：
+        #     missing（不存在）        一律拒绝 —— 守住
+        #                             test_batch_order_unknown_conn_zero_ok /
+        #                             test_batch_cancel_unknown_conn_all_failed 契约，
+        #                             「失败绝不包 code=0」。
+        #     offline（已注册未连接）  live/dry_run 拒绝（真实下单必须落在活连接上）；
+        #                             **paper 放行** —— broker_id 在 paper 下只是
+        #                             「选哪个模拟账户」的选择器，撮合全程在本地
+        #                             PaperEngine，根本不经过该连接。
+        #     online（已连接）         放行。
         #   空 broker_id 视作「默认连接」（paper 默认账户路径合法），放行。
+        #
+        #   ★ 此前此处对 live/paper 统一用 ``bridge() is None`` 判死，而
+        #     ``bridge()`` 把「不存在」与「已注册未连接」**都返回 None** ⇒ paper
+        #     模式被误伤：用户只要在连接管理里选中过一条连不上的券商记录，前端
+        #     OrderForm 就会带上它的 conn_id，此后**每一笔模拟盘下单都 503**
+        #     「请到连接管理添加并连接券商」—— 而模拟盘压根不需要券商。这就是
+        #     「下单流程没打通」的直接体感。
         if sig.broker_id:
-            if self._manager.bridge(sig.broker_id) is None:
-                reason = f"连接不存在或未注册：{sig.broker_id}"
+            state = self._conn_state(sig.broker_id)
+            if state == "missing":
+                reason = (f"连接不存在：{sig.broker_id}"
+                          "（注册表里没有这条连接；请到「连接管理」核对连接 ID，"
+                          "实盘下单需落在已连接的券商连接上）")
                 self._audit("signal.rejected", code, sig.__dict__, reason)
                 return {"ok": False, "reason": reason, "mode": self.mode,
+                        "broker_unavailable": True}
+            if state == "offline" and self.mode != "paper":
+                reason = (f"连接未连接：{sig.broker_id}"
+                          "（该连接已注册但当前未连接；实盘下单需先连接券商，"
+                          "模拟盘不依赖券商连接）")
+                self._audit("signal.rejected", code, sig.__dict__, reason)
+                return {"ok": False, "reason": reason, "mode": self.mode,
+                        "broker_unavailable": True}
+
+        # ★ 实盘下单前的**能力门禁**（2026-10-15 真机取证）：
+        #   大 QMT 文件桥会长期停在「已连接」绿灯，而 agent 实际一个终端注入函数
+        #   都没拿到（``funcs=[]``、``can_submit=false``）—— 此时下单/撤单/账户
+        #   查询**全部**不可用，而用户看到的是风控那句「账户快照未就绪：总资产仍
+        #   为演示值 1000000」：既没说清真正原因，也没指出下一步。
+        #   这里在**下单前**把能力缺口直接说出来，避免拿一个注定失败的通道去试。
+        if self.mode == "live":
+            gap = self._submit_capability_gap(sig.broker_id)
+            if gap:
+                self._audit("signal.rejected", code, sig.__dict__, gap)
+                self._emit({"type": "risk.blocked", "data": {
+                    "code": code, "side": side, "volume": sig.volume,
+                    "reason": gap, "source": sig.source, "mode": "live"}})
+                return {"ok": False, "reason": gap, "mode": "live",
                         "broker_unavailable": True}
 
         # P2-4：清理超时的挂起确认令牌
@@ -283,11 +328,93 @@ class SignalRouter:
 
         return await self._execute(sig, est_price)
 
+    def _conn_state(self, conn_id: str) -> str:
+        """连接三态：``missing`` / ``offline`` / ``online``。
+
+        优先走 ``manager.connection_state()``（唯一判据，见该方法注释里的
+        2026-10-14 实测）。manager 未实现该接口时**退化为 bridge 二态判据**：
+        取得到桥 ⇒ online，取不到 ⇒ missing。
+
+        ⚠️ 退化判据会把 offline 误报成 missing（宁拒勿放，比放行安全），只影响
+        未跟上新接口的测试替身/旧装配；生产路径的 BrokerManager 一定有三态判据。
+        """
+        fn = getattr(self._manager, "connection_state", None)
+        if callable(fn):
+            try:
+                return str(fn(conn_id))
+            except Exception:  # noqa: BLE001
+                return "missing"
+        try:
+            return "online" if self._manager.bridge(conn_id) is not None else "missing"
+        except Exception:  # noqa: BLE001
+            return "missing"
+
+    def _submit_capability_gap(self, conn_id: str) -> str:
+        """实盘下单前：本笔要落到的通道**是否真能下单**（空串 = 未发现缺口）。
+
+        为什么要有它（2026-10-15 真机取证）
+        ---------------------------------
+        本机同时存在三类「绿灯但不能用」的通道，它们的共同点是
+        ``is_connected()`` 为真、界面显示已连接，而下单必定失败：
+
+        1. 大 QMT 文件桥 agent 以**独立进程**运行 ⇒ 未被 QMT 以「公式策略」形态
+           挂载 ⇒ 拿不到 ``passorder`` 等终端注入函数（``funcs=[]``）；
+        2. 桥虽连上但 ``trading_enabled=false``（安全阀）；
+        3. 券商授权关闭 IPC（``mdl_auth_gt_ipc_pair=0``）⇒ xtquant 直连 rc=-1。
+
+        判据取自适配器自报的 ``connector_probe()``（``can_submit`` / ``root_cause``），
+        与 ``/brokers/diagnostics`` **同源**，不另起一套口径。
+
+        ★ 拿不到信息时一律**放行**（返回空串）：本门禁是「把已知缺口说清楚」，
+        不是新增一道可能误伤实盘的闸门。零 mock 契约下，宁可让真实下单去撞真实
+        错误，也不能靠猜测把正常通道挡住。
+        """
+        conn = None
+        try:
+            conns = self._manager.all_connections()
+        except Exception:  # noqa: BLE001
+            conns = []
+        for c in conns or []:
+            cfg = getattr(c, "cfg", None)
+            cid = getattr(cfg, "conn_id", "") or ""
+            if conn_id and cid == conn_id:
+                conn = c
+                break
+            if not conn_id and getattr(c, "connected", False):
+                conn = c
+                break
+        if conn is None:
+            return ""
+        probe_fn = getattr(getattr(conn, "adapter", None), "connector_probe", None)
+        if not callable(probe_fn):
+            return ""
+        try:
+            probe = probe_fn()
+        except Exception:  # noqa: BLE001 — 诊断失败不得阻断下单
+            return ""
+        if not isinstance(probe, dict) or probe.get("can_submit") is not False:
+            return ""
+        detail = str(probe.get("root_cause") or "").strip()
+        return (f"当前通道不具备下单能力，已拒绝实盘委托（连接："
+                f"{getattr(getattr(conn, 'cfg', None), 'name', conn_id) or conn_id}）。"
+                + (f"\n原因：{detail}" if detail else
+                   "\n原因：该通道自报 can_submit=false，详见「连接管理 → 诊断」。"))
+
     async def _est_price_async(self, sig: Signal) -> float:
         """估算下单金额所用价格：有价用价，市价/无价则取最新行情价。
 
         P0-4：取不到最新行情时返回 0（此前兜底 100.0，导致大额市价单被低估而绕过
         金额类风控与大额 TOTP 二次确认）。由调用方根据 0 决定「挂起」还是「拒绝」。
+
+        ★ paper 模式的取价兜底（2026-10-14 实测补）：
+          前端 OrderForm 的「最新价」来自 ``POST /market/quotes``，该端点缓存未命中
+          时走 **DataSourceManager**（eltdx / 公开源），**不需要券商**。于是同一标的
+          「界面显示着真实行情价、后端却报取不到行情」—— 用户按界面价格下市价单，
+          换来一句「未连接券商，或该标的暂无行情」，这是**前后端取价口径分叉**造成
+          的断链，不是真的没行情。
+          故 paper 模式下桥取不到价时，改走注入的 ``quote_fn``（上层接的正是同一个
+          DataSourceManager）。live 模式**不兜底**：实盘必须用券商实时价，用公开源
+          价下单等于拿滞后价成交，比拒单更危险。
         """
         if sig.price and sig.price > 0:
             return float(sig.price)
@@ -303,6 +430,18 @@ class SignalRouter:
                         return float(p)
             except Exception:  # noqa: BLE001
                 pass
+        if self.mode == "paper" and self._quote_fn is not None:
+            try:
+                p = await self._quote_fn(sig.code)
+                if p and float(p) > 0:
+                    return float(p)
+            except Exception as exc:  # noqa: BLE001
+                # 兜底取价失败 ⇒ 与「取不到行情」同义，交给调用方按 price<=0 处理
+                # （挂起或拒绝，绝不臆造价格）。这里不降级成 0 是因为函数尾部本就
+                # 返回 0.0，写一次更清楚：**失败与没行情走同一条出路**。
+                swallow(exc, why="paper 模式兜底取价失败 ⇒ 视为取不到行情，"
+                                 "由调用方按 price<=0 拒绝/挂起，绝不臆造价格",
+                        logger=log)
         return 0.0
 
     async def submit(self, code: str, side: str, volume: int, price: float = 0.0,
@@ -401,12 +540,15 @@ class SignalRouter:
         # ★ 市价单取不到行情时的**归因**必须准确（2026-09-20 实测修复）：此前直接把
         #   price=0 交给 PaperEngine，用户收到的是「模拟盘拒单：price 必须大于 0」——
         #   对一笔**市价单**来说这句话既没解释为什么、也没指出下一步。真实成因是
-        #   「市价单需要最新行情来定价，而当前取不到该标的行情」（未连券商 / 标的无
-        #   行情）。零 mock 契约：拿不到价就如实拒绝，绝不臆造一个价去成交。
+        #   「市价单需要最新行情来定价，而当前取不到该标的行情」。零 mock 契约：
+        #   拿不到价就如实拒绝，绝不臆造一个价去成交。
+        #   （2026-10-14：桥取不到价时已加 DataSourceManager 兜底，故走到这里说明
+        #    券商行情源与公开行情源**都没**返回该标的 —— 文案据此收窄，不再把
+        #    「未连接券商」当成唯一解释。）
         if price <= 0:
             reason = ("模拟盘无法以未知价成交：市价单需要最新行情来定价，"
-                      "当前取不到该标的行情（未连接券商，或该标的暂无行情）。"
-                      "可改用限价单，或先连接券商行情源。")
+                      "但券商行情源与公开行情源均未返回该标的行情"
+                      "（可能不在交易时段、停牌或代码有误）。可改用限价单。")
             self._audit("signal.rejected", sig.code, sig.__dict__, reason)
             return {"ok": False, "reason": reason, "mode": "paper"}
         try:
@@ -477,9 +619,16 @@ class SignalRouter:
     async def _live(self, sig: Signal) -> dict:
         b = self._manager.bridge(sig.broker_id or None)
         if b is None:
-            # broker_unavailable：路由据此返回 503 + 「券商连接」引导（而非 400），
+            # broker_unavailable：路由据此返回 503（而非 400），
             # 语义不再把「没有可用券商」误报成「请求非法」。
-            return {"ok": False, "reason": "未连接券商客户端", "mode": "live",
+            #
+            # ★ reason 自带完整引导（2026-10-15 修）：旧实现只给「未连接券商客户端」
+            #   六个字，靠路由层前缀 MSG_NO_BROKER 补引导 —— 而那个前缀对
+            #   「**已连接但不能下单**」的场景（能力门禁 / 连接三态）是**反向误导**
+            #   （见 routes/trade.py 同一处的注释）。真正的无券商场景由这里把话说全，
+            #   路由层才能安全地只做透传，不再编撰病因。
+            from core.state import MSG_NO_BROKER
+            return {"ok": False, "reason": MSG_NO_BROKER, "mode": "live",
                     "broker_unavailable": True, "error_type": "BrokerNotConnectedError"}
         # P0-1：intent 必须在下单**之前**落盘（顺序不可交换）。
         intent_id = uuid.uuid4().hex
@@ -541,7 +690,10 @@ class SignalRouter:
                 await self._notifier.notify("order.error", "委托失败",
                                             f"{sig.code} {sig.side} 失败：{exc}", sig.__dict__)
             self._audit("signal.failed", sig.code, sig.__dict__, str(exc))
-            # 券商**不可用**（未连接 / SDK 缺失 / 桥接不可用）→ 路由层转 503 引导；
+            # 券商**不可用**（未连接 / SDK 缺失 / 桥接不可用）→ 路由层转 503
+            #（message 原样透传本条 reason：BrokerNotConnectedError 的文案自带
+            # 「请到券商连接页」引导，BrokerSDKError 自带安装指引，均无需路由层
+            # 再补 —— 2026-10-15 移除盲目前缀，见 routes/trade.py 同源注释）；
             # 其余（风控拦截 / 柜台拒单）保持真实的执行拒绝语义。
             from xtquant_client.base import BrokerNotConnectedError, BrokerSDKError
             return {"ok": False, "reason": str(exc), "mode": "live",

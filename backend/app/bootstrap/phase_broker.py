@@ -57,36 +57,92 @@ def _bootstrap_from_env() -> None:
         state.broker_manager.add_connection(cfg, autoconnect=False)
 
 
-async def _auto_connect_active() -> str:
-    """启动自动连接：探测本机**正在运行**的 QMT 客户端并接入。
+async def _detect_candidates_budgeted(timeout: float = 60.0) -> list:
+    """探测本机 QMT 客户端候选 —— **每轮只探一次**，结果同时喂给路径 A 与路径 B。
+
+    ★ 为什么必须只探一次（2026-10-14 实测）：``detect_candidates`` 是全盘查找
+    （本机实测 **2.6~3.3s**，4 个候选），而 ``detect_bridge_agents(cands=None)``
+    会**自己再探一遍**。于是 ``_auto_connect_active`` 一轮就是两遍全盘扫描；
+    守护每 30s 跑一轮 ⇒ 每 30s 白烧 ~6s 磁盘 IO，且是**常驻**行为
+    （「先开软件、后开券商」时守护会一直探下去）。故这里探一次、显式传入。
+
+    失败/超时返回 ``[]``（**不是 None**）：调用方按「本轮没找到候选」处理，
+    下轮守护自然重试 —— 「探测失败」与「机器上确实没有 QMT」走同一条出路。
+    """
+    from xtquant_client.autoconnect import detect_candidates
+
+    try:
+        return await asyncio.wait_for(asyncio.to_thread(detect_candidates), timeout=timeout)
+    except asyncio.TimeoutError:
+        log.warning("自动探测本机 QMT 客户端超时（%.0fs），跳过本轮自动连接", timeout)
+        return []
+    except Exception as exc:  # noqa: BLE001
+        log.warning("自动探测本机 QMT 客户端失败，跳过本轮自动连接：%s", exc)
+        return []
+
+
+async def _bounded_connect_action(fn, *args) -> tuple[object, bool]:
+    """带**硬超时**执行一次会触发 ``adapter.start()`` 的同步动作。
+
+    返回 ``(结果, True)``；超时返回 ``(None, False)``。
+
+    ★ 为什么必须有（2026-10-15 真机取证：路径 A 慢失败饿死路径 B）
+    ------------------------------------------------------------
+    ``add_connection(cfg, True)`` 与 ``activate()`` 内部都走
+    ``_safe_start`` → ``adapter.start()``。路径 A 在本机（券商授权
+    ``mdl_auth_gt_ipc_pair=0`` 让 ``XtQuantServer`` 起不来）是**慢失败**：
+    ``bridge_client._READY_TIMEOUT=100s`` + 连接重试预算，实测整轮 41.87s 起。
+    旧实现对这两个调用**没有 bound** ⇒ 路径 A 挂起时 ``_auto_connect_active``
+    永远走不到路径 B（大 QMT 文件桥）—— 这正是「客户端没有自动连接大 QMT」
+    的时序根因之一（另一条是守护首轮晚 30s，见 ``phase_watchdogs``）。
+
+    超时**不取消底层线程**（``to_thread`` 取消不掉，取消只会让状态停在半路）：
+    此刻连接对象已在 manager 里注册（``_build`` 先注册再 ``_safe_start``），
+    由 ``BrokerHealthMonitor`` 的后台重连接管结局；本函数按「未连通」返回，
+    让调用方继续走路径 B。
+
+    注：``CONNECT_HARD_TIMEOUT`` 定义在本模块后方（启动预算常量区），函数体
+    在运行时才解析该名字，前向引用无碍。
+    """
+    try:
+        result = await asyncio.wait_for(
+            asyncio.to_thread(fn, *args), timeout=CONNECT_HARD_TIMEOUT)
+        return result, True
+    except asyncio.TimeoutError:
+        return None, False
+
+
+async def _auto_connect_qmt_client(cands: list) -> tuple[str, bool]:
+    """启动自动连接（**路径 A**：接入 ``cands`` 里**正在运行**的 QMT 客户端）。
 
     先按「券商 + 客户端路径 + 资金账号」找既有连接：**有就复用**（重新点亮持久意图
     并拉起），没有才新建 —— 否则「用户手动断开过 → 下次启动又新建一条」会让连接
     列表随启动次数膨胀（实测踩过：三次启动累积出 3 条重复的「迅投 XTQuant 22453951」）。
 
     全程**非阻断**：探测 / 建连的任何失败都只记日志，绝不抛出（启动流程优先）。
-    返回接入的 conn_id；未接入返回 ""。
-    """
-    from xtquant_client.autoconnect import build_connection, detect_candidates, pick_active
+    返回 ``(conn_id, connected)``；未接入时 ``("", False)``。
 
-    try:
-        cands = await asyncio.wait_for(asyncio.to_thread(detect_candidates), timeout=60.0)
-    except asyncio.TimeoutError:
-        log.warning("自动探测本机 QMT 客户端超时（60s），跳过自动连接")
-        return ""
-    except Exception as exc:  # noqa: BLE001
-        log.warning("自动探测本机 QMT 客户端失败，跳过自动连接：%s", exc)
-        return ""
+    ★ 建连动作带 ``CONNECT_HARD_TIMEOUT``（32s）硬上限（2026-10-15）：本机路径 A
+    是慢失败（41.87s 起），无 bound 时会把整轮自动连接拖死、路径 B 永远走不到。
+    超时按「未连通」返回（连接已注册，交后台重连），调用方继续走文件桥。
+
+    ★ 返回 ``connected`` 而不是只回 conn_id：``add_connection`` **建出连接对象**不等于
+    连上了。旧实现只看「有没有拿到 conn_id」，于是路径 A 建出一条连不上的连接后
+    就收工，**永远不会走到路径 B（文件桥）** —— 这正是「桥部署好了却从不自动接上」的成因。
+
+    ``cands`` 由 ``_detect_candidates_budgeted`` 探好传入（本函数**不再自己探**）。
+    """
+    from xtquant_client.autoconnect import build_connection, pick_active
 
     cand = pick_active(cands)
     if cand is None:
         log.info("未发现正在运行的 QMT 客户端（候选 %d 个），跳过自动连接", len(cands))
-        return ""
+        return "", False
     fields = build_connection(cand)
     if fields is None:
         log.warning("候选客户端缺少资金账号或客户端路径，跳过自动连接：%s",
                     cand.get("root") or cand.get("name"))
-        return ""
+        return "", False
 
     try:
         existing = state.broker_manager.find_by_identity(
@@ -100,22 +156,188 @@ async def _auto_connect_active() -> str:
                     state.broker_manager.repair_client_path,
                     existing.cfg.conn_id, fields["client_path"],
                     fields.get("client_mode") or "")
-            conn = await asyncio.to_thread(
+            conn, ok = await _bounded_connect_action(
                 state.broker_manager.activate, existing.cfg.conn_id)
+            if not ok:
+                # activate 内部 _safe_start → adapter.start() 超过硬上限：线程仍在
+                # 后台跑（连接已点亮 active），交 health monitor 重连；这里按
+                # 「未连通」返回，让 _auto_connect_active 继续走路径 B。
+                log.warning("路径 A 激活既有连接超时（%.0fs）：%s —— 已交后台重连，"
+                            "继续探测大 QMT 文件桥", CONNECT_HARD_TIMEOUT,
+                            existing.cfg.name)
+                return existing.cfg.conn_id, False
             conn.connected = conn.adapter.is_connected()
-            log.info("已复用既有连接接入本机 QMT 客户端：%s（账号 %s / %s）connected=%s",
-                     conn.cfg.name, conn.cfg.account_id, conn.cfg.client_path, conn.connected)
-            return conn.cfg.conn_id
-        conn = await asyncio.to_thread(
+            # ★ 措辞不得与事实冲突（2026-10-15）：旧实现无论连通与否都打
+            #   「已复用既有连接**接入**本机 QMT 客户端 … connected=False」，
+            #   一行日志里同时说「接入了」和「没连上」，排障时只能靠猜。
+            if conn.connected:
+                log.info("已复用既有连接接入本机 QMT 客户端：%s（账号 %s / %s）",
+                         conn.cfg.name, conn.cfg.account_id, conn.cfg.client_path)
+            else:
+                log.warning("已复用既有连接但**未连通**：%s（账号 %s / %s）last_error=%s",
+                            conn.cfg.name, conn.cfg.account_id, conn.cfg.client_path,
+                            (getattr(conn, "last_error", "") or "无")[:200])
+            return conn.cfg.conn_id, bool(conn.connected)
+        conn, ok = await _bounded_connect_action(
             state.broker_manager.add_connection, ConnectionConfig(**fields), True)
+        if not ok:
+            # 超时时连接已注册（_build 先注册再 _safe_start），按身份回查报结局；
+            # 回查不到（极少见：注册前就失败）按空串处理，调用方继续走路径 B。
+            cid = ""
+            try:
+                found = state.broker_manager.find_by_identity(
+                    fields["broker_id"], fields["client_path"], fields["account_id"])
+                cid = found.cfg.conn_id if found is not None else ""
+            except Exception as exc:  # noqa: BLE001 — 回查失败不影响继续走 B
+                log.debug("建连超时后按身份回查连接失败：%s", exc)
+            log.warning("路径 A 建连超时（%.0fs）：%s（conn_id=%s）—— 已交后台重连，"
+                        "继续探测大 QMT 文件桥", CONNECT_HARD_TIMEOUT,
+                        fields["name"], cid or "?")
+            return cid, False
     except Exception as exc:  # noqa: BLE001
         log.warning("自动连接失败（已跳过，不影响启动）：%s", exc)
-        return ""
+        return "", False
 
     conn.connected = conn.adapter.is_connected()
-    log.info("已自动连接本机 QMT 客户端：%s（账号 %s / %s）connected=%s",
-             fields["name"], fields["account_id"], fields["client_path"], conn.connected)
-    return conn.cfg.conn_id
+    if conn.connected:
+        log.info("已自动连接本机 QMT 客户端：%s（账号 %s / %s）",
+                 fields["name"], fields["account_id"], fields["client_path"])
+    else:
+        log.warning("已建出连接但**未连通**：%s（账号 %s / %s）last_error=%s",
+                    fields["name"], fields["account_id"], fields["client_path"],
+                    (getattr(conn, "last_error", "") or "无")[:200])
+    return conn.cfg.conn_id, bool(conn.connected)
+
+
+def _find_bridge_conn(bridge_dir: str):
+    """按 ``connector_key`` + 归一化 ``bridge_dir`` 找既有的桥连接。
+
+    ★ 不能复用 ``find_by_identity``：它**刻意跳过** ``connector_key`` 非空的连接
+    （桥没有 ``client_path``，参与路径身份匹配会互相误复用）。所以桥的幂等必须
+    单独按「同一个桥目录」判 —— 否则每次启动都会新增一条指向同一桥的连接，
+    正是 ``find_by_identity`` 当初要消灭的那类膨胀。
+    """
+    want = os.path.normcase(os.path.normpath(bridge_dir or ""))
+    if not want:
+        return None
+    for conn in state.broker_manager.all_connections():
+        if not conn.cfg.connector_key:
+            continue
+        if os.path.normcase(os.path.normpath(conn.cfg.bridge_dir or "")) == want:
+            return conn
+    return None
+
+
+async def _auto_connect_bridge(cands: list) -> str:
+    """启动自动连接（**路径 B 兜底**：探测本机已部署且在跑的大 QMT 文件桥 agent）。
+
+    为什么必须有（2026-10-14 用户实测反馈「客户端没有自动连接大 qmt」）
+    ----------------------------------------------------------------
+    当券商把 ``mdl_auth_gt_ipc_pair`` 关成 0 时，客户端日志出现
+    ``CIPCManager::init, not auth:mdl_auth_gt_ipc_pair`` 与
+    ``The XtQuantServer is not allowed to start.`` —— **路径 A 在这台机器上永远
+    不可能成功**，唯一可用的交易通道是跑在大 QMT 内置 Python 策略里的 agent + 文件桥。
+    旧实现只做路径 A 的探测，于是「QMT 明明开着、桥也部署好了，客户端却永远不自动
+    接上大 QMT」，用户只能手填 ``bridge_dir`` / ``auth_token``。
+
+    口径与 ``detect_bridge_agents`` 一致（只读、不猜账号、不生成 token）；
+    已存在同 ``bridge_dir`` 的连接时**复用**而不是新建。全程非阻断。
+    """
+    from xtquant_client.autoconnect import build_bridge_connection, detect_bridge_agents
+
+    try:
+        # ★ 传入 cands：让桥探测**复用**本轮已探好的 QMT 根，而不是再全盘扫一遍
+        #   （detect_bridge_agents(candidates=None) 会自己调 detect_candidates，
+        #   实测 ~3s；守护每 30s 一轮 ⇒ 这一处就是常驻的重复 IO）。
+        found = await asyncio.wait_for(
+            asyncio.to_thread(detect_bridge_agents, cands), timeout=30.0)
+    except asyncio.TimeoutError:
+        log.warning("探测大 QMT 文件桥超时（30s），跳过桥接自动连接")
+        return ""
+    except Exception as exc:  # noqa: BLE001
+        log.warning("探测大 QMT 文件桥失败，跳过桥接自动连接：%s", exc)
+        return ""
+
+    for item in found or []:
+        fields = build_bridge_connection(item)
+        if fields is None:
+            continue
+        existing = _find_bridge_conn(fields["bridge_dir"])
+        try:
+            if existing is not None:
+                # 配置漂移（token 换了 / 账号补上了）时必须同步，否则复用旧配置
+                # 会一直握手失败，而用户看到的是「明明配对了却连不上」。
+                await asyncio.to_thread(
+                    state.broker_manager.repair_bridge_config,
+                    existing.cfg.conn_id, fields["bridge_dir"],
+                    fields["auth_token"], fields["account_id"],
+                    fields["account_type"])
+                conn, ok = await _bounded_connect_action(
+                    state.broker_manager.activate, existing.cfg.conn_id)
+            else:
+                conn, ok = await _bounded_connect_action(
+                    state.broker_manager.add_connection,
+                    ConnectionConfig(**fields), True)
+            if not ok:
+                # 与路径 A 同一族：握手挂起（agent 假活 / 文件 IO 卡住）不得拖住
+                # 整轮自动连接。连接已注册，交 health monitor 后台重连。
+                log.warning("大 QMT 文件桥建连超时（%.0fs）：%s（bridge_dir=%s）—— "
+                            "已交后台重连", CONNECT_HARD_TIMEOUT,
+                            fields.get("name") or "?",
+                            fields.get("bridge_dir") or "")
+                continue
+        except Exception as exc:  # noqa: BLE001
+            log.warning("桥接自动连接失败（已跳过，不影响启动）：%s", exc)
+            continue
+        conn.connected = conn.adapter.is_connected()
+        if not conn.connected:
+            # ★ 建连 ≠ 连通（同上）：桥 agent 探测到了、连接对象也建出来了，但
+            #   握手没成功时不得返回 conn_id —— 否则调用方会据此打「已接入」、
+            #   刷活跃指针，界面一路绿灯而查询全 503。
+            log.warning("大 QMT 文件桥已建连但**未连通**：%s（bridge_dir=%s, agent=%s, "
+                        "心跳 %.0fs 前）last_error=%s",
+                        conn.cfg.name, item.get("bridge_dir"), item.get("agent_ver"),
+                        item.get("heartbeat_age_s") or 0.0,
+                        (getattr(conn, "last_error", "") or "无")[:200])
+            continue
+        log.info("已自动连接大 QMT 文件桥：%s（bridge_dir=%s, agent=%s, 心跳 %.0fs 前, "
+                 "runtime_mode=%s）",
+                 conn.cfg.name, item.get("bridge_dir"), item.get("agent_ver"),
+                 item.get("heartbeat_age_s") or 0.0,
+                 item.get("runtime_mode") or "?")
+        return conn.cfg.conn_id
+    return ""
+
+
+async def _auto_connect_active() -> str:
+    """启动自动连接总入口：先路径 A（xtquant 直连），连不上再兜底路径 B（文件桥）。
+
+    ★ 为什么不是「A 拿到 conn_id 就收工」：``add_connection`` **建出连接对象**并不
+    代表连上了 —— 本机实测（2026-10-14）它建出「集中交易001（自动连接）」后
+    ``connected=false``，``last_error=交易连接异常：WaitingFreeWriter instances
+    exceed maximum limit``（根因是券商授权 ``mdl_auth_gt_ipc_pair=0`` 让
+    ``XtQuantServer`` 起不来）。旧实现只看 conn_id 是否非空，于是**永远不会
+    走到路径 B** —— 这正是「桥部署好了却从不自动接上」的成因。
+    现在以 ``adapter.is_connected()`` 为准：A 真连上才收工，否则继续试 B。
+
+    返回**真正连通**的 conn_id（A 连上 → A；否则 B 连上 → B；都没连上 → ""）。
+
+    ★ 2026-10-15：返回值语义收紧为「连通」而非「建连」。旧实现 ``bid or cid``
+    会把「路径 A 建出了连接对象但没连上」的 conn_id 也返回，于是守护每 30s
+    打一条 ``broker auto-connect guard connected: xxx`` 并刷新活跃指针，而那条
+    连接 ``connected=false`` —— 日志全是绿灯、界面全是红灯，排障无从下手。
+    **建出连接对象是副作用，不是「接入成功」的证据**；调用方只该信返回值。
+
+    ★ 候选**只探一次**（``_detect_candidates_budgeted``）再分发给 A / B：见该函数
+    的 docstring（重复全盘扫描是本机实测 ~3s/次 × 每 30s 一轮的常驻浪费）。
+    """
+    cands = await _detect_candidates_budgeted()
+    cid, ok = await _auto_connect_qmt_client(cands)
+    if cid and ok:
+        return cid
+    if cid:
+        log.info("路径 A 已建连但未连通（conn_id=%s），继续探测大 QMT 文件桥", cid)
+    return await _auto_connect_bridge(cands)
 
 
 #: 启动期给「持久连接」的**总**等待预算（秒）。

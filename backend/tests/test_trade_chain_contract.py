@@ -166,6 +166,37 @@ def test_order_without_signal_router_is_503_not_crash():
     assert "信号" in env["message"]
 
 
+def test_order_broker_unavailable_reason_passes_through_without_false_prefix():
+    """★ 503 的归因必须**原样透传**，不得无条件前缀「未连接任何券商客户端」。
+
+    2026-10-15 真机取证：大 QMT 文件桥**已连接**、但 agent 以独立进程形态运行
+    （终端不注入 ``passorder``）时，``signal_router`` 的能力门禁返回一段可执行
+    文案；旧路由层却给它前缀上 ``MSG_NO_BROKER``（"未连接任何券商客户端：
+    请到「券商连接」页添加并连接券商。"）—— **与事实相反**（桥连着呢），
+    把用户引向「去连一个已经连上的券商」。这正是能力门禁要消灭的误导归因
+    在路由层的二次复发。
+
+    现在路由层只做 HTTP 语义映射：``message == reason``，病因由各拒绝点自负
+    （真正的无券商场景，其 reason 自带完整引导，见 ``signal_router._live``）。
+    """
+    gap_reason = ("当前通道不具备下单能力，已拒绝实盘委托（连接：大QMT桥接·文件）。\n"
+                  "原因：agent 已就绪但一个终端注入函数都没有——当前以独立进程运行，"
+                  "需让本策略以「公式策略」形态被 QMT in-process 挂载")
+
+    class _GapRouter(_SpyRouter):
+        async def submit(self, *a, **kw):
+            return {"ok": False, "reason": gap_reason, "mode": "live",
+                    "broker_unavailable": True}
+
+    # manager 必须「有桥」：否则请求在路由层前置门就被拦成 no_broker()，
+    # 测到的就不是透传逻辑而是前置门了。
+    env = _order({"code": "513090", "direction": "buy", "volume": 100,
+                  "price": 1.73}, _GapRouter(mode="live"), _ConnectedBridge())
+    assert env["code"] == 503, env
+    assert env["message"] == gap_reason, f"路由层改写了病因：{env}"
+    assert MSG_NO_BROKER not in env["message"], f"不得前缀与事实相反的引导：{env}"
+
+
 # ---- 缺陷 2：TOTP 字段名兼容 -----------------------------------------------
 
 def test_confirm_accepts_frontend_totp_field():

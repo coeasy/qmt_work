@@ -252,6 +252,24 @@ def test_sync_stock_list_full_skips_backfilled(store, monkeypatch):
 # ⑤ 增量模式不受影响
 # ---------------------------------------------------------------------------
 def test_incremental_does_not_page_or_filter(store, monkeypatch):
+    """增量（热）路径不翻页、不筛历史。
+
+    ⚠️ 必须显式 ``zone="hot"``（2026-10-14 查明本用例为何「单跑绿、全量红」）：
+    本用例的命题是「**增量**不做区间翻页」。但 ``sync_many`` 在**不传** ``plans``
+    时用的缺省计划是 ``SyncPlan(hot=True, cold=(zone != "hot"))`` —— ``zone`` 缺省
+    ``auto`` ⇒ ``cold=True`` ⇒ 会走冷回补，而冷回补**本来就要**打区间接口
+    （``bars_cold._sync_one_cold`` → ``_fetch_full`` → ``get_kline_range``）。
+
+    于是 ``hub.calls == []`` 是否成立，取决于 ``BarsSyncer._cold``（进程级单例
+    ``get_cold_store()``）有没有被**别的用例**初始化过：
+
+    * 单跑本文件：``_cold is None`` ⇒ ``_sync_one_cold`` 在取数**之前**就返回
+      （"冷仓未初始化：冷数据跳过"）⇒ 区间接口没被碰 ⇒ 通过；
+    * 全量套件：前面的用例初始化了冷仓 ⇒ 真的去取区间 ⇒ 本用例**假失败**
+      （实测：单跑 13 passed / 1.5s；全量套件在 90% 处报 ``assert ['20260101'] == []``）。
+
+    钉住 ``zone="hot"`` 后判据不再依赖进程全局状态，命题也回到它本来要测的东西。
+    """
     hub = _RangeHub(support=False)
     _patch_hub(monkeypatch, hub)
 
@@ -259,13 +277,55 @@ def test_incremental_does_not_page_or_filter(store, monkeypatch):
         assert count == 320          # 用的是 lookback，不是 FULL_COUNT
         return [_bar("20260815")]
 
-    s = BarsSyncer(store=store, fetch_bars=_fetch, lookback=320)
+    s = BarsSyncer(store=store, fetch_bars=_fetch, lookback=320, zone="hot")
     summary = asyncio.run(s.sync_many(["600519.SH"]))
 
-    assert hub.calls == []           # 增量模式压根不碰区间接口
+    assert hub.calls == []           # 热增量压根不碰区间接口
     assert summary.mode == "incremental"
     assert summary.paged is False
     assert summary.skipped_complete == 0
+
+
+def test_sync_many_default_plan_cold_flag_follows_zone(store, monkeypatch):
+    """★ 锁住 ``sync_many`` **不传** ``plans`` 时的缺省计划语义（可见化，不是美化）。
+
+    ``sync_many`` 的缺省计划是 ``SyncPlan(hot=True, cold=(zone != "hot"))`` ——
+    ``zone="auto"``（缺省）会**无条件**尝试冷回补，**绕过** ``_build_plans`` 为
+    ``auto`` 写的保守判据（「本地最早一根早于热窗口 **且** 未标记 complete **且**
+    冷仓未覆盖」才补）。两条调用路径因此行为不同：
+
+      * ``sync_stock_list`` 传了显式 ``plans``（``_build_plans`` 产出）⇒ 保守；
+      * 直接 ``sync_many(codes)``（如 ``app/sync/datasets.py``）⇒ 缺省即 cold=True。
+
+    本用例**只记录事实、不判定对错**：缺省偏保守（多尝试一次冷历史）在语义上说得通，
+    且 ``_sync_one_cold`` 对「冷仓未初始化」「源不支持区间」都有优雅降级（前者跳过、
+    后者 ``ok=False`` 且**不**标记 complete 以便日后重试）。真要改，需先确认
+    ``datasets.py`` 的冷回补是不是有意为之 —— 故本轮**不动产品行为**，只把它钉成
+    可见的事实，免得下次有人再被同一处隐式缺省坑到。
+    """
+    async def _fetch(code, period, adjust, count):
+        return [_bar("20260815")]
+
+    cold_calls: list = []
+
+    async def _fake_cold(self, code):            # noqa: ARG001
+        cold_calls.append(code)
+        return bars_mod.SyncOutcome(code=code, ok=True)
+
+    monkeypatch.setattr(bars_mod.BarsSyncer, "_sync_one_cold", _fake_cold)
+
+    # ① zone 缺省 auto + 不传 plans ⇒ 缺省计划 cold=True ⇒ 冷回补被调用
+    auto = BarsSyncer(store=store, fetch_bars=_fetch, lookback=320)
+    assert auto._zone == "auto"
+    asyncio.run(auto.sync_many(["600519.SH"]))
+    assert cold_calls == ["600519.SH"], (
+        "zone=auto 且未传 plans ⇒ 缺省计划 cold=True（绕过 _build_plans 的保守判据）")
+
+    # ② zone="hot" ⇒ 缺省计划 cold=False ⇒ 冷回补一次都不许调（这正是上一条用例的依据）
+    cold_calls.clear()
+    hot = BarsSyncer(store=store, fetch_bars=_fetch, lookback=320, zone="hot")
+    asyncio.run(hot.sync_many(["600519.SH"]))
+    assert cold_calls == [], "zone=hot 不得触碰冷回补"
 
 
 def test_invalid_mode_falls_back_to_incremental(store):

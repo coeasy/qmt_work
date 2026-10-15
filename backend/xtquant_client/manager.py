@@ -655,6 +655,32 @@ class BrokerManager:
             return conn.bridge if conn else None
         return self.active_bridge()
 
+    def connection_state(self, conn_id: str) -> str:
+        """连接三态判据：``missing`` / ``offline`` / ``online``。
+
+        ★ 为什么必须有这个方法（2026-10-14 本地下单流程实测）：
+          ``bridge()`` 把「连接**不存在**」与「**已注册但未连接**」**都返回 None**
+          —— 上层无法区分。于是 ``gateway.signal_router`` 的未知连接闸门只能写一句
+          「不存在或未注册」把两者混报；更糟的是 paper 模式（撮合在本地
+          PaperEngine，根本不碰券商）被这条闸门误伤：用户只要在连接管理里选中过
+          一条**连不上**的券商记录，前端 OrderForm 就会带上它的 conn_id，
+          此后**每一笔模拟盘下单都返回 503**「请到连接管理添加并连接券商」——
+          而模拟盘压根不需要券商。这就是「下单流程没打通」的直接体感。
+
+        三态语义：
+        - ``missing``：注册表里没有这个 conn_id（从未添加 / 已删除）；
+        - ``offline``：已注册但当前未连接（``conn.connected`` 为 False）；
+        - ``online``：已注册且已连接。
+
+        ⚠️ ``conn.bridge`` 本身在连接未建立时也可能为 None，故判据只看
+        ``conn.connected``（由 ``connect()`` / 健康监控维护），不看 bridge 是否
+        非空 —— 否则「注册了但桥还没建好」会被误报成 missing。
+        """
+        conn = self._conns.get(conn_id)
+        if conn is None:
+            return "missing"
+        return "online" if conn.connected else "offline"
+
     def all_connections(self) -> list[Connection]:
         return list(self._conns.values())
 
@@ -834,4 +860,62 @@ class BrokerManager:
         conn.last_error = ""
         self._persist(c)
         log.info("已修正连接 %s 的客户端路径：%s", conn_id, client_path)
+        return conn
+
+    def repair_bridge_config(self, conn_id: str, bridge_dir: str, auth_token: str,
+                             account_id: str = "", account_type: str = "") -> Connection | None:
+        """把既有**桥连接**的 bridge_dir / token / 账号修正为探测到的值，并重建适配器。
+
+        ★ 为什么需要它（与 ``repair_client_path`` 同一族债务）
+        ----------------------------------------------------
+        自动发现（``autoconnect.detect_bridge_agents``）会复用「同一个 bridge_dir」的
+        既有连接。但部署侧配置是会漂移的：``agent_config.json`` 里换了
+        ``auth_token``、补上了 ``account_id``、或用户把 agent 挪到了新目录。
+        此时若只「复用旧 cfg」，连接会一直握手失败，而用户看到的是
+        「两边明明配对了却连不上」—— 与路径 A 的
+        「已开启 QMT 却不自动连接」是同一种误导。
+
+        与 ``repair_client_path`` 的差别：桥连接的适配器由
+        ``_build_bigqmt_bridge`` 装配（绑定 connector_key + bridge_dir + token），
+        **只改 cfg 不重建 adapter 不会生效**，所以这里走桥的装配路径重建。
+        同样只在「当前没连上」时调用（调用方保证）。
+        """
+        conn = self._conns.get(conn_id)
+        if conn is None:
+            return None
+        c = conn.cfg
+        changed = (
+            os.path.normcase(os.path.normpath(c.bridge_dir or ""))
+            != os.path.normcase(os.path.normpath(bridge_dir or ""))
+            or (c.auth_token or "") != (auth_token or "")
+            or str(c.account_id or "") != str(account_id or "")
+            or (account_type and c.account_type != account_type))
+        if not changed:
+            return conn
+        if not c.connector_key:
+            # 路径 A 的连接不该走这里（用 repair_client_path）
+            log.debug("repair_bridge_config 跳过非桥连接 %s", conn_id)
+            return conn
+        try:
+            conn.adapter.close()
+        except Exception as exc:  # noqa: BLE001 — 关闭失败不影响重建
+            log.debug("repair_bridge_config close %r: %s", conn_id, exc)
+        c.bridge_dir = bridge_dir
+        c.auth_token = auth_token or ""
+        if account_id:
+            c.account_id = account_id
+        if account_type:
+            c.account_type = account_type
+        try:
+            adapter = self._build_bigqmt_bridge(c)
+        except Exception as exc:  # noqa: BLE001 — 装配失败保持原样并记录
+            log.warning("重建桥连接 %s 失败：%s", conn_id, exc)
+            return conn
+        conn.adapter = adapter
+        conn.bridge = adapter
+        conn.connected = False
+        conn.last_error = ""
+        self._persist(c)
+        log.info("已修正桥连接 %s 的配置：bridge_dir=%s token=%s",
+                 conn_id, bridge_dir, "已设置" if c.auth_token else "空")
         return conn

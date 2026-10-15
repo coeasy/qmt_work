@@ -21,6 +21,41 @@ from .quotes import QuotesMixin
 from .trading import TradingMixin
 
 
+#: 「SDK 资源池被本进程自己占满」的特征串。
+#:
+#: ★ 2026-10-15 真机取证：本机两台 QMT（userdata / userdata_mini）都以
+#:   ``connect rc=-1`` 被券商拒（客户端日志 ``CIPCManager::init, not auth:
+#:   mdl_auth_gt_ipc_pair`` + ``The XtQuantServer is not allowed to start.``），
+#:   而平台侧报的却是 ``交易连接异常：WaitingFreeWriter instances exceed maximum
+#:   limit``。用干净进程做**单次**连接（scripts/probe_xtquant_once.py）复现不出来，
+#:   证明它不是券商给的，而是**本进程反复重试新建 XtQuantTrader 却没释放**
+#:   把 SDK 内部的 writer 池撑爆了 —— 属于自伤，且**越重试越糟**。
+#:
+#: 这类错误必须立即停止重试并如实上报：否则守护每 30s 再补一批实例，
+#: 连接就永远不可能恢复（实测 reconnect_attempts 已累到 35/36 次）。
+_RESOURCE_EXHAUSTED_MARKS = (
+    "waitingfreewriter",
+    "instances exceed maximum limit",
+    "exceed maximum limit",
+)
+
+
+def _is_resource_exhausted(exc: BaseException) -> bool:
+    """异常是否属于「SDK 资源池耗尽」（自伤型，重试只会更糟）。"""
+    low = str(exc).lower()
+    return any(m in low for m in _RESOURCE_EXHAUSTED_MARKS)
+
+
+def _safe_stop(trader) -> None:
+    """释放一次失败的 XtQuantTrader 会话（失败也不影响调用方）。"""
+    if trader is None:
+        return
+    try:
+        trader.stop()
+    except Exception:  # noqa: BLE001 — 释放失败不得掩盖原始连接错误
+        pass
+
+
 class XTPQuantAdapter(QuotesMixin, AccountMixin, TradingMixin, InstrumentMixin, BrokerAdapter):
     """迅投 XTQuant 真实适配器。"""
 
@@ -313,6 +348,8 @@ class XTPQuantAdapter(QuotesMixin, AccountMixin, TradingMixin, InstrumentMixin, 
             attempts_made = 0
             deadline = time.monotonic() + self._CONNECT_RETRY_BUDGET
             budget_exhausted = False
+            # ★ 自伤型失败（SDK 资源池耗尽）：命中即**立刻停止**后续重试。
+            resource_exhausted = False
             for d in candidate_dirs:
                 if trader is not None:
                     break
@@ -327,11 +364,29 @@ class XTPQuantAdapter(QuotesMixin, AccountMixin, TradingMixin, InstrumentMixin, 
                         budget_exhausted = True
                         break
                     sid = self.session_id + attempt
-                    t = XtQuantTrader(d, sid)
-                    rc = t.start()
+                    t = None
+                    try:
+                        t = XtQuantTrader(d, sid)
+                        rc = t.start()
+                    except Exception as exc:  # noqa: BLE001
+                        # ★ 关键修复（2026-10-15 真机取证）：旧实现只在
+                        #   ``connect()`` 失败时 ``stop()``，``start()`` 抛异常时
+                        #   **直接 continue** —— 于是每轮 12 次尝试最多泄漏 12 个
+                        #   XtQuantTrader 实例。守护每 30s 再来一轮，几十轮后 SDK
+                        #   的 writer 池被撑爆，报
+                        #   ``WaitingFreeWriter instances exceed maximum limit``。
+                        #   这个错误**盖住了真实的券商拒绝**（rc=-1），还让「重试」
+                        #   从自救变成了自伤。现在：一律释放；耗尽则立即中止。
+                        _safe_stop(t)
+                        last_err = f"start 异常：{exc}"
+                        if _is_resource_exhausted(exc):
+                            resource_exhausted = True
+                            break
+                        continue
                     attempts_made += 1
                     if rc is not None and rc != 0:
                         last_err = f"start rc={rc}"
+                        _safe_stop(t)
                         continue
                     crc = t.connect()
                     if crc == 0:
@@ -340,13 +395,24 @@ class XTPQuantAdapter(QuotesMixin, AccountMixin, TradingMixin, InstrumentMixin, 
                         break
                     last_err = f"connect rc={crc}"
                     # 释放本次失败的会话，避免连续重试泄漏多个 session
-                    try:
-                        t.stop()
-                    except Exception:  # noqa: BLE001
-                        pass
-                if trader is not None:
+                    _safe_stop(t)
+                if trader is not None or resource_exhausted:
                     break
             trade_dir = used_dir
+            if trader is None and resource_exhausted:
+                # ★ 如实区分「券商拒绝」与「本机自己把资源占满了」。
+                #   两者的处置完全相反：前者找券商/改登录模式，后者**重启本程序**。
+                #   混为一谈会让用户反复重启 QMT 客户端，而真正的修法是重启平台。
+                raise BrokerNotConnectedError(
+                    "交易连接异常：本机 xtquant 交易会话资源已耗尽"
+                    f"（{last_err}）。\n"
+                    "### 这是什么\n"
+                    "  这不是券商拒绝，而是**本程序**反复重试连接时新建了大量 "
+                    "XtQuantTrader 实例、未全部释放，把 SDK 内部的 writer 池占满了。\n"
+                    "### 怎么修\n"
+                    "  1) 已停止本轮重试（继续重试只会更糟）；\n"
+                    "  2) **重启本程序**（不是重启 QMT 客户端）即可释放；\n"
+                    "  3) 若重启后仍连不上，再用下方信息排查券商侧原因。")
             if trader is None:
                 _exe_procs = _running_client_exes()
                 # ★ 2026-10-09 修（真机实测）：诊断必须锚在**首选判定的模式/目录**上。

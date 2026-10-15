@@ -469,3 +469,187 @@ def test_inspect_force_degrades_on_locked_file(monkeypatch, tmp_path, capsys):
     assert "configFormula" in out and "UiSettingConfig" in out, out
     # 反向锚：不得把异常漏出去变成 traceback
     assert "Traceback" not in out
+
+
+# --------------------------------------------------------------------------
+# 2026-10-14：运行形态判定 —— 「独立进程」策略永远拿不到交易函数注入
+#
+# 真机取证：QMT 只把 passorder / get_trade_detail_data 注入**在终端进程内被公式
+# 引擎挂载**的那个文件命名空间。登记成「独立进程 / 原生Python」时 QMT 走
+# `pythonw.exe -u <file> <userdata> <ts>`，该进程注入面恒为空 —— agent 心跳新鲜、
+# PROBE 通过、桥显示「已连接」，但 injected=[]、can_submit=false，下单/查询全失败。
+#
+# 本机实测（P:/stock/gd_qmt）：
+#   * QMT_WORK_AGENT 是全部日志里**唯一**出现 `execude cmd: -u ...` 的策略；
+#   * 新股申购 / 国债逆回购 / ZT996 走 `doRun: ... m_scriptType:1`（进程内）且有账户能力。
+#
+# 这组测试锁三件事：① 两种形态都能从日志判出来；② 中文文件名 mojibake 要能还原
+# （否则永远匹配不上，得出「没找到启动记录」的假结论）；③ 无日志证据时只能标「推断」。
+# --------------------------------------------------------------------------
+
+def _load_deploy_mod():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "_deploy_mod_runmode_under_test", DEPLOY_SCRIPT)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _make_qmt(tmp_path, log_lines=(), log_name="XtClient_20261014.log"):
+    """搭一个最小 QMT 目录：python/ 策略目录 + userdata/log/<主日志>。"""
+    qmt = tmp_path / "gd_qmt"
+    (qmt / "python").mkdir(parents=True)
+    logdir = qmt / "userdata" / "log"
+    logdir.mkdir(parents=True)
+    if log_lines:
+        (logdir / log_name).write_text("\n".join(log_lines) + "\n", encoding="utf-8")
+    return qmt
+
+
+def test_run_mode_detects_independent_process_from_log(tmp_path):
+    """主日志出现 `execude cmd: -u "<file>"` ⇒ 判定独立进程（不可下单）。"""
+    mod = _load_deploy_mod()
+    line = ('2026-10-14 19:10:48,203 [INFO] [TC::CTradeStrategyData::doRun] '
+            'execude cmd:  -u "P://stock//gd_qmt//python//QMT_WORK_AGENT.py" '
+            '"P://stock//gd_qmt//userdata" 1791976248203')
+    qmt = _make_qmt(tmp_path, [line])
+    (qmt / "python" / "QMT_WORK_AGENT.py").write_text(
+        "# -*- coding: utf-8 -*-\nprint('x')\n", encoding="utf-8")
+
+    res = mod.run_mode_of_strategy(str(qmt), "QMT_WORK_AGENT.py")
+    assert res["mode"] == "independent", res
+    assert res["certain"] is True, "有启动行证据时必须是「已确认」，不能是推断"
+    assert any("execude cmd" in e for e in res["evidence"]), res["evidence"]
+
+
+def test_run_mode_detects_in_process_formula_from_log(tmp_path):
+    """主日志出现 `m_luaFile:` + `m_scriptType:` ⇒ 判定内置Python（可下单）。"""
+    mod = _load_deploy_mod()
+    line = ('2026-10-14 19:11:39,940 [INFO] [TC::CTradeStrategyData::doRun] doRun: '
+            'm_type:0, m_luaFile:P://stock//gd_qmt//python//ZT996.py, '
+            'm_startTime:-2524550400000, m_scriptType:1, m_runMode:1')
+    qmt = _make_qmt(tmp_path, [line])
+    # 容器形态：单行、首 200 字节无空格、非 # 开头
+    (qmt / "python" / "ZT996.py").write_bytes(b"MiFBOecYoHXTplIeaO0x" + b"A" * 400)
+
+    res = mod.run_mode_of_strategy(str(qmt), "ZT996.py")
+    assert res["mode"] == "formula", res
+    assert res["certain"] is True, res
+    assert any("m_luaFile" in e for e in res["evidence"]), res["evidence"]
+
+
+def test_run_mode_repairs_cp1252_mojibake_in_chinese_name(tmp_path):
+    """中文策略名在主日志里是 cp1252 mojibake，必须还原后才匹配得上。
+
+    `国` 的 utf-8 首字节 0x9B 在 cp1252 里是 `›`（U+203A），**不在 latin-1 范围**；
+    若先按 latin-1 解会把该字节静默丢掉 ⇒ 还原出错误名字 ⇒ 永远匹配不上，
+    得出「没找到启动记录」的假结论（实测踩过）。
+    """
+    mod = _load_deploy_mod()
+    mojibake = "国债逆回购.py".encode("utf-8").decode("cp1252")
+    assert mojibake != "国债逆回购.py", "构造 mojibake 失败，测试前提不成立"
+    line = ('2026-10-14 19:10:48,201 [INFO] [TC::CTradeStrategyData::doRun] doRun: '
+            'm_luaFile:P://stock//gd_qmt//python//%s, m_startTime:0, '
+            'm_scriptType:1, m_runMode:1' % mojibake)
+    qmt = _make_qmt(tmp_path, [line])
+    (qmt / "python" / "国债逆回购.py").write_bytes(b"MmJNMuofqSiOo1t" + b"A" * 400)
+
+    res = mod.run_mode_of_strategy(str(qmt), "国债逆回购.py")
+    assert res["mode"] == "formula", res
+    assert res["certain"] is True, res
+    assert any("m_luaFile" in e for e in res["evidence"]), res["evidence"]
+
+
+def test_run_mode_without_log_evidence_is_only_inferred(tmp_path):
+    """没有启动记录时只能据文件形态**推断**，不得冒充「已确认」。"""
+    mod = _load_deploy_mod()
+    qmt = _make_qmt(tmp_path, [])          # 无日志
+    (qmt / "python" / "PY简单示例.py").write_text(
+        "#coding:gbk\nprint(1)\n", encoding="utf-8")
+
+    res = mod.run_mode_of_strategy(str(qmt), "PY简单示例.py")
+    assert res["mode"] == "independent", res
+    assert res["certain"] is False, "无日志证据时必须标 uncertain"
+    assert any("推断" in e for e in res["evidence"]), res["evidence"]
+
+
+def test_run_mode_excludes_satellite_logs(tmp_path):
+    """旁路日志（datasource/Message/Formula）不得被当主日志扫描。
+
+    历史坑：判据写成「文件名里有下划线」去排除旁路日志，但**主日志恰好没有下划线**
+    （`XtClient_20261014.log`）⇒ 主日志被一起滤掉，永远取不到日志证据，
+    只剩文件形态兜底（假阴性）。
+    """
+    mod = _load_deploy_mod()
+    ext = ('[TC::CTradeStrategyData::doRun] execude cmd:  -u '
+           '"P://q//QMT_WORK_AGENT.py" "P://q//userdata" 1')
+    qmt = _make_qmt(tmp_path, [])
+    logdir = qmt / "userdata" / "log"
+    # 旁路日志里有同样的行，但主日志里没有 ⇒ 必须**不**被采信
+    (logdir / "XtClient_datasource_20261014.log").write_text(ext + "\n", encoding="utf-8")
+    (logdir / "XtClient_20261014.log").write_text("no doRun here\n", encoding="utf-8")
+    (qmt / "python" / "QMT_WORK_AGENT.py").write_text("# plain\n", encoding="utf-8")
+
+    res = mod.run_mode_of_strategy(str(qmt), "QMT_WORK_AGENT.py")
+    assert not any("execude cmd" in e for e in res["evidence"]), (
+        "旁路日志被误当主日志采信了：%s" % res["evidence"])
+    assert res["certain"] is False, res
+
+
+def test_check_warns_loudly_on_independent_form(tmp_path, monkeypatch, capsys):
+    """`check` 在独立进程形态下必须给出**可执行**的修法与自证判据。
+
+    ★ 并且**退出码必须非 0**（2026-10-14 修）：此前打出 `[FAIL]` 却 `return 0` ——
+    那是本项目最忌讳的「假绿灯」：`if qmt_agent_deploy.py check; then echo ok; fi`
+    会得到「一切正常」，而这台机器一单都下不出去。2 = 已部署但需人工动作。
+    """
+    import types
+    mod = _load_deploy_mod()
+    line = ('[TC::CTradeStrategyData::doRun] execude cmd:  -u '
+            '"P://q//QMT_WORK_AGENT.py" "P://q//userdata" 1')
+    qmt = _make_qmt(tmp_path, [line])
+    (qmt / "python" / "QMT_WORK_AGENT.py").write_text("# plain\n", encoding="utf-8")
+
+    monkeypatch.setattr(mod, "find_qmt_dir", lambda d: str(qmt))
+    monkeypatch.setattr(mod, "qmt_running", lambda: [])
+    # 注册状态判定依赖 QMT 日志还原器，这里隔离掉，只锁「运行形态」这一段
+    monkeypatch.setitem(__import__("sys").modules, "qmt_agent_verify",
+                        types.SimpleNamespace(registration=lambda q, t: {"log": "x"}))
+
+    rc = mod.cmd_check(types.SimpleNamespace(
+        qmt_dir=str(qmt), strategy_dir=None, strategy="QMT_WORK_AGENT",
+        filename="QMT_WORK_AGENT.py"))
+    out = capsys.readouterr().out
+    assert rc == 2, "独立进程形态下 check 必须非 0 退出（否则自动化拿到假绿灯）"
+    assert "独立进程" in out and "永远下不了单" in out, out
+    assert "内置Python" in out, "必须给出修法"
+    assert "m_scriptType:1" in out, "必须给出自证判据"
+    assert "Traceback" not in out
+
+
+def test_check_returns_zero_on_healthy_in_process_form(tmp_path, monkeypatch, capsys):
+    """反面：内置Python（公式）形态 ⇒ `check` 必须 0 退出，不能把健康态也报成 FAIL。
+
+    ★ 这条是上一条的**证伪面**：若把「非 0」写成无条件的，自动化会把正常部署也拦下。
+    """
+    import types
+    mod = _load_deploy_mod()
+    line = ('[TC::CTradeStrategyData::doRun] doRun: m_type:0, '
+            'm_luaFile:P://q//python//QMT_WORK_AGENT.py, m_startTime:1')
+    qmt = _make_qmt(tmp_path, [line])
+    # 内置Python 形态的文件是**单行不透明容器**（首 200 字节无空格、非 # 开头）
+    (qmt / "python" / "QMT_WORK_AGENT.py").write_bytes(b"MiFBOecYoHXTplIeaO0x" + b"A" * 400)
+
+    monkeypatch.setattr(mod, "find_qmt_dir", lambda d: str(qmt))
+    monkeypatch.setattr(mod, "qmt_running", lambda: [])
+    monkeypatch.setitem(__import__("sys").modules, "qmt_agent_verify",
+                        types.SimpleNamespace(registration=lambda q, t: {"log": "x"}))
+
+    rc = mod.cmd_check(types.SimpleNamespace(
+        qmt_dir=str(qmt), strategy_dir=None, strategy="QMT_WORK_AGENT",
+        filename="QMT_WORK_AGENT.py"))
+    out = capsys.readouterr().out
+    assert rc == 0, "健康形态不得非 0 退出：%s" % out
+    assert "内置Python" in out and "具备下单能力" in out, out
+    assert "[FAIL]" not in out, out

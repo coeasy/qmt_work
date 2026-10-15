@@ -15,7 +15,7 @@ from app.routes._common import (
     ok,
 )
 from app.services import account_store
-from app.services.positions import enrich_positions
+from app.services.positions import enrich_positions, mark_paper_positions
 # paper 模式账本映射：/account/status 与 /trade/positions|orders|deals 同族
 # （2026-10-12 一起补的模式分流，详见 routes/trade.py 文件头注释）。
 from app.services import paper_ledger as _paper_ledger
@@ -55,7 +55,13 @@ async def account_status(conn_id: str = "", ctx: AppContext = Depends(get_ctx)):
         pe = _ledger_engine(ctx)
         if pe is None:
             return err(503, "模拟盘引擎未初始化（paper 模式不可查账户）")
-        return ok(_paper_ledger.paper_account_status(pe))
+        st = _paper_ledger.paper_account_status(pe)
+        # ★ 与 /trade/positions 同一套盯市（2026-10-14 修复）：PaperEngine 的
+        #   last_prices 无行情推送时停留在 submit_order 写入的成交价，
+        #   仪表盘「持仓盈亏」会因此恒为 0 却自称实时。复用 mark_paper_positions
+        #   按真实行情重算，拿不到则留 None + marking="cost"（不拿成交价冒充）。
+        st["positions"] = await mark_paper_positions(st.get("positions") or [], ctx)
+        return ok(st)
     if mode == "dry_run":
         return err(503, "当前为「预演（dry_run）」模式：不连接券商、不维护账本，"
                          "没有账户视图可查。切换到模拟盘或实盘模式后再查。")

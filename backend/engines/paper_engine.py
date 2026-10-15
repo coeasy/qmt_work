@@ -208,6 +208,28 @@ class PaperEngine:
     def _stamp_tax(self, amount: float) -> float:
         return round(amount * self.stamp_tax_rate, 4)
 
+    def _resolve_key(self, code: str) -> str:
+        """同一标的的两种写法归并到同一持仓键（``000001`` vs ``000001.SZ``）。
+
+        历史缺陷（2026-10-14 本地下单流程实测）：``submit_order`` 对 code 只做
+        ``strip().upper()``，于是同一只股票以「裸码」和「带交易所后缀码」各下一单，
+        会裂成**两条独立持仓** —— 前端持仓页显示两只同名股票（且 name 一条是
+        「平安银行」一条是裸码），持仓集中度风控把一只股票算成两只（单票占比
+        分母虚高、分子被拆），T+1 批次也记在两处。
+
+        规则：**数字段相同即视为同一标的**，沿用已入库的键（它通常已带交易所
+        后缀，是更完整的写法）。两者都全新时用传入原样 —— 绝不猜测交易所：
+        ``000001`` 既可能是上证指数也可能是平安银行，取决于标的类型，
+        猜错会把指数持仓和股票持仓混成一笔。
+        """
+        num = "".join(ch for ch in code if ch.isdigit())
+        if not num:
+            return code
+        for k in self.positions:
+            if k != code and "".join(ch for ch in k if ch.isdigit()) == num:
+                return k
+        return code
+
     # ---------------- 下单（立即成交） ----------------
     def submit_order(self, code: str, side: str, price: float, volume: float,
                      price_type: str = "limit", remark: str = "",
@@ -242,6 +264,11 @@ class PaperEngine:
             raise ValueError(limit_check)
 
         with self._lock:
+            # 同一标的的两种写法归并到同一持仓键（000001 / 000001.SZ），
+            # 否则会裂成两条独立持仓：前端显示两只同名股票，且持仓集中度
+            # 风控把一只股票算成两只（单票占比分母虚高、分子被拆）。
+            # 放在锁内：避免两个并发线程同时首次买入同一标的的不同写法。
+            code = self._resolve_key(code)
             amount = price * vol_int
             commission = self._commission(amount)
             pnl = 0.0

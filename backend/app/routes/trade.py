@@ -3,12 +3,13 @@ import logging
 from core.context import AppContext, get_ctx
 from fastapi import APIRouter, Depends
 
-from app.routes._common import (MSG_NO_BROKER, _call, _need, envelope_ok, err,
+from app.routes._common import (_call, _need, envelope_ok, err,
                                 no_broker, ok)
 # 持仓行富化（中文名兜底 + 现价/盈亏/盈亏比补算）已抽到服务层：
 # /trade/positions 与 /account/status（仪表盘「持仓盈亏」）必须共用同一实现，
 # 否则两页会各说各话（实测：持仓页 -10.4、仪表盘 0）。
-from app.services.positions import enrich_names, enrich_positions
+from app.services.positions import (
+    enrich_names, enrich_positions, mark_paper_positions)
 # paper 模式的账本查询映射（PaperEngine → 平台契约形状）。查询端点按执行模式
 # 分流：live 走券商，paper 读本地账本 —— 见各端点注释与 paper_ledger docstring。
 from app.services.paper_ledger import (
@@ -135,12 +136,23 @@ async def trade_order(body: dict, ctx: AppContext = Depends(get_ctx)):
         if isinstance(res, dict) and not res.get("ok", True):
             reason = str(res.get("reason") or res.get("message") or res)
             # 语义分流（零 mock 契约）：
-            # - 券商**不可用**（未连接 / SDK 缺失 / 桥接不可用）→ 503 + 「券商连接」引导；
+            # - 券商**不可用**（未连接 / SDK 缺失 / 桥接不可用）→ 503；
             # - 其余为**真实执行拒绝**（风控拦截 / 柜台拒单 / 非交易时段）→ 400 + 真实原因。
             # 铁律：绝不把失败粉饰成 code=0（前端 tradeApi.js 依赖 code!=0 抛错，
             # 否则会把拒单显示成「已报」——假成功）。
+            #
+            # ★ 503 的 message **原样透传** router 的 reason（2026-10-15 真机取证修复）：
+            #   旧实现在这里无条件前缀 ``MSG_NO_BROKER``（"未连接任何券商客户端：
+            #   请到「券商连接」页添加并连接券商。"），而 ``broker_unavailable`` 的
+            #   拒绝源远不止「没连券商」——**能力门禁**（大 QMT 桥已连通、但 agent
+            #   以独立进程形态运行拿不到 passorder）与**连接三态**（不存在 /
+            #   已注册未连接）都走这一支。对那些场景，这句前缀**与事实相反**
+            #   （券商明明连着呢），把用户引向「去连一个已经连上的券商」——
+            #   正是能力门禁要消灭的误导归因，只是在路由层又长了出来。
+            #   现在每条 reason 自带准确归因与下一步（见 ``signal_router`` 各
+            #   拒绝点），路由层只做 HTTP 语义映射，不二次编撰病因。
             if res.get("broker_unavailable"):
-                return err(503, f"{MSG_NO_BROKER}（{reason}）")
+                return err(503, reason)
             return err(400, f"风控/执行拒绝：{reason}")
         return ok(res)
 
@@ -238,6 +250,15 @@ async def trade_positions(symbol: str = "", ctx: AppContext = Depends(get_ctx)):
         if pe is None:
             return err(503, "模拟盘引擎未初始化（paper 模式不可查持仓）")
         rows = _paper_positions(pe, symbol)
+        # ★ paper 持仓同样要按**真实行情**盯市（2026-10-14 实测修复）。
+        #   PaperEngine 的 last_prices 在无行情推送时停留在 submit_order 写入的
+        #   **成交价**，且 marking 仍标 "live" —— 持仓页的「现价/市值/浮动盈亏」
+        #   于是恒等于成交价（利润恒 0），那是把成交价伪装成实时行情。
+        #   实盘路径走 enrich_positions（缓存→负缓存→短TTL→券商→hub 五级取价），
+        #   paper 此前完全不走 —— 「下单修了、查询没修」家族的又一成员。
+        #   复用 mark_paper_positions：拿不到行情就留 None（docstring 承诺
+        #   「拿不到行情则留空」），marking 降级为 "cost" 供消费方区分。
+        rows = await mark_paper_positions(rows, ctx)
         return envelope_ok(enrich_names(rows))
     if mode == "dry_run":
         return err(503, _DRY_RUN_NO_DATA.format(what="持仓"))

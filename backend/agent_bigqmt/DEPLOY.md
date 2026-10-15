@@ -190,6 +190,33 @@ python scripts/qmt_cef_cdp.py read-editor --out logs/editor_dump.py
 > 另外，QMT 只把 `passorder`/`get_trade_detail_data` 等函数注入**被挂载的那一个
 > 文件**的命名空间。入口若只是 `from BIGQMT_AGENT import *`，`globals()` 指向的是
 > 被导入模块 ⇒ **一个注入函数都捕获不到**，能力面全灭。所以入口必须自己就是实现。
+>
+> **⚠️ 更关键的一条：注册成「独立进程」的策略，注入面**恒为空**（2026-10-14 真机取证）**
+>
+> QMT 的 Python 策略有**两种运行形态**，二者能力天差地别：
+>
+> | 形态 | QMT 怎么跑它 | 主日志判据 | 能拿到 `passorder` 吗 |
+> |---|---|---|---|
+> | **内置Python（公式）** | 源码被公式引擎 in-process 挂载 | `doRun: ... m_scriptType:1 ... m_runMode:1` | ✅ 能 |
+> | **原生Python（独立进程）** | `pythonw.exe -u <file> <userdata> <ts>` | `doRun] execude cmd:  -u "<file>" ...` | ❌ **永远不能** |
+>
+> 本机（`P:\stock\gd_qmt`）实测：
+> * `QMT_WORK_AGENT` 是**全部日志里唯一**出现 `execude cmd: -u ...QMT_WORK_AGENT.py`
+>   的策略（14 次）⇒ 独立进程 ⇒ `agent_status.json` 里 `runtime_mode=standalone_process`、
+>   `injected=[]`、`trade_surface.can_submit=false` ⇒ **下单/账户查询一律失败**；
+> * QMT 自带的可交易策略 `新股申购` / `国债逆回购` / `ZT996` 全部走
+>   `doRun: ... m_scriptType:1`（进程内），且 `XtClient_FormulaOutput_<日期>.log`
+>   里能看到它们真的拿到了账户（`... 22453951 STOCK 单笔买入数量1000000`）。
+>
+> 形态还会**写在文件上**：内置Python 形态的 `.py` 是**单行不透明容器**
+> （QMT 编译后的公式体，首 200 字节无空格）；独立进程形态的 `.py` 保持
+> **明文源码**（`# -*- coding: utf-8 -*-`）。
+>
+> 一条命令自证（只读，不碰 QMT）：
+> ```bash
+> python scripts/qmt_agent_deploy.py check --strategy QMT_WORK_AGENT --filename QMT_WORK_AGENT.py
+> ```
+> 看到 `运行形态 : 独立进程（原生 Python）—— 永远下不了单` 就必须按 §3.1 路径 A 重做。
 
 **一键部署（推荐）**：
 
@@ -217,24 +244,54 @@ python scripts/qmt_agent_deploy.py check      # 体检：目录/QMT进程/配置
 
 ### 3.1 注册策略 + 设置自动运行（唯一需要人工的一步，约 30 秒）
 
-**拷贝文件到此为止都不算完成。** 必须做一次会写注册树的动作，二选一：
+**拷贝文件到此为止都不算完成。** 必须做一次会写注册树的动作。
 
-**路径 A · 导入本地策略**
+> **★ 选错入口 = 永远下不了单（2026-10-14 真机修正）**
+>
+> 旧版本这里把两条路径写成「二选一、等价」——**这是错的**。实测结论：
+>
+> | 入口 | 得到的运行形态 | 能否下单 |
+> |---|---|---|
+> | **新建策略 → Python 策略 →（类型选**内置Python**）→ 粘贴 → 编译** | 内置Python（公式，进程内） | ✅ **可以** |
+> | 导入本地策略（指向明文 `.py`） | 原生Python（独立进程） | ❌ **永远不能** |
+>
+> 「导入本地策略」得到的是**独立进程**：QMT 以
+> `pythonw.exe -u <file> <userdata> <ts>` 拉起它，**不注入任何交易函数**。
+> 症状极具迷惑性 —— agent 心跳新鲜、PROBE 通过、桥显示「已连接」，但
+> `injected=[]`、`trade_surface.can_submit=false`，下单与账户查询全失败。
+> 本机 2026-10-14 实测：`QMT_WORK_AGENT` 正是这种形态（见 §3 的取证表）。
+>
+> 因此**只推荐下面这一条路径**。
+
+**路径 A · 新建 + 粘贴（唯一推荐，得到可下单的内置Python形态）**
+
+1. 「我的」页 → **新建策略** → **Python 策略**；
+2. 在编辑器的**类型 / 运行方式**选择里选 **「内置Python」**
+   ——**不要**选「原生Python / 独立进程」；
+3. 全选删掉模板代码，粘贴 `qmt_work_agent.py` 的全部内容
+   （`deploy --txt` 会在同目录多产一份 `.txt`，用记事本粘贴比 IDE 稳）；
+4. 点 **「编译」**（编译/保存才会登记进注册树，并把源码编译成公式体写回该 `.py`）。
+
+**编译成功的判据（可直接看文件）**：`<QMT>/python/<策略名>.py` 会从**明文源码**
+变成**单行不透明容器**（首 200 字节无空格、非 `#` 开头）。没变 ⇒ 没编译成功。
+
+**路径 B · 导入本地策略（仅行情 / 回测可用，不推荐用于交易通道）**
+
+只有当这台机器**不需要下单**（只借 agent 的行情/K线能力）时才用它：
+
 1. 左侧进 **「模型研究」**（找不到就走「模型交易」）；
 2. 在策略区（图标/列表）**空白处右键**；
 3. 选 **「导入本地策略」/「本地.rzrk导入」**，文件类型切到 `*.py`；
 4. 选中 `<QMT>/python/qmt_work_agent.py`。
-
-**路径 B · 新建 + 粘贴**
-1. 「我的」页 → **新建策略** → **Python 策略**；
-2. 全选删掉模板代码，粘贴 `qmt_work_agent.py` 的全部内容；
-3. 点 **「编译」**（编译/保存才会登记进注册树）。
 
 **注册后**：在「模型交易」里找到它 → 右键 → **设置自动运行**
 （`startupAutorun`，QMT 记在 `config/user/root/UiSettingConfig`）→ 点运行
 （若弹出「以下策略设置为自动运行，是否立即运行？」选确定）。
 
 完成后 QMT **每次启动都会自动拉起该策略**，之后无需再点任何东西。
+
+**⚠️ 改过类型之后必须重启策略**（QMT 里停止再运行）—— 运行形态在启动时确定，
+热改不生效。
 
 > 自证注册成功（无需看界面）：
 > ```bash
@@ -243,9 +300,17 @@ python scripts/qmt_agent_deploy.py check      # 体检：目录/QMT进程/配置
 > 输出 `已注册: 是`，并列出 `startupAutorun`。它读的是客户端日志里的注册树
 > 还原结果，**与文件在不在目录里无关**。
 >
+> **自证「形态对」**（这一步比「已注册」更重要）：
+> ```bash
+> python scripts/qmt_agent_deploy.py check --strategy QMT_WORK_AGENT --filename QMT_WORK_AGENT.py
+> ```
+> 必须看到 `运行形态 : 内置Python（公式，进程内）—— 具备下单能力`。
+> 若显示 `独立进程（原生 Python）—— 永远下不了单`，回到路径 A 重做。
+>
 > 日志判据：`[TC::CStrategyTradeManager::loadSettings] [CStrategyLoadSetting]Account:<账号>,
 > FomrlaName: qmt_work_agent, startupAutorun: true, ID:N`，随后出现
-> `[TC::CMainWindow::tryAutoRunStrategy] ... automatic run`。
+> `[TC::CMainWindow::tryAutoRunStrategy] ... automatic run`，且该策略**只**出现
+> `doRun: ... m_scriptType:1 ...`、**不**出现 `execude cmd:  -u "<本文件>"`。
 
 > **想把「导入」也自动化？** 目前不可能，§2.1.1 给了三重证据（注册树整文件
 > 字节锁 + 全 `config\` 无明文名单 + `.rzrk` 亦为加密容器）。补充格式细节：
@@ -390,6 +455,7 @@ V4 组合表里 `qmt.big.bridge.redis` / `.zmq` 标记为「可用」，但**那
 | `auth token 不匹配` | token 两侧不同 | 复制同一份，别带换行空格 |
 | `未在该解析路径捕获到函数 X` | **本文件不是 QMT 挂载的入口**，或该版本的确没此函数 | 确认策略选中的是 `qmt_work_agent.py`（单文件态）；在大 QMT 里直接调用一次该函数验证。**不要据这条提示断定终端没有此接口**——能力面会诚实标 UNKNOWN |
 | 下单返回 `trading_enabled=false` | 安全阀未开 | 配置置 `true` 后**重启策略** |
+| **心跳正常、桥显示「已连接」，但下单/账户查询全失败** | 策略登记成了**独立进程（原生Python）**形态 ⇒ 终端不注入 `passorder`/`get_trade_detail_data`（`injected=[]`、`can_submit=false`） | 跑 `qmt_agent_deploy.py check` 看「运行形态」；若是独立进程，按 §3.1 **路径 A** 重建为**内置Python**并重启策略 |
 | 下单参数错误 | `passorder` 枚举与客户端版本不符 | 改 `passorder.*`，查 QMT 日志里的真实报错 |
 | 有委托/成交但前端不刷新 | 事件缺失 | 查 `events.ndjson` 是否有新行；无则说明 `get_trade_detail_data("ORDER"/"DEAL")` 在该客户端不可用（能力面标 UNKNOWN） |
 | 行情/ K 线查不到 | 大 QMT 主窗口 58600 只做交易，行情 RPC 需 miniquote **58610** | 开启独立行情/极简模式，或让数据面走 eltdx/公共源降级链 |
@@ -432,10 +498,18 @@ python scripts/check_bigqmt_agent_py36.py
 真实下单由本 agent 直接调用柜台接口完成，资金风险自担。首次使用请按以下清单验证：
 
 - [ ] QMT 已登录柜台、可手动下单；
-- [ ] `python/qmt_work_agent.py` 已在**策略目录顶层**（不是子目录），编码 GBK；
-- [ ] **已做注册动作**（导入本地策略 / 新建+编译），且
+- [ ] `python/qmt_work_agent.py` 已在**策略目录顶层**（不是子目录）；
+- [ ] **已做注册动作**（**新建策略 → 内置Python → 粘贴 → 编译**），且
       `python scripts/qmt_strategy_list_probe.py --target qmt_work_agent`
       输出 `已注册: 是`（这一步不做，界面上永远不会出现）；
+- [ ] **运行形态 = 内置Python（可下单）**：
+      `python scripts/qmt_agent_deploy.py check --strategy QMT_WORK_AGENT --filename QMT_WORK_AGENT.py`
+      输出 `运行形态 : 内置Python（公式，进程内）—— 具备下单能力`；
+      且 `<QMT>/python/<策略名>.py` 已是**单行不透明容器**（不是明文源码）；
+      且主日志里该策略**不**出现 `execude cmd:  -u "<本文件>"`；
+      **退出码必须为 0** —— 该命令在「独立进程 ⇒ 永远下不了单」时返回 **2**
+      （2 = 已部署但需人工动作；1 = QMT 目录未找到），可直接用于自动化/预检：
+      `python scripts/qmt_agent_deploy.py check || echo "部署未就绪，见上面的 [FAIL] 修法"`；
 - [ ] 策略已勾选「自动运行」（客户端日志出现 `startupAutorun: true` / `automatic run`）；
 - [ ] `agent_config.json` 的 `bridge_dir` / `auth_token` 与 qmt_work 后端连接配置逐字符一致；
 - [ ] `python scripts/qmt_agent_verify.py --wait 60` 返回**通过**（心跳新鲜 + 自检无异常项）；

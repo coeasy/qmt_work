@@ -92,6 +92,23 @@ class BrokerHealthMonitor:
             conn.last_error = _brief(exc)
         conn.connected = ok
         if ok:
+            # ★ 「连上了」不等于「能用」（2026-10-14 真机取证）。
+            #
+            # 大 QMT 文件桥的存活判据只回答「agent 还在应答吗」。本机实测存在
+            # 「心跳新鲜 + PROBE 通过 + 桥显示已连接」而 agent 拿不到 passorder
+            # 的状态（策略被 QMT 当**独立进程**跑 ⇒ 终端不注入交易函数）——
+            # 界面是一条绿灯，用户每次操作却撞 503。这就是「假绿灯」家族：
+            # 存活 ≠ 可用。
+            #
+            # 因此只要适配器能零成本报出**能力缺口**，就如实降级为 needs_action
+            # 并带上可执行的处置文案，而不是继续挂绿灯。
+            gap = self._capability_gap(conn)
+            if gap:
+                if conn.health_status != "needs_action" or conn.last_error != gap:
+                    log.warning("broker %s 已连通但能力不足：%s", conn.cfg.conn_id, gap[:160])
+                conn.health_status = "needs_action"
+                conn.last_error = gap
+                return
             if conn.health_status != "connected":
                 conn.health_status = "connected"
                 conn.reconnect_attempts = 0
@@ -119,6 +136,26 @@ class BrokerHealthMonitor:
             # （旧代码 bug）也能继续创建新的重连任务，保证自愈不失效。
             if conn.cfg.active and (conn.reconnect_task is None or conn.reconnect_task.done()):
                 conn.reconnect_task = asyncio.create_task(self._reconnect(conn))
+
+    @staticmethod
+    def _capability_gap(conn) -> str:
+        """适配器自报的**能力缺口**（空串 = 无缺口 / 无法判定）。
+
+        契约：适配器可选实现 ``capability_gap() -> str``，且必须是 **O(1) 零 IO**
+        （health 循环每 5s 跑一次，这里绝不允许触发一次往返）。未实现该方法的
+        适配器（如 xtquant 直连）一律视为「无缺口」，行为与改动前完全一致 ——
+        本改动**只增不减**，不改变既有适配器的健康语义。
+
+        任何异常都吞掉：健康检查本身绝不能因为一个诊断方法而炸掉整轮巡检。
+        """
+        fn = getattr(conn.adapter, "capability_gap", None)
+        if not callable(fn):
+            return ""
+        try:
+            return str(fn() or "")
+        except Exception as exc:  # noqa: BLE001
+            log.debug("capability_gap(%s) 失败：%s", conn.cfg.conn_id, exc)
+            return ""
 
     async def _reconnect(self, conn):
         conn.health_status = "connecting"

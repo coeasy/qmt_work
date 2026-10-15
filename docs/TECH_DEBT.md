@@ -1502,3 +1502,83 @@ PY
 
 **当前状态**：登记中，未闭环。三条都在**本轮新增代码**里，
 说明「新增端点/字段时必须同步检查前端消费点」这道工序还缺一个门禁。
+
+---
+
+### TD-43（R43，2026-10-15）：「重试自伤」+「建连即绿灯」—— 真实下单链路的三个假象
+
+**背景**：真实下单 `513090` 买 100 股（live 模式）被打回
+`风控/执行拒绝：账户快照未就绪：拒绝买入开仓（总资产仍为演示值 1000000）`。
+顺着这条线往下挖，发现三个叠加在一起的假象，每一个单独看都像「券商的问题」，
+合起来把真实成因完全盖住了。
+
+#### ① 重试自伤：`WaitingFreeWriter` 不是券商给的，是本程序自己造的
+
+`xtquant_client/xtp/adapter.py` 的连接重试循环每次都 `XtQuantTrader(dir, sid)`
+新建实例，却**只在 `connect()` 失败时 `stop()`** —— `start()` 抛异常时直接
+`continue`。一轮最多 2 目录 × 6 session = 12 个实例，而自动连接守护每 30s 一轮、
+**无退避**，几十轮后 SDK 的 writer 池被撑爆，抛
+`WaitingFreeWriter instances exceed maximum limit`。
+
+判别方法（关键，可复用）：用**干净进程做单次**连接
+（`scripts/probe_xtquant_once.py`，本轮新增）复现不出来 ⇒ 证明它不是券商给的。
+本机实测干净进程：`start rc=None`、`connect rc=-1`、无 `WaitingFreeWriter`。
+⇒ 真实成因是券商授权：客户端日志
+`CIPCManager::init, not auth:mdl_auth_gt_ipc_pair` +
+`The XtQuantServer is not allowed to start.`
+
+**危害**：自造的错误**盖住了**真实的 `rc=-1`，且**越重试越不可能恢复**
+（实测 `reconnect_attempts` 累到 35/36 次）。处置方向还相反：
+资源耗尽要**重启本程序**，券商拒绝要**找券商/改登录模式**。
+
+**已修**：① 每次失败的尝试一律释放（含 `start()` 抛异常）；
+② 命中资源耗尽特征串**立即中止**重试，不再新建实例；
+③ 错误文案显式区分两者并给出相反的正确动作。
+护栏：`tests/test_xtp_connect_leak.py`（5 例）。
+
+#### ② 建连即绿灯：`_auto_connect_active` 把「建出连接对象」当成「接入成功」
+
+`return bid or cid` —— 路径 A 只是**建出了连接对象**、并没连上时也会返回
+conn_id。守护据此打 `broker auto-connect guard connected: xxx` 并刷新活跃指针。
+实测日志每 30~38s 一条「已连接」，而 `GET /brokers` 里那条
+`connected=false`、`last_error=交易连接异常：WaitingFreeWriter...`。
+**日志全程绿灯、界面全程红灯**，「排障」无从下手。
+
+同源的两个措辞矛盾：`已复用既有连接**接入**本机 QMT 客户端 … connected=False`
+（一行日志里同时说「接入了」和「没连上」）；`_auto_connect_bridge` 无条件返回
+conn_id（桥握手失败也算接入）。
+
+**已修**：返回值语义收紧为「**真正连通**」，未连通返回 `""`；
+调用方二次校验 `conn.connected` 才打 connected 日志 / 刷活跃指针；
+日志措辞按连通与否分流。护栏：`tests/test_autoconnect.py`（+3 例）。
+
+#### ③ 无退避的常驻重连：把「不可能成功」的通道每 30s 试一遍
+
+路径 A 在这台机器上**永远**不可能成功（券商授权关闭 IPC），守护却恒 30s 一轮
+完整探测 + 建连。这既制造了 ① 的资源泄漏，也让日志每 30s 一条噪音。
+
+**已修**：连续未接入按 30s → 60 → 120 → 300s（上限）指数退避。
+护栏：`test_guard_backs_off_after_repeated_failures`。
+
+#### ④ 顺带修：账号快照失败每 60s 一条 WARNING 连刷
+
+实测凌晨 `00:16~00:54` 连刷 38 条**同一原因**的 `account snapshot failed`，
+既淹没真正需要看的告警，也把日志推到 GB 级。
+**已修**：同一原因只首次告警，重复降 DEBUG，成功时清空标记。
+
+#### 仍然无解的部分（不是平台缺陷，必须如实告知）
+
+* 路径 A（外部 xtquant 直连）：券商授权 `mdl_auth_gt_ipc_pair=0`，平台无法改写；
+* 路径 B（大 QMT 文件桥）：`connected=true` 但 agent `funcs=[]`、
+  `can_submit=false` —— 策略未被 QMT 以「公式策略」形态 in-process 挂载，
+  拿不到 `passorder`。属 QMT 客户端侧限制（注册树需 GUI 动作）。
+
+⇒ 本轮新增**实盘下单能力门禁**（`SignalRouter._submit_capability_gap`）：
+live 下单前先问活跃通道 `connector_probe().can_submit`，明确为 `False` 时
+**直接拒绝并带出 `root_cause`**，而不是让用户撞上「账户快照未就绪」这句
+看不懂的话。判据与 `/brokers/diagnostics` 同源；拿不到信息一律放行
+（不新增可能误伤实盘的闸门）。
+
+**为什么单开一条**：这三个假象的共同结构是「**把副作用当结果**」
+（建连 → 当成接通；重试 → 当成自救）。它和 TD-33「诊断工具假告状」是
+同一家族的两面：一个谎报成功，一个谎报失败。

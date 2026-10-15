@@ -56,34 +56,50 @@ export function Trade() {
   // 持仓 / 委托 / 成交 点一行 ⇒ 直接进行情工作台看这只票（唯一出口，勿各写一遍）
   const openWorkbench = useOpenWorkbench();
   const activeConn = connections.find((c) => c.active)?.conn_id ?? "";
-  /**
-   * ★ 空列表必须先问「是查不了，还是真的空」。
-   * `refresh()` 对未连接券商的情况是**静默吞异常**（`catch {}`），于是三个列表
-   * 都拿到 `[]` —— 若直接显示「暂无持仓数据」，就把「连不上」说成了「没有」，
-   * 用户会以为是账户空、而不是接口没数据。这里与 `Positions.tsx` 同口径。
-   */
-  const connected = connections.some((c) => c.connected);
 
   /**
    * ★ 信号模式：决定「下面三张表是不是这笔委托的去处」。
    *
-   * 后端信号模式默认就是 **paper**（`SignalRouter._load_persisted_mode("paper")`），
-   * 而持仓/委托/成交三个接口**只读券商**（`/trade/*` 恒走 active 连接）。
-   * 于是「已连券商 + 默认 paper」时：用户下单 → 本地撮合成交，而这一页显示的
-   * 是**券商**账本 —— 刚买的票不在持仓里，用户会以为单子丢了或没成交。
-   * 这里把成因显式写出来（订单表单侧同样有提示，见 `orderExecutionNote`）。
+   * 后端信号模式默认就是 **paper**（`SignalRouter._load_persisted_mode("paper")`）。
+   *
+   * ★ 2026-10-12 后端已按执行模式分流（trade.py 的 `_exec_mode`）：paper 模式下
+   *   `/trade/positions|orders|deals` **返回本地模拟盘账本**（PaperEngine 的持仓 /
+   *   委托 / 成交），与券商连接无关。此前的文案说「下表是券商账户、模拟盘成交不在
+   *   其中」是**分流修复之前**的认知，已作废 —— 按它写的后果是：用户在模拟盘下
+   *   了单，这一页明明有数据却被告知「去账户·模拟盘看」，而三张表自己就是模拟盘
+   *   账本。空状态同理：paper 模式下查询根本不需要券商。
    */
   const sigMode = useAsync(() => signalApi.getMode(), []).data?.mode;
+  const paperMode = sigMode === "paper";
   const modeNote = (() => {
-    if (sigMode === "paper") {
-      return "当前信号模式为「模拟盘」：下表是券商账户的持仓 / 委托 / 成交，"
-        + "模拟盘的成交不在其中 —— 模拟盘账本请到「账户 · 模拟盘」查看。";
+    if (paperMode) {
+      return "当前信号模式为「模拟盘」：下表是本地模拟盘账本（持仓 / 委托 / 成交），"
+        + "由模拟盘引擎撮合产生，与券商账户无关，也无需连接券商。";
     }
     if (sigMode === "dry_run") {
       return "当前信号模式为「预演」：下单只返回计划，不会产生券商委托或成交，下表不会变化。";
     }
     return "";
   })();
+
+  /**
+   * ★ 空列表必须先问「是查不了，还是真的空」。
+   * `refresh()` 对未连接券商的情况是**静默吞异常**（`catch {}`），于是三个列表
+   * 都拿到 `[]` —— 若直接显示「暂无持仓数据」，就把「连不上」说成了「没有」，
+   * 用户会以为是账户空、而不是接口没数据。这里与 `Positions.tsx` 同口径。
+   *
+   * ★ paper 模式例外（2026-10-12 后端分流后）：`/trade/*` 在 paper 下返回的是
+   *   本地模拟盘账本，**压根不走券商**，`connected` 为 False 也照样查得到。
+   *   所以「未连接券商，无法查询」只能出现在 live 模式；paper 下显示它等于
+   *   把「查过了、确实是空」谎报成「查不了」，还会挂一个引导去连券商的按钮
+   *   —— 而模拟盘连接券商没有任何意义。
+   */
+  const connected = connections.some((c) => c.connected);
+  /** 空状态文案：paper 下三张表就是模拟盘账本（查过了、确实空），不谎报「查不了」。 */
+  const emptyText = (what: string) =>
+    paperMode ? `模拟盘暂无${what}` : (connected ? `当前账户无${what}` : `未连接券商，无法查询${what}`);
+  /** 「去连接」引导只在真的需要券商时出现（paper 模式连接券商没有意义）。 */
+  const showBrokerGuide = !paperMode && !connected;
 
   /** 撤单结果与撤单相关提示（下单自身的提示在 OrderForm 内） */
   const [banner, setBanner] = useState<Banner | null>(null);
@@ -106,7 +122,8 @@ export function Trade() {
 
   const refresh = useCallback(async () => {
     try {
-      // 契约：positions/orders/deals 只作用于 active 连接；
+      // 契约：positions/orders/deals 按执行模式分流（trade.py `_exec_mode`）——
+      // live 走 active 连接；paper 返回本地模拟盘账本（不碰券商）；
       // positions 的 query 参数是 symbol（按标的过滤），不是 conn_id。
       const [p, o, d] = await Promise.all([
         tradeApi.positions(),
@@ -346,9 +363,9 @@ export function Trade() {
                 />
               ) : (
                 <EmptyState
-                  text={connected ? "当前账户无持仓" : "未连接券商，无法查询持仓"}
-                  actionText={connected ? undefined : "去连接"}
-                  onAction={connected ? undefined : () => open("brokers", {}, { title: "连接管理" })}
+                  text={emptyText("持仓")}
+                  actionText={showBrokerGuide ? "去连接" : undefined}
+                  onAction={showBrokerGuide ? () => open("brokers", {}, { title: "连接管理" }) : undefined}
                 />
               ))}
             {tab === "orders" &&
@@ -361,9 +378,9 @@ export function Trade() {
                 />
               ) : (
                 <EmptyState
-                  text={connected ? "当前账户无委托" : "未连接券商，无法查询委托"}
-                  actionText={connected ? undefined : "去连接"}
-                  onAction={connected ? undefined : () => open("brokers", {}, { title: "连接管理" })}
+                  text={emptyText("委托")}
+                  actionText={showBrokerGuide ? "去连接" : undefined}
+                  onAction={showBrokerGuide ? () => open("brokers", {}, { title: "连接管理" }) : undefined}
                 />
               ))}
             {tab === "deals" &&
@@ -377,9 +394,9 @@ export function Trade() {
                 />
               ) : (
                 <EmptyState
-                  text={connected ? "当前账户无成交" : "未连接券商，无法查询成交"}
-                  actionText={connected ? undefined : "去连接"}
-                  onAction={connected ? undefined : () => open("brokers", {}, { title: "连接管理" })}
+                  text={emptyText("成交")}
+                  actionText={showBrokerGuide ? "去连接" : undefined}
+                  onAction={showBrokerGuide ? () => open("brokers", {}, { title: "连接管理" }) : undefined}
                 />
               ))}
           </div>

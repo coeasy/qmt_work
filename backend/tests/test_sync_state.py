@@ -154,12 +154,24 @@ def _run_bars(params, summary, monkeypatch, raise_exc=None):
     return asyncio.run(runner({"id": "job-1"}))
 
 
+def _last_bars(zone: str = "hot"):
+    """读日线同步状态 —— **必须按 zone 读分区流**，不能读遗留的 ``sync.bars``。
+
+    ⚠️ 这是本文件曾经全红 5 条的根因（2026-10-14 查明）：v0.5.2 的冷热分层把
+    写入从 ``sync.bars`` 拆成了 ``sync.bars.hot`` / ``sync.bars.cold``，但这 5 条
+    由 ``_run_bars`` 驱动的用例仍读 ``STREAM_SYNC_BARS``（"sync.bars"）——
+    于是 ``last_run`` 恒返回 ``None``，断言全部落空。
+    ``STREAM_SYNC_BARS`` 现在**只**用于读取改造前的旧库记录（见 ``app/sync/state.py``）。
+    """
+    return st_mod.last_run(st_mod.sync_bars_stream(zone))
+
+
 def test_sync_bars_records_ok(db, monkeypatch):
     out = _run_bars({}, {"total": 5224, "ok": 5224, "failed": 0, "stale": 0,
                          "bars_written": 100, "as_of_max": "20260918",
                          "errors": []}, monkeypatch)
     assert out["ok"] == 5224
-    rec = st_mod.last_run(st_mod.STREAM_SYNC_BARS)
+    rec = _last_bars()
     assert rec is not None and rec["status"] == "ok"
     assert rec["detail"]["total"] == 5224
     assert rec["detail"]["as_of_max"] == "20260918"
@@ -175,7 +187,7 @@ def test_sync_bars_stale_marks_partial(db, monkeypatch):
     _run_bars({}, {"total": 5224, "ok": 5224, "failed": 0, "stale": 5093,
                    "bars_written": 1630066, "as_of_max": "20250418",
                    "errors": []}, monkeypatch)
-    rec = st_mod.last_run(st_mod.STREAM_SYNC_BARS)
+    rec = _last_bars()
     assert rec["status"] == "partial"
     assert rec["detail"]["stale"] == 5093
     assert rec["detail"]["as_of_max"] == "20250418"
@@ -185,7 +197,7 @@ def test_sync_bars_failure_recorded_and_reraised(db, monkeypatch):
     """失败必须**既落库又抛出**：只落库会让作业显示成功，只抛出会让界面失忆。"""
     with pytest.raises(RuntimeError):
         _run_bars({}, {}, monkeypatch, raise_exc=RuntimeError("股票池为空"))
-    rec = st_mod.last_run(st_mod.STREAM_SYNC_BARS)
+    rec = _last_bars()
     assert rec is not None and rec["status"] == "error"
     assert "股票池为空" in rec["detail"]["error"]
 
@@ -195,7 +207,7 @@ def test_sync_bars_errors_truncated(db, monkeypatch):
     errs = [{"code": f"600{i:03d}", "error": "x"} for i in range(50)]
     _run_bars({}, {"total": 60, "ok": 10, "failed": 50, "stale": 0,
                    "bars_written": 10, "errors": errs}, monkeypatch)
-    rec = st_mod.last_run(st_mod.STREAM_SYNC_BARS)
+    rec = _last_bars()
     assert len(rec["detail"]["errors"]) == 20
     assert rec["detail"]["errors_truncated"] == 30
 
@@ -214,7 +226,7 @@ def test_sync_bars_detail_exposes_full_backfill_fields(db, monkeypatch):
     _run_bars({}, {"total": 10, "ok": 10, "failed": 0, "stale": 0, "bars_written": 99,
                    "mode": "full", "paged": True, "as_of_min": "20140102",
                    "skipped_complete": 4100}, monkeypatch)
-    d = st_mod.last_run(st_mod.STREAM_SYNC_BARS)["detail"]
+    d = _last_bars()["detail"]
     assert d["mode"] == "sync_bars"        # 流标签，保持不变
     assert d["sync_mode"] == "full"        # 同步模式
     assert d["paged"] is True
@@ -275,3 +287,84 @@ def test_sync_status_keeps_history_when_synchronizer_absent(db, monkeypatch):
     assert payload["initialized"] is False
     assert payload["last_bars_run"]["status"] == "error"
     assert "股票池为空" in payload["last_bars_run"]["detail"]["error"]
+
+
+# ---------------------------------------------------------------------------
+# ⑦ 冷热分区流（v0.5.2 拆分）—— 此前**零覆盖**，正是上面 5 条静默变红的成因
+# ---------------------------------------------------------------------------
+def test_sync_bars_stream_is_partitioned_by_zone():
+    """★ ``zone`` → 流名 的映射必须锁死。
+
+    背景（2026-10-14 查明）：v0.5.2 把日线同步的**写入**从 ``sync.bars`` 拆成
+    ``sync.bars.hot`` / ``sync.bars.cold``，但**没有任何用例断言这件事** ——
+    于是拆分之后，本文件 5 条由 ``_run_bars`` 驱动的用例仍读遗留流名，
+    ``last_run`` 恒返回 ``None``，套件一直红着却看不出坏在哪一层。
+    这条锁映射本身，下面两条锁接线与缺省推断。
+    """
+    assert st_mod.sync_bars_stream("hot") == "sync.bars.hot"
+    assert st_mod.sync_bars_stream("cold") == "sync.bars.cold"
+    # ``both``（mode=full 的缺省推断）走热流：它是「热+冷都做」，主记录归热。
+    assert st_mod.sync_bars_stream("both") == "sync.bars.hot"
+    # 缺省 / 大小写 / 空白一律收敛到热流，**绝不返回空串** —— 空流名会让所有
+    # 记录挤进同一条（等于把分区撤销了，而且界面上看不出来）。
+    for z in ("", "  ", None, "HOT", " Hot ", "unknown"):
+        assert st_mod.sync_bars_stream(z) == "sync.bars.hot", repr(z)
+    assert st_mod.sync_bars_stream("COLD") == "sync.bars.cold"
+    assert st_mod.sync_bars_stream(" cold ") == "sync.bars.cold"
+
+
+def test_sync_bars_runner_writes_partitioned_stream_by_zone(db, monkeypatch):
+    """★ 接线：``zone=cold`` 的调度必须写冷流，且**不碰**热流（反之亦然）。
+
+    为什么必须锁：两条调度共用 ``kind == "system.sync_bars"``，而 ``record_run``
+    以 stream 为唯一键。若二者写同一条流，后跑的覆盖先跑的 —— 冷补齐在无券商
+    连接时落 ``status="error"``，界面读到的「上次日线同步」就成了冷补齐的失败，
+    把正常的热同步显示成故障（假告警，最耗排查时间的一类）。
+    """
+    _run_bars({"zone": "cold"}, {"total": 1, "ok": 1, "failed": 0, "stale": 0,
+                                 "bars_written": 1, "errors": []}, monkeypatch)
+    assert st_mod.last_run("sync.bars.cold") is not None, "zone=cold 必须写冷流"
+    assert st_mod.last_run("sync.bars.hot") is None, "zone=cold 不得污染热流"
+
+    _run_bars({"zone": "hot"}, {"total": 2, "ok": 2, "failed": 0, "stale": 0,
+                                "bars_written": 2, "errors": []}, monkeypatch)
+    assert st_mod.last_run("sync.bars.hot") is not None, "zone=hot 必须写热流"
+    assert st_mod.last_run("sync.bars.cold")["detail"]["total"] == 1, \
+        "热流记录不得覆盖冷流记录"
+
+
+def test_sync_bars_zone_defaults_to_hot_unless_mode_full(db, monkeypatch):
+    """``zone`` 缺省推断与 ``jobs.sync_runner`` 一致：``mode=full`` ⇒ both，否则 hot。
+
+    推断错了会让「全量回补」的记录落到热流上，把日常热同步的「上次同步」覆盖掉。
+    """
+    _run_bars({}, {"total": 1, "ok": 1, "failed": 0, "stale": 0, "errors": []},
+              monkeypatch)
+    assert st_mod.last_run("sync.bars.hot") is not None
+    assert st_mod.last_run("sync.bars.cold") is None, "增量不该写冷流"
+
+    _run_bars({"mode": "full"}, {"total": 3, "ok": 3, "failed": 0, "stale": 0,
+                                 "errors": []}, monkeypatch)
+    assert st_mod.last_run("sync.bars.hot")["detail"]["total"] == 3, \
+        "mode=full ⇒ zone=both ⇒ 主记录仍归热流"
+
+
+def test_last_hot_bars_run_falls_back_to_legacy_stream(db):
+    """★ 旧库兼容：尚无 ``sync.bars.hot`` 时必须回退读遗留 ``sync.bars``。
+
+    分区之前所有记录都在 ``sync.bars`` 上。升级后若只读新流名，老库用户看到的
+    「上次同步」会瞬间变成「尚无记录」—— 恰好丢在最需要线索的时刻。
+    """
+    from app.routes.market import _last_hot_bars_run
+
+    assert _last_hot_bars_run() is None, "两处都没有才叫「从没跑过」"
+
+    st_mod.record_run(st_mod.STREAM_SYNC_BARS, status="ok",
+                      detail={"mode": "sync_bars", "total": 7})
+    legacy = _last_hot_bars_run()
+    assert legacy is not None and legacy["detail"]["total"] == 7, "必须回退读遗留流"
+
+    st_mod.record_run("sync.bars.hot", status="ok",
+                      detail={"mode": "sync_bars", "total": 8})
+    assert _last_hot_bars_run()["detail"]["total"] == 8, \
+        "新流有记录时**优先**新流（回退只是兜底）"

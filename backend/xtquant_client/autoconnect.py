@@ -22,9 +22,166 @@
 """
 from __future__ import annotations
 
+import json
+import os
+import time
+
 from .discovery import discover, discover_accounts, guess_broker_id_by_name
 
-__all__ = ["detect_candidates", "pick_active", "build_connection", "resolve_broker_id"]
+__all__ = ["detect_candidates", "pick_active", "build_connection", "resolve_broker_id",
+           "detect_bridge_agents", "build_bridge_connection",
+           "BRIDGE_HEARTBEAT_MAX_AGE_S"]
+
+#: 大 QMT 文件桥 agent 的默认连接器 key（见 ``connectors/registry.py``）。
+BRIDGE_CONNECTOR_KEY = "qmt.big.bridge.file"
+
+#: agent 心跳可接受的最大陈旧度（秒）。
+#:
+#: ★ 为什么是「小时级」而不是「秒级」：``agent_status.json`` 的 ``ts`` 由 agent 的
+#:   写入节奏决定，**与运行形态有关** ——
+#:     * 独立进程形态：``run_standalone`` 主循环里持续写，永远新鲜；
+#:     * 公式（内置Python）形态：只在 ``handlebar`` 被 QMT 调用时写，
+#:       **非交易时段/午休会自然停更**。
+#:   若按秒级判新鲜，公式形态在收盘后会被误判成「没部署」⇒ 自动连接永远不生效，
+#:   正是「客户端明明开着大 QMT 却从不自动接上」的成因。
+#:   因此这里只把心跳当「**这份部署最近活过**」的粗筛，真伪交给连接自身的
+#:   往返探活（``BigQmtBridge.is_connected`` 的 ``_liveness_probe``）判定。
+BRIDGE_HEARTBEAT_MAX_AGE_S = 12 * 3600.0
+
+#: 探测桥 agent 时最多看几个 QMT 候选根（避免大机群下扫描失控）。
+_BRIDGE_SCAN_LIMIT = 8
+
+
+def _read_json(path: str) -> dict:
+    """读 JSON，任何失败都返回空 dict（探测路径绝不抛）。"""
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else {}
+    except Exception:  # noqa: BLE001 — 探测是只读尽力而为
+        return {}
+
+
+def _bridge_config_paths(qmt_root: str) -> list[str]:
+    """agent_config.json 的候选位置（部署约定，按序回退）。
+
+    与 ``agent_bigqmt`` bundle 的查找顺序一致：先 ``python/agent_config.json``，
+    再旧布局 ``python/agent_bigqmt/agent_config.json``。
+    """
+    sdir = os.path.join(qmt_root, "python")
+    return [os.path.join(sdir, "agent_config.json"),
+            os.path.join(sdir, "agent_bigqmt", "agent_config.json")]
+
+
+def detect_bridge_agents(candidates: list[dict] | None = None,
+                         now: float | None = None) -> list[dict]:
+    """探测本机**已部署且在跑**的大 QMT 文件桥 agent（路径 B）。
+
+    为什么需要它（2026-10-14 用户实测反馈：「客户端没有自动连接大 qmt」）
+    -------------------------------------------------------------------
+    ``detect_candidates`` 只找**路径 A**（外部 xtquant 直连）的候选。当券商把
+    ``mdl_auth_gt_ipc_pair`` 关成 0 时，客户端日志会出现
+    ``CIPCManager::init, not auth:mdl_auth_gt_ipc_pair`` 与
+    ``The XtQuantServer is not allowed to start.`` —— **路径 A 在本机根本不可能成功**，
+    唯一可用的交易通道是跑在大 QMT 内置 Python 策略里的 agent + 文件桥。
+    但那条连接的 ``bridge_dir`` / ``auth_token`` 只有部署者知道，自动连接从不认识它，
+    于是「QMT 明明开着，客户端永远不自动接上大 QMT」，用户只能手填一遍。
+
+    发现口径（**只读、无副作用、不猜**）
+    ----------------------------------
+    1. 从 QMT 候选根的 ``python/agent_config.json`` 读 agent 部署配置；
+    2. 要求 ``bridge_dir`` 非空且目录存在（否则连上也无处投递请求）；
+    3. 读 ``bridge_dir/agent_status.json``，要求 ``alive`` 为真且心跳不过期
+       （窗口见 ``BRIDGE_HEARTBEAT_MAX_AGE_S``）—— **文件存在不算**，
+       残留的过期心跳是「假存活」的主要来源；
+    4. ``auth_token`` 直接沿用部署配置里的值（**不猜、不生成**：猜错 token 会被
+       agent 侧拒绝，表现为「一直超时」，比不连更误导）。
+
+    ``candidates`` 省略时内部调 ``detect_candidates()``（已含 QMT 根发现）。
+    返回列表，每项形如 ``{"root", "config_path", "bridge_dir", "auth_token",
+    "account_id", "transport", "status", "heartbeat_age_s", "agent_ver"}``。
+    """
+    cands = candidates if candidates is not None else detect_candidates()
+    now = time.time() if now is None else now
+    found: list[dict] = []
+    seen_dirs: set[str] = set()
+
+    for c in (cands or [])[:_BRIDGE_SCAN_LIMIT]:
+        root = (c.get("root") or c.get("client_path") or "").strip()
+        if not root:
+            continue
+        for cfg_path in _bridge_config_paths(root):
+            if not os.path.isfile(cfg_path):
+                continue
+            cfg = _read_json(cfg_path)
+            bridge_dir = str(cfg.get("bridge_dir") or "").strip()
+            if not bridge_dir:
+                continue
+            # 归一化比较（去掉尾部斜杠 / 统一分隔符），避免同一条桥被重复登记
+            key = os.path.normcase(os.path.normpath(bridge_dir))
+            if key in seen_dirs:
+                continue
+            seen_dirs.add(key)
+            if not os.path.isdir(bridge_dir):
+                continue
+
+            st_path = os.path.join(bridge_dir, "agent_status.json")
+            st = _read_json(st_path)
+            age = None
+            ts_ms = st.get("ts")
+            if isinstance(ts_ms, (int, float)) and ts_ms > 0:
+                age = now - (float(ts_ms) / 1000.0)
+            alive = bool(st.get("alive"))
+            if not st or not alive:
+                continue
+            if age is None or age > BRIDGE_HEARTBEAT_MAX_AGE_S:
+                # 心跳过期 ⇒ 这份部署近期没活过，不自动接入
+                # （与 ``pick_active`` 拒绝自动连「没在跑的客户端」同一纪律）。
+                continue
+
+            acc = str(cfg.get("account_id") or c.get("default_account_id") or "").strip()
+            found.append({
+                "root": root,
+                "config_path": cfg_path,
+                "bridge_dir": bridge_dir,
+                "auth_token": str(cfg.get("auth_token") or ""),
+                "transport": str(cfg.get("transport") or "file"),
+                "account_id": acc,
+                "account_type": str(cfg.get("account_type") or "STOCK").upper(),
+                "status_path": st_path,
+                "heartbeat_age_s": round(age, 1) if age is not None else None,
+                "agent_ver": str(st.get("agent_ver") or ""),
+                "runtime_mode": str(st.get("runtime_mode") or ""),
+                "injected": list(st.get("injected") or []),
+            })
+            break   # 同一根只用第一个存在的配置文件
+    return found
+
+
+def build_bridge_connection(found: dict) -> dict | None:
+    """把 ``detect_bridge_agents`` 的结果转成 ``add_connection`` 的连接字段。
+
+    返回 ``None`` = 不足以建连（缺 ``bridge_dir``）。``account_id`` 允许为空 ——
+    桥的账户可由请求携带或在 ``agent_config.json`` 里指定，这里**不猜账号**
+    （``build_connection`` 对路径 A 的同一条纪律）。
+    """
+    bridge_dir = str((found or {}).get("bridge_dir") or "").strip()
+    if not bridge_dir:
+        return None
+    label = "大QMT桥接·文件"
+    return {
+        "conn_id": "",
+        "name": "%s（自动连接）" % label,
+        "broker_id": "generic",
+        "client_path": "",
+        "client_mode": "auto",
+        "account_id": str(found.get("account_id") or ""),
+        "account_type": str(found.get("account_type") or "STOCK"),
+        "active": True,
+        "connector_key": BRIDGE_CONNECTOR_KEY,
+        "bridge_dir": bridge_dir,
+        "auth_token": str(found.get("auth_token") or ""),
+    }
 
 
 def resolve_broker_id(cand: dict) -> str:

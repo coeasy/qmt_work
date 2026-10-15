@@ -237,3 +237,44 @@ async def _fill_position_prices(rows, ctx, bridge=None) -> None:
         p = prices.get(code)
         if p is not None and pick_last_price(r) is None:
             r["price"] = p
+
+
+async def mark_paper_positions(rows, ctx) -> list:
+    """paper 持仓按**真实行情**盯市（与实盘 enrich_positions 同源取价）。
+
+    为什么单列这一个函数（2026-10-14 本地下单流程实测）：
+    PaperEngine 的盯市价 :meth:`_price_of` 在 ``last_prices`` 缺失时退化为
+    持仓成本，而 :meth:`submit_order` 会把**成交价**写进 ``last_prices``
+    （paper_engine.py:299）并据此标 ``marking="live"``。于是没有任何行情
+    推送时，``/trade/positions`` 返回的「现价 / 市值 / 浮动盈亏」恒等于
+    成交价（利润恒 0），却自称 live —— **把成交价伪装成实时行情**。
+
+    同期只有 ``/paper/account`` 一个端点会从 ``sync_engine.latest_quotes``
+    抽行情刷新（routes/paper.py:93），``/trade/positions``（前端 Trade 页
+    持仓页签实际消费的端点）完全不走。这正是「下单修了、查询没修」家族的
+    又一成员：同一份持仓数据，两个查询端点一个盯市一个不盯市。
+
+    修法：清空补算字段后复用实盘同一套五级取价（``_fill_position_prices``），
+    拿不到就留 None —— 与 ``/trade/positions`` docstring 承诺的「拿不到行情
+    则留空」一致，**不拿成交价冒充现价**。取不到的标的同时把 ``marking``
+    降级为 ``"cost"``，让消费方（前端/MCP）能区分「实时盯市」与「无行情」。
+    """
+    if not isinstance(rows, list) or not rows:
+        return rows
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        # 成本与数量是账本事实，保留；现价/市值/盈亏一律重算
+        for k in ("price", "market_value", "profit", "profit_pct", "marking"):
+            r[k] = None
+    try:
+        await _fill_position_prices(rows, ctx, None)
+    except Exception as exc:  # noqa: BLE001
+        # 补算是增强项：失败降级为「只有持仓、无现价」，不阻断主数据链路。
+        log.debug("paper 持仓盯市失败（已降级为无现价）：%s", exc)
+    apply_pnl(rows)
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        r["marking"] = "live" if pick_last_price(r) is not None else "cost"
+    return rows

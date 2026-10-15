@@ -78,6 +78,11 @@
   font-size: var(--font-sm);
   border: 1px solid;
   word-break: break-all;
+  /* 后端拒绝原因常是**多行**可执行指引（如实盘能力门禁的「原因：…」段、
+     连接三态的括号补充）。HTML 默认把 \n 折成空格 ⇒ 整段挤成一行，
+     段落结构与「下一步」动作一起糊掉。pre-line 保留换行、不保留缩进，
+     正适合这种段落级文案；单行文案行为不变。 */
+  white-space: pre-line;
 }
 
 .banner[data-tone="success"] {
