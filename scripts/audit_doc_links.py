@@ -36,7 +36,7 @@ SCAN_SUFFIXES = (".py", ".md", ".ts", ".tsx", ".sh", ".bat", ".yml", ".yaml",
                  ".ps1", ".json")
 SKIP_DIRS = {"node_modules", ".venv", "dist", "dist-electron", "build",
              "runtimes", "__pycache__", "logs", "site-packages", "release",
-             ".tmp-test", "coverage", "htmlcov"}
+             "output", ".tmp-test", "coverage", "htmlcov"}
 
 #: 形如 ``docs/xxx.md`` / ``backend/a/b.py`` / 裸 ``TECH_DEBT.md``。
 #: 末尾允许跟 ``::TD-16`` / `` §7.2`` / ``:79`` 这类定位后缀，一律剥掉。
@@ -104,6 +104,13 @@ KNOWN_MISSING: dict[str, str] = {
     "PROJECT_OPTIMIZATION_PLAN_2026-10-03.md":
         "本索引自身的**删除记录**：这份一次性计划已于 2026-10-05 删除，"
         "索引必须写出它的名字才能说明删了什么。属记录而非链接",
+    "frontend-next/dist-electron/latest.yml":
+        "electron-builder 的**构建产物**（由打包步骤在 dist-electron/ 下生成，"
+        "不随仓库分发）；引用处是 release/build-client workflow 在讲"
+        "「把该文件作为发布资产上传」，属产物名而非仓库内链接",
+    "frontend-next/dist-electron/release-manifest.json":
+        "同上：`scripts/build_release_manifest.py` 在打包后写入 dist-electron/ 的"
+        "**构建产物**，干净检出下必然不存在；引用处是 workflow 上传该资产的动作",
 }
 
 #: glob 形式的已知有意缺失（子串匹配），理由同上。
