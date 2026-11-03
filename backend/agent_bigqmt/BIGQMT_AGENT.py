@@ -826,7 +826,7 @@ def after_init(ContextInfo):  # pragma: no cover - QMT 可选入口
 from agent_runtime import (  # bundle: 已内联，生成器会剔除本行
     _StandaloneContext, _augment_sys_path, _consume_stop_file,
     _env_float, _forward_xtdata_funcs, _import_xtdata,
-    _is_process_main, _qmt_root_from_userdata, should_autorun,
+    _qmt_root_from_userdata, should_autorun,
 )
 
 def run_standalone(argv=None):
