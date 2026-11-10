@@ -1119,6 +1119,95 @@ key_sets = [["ack", ["params","status"]]]
 
 （若后续某轮 58670 起得来且抓到带行情字段的推送帧，应另起 §17 记录，不要回改本节。）
 
+### 16.11 授权升级后的现场复核（2026-11-10 08:2x，人工轮）
+
+> 用户本轮明确授权：可拉起 `XtModel`、可对 `guoxin_iquant_11` 与 `gd_qmt` 的
+> `XtItClient.exe` 做相关操作、可自动执行分析、可做下单测试与快速撤单。
+> 本节记录**授权后实际能做到什么**——授权解除的是「允许尝试」，不是「物理前置」。
+> 全程未改任何配置、未结束任何客户端进程、未向真实柜台发单。
+
+#### 16.11.1 现场实测（08:2x）
+
+| 项 | 实测值 | 判读 |
+| --- | --- | --- |
+| 后端服务 | `127.0.0.1:21118` health 200，v0.5.4 | 由本轮启动；`Application startup complete` |
+| 58600 | `LISTENING`，**两个 PID 10796 / 15072**（均 `XtItClient`） | 多套安装同绑一端口，探针连到哪个实例不确定 |
+| 58670 | **未监听** | `XtModel` 启动即退出 |
+| 文件桥 broker `90c700f265d6` | `connected=true, active=true` | agent 在跑，桥可用 |
+| `23019cce2bda`（gd_qmt / 22453951） | 未连 | 启动期 32s 硬超时，后台重连仍 failed |
+| `dd1822009f64`（guoxin / 410001005814） | 未连 | `connect rc=-1`（6 个 session 全试），提示**未开通程序化交易权限** |
+| `agent_status.json` | `alive=true`、`runtime_mode=standalone_process`、`injected=[]`、`trading_enabled=false` | **无 passorder ⇒ 真实下单/撤单不可用** |
+| 信号模式 | `paper` | 下单进本地账本，零真实资金 |
+
+#### 16.11.2 阻塞链（四层，逐层独立）
+
+1. **策略以独立进程运行**：QMT 日志 `[TC::CTradeStrategyData::doRun] execude cmd: -u
+   "P:\stock\gd_qmt\python\QMT_WORK_AGENT.py" "P:\stock\gd_qmt\userdata"` ⇒ 脚本走
+   `__main__` → `run_standalone()` → `standalone=True` ⇒ `injected=[]`。
+   解法只有 runbook Phase 2：在 QMT GUI 内把策略改为公式模式（注册树 `configFormula`
+   加密，**不可自动化**）。
+2. **账户不可用**：`gd_qmt` 账户 22453951 的 `accountdetail` 恒为
+   `balance 0.0 / available 0.0 / marketvalue 0.0 / status 0`，`tradeday 20261109`。
+3. **行情账号过期**：`XtModel` 日志对所有行情服务器返回
+   `resp:{ result: 4, reason: "account is expired" }`，进程启动后自行退出 ⇒ 58670 起不来。
+4. **程序化交易权限**：国信 410001005814 直连 `rc=-1`，官方四步排查指向
+   「资金账号未开通 QMT 程序化交易/策略交易权限」。
+
+#### 16.11.3 行情三源实测：全部不可用
+
+| 源 | 结果 |
+| --- | --- |
+| `/market/quote?source=broker` | 503「券商连接异常或未连接」 |
+| `/market/quote?source=tdx` | 503「TDX 行情源不可用」（网络不可达） |
+| `/market/quote`（auto） | 503（两源皆失败） |
+| `/market/ticks` | 503「本地 TDX 行情源未就绪」 |
+| `/market/kline` | 200，但 `source=cache_stale`、`stale=true`，缓存止于 **2025-04** |
+
+⇒ **实时行情不可用**；陈旧 K 线不得当实时行情。`xtquant` 侧报
+「无法连接 xtquant 服务，请检查 QMT-投研版或 QMT-极简版是否开启」。
+
+#### 16.11.4 paper 下单 + 撤单实测
+
+新增 `scripts/qmt_order_smoke.py`（默认 paper；`--live` 需四道前置全绿才放行）。
+
+| 步骤 | 实测 |
+| --- | --- |
+| health | OK v0.5.4 |
+| precheck | `allowed=true, reason=ok` |
+| 下单 513090 × 100 @1.500 | OK → `PAPER-35` / `PAPER-36` / `PAPER-37` |
+| 委托可见 | `status=filled, filled=100`（**paper 按限价立即全额成交**） |
+| 撤单 | 503「该委托号属于「模拟盘」（本地撮合），券商柜台不存在这笔委托」 |
+| 判读 | 这是**刻意契约**，不是「撤单失败留挂单」；paper 下 `cancel_applicable=false` |
+
+⇒ **paper 能验证下单链路，验证不了真实撤单**（模拟盘无柜台挂单）。真实撤单必须在
+live 且 agent 拿到 passorder 时才可测。
+
+#### 16.11.5 live 护栏实测（拒绝发单，缺口逐条列出）
+
+`--live` 实测 exit 1、**未发任何请求到 `/trade/precheck` 与 `/trade/order`**，缺口：
+
+1. `/signal/mode='paper'`，需先切 live；
+2. `agent trading_enabled=false`；
+3. `agent injected` 缺 `passorder`（`runtime_mode=standalone_process`）⇒ 需 QMT 内切公式模式。
+
+#### 16.11.6 本轮修掉的缺陷（都是「诊断自己说谎」家族）
+
+| # | 缺陷 | 修法 |
+| --- | --- | --- |
+| 1 | `_finish` 用 `int(report.get("exit_code") or 1)`，把合法的 `0` 吞成 `1`，把「下单成功」谎报成「环境不满足」 | 显式判 `None`，并加回归锁 |
+| 2 | paper 已成交时撤单 503 被报成 FAIL「可能留有挂单」，诱导人工去追不存在的挂单 | 判 `cancel_applicable=false`、步骤记 SKIP、verdict 明写「真实撤单未验证」 |
+| 3 | 缺 paper/live 语义隔离 | `--live` 四道前置，任一不满足直接 exit 1 且不发单 |
+
+回归锁：`backend/tests/test_qmt_order_smoke.py`（7 例，纯函数 + 假 HTTP，不触真服务）。
+
+#### 16.11.7 仍需的人工动作（本轮一律未做）
+
+1. **QMT GUI 内把 `QMT_WORK_AGENT` 改为公式模式运行**（runbook Phase 2，约 30 秒，
+   注册树加密不可自动化）——这是 `passorder` 的唯一来源；
+2. **确认账户 22453951 状态**（balance/available 全 0）并**开通程序化交易权限**
+   （国信 410001005814 当前 rc=-1）；
+3. **行情账号续期**（`account is expired`）或换可用行情源，否则 58670 永远起不来。
+
 ## 17. 21:00 复跑（2026-11-09 21:02，**收盘后**）：两项仍未证实，且本轮不在交易时段
 
 > 本节为本次定时任务按「追加结论为新章节」要求新增。§16 已由 09:38 首跑占用，且
