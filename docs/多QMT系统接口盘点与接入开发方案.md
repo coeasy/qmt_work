@@ -1406,3 +1406,281 @@ key_sets = [["ack", ["params","status"]]]
   12 组 `getMarketData` 返空属于「参数形状未命中 / 非交易时段」，亦不作证伪结论。
 
 （后续若在交易时段 58670 起得来且抓到带行情字段的推送帧，应另起 §18 记录，不要回改本节。）
+
+## 17. 2026-11-10 交易时段自动分析第 1 次（09:42–09:52，共 3 次）
+
+> ★ **编号说明**：本文档已存在 2026-11-09 21:00「收盘后复跑」的 §17（上一系列，
+> §17.1–§17.10），本节按本系列任务约定仍编号 §17，两节以**日期/标题**区分，
+> 旧节逐字未动。本节子标题统一用 `17.R*` 以免与旧 `17.1–17.10` 混淆；
+> 是否重排编号属「待人工处理」，本轮不擅自改动。
+> ★ **时点**：全部采样落在 09:30–11:30 交易时段内（09:42:32 首测 / 09:52:19 收尾），
+> 与 21:00 那轮「收盘后」不同，证据强度不打折。
+
+### 17.R0 采样时间、命令与证据文件（绝对路径）
+
+| 时刻（+08） | 动作 | 命令 / 端点 |
+| --- | --- | --- |
+| 09:42:32 | 只读预检 | `netstat -ano \| findstr 58600/58610/58670`；`Get-Process XtItClient,XtModel`；读 `agent_status.json` |
+| 09:42:3x | 基线复核 | `curl --noproxy '*' -H 'X-API-Key: qmt-dev-key' .../api/v1/health`、`.../signal/mode`、`.../brokers` |
+| 09:43:20 | 授权拉起 | `Start-Process P:\stock\guoxin_iquant_11\xtmodel\XtModel.exe -WorkingDirectory <其所在目录> -PassThru` |
+| 09:44:40 / 09:45:47 | 行情三源 | `backend/runtimes/cp311/python.exe -u output/qmt_market_probe_20261110.py` |
+| 09:46:19–09:47:11 | 45 秒探针 | `backend/runtimes/cp311/python.exe -u scripts/qmt_tradehours_validate.py --seconds 45` |
+| 09:47:34 | 下单/撤单 | `backend/runtimes/cp311/python.exe -u scripts/qmt_order_smoke.py --code 513090 --volume 100 --price 1.500`；再 `--live` |
+| 09:48:17 | 形状补扫 | `backend/runtimes/cp311/python.exe -u output/qmt_shape_audit_20261110.py` |
+| 09:51:14–09:51:53 | 修复验证 | `py_compile` + 6 文件 pytest + `output/qmt_autofix_falsify_20261110.py` + `scripts/audit_doc_links.py` |
+| 09:52:19 | 收尾复核 | 再查端口/进程/日志/agent/mode |
+
+证据文件（全部绝对路径，`output/` 已被 `.gitignore` 忽略）：
+
+* `P:\github_public\qmt_work\output\qmt_xtmodel_launch_20261110_094320.json`（拉起三态 + 日志尾部）
+* `P:\github_public\qmt_work\output\qmt_market_probe_20261110_094440.json`（首跑，探针有缺陷，见 17.R7）
+* `P:\github_public\qmt_work\output\qmt_market_probe_20261110_094547.json`（**修正后正式证据**）
+* `P:\github_public\qmt_work\output\qmt_market_probe_20261110_run.log`
+* `P:\github_public\qmt_work\output\qmt_tradehours_validate_20261110_094711.json`（**本轮主证据**）
+* `P:\github_public\qmt_work\output\qmt_tradehours_validate_0940.log`、`...\qmt_tradehours_validate_20261110_095125.json`（修复后复跑）
+* `P:\github_public\qmt_work\output\qmt_shape_audit_20261110_094817.json`
+* `P:\github_public\qmt_work\output\qmt_order_smoke_paper_20261110_0948.json`
+* `P:\github_public\qmt_work\output\qmt_order_smoke_live_20261110_0948.json`
+* `P:\github_public\qmt_work\output\qmt_order_smoke_live_afterfix2_20261110.json`
+* `P:\github_public\qmt_work\output\qmt_autofix_falsify_20261110.json`
+* `P:\github_public\qmt_work\output\_autofix_backup_20261110_0940\*.bak`（修复前备份，sha256 已比对）
+* 外部只读来源：`P:\stock\guoxin_iquant_11\xtmodel\data\log\xtquantservice_20261110.log`、
+  `C:\Users\Administrator\qmt_work\bigqmt_bridge\agent_status.json`
+
+### 17.R1 端口 / 进程 / 后端基线（只读预检，09:42:32）
+
+| 项 | 实测 | 三态 |
+| --- | --- | --- |
+| 后端 | `127.0.0.1:21118` health **HTTP 200 / code 0 / v0.5.4**，uptime 4713s | ok |
+| 58600 | **两个 PID 同时 LISTENING**：`20752`（`P:\stock\gd_qmt\bin.x64\XtItClient.exe`，08:50:37 起）、`22344`（`P:\stock\guoxin_iquant_11\bin.x64\XtItClient.exe`，08:53:21 起） | ok（但探针连到哪个实例不确定，是可重复性变量） |
+| 58610 | **无监听**，只有 12+ 条 `SYN_SENT`（PID 2796/19336）⇒ 连接方在重试 | unavailable（通道缺失） |
+| 58670 | 预检时无监听、无 `XtModel.exe` | unavailable（**当时**属环境缺失） |
+| broker | `90c700f265d6` 文件桥 `connected=true, active=true`；`23019cce2bda`（gd_qmt/22453951）、`dd1822009f64`（guoxin/410001005814）均 `connected=false` | 与 08:2x 基线一致 |
+| `/signal/mode` | `{"mode":"paper"}` | ok（**本轮未改**） |
+| agent_status | `alive=true`、`runtime_mode=standalone_process`、`injected=[]`、`trading_enabled=false` | ok（状态如实记录，未粉饰） |
+| git | 干净；HEAD `6b53e70`；文档 `i/lf w/lf`（CRLF=0，LF=1408） | ok |
+
+两个客户端**只读**：未结束进程、未改 `Config.xml` / `broker.ini` / `agent_config.json` /
+`is_automonitor` / 任何下单配置。
+
+### 17.R2 XtModel 拉起结果（授权范围内 1 次，未重启）
+
+| 时刻 | 观测 |
+| --- | --- |
+| 09:43:20 | `Start-Process` 成功，PID `22152`，工作目录 = `P:\stock\guoxin_iquant_11\xtmodel` |
+| 09:43:28（+8s） | 进程**仍存活**、exit code 空；58670 **尚未** LISTENING；日志已出现 `resp:{ result: 4, reason: "account is expired" }` |
+| 09:43:36（+16s） | 日志 `[xtdc]start ... portStart:58670` → `IPythonApiServer::createServer listen, finished:true, ip:0.0.0.0, port:58670` → `[try_listen] [xtdc]finished, result:0.0.0.0:58670` |
+| 09:43:44 | `netstat`：`TCP 0.0.0.0:58670 ... LISTENING 22152` |
+| 09:52:19（收尾） | PID `22152` 仍在、58670 仍 LISTENING，运行约 9 分钟未退出；两个 `XtItClient` 仍在 |
+
+**与 08:2x 基线的差异（重要）**：基线「XtModel 启动后退出 / 58670 未监听」⇒ 属**环境缺失**；
+本轮 XtModel 起了且 58670 稳定监听 ⇒ 环境前置**已解除**，但行情仍拿不到，
+所以本轮的阻塞类别是 **`quote_channel_no_data`（通道已应答但无行情数据）**，
+不是环境缺失、也不是「反复重启能解决」。按授权「同一轮最多重启 2 次」，本轮**只拉起 1 次、零重启**。
+
+日志真实原因（`xtquantservice_20261110.log`，全程只读）：
+今日累计 **33 处** `account is expired`，其中 09:43:23–09:43:25 的 31 处 `reason: "account is expired"`
+逐台命中行情服务器（203.135.101.34 / 119.147.202.44 / 36.99.48.21 / 42.228.16.211 /
+43.242.96.162 等，port 55300），伴随 `accessible:false`、`StockList::init waiting`、
+`WholeMarketQuoter::waitForInitFinish wait before send subscribe, timeout`。
+⇒ **RPC 服务可监听、可应答，但上游行情服务器登录全部被拒**，这是 58670 无 tick 的直接成因。
+
+### 17.R3 行情三态：`/market/quote` 三源、`/market/ticks`、`/market/kline`
+
+正式证据 `...\qmt_market_probe_20261110_094547.json`（09:45:47）。
+
+| 端点 / 源 | HTTP / code | `source` | 实测 | 三态 |
+| --- | --- | --- | --- | --- |
+| `/market/quote?source=auto`（600036.SH） | 200 / 0 | **`tencent`** | 有真实价格字段：`last=42.79`、`pre_close=43.01`、`change_pct=-0.51`、`volume=11528300` | **ok（公开源快照）** |
+| `/market/quote?source=auto`（513090.SH） | 200 / 0 | `tencent` | `last=1.618`、`change_pct=0.5`、`volume=273481100` | ok（公开源快照） |
+| `/market/quote?source=broker` | **503 / 503** | — | `行情获取失败：券商连接异常或未连接` | unavailable |
+| `/market/quote?source=tdx` | **503 / 503** | — | `TDX 行情源不可用` | unavailable |
+| `/market/ticks?source=auto` | **503 / 503** | — | `本地 TDX 行情源未就绪（未安装 eltdx 或行情服务器不可达）` | unavailable |
+| `/market/kline?period=1d&source=auto` | **503 / 503** | — | `get_market_data 失败: 无法连接xtquant服务` | unavailable |
+| `/market/kline?period=1m&source=auto` | **503 / 503** | — | 同上 | unavailable |
+
+★ **证据分级（不可合并成一句「行情可用」）**：
+
+* `source=tencent` 是**公开 HTTP 行情源快照**，不是券商 xtquant 通道、不是 58670 推送 tick、
+  响应里**没有任何服务端时间戳** ⇒ `quote_snapshot_proven=true`、
+  `broker_quote_proven=false`、`realtime_tick_proven=false`、`freshness_proven=false`。
+  09:44:40 与 09:45:47 两次采样 `last` 从 42.78→42.79、`volume` 11420100→11528300 有变化，
+  只能说明公开源盘中在更新，**不能**据此宣称大 QMT 实时行情已通。
+* 基线里 `/market/kline` 曾回 `source=cache_stale`（缓存止于 2025-04）；**本轮连陈旧缓存都没返回**，
+  直接 503。两种「有数据」都不存在 ⇒ 本轮没有任何日线 / 陈旧缓存被误当成实时 tick 的机会。
+* 因此：**大 QMT 通道实时行情「不可用 / 未证实」**；REST 层只有公开源快照可用，
+  两者是不同轴，不得互相顶替。
+
+### 17.R4 45 秒探针：`axes` 与逐形状证据
+
+主证据 `...\qmt_tradehours_validate_20261110_094711.json`（采样起点 09:46:19，`--seconds 45`），
+日志 `...\qmt_tradehours_validate_0940.log`，**EXIT=2（需人工动作或未证实）**。
+
+```
+ports: {"58600": ["20752","22344"], "58610": [], "58670": ["22152"]}
+axes : {"push_proven": false, "pull_proven": false, "realtime_tick_proven": false,
+        "code_list_proven": true, "channel_58600_listening": true,
+        "channel_58670_listening": true, "channel_58670_missing": false}
+verdict: 实时行情未证实：58670 在监听但订阅抓帧未出现行情字段；拉取形状亦未命中；
+         证券代码表已取到（不算行情数据）。需人工动作或继续参数形状扫描
+```
+
+* `probe_58670_tag`：`getTag` → `{"tag":"xtquant","version":"1.0"}`、`ErrorID=None` ⇒ **RPC 服务活着**（`ok`）。
+* `probe_58670_fulltick`：`getFullTick({"stockMarkets":["600036.SH"]})` →
+  `{"status":0,"params":{"result":{}}}`、`quote_proven=false`、`payload_kind=empty` ⇒
+  **服务端应答了，但结果体为空**（`status=ok` 只代表应答，不代表有数据）。
+* `capture_58670`（45s）：`total=11 / heartbeat=10 / ack=1 / quote=0 / data_other=0`，
+  ACK 内容 `{status:0, params:{seq:1, error:{ErrorID:0,ErrorMsg:""}}}`；
+  verdict「只有订阅应答与心跳（订阅未生效或非交易时段）」⇒ **ACK 没有被误计成推送**。
+* `capture_58600`（6s）：`ack=1`（`ErrorID=200005 未找到处理函数`）+ `heartbeat=1` + `closed=1`，
+  `quote=0` ⇒ 58600 订阅通道明确**不可用**。
+* `probe_58600` 12 组形状：仅 `getStockListInSector{"sectorName":"沪深A股"}` 非空
+  （**5225 条代码字符串**，`payload_kind=code_list`），其余全空；
+  `getFullTick` 两组均 `200005`。`quote_shapes=0`、`tick_shapes=0`、`code_list_proven=true`
+  ⇒ **代码表不是行情**。
+* `file_orders`：`dbf_armed=0`、`batch_order_enabled=0`；`installs`：`declared_conflicts=33`、
+  `plan_applied=false`（本轮零配置写入）。
+* 修复后复跑 `--seconds 1`（`..._095125.json`）新增并打印
+  **`blocking_class: quote_channel_no_data`**，EXIT 仍为 2。
+
+### 17.R5 paper 下单 / 撤单与 live 前置缺口
+
+| 项 | 实测 |
+| --- | --- |
+| 命令 | `qmt_order_smoke.py --code 513090 --volume 100 --price 1.500`（默认 **paper**） |
+| 结果 | **PAPER-39**，precheck `allowed=true` → place OK → `order_visible` `filled=100, status=filled` |
+| 撤单 | **SKIP（不适用）**：paper 按限价立即全额成交，模拟盘无柜台挂单；`cancel_applicable=false` |
+| EXIT | **0**，verdict「paper 下单成功且已成交；撤单在模拟盘不适用（**未验证真实撤单**）」 |
+| 真实撤单 | **未验证**。paper 下 503「模拟盘…券商柜台不存在这笔委托」是**刻意契约**，不是「撤单失败留挂单」 |
+| 笔数 | 本轮**仅 1 笔 paper 单**，零真实委托 |
+
+`--live`（只做前置检查，预期被拒）EXIT=**1**，证据 `...\qmt_order_smoke_live_20261110_0948.json`，
+`steps` 仅 `health` + `live_preconditions` ⇒ **未向 `/trade/precheck` 与 `/trade/order` 发任何请求**。
+四道前置逐项：
+
+| # | 前置 | 实测 | 判定 |
+| --- | --- | --- | --- |
+| 1 | agent `injected` 含 `passorder` | `injected=[]`，`runtime_mode=standalone_process`（需 QMT GUI 切公式模式，注册树加密不可自动化） | **挡住** |
+| 2 | `trading_enabled=true` | `false` | **挡住** |
+| 3 | `/signal/mode=live` | `paper` | **挡住** |
+| 4 | 目标 broker `connected=true` | `90c700f265d6` **connected=true、active=true** | **已绿** |
+
+⇒ live 被 **1/2/3 三项**挡住（第 4 项已满足）；未手工绕过、未强切 live、未发单。
+另：`agent alive=true` 只说明进程在跑，不等于可下单；health 的 `last_error` 亦明写
+「未捕获到终端注入的 passorder ⇒ 本连接只能查行情/K线，无法下单」，三态未被粉饰。
+
+### 17.R6 逐项三态总表（严禁把「没查」写成「查了没事」）
+
+| 检查项 | 三态 | 依据 |
+| --- | --- | --- |
+| 后端 health / 版本 | ok | HTTP 200 / v0.5.4 |
+| 端口 58600 / 进程 | ok | 双 PID LISTENING，进程只读核对 |
+| 端口 58610 | unavailable | 无监听、SYN_SENT 堆积 |
+| 端口 58670 | ok（本轮已 LISTENING） | PID 22152，09:43:36 绑定，09:52:19 仍在 |
+| XtModel 拉起 | ok（拉起 1 次、零重启） | 进程存活、端口绑定 |
+| XtModel 上游行情登录 | **unavailable** | 33 处 `account is expired`，`accessible:false` |
+| `/market/quote` auto | ok（**公开源快照**，非券商/非 tick） | `source=tencent` + 价格字段 |
+| `/market/quote` broker / tdx | unavailable | 503 |
+| `/market/ticks` | unavailable | 503 |
+| `/market/kline` 1d / 1m | unavailable（本轮连 cache_stale 都没有） | 503 |
+| 58670 `getTag` | ok（服务应答） | `xtquant 1.0` |
+| 58670 `getFullTick` | unavailable（应答但空结果） | `result={}`、`quote_proven=false` |
+| 58670 订阅推送 | unavailable（ACK+心跳，0 quote） | 45s 抓帧 |
+| 58600 订阅 / `getFullTick` | unavailable（明确证伪） | `ErrorID=200005` |
+| 证券代码表 | ok（**仅 code_list**） | 5225 条字符串 |
+| 实时 tick（push / pull） | **unavailable（未证实）** | `push_proven=pull_proven=realtime_tick_proven=false` |
+| paper 下单 | **ok** | PAPER-39 filled=100 |
+| paper 撤单 | **skipped（不适用，刻意契约）** | 已成交，无柜台挂单 |
+| 真实撤单 | **skipped（未验证）** | live 未放行，本轮零真实委托 |
+| live 发单 | **skipped（前置拒绝）** | EXIT=1，零请求 |
+| 配置 / 进程结束 / push | skipped（按硬约束不执行） | — |
+
+### 17.R7 自动检查问题清单
+
+1. **自写行情探针首跑崩溃**：`output/qmt_market_probe_20261110.py` 打印格式串 8 个占位符只给
+   7 个参数 ⇒ `TypeError`，证据未生成。**判为探针自身缺陷，不是接口结论**，修复后复跑。
+2. **自写行情探针证据分级错**：初版按 `count` 判「空」，但 `/market/quote` 的 data **没有 `count` 键**，
+   会把 `source=tencent` 的真实价格快照误报成 `state=empty`。已改为按 `last/price` 字段判据，
+   并显式给出 `broker_quote_proven` / `realtime_tick_proven` / `freshness_proven` 三个独立轴。
+   ⇒ 这正对应任务点名要查的「结果键 / 证据分级」；证据脚本在 `output/`（gitignored），非生产代码。
+3. **探针参数形状补扫**：对 58670 另扫 10 组（4×`getFullTick`、2×`getMarketData`、
+   2×`getStockListInSector`、`getInstrumentDetail`、`getTag`），
+   `...\qmt_shape_audit_20261110_094817.json` 显示 `getFullTick` 四形状全 `result={}`、
+   `getMarketData` 两组 `200005`、代码表两组全空 ⇒ **不是形状漏扫**，是上游无数据。
+4. **ACK 误计**：已核 `summarize_capture` 把 `ack` 排除在 `data/quote` 之外，
+   45s 只有 1 ACK + 10 心跳仍判「只有订阅应答与心跳」，无误报。
+5. **证据分级**：5225 条代码表只计 `code_list_proven`；`getFullTick={}` 不计行情；
+   本轮无日线 / 陈旧缓存冒充实时 tick。
+6. **退出码与判词**：`tradehours` EXIT=2 / `order_smoke paper` EXIT=0 / `--live` EXIT=1，
+   与各自 verdict、`exit_code_meaning` 逐条一致；`_finish` 的 `exit_code=0` 未被 `or 1` 吞掉。
+7. **paper/live 未混用**：verdict 明写「未验证真实撤单」，未用 paper 成功冒充 live 成功。
+8. **agent 三态未粉饰**：`alive=true` 与 `injected=[] / trading_enabled=false /
+   standalone_process` 同时记录，health `last_error` 同源佐证。
+9. **发现两处白名单内真实缺陷并修复**（见 17.R8）：① 默认 paper 冒烟在后端已切 live 时会打到
+   真实柜台；② `qmt_tradehours_validate` 的 `pending_human_actions` 在 58670 已监听却无数据时
+   仍劝人「保持 XtModel 可用」，误导反复重启（本系列明确禁止）。
+10. **文档编号冲突**：既有 §17（21:00 收盘后）与本系列 §17 同名。已在节首加编号说明，
+    旧节逐字未动；是否重排编号属待人工处理。
+
+### 17.R8 自动修复清单（文件 / commit / 测试 / 是否回滚）
+
+| 文件 | 修复 | 备份 |
+| --- | --- | --- |
+| `scripts/qmt_order_smoke.py` | ① 默认 paper 反查 `/signal/mode`，后端为 `live` 时 EXIT=1 且零发单（`mode_guard=blocked_live`）；`--live` 分支不重复打标签（`not_applicable_live`），避免「live 运行却标 confirmed_paper」的自相矛盾；② docstring 改写为真实四道前置口径，删除未实现的「账户快照为 live」声明 | `output/_autofix_backup_20261110_0940/qmt_order_smoke.py.bak` |
+| `scripts/qmt_tradehours_validate.py` | `_conclusion` 新增 `blocking_class` 四态（`environment_absent` / `channel_58670_absent` / `quote_channel_no_data` / `none`）；`pending_human_actions` 按阻塞类别分流；证据与 stdout 均打印 `blocking_class` | `.../qmt_tradehours_validate.py.bak` |
+
+* **本地提交**：`863f7bb [auto-fix] paper 冒烟反查后端模式防误打 live；58670 监听但无数据单独归类`
+  （仅 `git add` 上述两个文件；**绝不 push**，本地 HEAD 由 `6b53e70` → `863f7bb`）。
+* **门禁**：未增 / 未改任何测试文件 ⇒ 按任务约定走 `audit_doc_links.py` + 相关 pytest，
+  **未跑 `ci_reconcile.py`**；`EXPECTED_TESTS=2952`、README 两处 `220 / 2952` 全部未动。
+* **验证链**：`py_compile` OK →
+  `pytest tests/test_qmt_tradehours_validate.py tests/test_xtq_rpc.py tests/test_qmt_file_order.py tests/test_qmt_client_routes.py tests/test_install_registry.py tests/test_qmt_order_smoke.py -q -p no:cacheprovider`
+  = **156 passed**（6.32s / 复跑 5.78s，0 failed）→
+  可证伪探针 `output/qmt_autofix_falsify_20261110.py` **9/9 PASS**（含「后端 live ⇒ 拒绝且零发单」与
+  「paper ⇒ 不得过度拦截」正反两面，及 `blocking_class` 四态）→
+  `scripts/audit_doc_links.py` **EXIT=0** →
+  真实环境复跑 `tradehours --seconds 1` EXIT=2 / `blocking_class=quote_channel_no_data`、
+  `order_smoke --live` EXIT=1 且未发单。
+* **是否回滚**：**0 次回滚**，全程一次通过；备份 sha256 与修复前一致。
+* **越界问题**：一律只记「待人工处理」（17.R9），未改任何生产业务代码 / 前端 / 配置 /
+  下单撤单业务逻辑 / VERSION / 打包。
+
+### 17.R9 仍未解决项（三态分开报）
+
+**A. 环境缺失（本轮 58670 已不缺，其余仍在）**
+① 58610 无监听（`SYN_SENT` 堆积）；② 58600 双 PID 同绑导致探针实例不确定；
+③ 33 项声明端口冲突、`plan_applied=false`（落盘 `broker.ini` 需用户批准）。
+
+**B. 需人工动作（代码与授权都解不开）**
+① **行情账号 `account is expired`**（33 处）⇒ 券商侧续期/授权；反复重启 XtModel 无效；
+② QMT GUI 内把策略从「独立进程」切到公式/内置 Python 形态以注入 `passorder`（注册树加密，不可自动化）；
+③ `trading_enabled=false` 需在客户端开启；
+④ `/signal/mode=paper` 本轮**未改、不得强切**；
+⑤ 国信 `dd1822009f64` 未开通程序化交易权限（基线）、gd_qmt 账户 22453951 资产全 0（基线）；
+⑥ `dbf_armed=0`、`batch_order_enabled=0`、导出下单模板 DBF 与 `is_automonitor` 需界面操作；
+⑦ 文档 §17 编号重复是否重排；
+⑧ **真实撤单验证**：须等四道前置全绿且脚本自检通过后再跑 `--live`，本轮**未做**。
+
+**C. 接口不通 / 已应答但无数据**
+① 58670 `getFullTick` 恒 `result={}`、45s 抓帧 0 quote（`blocking_class=quote_channel_no_data`）；
+② 58600 `subscribeQuote` / `getFullTick` `ErrorID=200005 未找到处理函数`（明确证伪该通道）；
+③ `/market/quote` broker / tdx、`/market/ticks`、`/market/kline` 均 503。
+⇒ 以上均**不是**「没查」，也不是「环境缺失」；是通道已应答却无行情数据 / 源不可用。
+
+### 17.R10 判读纪律与约束如实性
+
+* **ACK 不是推送**：58670 的 `ErrorID=0` 订阅 ACK 与 10 个心跳一律不计 `quote`。
+* **代码表不是行情**：5225 条只记 `code_list_proven`。
+* **日线 / 陈旧缓存不是实时 tick**：本轮 kline 直接 503，连 `cache_stale` 都未出现；
+  公开源 `tencent` 快照有价格字段，但**不是券商通道、不是 tick 推送、无服务端时间戳**。
+* **服务端应答 ≠ 有数据**：`getTag` ok、`getFullTick` `status=0` 但 `result={}`。
+* **paper 成交不是 live 成交**：PAPER-39 成功仅证明平台侧下单链路；live 发单为零。
+* **paper 撤单 503 是刻意契约（不适用）**，不是「撤单失败留挂单」；报告一律写
+  「真实撤单未验证」，绝不写「撤单已验证」。
+* 约束全项保持：**未向真实柜台发单**、未改任何配置、未结束客户端进程、
+  未伪造凭证 / 绕 PID 白名单、**未 push**、paper 仅 1 笔、live 零请求；
+  XtModel 按授权拉起 **1 次 / 上限 2 次**，零重启。
+* 退出码如实：`tradehours` 2（需人工动作 / 未证实）、`order_smoke paper` 0（下单成功且撤单不适用）、
+  `order_smoke --live` 1（前置不满足、未发单）；三者含义互不顶替。
+* §15.7 / §15.8 / §16 / 旧 §17 均**逐字未改**；本文档保持 **LF**（追加后 CRLF=0 复核）。
+
