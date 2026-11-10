@@ -329,7 +329,7 @@ def _conclusion(report: dict) -> dict:
         "channel_58670_missing": not p58670,
     }
     if not env_ok:
-        return {**axes, "exit_code": 1,
+        return {**axes, "exit_code": 1, "blocking_class": "environment_absent",
                 "verdict": "环境缺失：拿不到监听状态/安装目录，本次验证不成立"}
     if push_proven or pull_proven:
         axis = "推送" if push_proven else "拉取"
@@ -337,7 +337,7 @@ def _conclusion(report: dict) -> dict:
         tail = ("；实时 tick 推送已证实" if push_proven
                 else "；实时 tick 级数据已由拉取通路证实" if pull_tick_proven
                 else "；但只证实非 tick 级数据，实时 tick 仍未证实")
-        return {**axes, "exit_code": 0,
+        return {**axes, "exit_code": 0, "blocking_class": "none",
                 "verdict": ("行情接口已证实可用（%s通路拿到带行情字段的数据%s）"
                             % (axis, both)) + tail}
 
@@ -350,7 +350,12 @@ def _conclusion(report: dict) -> dict:
         reason = "58670 在监听但订阅抓帧未出现行情字段；拉取形状亦未命中"
     if code_list_proven:
         reason += "；证券代码表已取到（不算行情数据）"
+    # ★ 2026-11-10 §17：58670「没监听」与「在监听但无行情数据」是两类阻塞，
+    #   处置动作完全不同。前者是环境缺失（拉起 XtModel），后者是上游行情源无数据
+    #   （账号过期 / 权限），反复重启 XtModel 毫无意义 ⇒ 必须分开报。
     return {**axes, "exit_code": 2,
+            "blocking_class": ("quote_channel_no_data" if p58670
+                               else "channel_58670_absent"),
             "verdict": "实时行情未证实：" + reason + "。需人工动作或继续参数形状扫描"}
 
 
@@ -425,11 +430,23 @@ def main() -> int:
     exit_code = conclusion["exit_code"]
     verdict = conclusion["verdict"]
     report["exit_code"] = exit_code
+    report["blocking_class"] = conclusion.get("blocking_class", "unknown")
     report["exit_code_meaning"] = {0: "就绪且已证实", 1: "环境缺失",
                                    2: "需人工动作或未证实"}[exit_code]
+    blocking = report["blocking_class"]
+    if blocking == "quote_channel_no_data":
+        push_action = ("（58670 已 LISTENING 但抓帧无行情字段）核查上游行情服务器登录态"
+                       "（account is expired / 程序化交易权限），不是反复重启 XtModel "
+                       "能解决；修复后复跑订阅抓取（证据 capture_58670 + xtquantservice 日志）")
+    elif blocking == "channel_58670_absent":
+        push_action = ("（58670 未 LISTENING，属环境缺失）交易时段拉起 XtModel 使 58670 "
+                       "监听并复跑订阅抓取（本轮结论见 capture_58670）")
+    else:
+        push_action = ("（推送轴%s）" % ("未证实" if not conclusion["push_proven"]
+                                    else "已证实，仍需守住")) \
+            + "交易时段保持 58670/XtModel 可用并复跑订阅抓取"
     report["pending_human_actions"] = [
-        ("（推送轴未证实）" if not conclusion["push_proven"] else "（推送轴已证实，仍需守住）")
-        + "交易时段保持 58670/XtModel 可用并复跑订阅抓取（本轮结论见 capture_58670）",
+        push_action,
         "端口方案落盘 broker.ini 需用户明确批准（本脚本从不写配置）",
         "在客户端界面打开 is_automonitor 并导出下单模板 DBF",
     ]
@@ -458,6 +475,7 @@ def main() -> int:
             extra = " | quote_proven=%s" % sec.get("quote_proven", "?")
         print("  %-24s %s%s" % (key, sec.get("status", "?"), extra))
     print("  evidence: %s" % out)
+    print("  blocking_class: %s" % report["blocking_class"])
     print("  exit_code: %d (%s)" % (exit_code, report["exit_code_meaning"]))
     return exit_code
 

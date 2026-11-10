@@ -29,9 +29,12 @@ paper 仍可完整验证平台侧链路。**不得用 paper 的成功冒充 live
 
 硬约束
 ------
-* ``--live`` 必须同时满足：agent ``injected`` 含 passorder、``trading_enabled``
-  为真、``/signal/mode`` 已是 live、账户快照为 live。任一不满足直接退出 1，
-  **不尝试**、不降级、不猜测。
+* ``--live`` 必须同时满足四道前置：目标 broker ``connected``、``/signal/mode``
+  已是 live、agent ``trading_enabled``、``injected`` 含 passorder（另有 ``alive``
+  兜底）。任一不满足直接退出 1，**不尝试**、不降级、不猜测。
+* **默认 paper 也反查 ``/signal/mode``**（2026-11-10 §17 加固）：后端若已切 live，
+  不带 ``--live`` 的冒烟同样会打到真实柜台 ⇒ 直接退出 1、不发单。
+  ``--live`` 不是唯一的真实下单开关；模式读不出时如实标 ``mode_guard=unknown``。
 * 单次运行最多发 1 笔委托；撤单失败最多重试 3 次，仍失败即退出 2 并打印醒目告警。
 * 默认限价买单价**低于卖一价**（不主动追价），避免测试单成交。
 * 不撤单成功就绝不退出 0；「下单成功」不等于「验证成功」。
@@ -171,7 +174,30 @@ def main(argv: list[str] | None = None) -> int:
         return _finish(report, args.json_out, "服务未就绪（health 非 200）")
     step("health", True, {"version": (_ok_body(h) or {}).get("version")})
 
-    # ---- 2. live 前置（paper 不看，但仍记录 broker 状态） ----
+    # ---- 2.0 模式反查（paper 也必须确认后端不是 live，否则会误打真实柜台） ----
+    # live 分支由 _live_preconditions 单独校验 /signal/mode，这里不重复、也不打
+    # 「confirmed_paper」这种与 live 运行自相矛盾的标签。
+    if not args.live:
+        _, mode_doc = _http("GET", "/signal/mode")
+        backend_mode = str((_ok_body(mode_doc) or {}).get("mode") or "")
+        report["backend_signal_mode"] = backend_mode
+        if backend_mode == "live":
+            step("mode_guard", False,
+                 {"backend_mode": backend_mode,
+                  "note": "后端已是 live，默认 paper 冒烟会打到真实柜台，拒绝发单"})
+            report["mode_guard"] = "blocked_live"
+            report["exit_code"] = 1
+            return _finish(report, args.json_out,
+                           "后端 /signal/mode=live，默认 paper 冒烟会打真实柜台，已拒绝发单")
+        report["mode_guard"] = ("confirmed_paper" if backend_mode in ("paper", "dry_run")
+                                else "unknown")
+        step("mode_guard", True,
+             {"backend_mode": backend_mode or "unknown",
+              "guard": report["mode_guard"]})
+    else:
+        report["mode_guard"] = "not_applicable_live"
+
+    # ---- 2. live 前置（paper 不看 broker 前置，但仍记录 broker 状态） ----
     if args.live:
         ok, gaps = _live_preconditions(args.conn_id)
         step("live_preconditions", ok, gaps or "全绿")
