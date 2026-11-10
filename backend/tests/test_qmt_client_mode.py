@@ -161,6 +161,24 @@ def test_discover_small_qmt_alone_suggests_mini(tmp_path, monkeypatch):
     assert os.path.basename(c["client_path"]) == "userdata_mini"
 
 
+def test_platform_install_dir_name_does_not_hide_clients(tmp_path, monkeypatch):
+    """反例护栏：本平台装在名为 qmt_work 的目录下时，真实客户端不得被误排除。
+
+    旧实现把排除关键词（qmt_work / workbuddy）拿去匹配**整个 exe 路径**，于是
+    「仓库检出在 P:\\...\\qmt_work\\...」这类正常环境里，同机所有 QMT 客户端
+    的 exe 路径都含 qmt_work ⇒ discover() 返回空列表（自动发现彻底失效）。
+    """
+    root = _client_tree(tmp_path)          # tmp_path 本身就在 .../qmt_work/... 下
+    procs = [{"pid": "11092", "name": "xtitclient.exe",
+              "exe": str(root / "bin.x64" / "XtItClient.exe")}]
+    _patch_discover(monkeypatch, procs, tmp_path)
+    cands = D.discover()
+    assert len(cands) == 1, cands
+    assert cands[0]["client_mode"] == "full"
+    # 正向锚：本平台自身进程仍必须被排除（排除只看进程名 / exe 文件名）
+    assert D._is_qmt_proc("qmt_work.exe", r"C:\x\qmt_work.exe") is False
+    assert D._is_qmt_proc("qmt_work_agent.exe", r"C:\x\qmt_work_agent.exe") is False
+
 # ---------------------------------------------------------------- B3 回归
 
 def _stub_shell_probe(monkeypatch, **flags):

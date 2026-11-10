@@ -18,7 +18,9 @@
   2. bundle 里不再残留 ``from qmt_api import``（内联完整性）；
   3. 配置查找能兼容旧部署（``agent_bigqmt/agent_config.json``）与内嵌配置；
   4. 自检 + 心跳真的会落盘（自动验证的数据来源）；
-  5. 源码编码必须是 **UTF-8**，且**注册态判定不会静默假阴性**
+  5. 源码编码门禁：**utf-8 与 gbk 都放行，但 gbk 只在 CRLF 行尾下安全**
+     （LF 行尾的 GBK 会让内置 py3.6 丢开头两行 ⇒ docstring 失效 ⇒ SyntaxError，
+      实测 3/3；gb18030 实测失败，必须判红），且**注册态判定不会静默假阴性**
      （副日志里没有注册树行；按 mtime 取「最新」会取到副日志并把「已注册」
       全部误报成「未注册」—— 这类假阴性必须由用例锁住）。
 """
@@ -386,45 +388,54 @@ def test_verify_fresh_probe_still_flags_missing_funcs(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# 4. 源码编码（★ 部署必须 UTF-8 —— 2026-10-08 真机事故，R27）
+# 4. 源码编码（★ utf-8 与 gbk 都是真跑口径；gbk 必须 CRLF —— 2026-10-15 复测）
 # ---------------------------------------------------------------------------
 def test_recode_utf8_is_default_and_lossless():
-    """UTF-8 是部署口径：recode 不动内容、不产告警。"""
+    """UTF-8 是默认口径：recode 不动内容、不产告警、行尾保持 LF。"""
     text = gen.build(stamp="test")
-    out, enc, notes = gen.recode(text, "utf-8")
-    assert (out, enc, notes) == (text, "utf-8", [])
+    out, enc, notes, newline = gen.recode(text, "utf-8")
+    assert (out, enc, notes, newline) == (text, "utf-8", [], "\n")
 
 
-def test_recode_gbk_still_converts_but_must_warn_loudly():
-    """gbk/gb18030 仍可转换（给「不在本机跑、只给编辑器看」的场景），
-    但**必须**带一条说清后果的强告警 —— 否则用户会以为它是推荐选项。
+def test_recode_gbk_is_supported_but_must_force_crlf():
+    """gbk 是**受支持**的真跑口径，但 recode 必须把行尾一并交出来（CRLF）。
 
-    R27 事故：gb18030 的 52 KB bundle 在开发机 py3.11 上编译通过，
-    QMT 内置 pythonw.exe（Python 3.6.8）却 `SyntaxError: encoding problem: gb18030`，
-    进程 return code:1，**一条自检都不落盘**。
+    背景（2026-10-15 本机 bin.x64/pythonw.exe = Python 3.6.8 逐形态实测）：
+      utf-8（LF/CRLF）通过、utf-8+BOM 通过、**gbk+CRLF 通过（3/3）**、
+      gbk+LF **必然** SyntaxError、gb18030 失败。
+
+    gbk+LF 的报错极具误导性：`invalid character in identifier`，位置指向**模块
+    docstring 正中间的一行中文**（实测第 7 行 `部署（唯一正确姿势）`）—— 看着像
+    「某个中文字写错了」，实为 tokenizer 在 LF 行尾下丢掉开头两行、docstring 的
+    三引号没生效。所以「GBK 安全」是**编码 + 行尾**的联合属性，缺一不可。
     """
     text = gen.build(stamp="test")
-    out, enc, notes = gen.recode(text, "gbk")
-    assert enc in ("gbk", "utf-8")
-    assert notes, "编码降级必须报出来，不能静默"
+    out, enc, notes, newline = gen.recode(text, "gbk")
+    assert enc == "gbk"
+    assert newline == "\r\n", "GBK 必须 CRLF —— 否则 QMT 内置 py3.6 必然 SyntaxError"
+    assert notes, "CRLF 与字符替换这两条前提都必须报出来，不能静默"
+    assert any("CRLF" in n for n in notes), "告警必须点明行尾要求"
+    assert any("替换" in n for n in notes), "被替换的字符必须列出来"
+    assert out.splitlines()[0] == "# -*- coding: gbk -*-"
+    # 内联了多个源文件，各自带 cookie —— 只能留一条**生效的**（PEP263 只看前两行，
+    # 留多条时真正生效的仍是第一行）。用 cookie 正则数，不要用裸 "coding:" 计数：
+    # 文档里解释编码问题的正文也含 "coding:"，裸计数会误报。
+    assert len([ln for ln in out.split("\n") if gen._CODING_RE.match(ln)]) == 1
+    assert out.encode("gbk").decode("gbk") == out
+    assert out.count("EMBEDDED_CONFIG") == text.count("EMBEDDED_CONFIG")
+    # GBK 表示不了的装饰字符被白名单替换（⇒ 是整份 bundle 里唯一的箭头）
+    assert u"\u21d2" not in out
+    assert u"=>" in out
+
+
+def test_recode_gb18030_still_warns_loudly():
+    """gb18030 仍是实测失败项：能转换，但必须带「别用它真跑」的告警。"""
+    _out, enc, notes, _nl = gen.recode(gen.build(stamp="test"), "gb18030")
+    assert enc == "gb18030"
+    assert notes, "gb18030 必须带告警"
+    assert any("失败" in n for n in notes)
     assert any("3.6.8" in n or "py3.6" in n for n in notes), (
         "告警必须点明 QMT 内置解释器是 Python 3.6.8（否则用户不知道为什么要改）")
-    if enc == "gbk":
-        assert out.splitlines()[0] == "#coding:gbk"
-        # 内联了多个源文件，各自带 cookie —— 只能留一条，否则第一行才是生效的那条
-        assert out.count("coding:") == 1
-        assert out.encode("gbk").decode("gbk") == out
-        assert out.count("EMBEDDED_CONFIG") == text.count("EMBEDDED_CONFIG")
-    else:
-        # GBK 表示不了某些字符时必须**报出来**并退回 utf-8，不能静默写坏
-        assert len(notes) >= 2
-
-
-def test_recode_gb18030_warns_too():
-    """gb18030 分支同样必须带告警（它在 QMT 上是实测失败的那一个）。"""
-    _out, enc, notes = gen.recode(gen.build(stamp="test"), "gb18030")
-    assert notes, "gb18030 必须带告警"
-    assert enc in ("gb18030", "utf-8")
 
 
 def test_generated_utf8_bundle_is_qmt_safe(tmp_path):
@@ -442,25 +453,46 @@ def test_generated_utf8_bundle_is_qmt_safe(tmp_path):
     assert health["ok"] is True, health
 
 
-def test_gbk_bundle_is_rejected_by_preflight_health(tmp_path):
-    """反向对照：同一份内容落成 gb18030，体检必须判红。
+def test_bundle_health_encoding_gate(tmp_path):
+    """编码门禁三态：gb18030 判红、**gbk+CRLF 放行**、gbk+LF 判红。
 
-    没有这条，「编码判定」很容易被改回永远绿灯 —— 那正是 R27 事故的成因。
+    没有反向对照，「编码判定」很容易被改回永远绿灯 —— 那正是 R27 事故的成因。
+    ★ 2026-10-15 起 gbk 是受支持编码，但**只在 CRLF 行尾下**：LF 行尾的 GBK
+      会让内置 py3.6 丢掉开头两行、docstring 失效（本机实测 3/3）。
     """
     sys.path.insert(0, str(ROOT / "scripts"))
     import qmt_agent_verify as verify
 
     text = gen.build(stamp="test")
+
+    # ① gb18030：开发机解析得动（这正是它危险的地方），体检必须判红
     kept = [ln for ln in text.split("\n")
             if "coding" not in ln or not ln.lstrip().startswith("#")]
-    body = "#coding:gb18030\n" + "\n".join(kept)
-    out = tmp_path / "bundle_gbk.py"
-    out.write_bytes(body.encode("gb18030"))
-    health = verify.bundle_health(str(out))
+    p18030 = tmp_path / "bundle_gb18030.py"
+    p18030.write_bytes(("#coding:gb18030\n" + "\n".join(kept)).encode("gb18030"))
+    health = verify.bundle_health(str(p18030))
     assert health["syntax_ok"] is True, "开发机能解析 —— 这正是它危险的地方"
     assert health["encoding_ok"] is False
     assert health["ok"] is False
     assert "3.6.8" in (health["encoding_note"] or "")
+
+    body = gen.recode(text, "gbk")[0]
+
+    # ② gbk + CRLF：放行（本机真跑 3/3 通过的那一种）
+    ok_path = tmp_path / "bundle_gbk_crlf.py"
+    ok_path.write_text(body, encoding="gbk", newline="\r\n")
+    health = verify.bundle_health(str(ok_path))
+    assert health["encoding_ok"] is True, health.get("encoding_note")
+    assert health["ok"] is True, health
+
+    # ③ gbk + LF：必须判红，且把「是行尾问题」说清楚（否则用户只会去查中文）
+    bad_path = tmp_path / "bundle_gbk_lf.py"
+    bad_path.write_text(body, encoding="gbk", newline="\n")
+    health = verify.bundle_health(str(bad_path))
+    assert health["encoding_ok"] is False, (
+        "LF 行尾的 GBK 在 QMT 上必然 SyntaxError，不能放行")
+    assert health["ok"] is False
+    assert "CRLF" in (health["encoding_note"] or "")
 
 
 # ---------------------------------------------------------------------------

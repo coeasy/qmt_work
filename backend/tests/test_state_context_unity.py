@@ -28,7 +28,7 @@ from core.context import AppContext, active_context, set_active_context
 from core.state import AppState, state
 
 _BACKEND = pathlib.Path(__file__).resolve().parent.parent
-_SKIP_PARTS = {"runtimes", "dist", "__pycache__", ".venv", "tests"}
+_SKIP_PARTS = {"runtimes", "dist", "__pycache__", ".venv", "tests", ".pytest_tmp"}
 
 
 @pytest.fixture()

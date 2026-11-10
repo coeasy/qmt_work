@@ -77,7 +77,8 @@ class _SpyRouter:
 
     async def submit(self, code, side, volume, price=0.0, price_type="limit",
                      source="", broker_id="", remark="", idempotency_key="",
-                     auto_confirm=False, payload=None, account_type=""):
+                     auto_confirm=False, payload=None, account_type="",
+                     client_order_id=""):
         self.submits.append({"code": code, "side": side, "volume": volume,
                              "source": source, "broker_id": broker_id,
                              "idempotency_key": idempotency_key,

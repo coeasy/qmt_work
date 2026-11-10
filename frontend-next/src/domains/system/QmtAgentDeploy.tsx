@@ -196,9 +196,14 @@ export default function QmtAgentDeploy() {
       const summary = dryRun
         ? `预览完成：${res.path}（${res.size_bytes} B，未写盘）`
         : `已部署：${res.path}（${res.size_bytes} B，编码 ${res.encoding}${res.backup ? "，已备份旧版" : ""}）`;
+      // ★ 「部署成功」与「产物可用」是两个轴：文件写下去了不代表新规下能跑。
+      //   只报成功会把用户送到「盘前发现没下单」那一步，所以这里必须同屏说清。
+      const unusable = res.compliance && !res.compliance.usable;
       setBanner({
         tone: res.problems.length ? "error" : "ok",
-        text: summary + (res.problems.length ? ` ⚠ ${res.problems.join("; ")}` : ""),
+        text: summary
+          + (unusable ? ` ｜ ⚠ 该产物在新规（${res.compliance!.regulation_cutoff}）后不可用，见下方说明` : "")
+          + (res.problems.length ? ` ⚠ ${res.problems.join("; ")}` : ""),
       });
       status.reload();
     } catch (e: any) {
@@ -426,6 +431,24 @@ export default function QmtAgentDeploy() {
         {lastDeploy?.registered_hint && (
           <div className={s.muted} style={{ marginTop: 8, fontSize: "0.88em", lineHeight: 1.5 }}>
             {lastDeploy.registered_hint}
+          </div>
+        )}
+
+        {lastDeploy?.compliance && !lastDeploy.compliance.usable && (
+          <div style={{
+            marginTop: 8,
+            padding: "8px 10px",
+            borderRadius: 4,
+            background: "var(--warning-dim)",
+            color: "var(--warning)",
+            fontSize: "0.88em",
+            lineHeight: 1.55,
+          }}>
+            <strong>
+              这份产物在新规（{lastDeploy.compliance.regulation_cutoff}）后不可用：
+            </strong>
+            {lastDeploy.compliance.reason}
+            <div style={{ marginTop: 4 }}>{lastDeploy.compliance.next_action}</div>
           </div>
         )}
       </Panel>
@@ -743,19 +766,110 @@ export default function QmtAgentDeploy() {
               {lastDiagnose.config.exists ? <Badge tone="success">存在</Badge> : <Badge tone="warning">未存在</Badge>}
               {lastDiagnose.config.bridge_dir ? <> · bridge_dir=<code>{lastDiagnose.config.bridge_dir}</code></> : null}
             </dd>
+            <dt>运行形态</dt>
+            <dd>
+              {lastDiagnose.closed_loop ? (
+                <>
+                  <Badge tone="success">闭环（新规形态）</Badge>
+                  {lastDiagnose.closed_loop.plan_id ? (
+                    <> · 计划 <code>{lastDiagnose.closed_loop.plan_id}</code></>
+                  ) : null}
+                  {lastDiagnose.closed_loop.standalone ? (
+                    <>
+                      {" "}
+                      <Badge tone="danger">独立进程</Badge>
+                      <div className={s.muted} style={{ marginTop: 4 }}>
+                        独立进程模式下终端**不注入任何交易函数**，闭环一单都发不出去；
+                        请在 QMT 策略编辑器里改成「内置 Python」并重启策略。
+                      </div>
+                    </>
+                  ) : null}
+                </>
+              ) : (
+                <Badge tone="neutral">文件桥（旧形态）</Badge>
+              )}
+            </dd>
             <dt>心跳</dt>
             <dd>
-              {lastDiagnose.heartbeat.alive ? (
+              {lastDiagnose.heartbeat.known === false ? (
+                <>
+                  {/* 三态里的第二态：**判不出来**。显示「未运行」是把「没读到」
+                      当成了「没有」，用户会去点「运行」重启一个可能正常的策略。 */}
+                  <Badge tone="neutral">判不出来</Badge>
+                  <span className={s.muted} style={{ marginLeft: 6 }}>
+                    {lastDiagnose.heartbeat.reason || "心跳证据不可用"}
+                  </span>
+                </>
+              ) : lastDiagnose.heartbeat.alive ? (
                 <Badge tone="success">agent 在跑（v{lastDiagnose.heartbeat.agent_ver || "?"}）</Badge>
               ) : (
                 <Badge tone="warning">agent 未运行</Badge>
               )}
               {lastDiagnose.heartbeat.runtime_mode ? <> · {lastDiagnose.heartbeat.runtime_mode}</> : null}
+              {/* 闭环的心跳来自客户端日志，不是 agent_status.json —— 说清楚来源，
+                  否则用户会去 bridge_dir 里找一份「本来就该不存在」的文件。 */}
+              {lastDiagnose.closed_loop?.available ? (
+                <div className={s.muted} style={{ marginTop: 4 }}>
+                  来源：客户端日志 <code>{lastDiagnose.closed_loop.log_path || "（未找到）"}</code>
+                  {lastDiagnose.closed_loop.last_age_s != null ? (
+                    <> · 最后一条 {lastDiagnose.closed_loop.last_kind || "?"} 距今{" "}
+                      {Math.round(lastDiagnose.closed_loop.last_age_s)}s</>
+                  ) : null}
+                </div>
+              ) : null}
             </dd>
+            {lastDiagnose.closed_loop?.available ? (
+              <>
+                <dt>本轮进度</dt>
+                <dd>
+                  已发 <strong>{lastDiagnose.closed_loop.orders}</strong> 单 · 在途{" "}
+                  {lastDiagnose.closed_loop.heartbeat?.pending ?? "?"} · 成交{" "}
+                  {lastDiagnose.closed_loop.settled} · 拒单{" "}
+                  <span style={{
+                    color: lastDiagnose.closed_loop.rejects
+                      ? "var(--danger)"
+                      : "inherit",
+                  }}>
+                    {lastDiagnose.closed_loop.rejects}
+                  </span>{" "}
+                  · {lastDiagnose.closed_loop.done ? "已到位" : "未到位"}
+                  {lastDiagnose.closed_loop.window_closed ? " · 窗口已收" : ""}
+                  {lastDiagnose.closed_loop.readonly ? (
+                    <>
+                      {" "}
+                      <Badge tone="warning">只读</Badge>
+                    </>
+                  ) : null}
+                  {lastDiagnose.closed_loop.halted ? (
+                    <>
+                      {" "}
+                      <Badge tone="danger">已停机</Badge>
+                    </>
+                  ) : null}
+                </dd>
+                {(lastDiagnose.closed_loop.readonly || lastDiagnose.closed_loop.halted) && (
+                  <>
+                    <dt>不交易原因</dt>
+                    <dd style={{ color: "var(--danger)" }}>
+                      {lastDiagnose.closed_loop.readonly || lastDiagnose.closed_loop.halted}
+                    </dd>
+                  </>
+                )}
+              </>
+            ) : null}
             <dt>自检</dt>
             <dd>
               {lastDiagnose.heartbeat.probe_ok === undefined ? (
-                <Badge tone="neutral">未上报</Badge>
+                <>
+                  <Badge tone="neutral">未上报</Badge>
+                  {/* 闭环不写盘 ⇒ 不会有 probe_result.json。说清楚「未上报」是
+                      形态决定的，不是故障，否则用户会去修一个不存在的问题。 */}
+                  {lastDiagnose.closed_loop?.available ? (
+                    <span className={s.muted} style={{ marginLeft: 6 }}>
+                      （闭环禁写盘，不产出自检文件；能力真相见下方「下单能力」）
+                    </span>
+                  ) : null}
+                </>
               ) : lastDiagnose.heartbeat.probe_ok ? (
                 <Badge tone="success">通过</Badge>
               ) : (

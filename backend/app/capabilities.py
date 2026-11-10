@@ -40,6 +40,12 @@ _EXEC_DENY_DOMAINS = {
     "condition", "limitup", "signal", "brokers",
     "api-keys", "webhooks", "notifications", "alerts",
     "scheduler", "ws", "health", "metrics", "capabilities",
+    # ★ 2026-11-08：qmt = **宿主级诊断**（枚举本机安装目录、读 broker.ini 端口、
+    #   跑 netstat 查重复绑定、读各账号的 Config.xml）。它不产生委托，但会
+    #   **枚举文件系统并拉起子进程** —— 自动暴露给 Agent 等于给它一个任意目录
+    #   探测器。风险面与 market 的只读行情不同量级，故整体拒绝自动暴露；
+    #   REST 仍可用（界面 / 运维脚本），只是不生成 MCP tool。
+    "qmt",
 }
 
 # 「执行域」里的**只读豁免**域（2026-09-18 放开，经用户确认）。

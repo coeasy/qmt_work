@@ -30,7 +30,8 @@ BACKEND = Path(__file__).resolve().parent.parent
 
 #: 扫描范围：后端全部 .py，排除运行时 / 构建产物 / 打包输出 / 测试自身。
 SKIP_PARTS = frozenset({"runtimes", "dist", "build", "__pycache__",
-                        "tests", "node_modules", ".venv", "output"})
+                        "tests", "node_modules", ".venv", "output",
+                        ".pytest_tmp"})
 
 #: 只写槽位属性名
 WRITE_ONLY_ATTRS = frozenset({"bridge", "gateway"})

@@ -1,5 +1,6 @@
 import { Suspense, useRef } from "react";
 import { PAGES, type PageProps } from "@/app/routes";
+import { ErrorBoundary } from "@/app/ErrorBoundary";
 import { useWorkspaceStore, type PaneNode } from "@/stores/workspace";
 import { Spinner } from "@/design/primitives";
 import { Splitter } from "./Splitter";
@@ -110,7 +111,11 @@ function PaneLeaf({
       <div className={def?.fullBleed ? s.paneBodyFlush : s.paneBody}>
         {def ? (
           <Suspense fallback={<Spinner label="加载页面…" />}>
-            <def.comp {...props} />
+            {/* 窗格级隔离：key=pageKey 保证切页自动清掉上一页的错误状态，
+                否则用户换到正常页面仍会看到旧错误。 */}
+            <ErrorBoundary key={node.pageKey} scope={node.pageKey}>
+              <def.comp {...props} />
+            </ErrorBoundary>
           </Suspense>
         ) : (
           <div style={{ padding: 16, color: "var(--text-faint)" }}>

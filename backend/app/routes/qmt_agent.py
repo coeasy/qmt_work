@@ -13,8 +13,15 @@ deploy_qmt_work_agent.bat → 手填 QMT 目录」，客户端安装包里既没
   GET  /bundle    生成当前 bundle 文本（供下载 / 复制粘贴）
   POST /deploy    一键部署到 QMT 策略目录（幂等：同 target 先备份 .bak）
   POST /diagnose  注册态 + 心跳 + 编码 三重判定
+  GET  /closed-loop  闭环策略的**运行态**（只读客户端日志，可高频轮询）
   GET  /config    读取用户机上的 agent_config.json
   POST /config    写入配置模板（幂等：先备份 .bak）
+
+闭环（2026-10-23 新规形态）与文件桥是**两套判据**，不能混用：
+新规禁策略进程读写文件，闭环模式下 ``agent_status.json`` 等三份桥文件一个都
+不会生成，心跳只能从客户端日志的 ``@@QMTW|`` 行推导。本路由在检测到闭环
+产物时自动切换判据（见 :func:`_closed_loop_runtime`），避免把「正在正常下单」
+误报成「策略未运行」。
 
 零 mock 契约：
 - 打包态与开发态走**同一套**函数；差异只在**路径解析**
@@ -33,6 +40,7 @@ import importlib.util
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -45,11 +53,19 @@ from fastapi import APIRouter, Request
 from pydantic import BaseModel, Field
 
 from app.routes._common import err, ok, audit_log
-from core.clock import now_iso
+from core.clock import now_iso, to_iso
 
 log = logging.getLogger("qmt_work.routes.qmt_agent")
 
 router = APIRouter(prefix="/qmt-agent", tags=["qmt-agent"])
+
+#: QMT 内置解释器（bin.x64/pythonw.exe = Python 3.6.8）能跑的源码编码。
+#: ★ 2026-10-15 真机实测：utf-8 与 **gbk（须 CRLF 行尾）** 通过；gb18030 失败。
+#: 权威实现见 ``scripts/qmt_agent_verify.check_bundle_encoding``；这里是
+#: 「scripts/ 不可导入」时的降级副本，口径必须与它一致。
+_QMT_SAFE_ENCODINGS = frozenset({"utf-8", "utf8", "ascii", "us-ascii"})
+_CODING_COOKIE_RE = re.compile(rb"coding[:=][ \t]*([-\w.]+)")
+_BARE_LF_RE = re.compile(rb"(?<!\r)\n")
 
 
 # ===========================================================================
@@ -136,6 +152,140 @@ def _verify():
         _verify_mod = _load_module(
             "qmt_agent_verify_mod", "qmt_agent_verify.py", _qmt_tools_dir())
     return _verify_mod
+
+
+#: 闭环心跳过期阈值（秒）。与 ``scripts/qmt_closed_loop_verify.DEFAULT_MAX_AGE_S``
+#: 同源 —— 闭环 tick 默认 3s、STATUS 默认 10s，90s 是很宽的界。
+_CLOSED_LOOP_MAX_AGE_S = 90.0
+
+_clv_mod: Any | None = None
+_clv_tried = False
+
+
+def _closed_loop_verify():
+    """惰性加载闭环体检工具（``scripts/qmt_closed_loop_verify.py``）。
+
+    ★ 用 ``_clv_tried`` 而不是 ``is None`` 判「加载过」：脚本缺失时
+      ``_load_module`` 同样返回 None，用 ``is None`` 会在**每个请求**上重试一次
+      文件系统探测（日志刷屏 + 拖慢诊断），而缺脚本是**安装形态问题**，
+      重试一万次也不会好。
+    """
+    global _clv_mod, _clv_tried
+    if not _clv_tried:
+        _clv_tried = True
+        _clv_mod = _load_module(
+            "qmt_closed_loop_verify_mod", "qmt_closed_loop_verify.py",
+            _qmt_tools_dir())
+    return _clv_mod
+
+
+def _closed_loop_runtime(qmt_dir: str, bundle_path: Path,
+                         log_path: str | None = None) -> dict[str, Any] | None:
+    """闭环 bundle 的运行态。``None`` = **不是**闭环产物，调用方走旧文件桥判据。
+
+    ★ 为什么必须分叉：新规（2026-10-23 起）策略进程禁文件读写，闭环模式下
+      ``agent_status.json`` / ``probe_result.json`` / ``events.ndjson`` **一个都不会
+      生成**。若 ``/diagnose`` 继续只看那三份文件，一条正在正常下单的策略会被
+      报成「策略未运行（心跳 stale）」—— 这是与「假绿灯」对称的反向故障，
+      假红灯一样会让人去修没坏的东西。
+
+      闭环的唯一证据链是客户端日志里的 ``@@QMTW|`` 行（见
+      ``connectors/bigqmt_log_tail.py`` 的模块 docstring），判定逻辑
+      **不在这里重写** —— 直接复用 ``qmt_closed_loop_verify.evaluate()``，
+      保证「界面看到的结论」与「命令行体检的结论」永远同源。
+
+    :param log_path: 指定日志文件；``None`` 走 ``newest_log(qmt_dir)`` 自动定位。
+                     排障常要看**历史某一天**的日志，此时「最新」恰好是错的。
+    :return: ``{"mode": "closed_loop", ...}``；bundle 不存在或非闭环时返回 None
+             （bundle 不存在由调用方先报错，这里不再重复）。
+    """
+    mod = _closed_loop_verify()
+    if mod is None:
+        # 判不出来时必须说「判不出来」，不能默默退化成旧判据 ——
+        # 那样又会回到「真在跑却报未运行」的老坑。
+        return {"mode": "closed_loop", "available": False,
+                "reason": "scripts/qmt_closed_loop_verify.py 不可用，无法按闭环口径判定"}
+    try:
+        info = mod.inspect_bundle(str(bundle_path))
+    except Exception as exc:  # noqa: BLE001
+        return {"mode": "closed_loop", "available": False,
+                "reason": "bundle 体检失败: %s" % exc}
+    if not info.get("closed_loop"):
+        return None
+
+    records: list[Any] = []
+    stats: dict[str, Any] = {}
+    log_error = ""
+    try:
+        if log_path is None:
+            log_path = mod.newest_log(qmt_dir)
+        if log_path:
+            records, stats = mod.collect_records(log_path)
+    except OSError as exc:
+        log_error = str(exc)
+
+    code, lines, details = mod.evaluate(
+        info, records, stats, max_age_s=_CLOSED_LOOP_MAX_AGE_S)
+
+    last = records[-1] if records else None
+    last_ts = float(getattr(last, "ts", 0.0) or 0.0) if last is not None else 0.0
+    last_data = (getattr(last, "data", None) or {}) if last is not None else {}
+    status_data = last_data if (last is not None and last.kind == "STATUS") else {}
+    # 取**最后一条** BOOT（与 evaluate 的 ``boots[-1]`` 同口径）：一次日志里可能有
+    # 多轮启动，拿第一条会把「昨天那次」的计划当成今天的。
+    boot_data: dict[str, Any] = {}
+    for record in records:
+        if record.kind == "BOOT":
+            boot_data = record.data or {}
+
+    out: dict[str, Any] = {
+        "mode": "closed_loop",
+        "available": True,
+        "plan_id": details.get("plan_id") or "",
+        "log_path": log_path,
+        "log_error": log_error,
+        # 退出码原样透出：0=就绪 / 2=需人工动作 / 1=环境缺失（口径见脚本 docstring）
+        "exit_code": code,
+        "findings": lines,
+        "boot_id": details.get("boot_id") or "",
+        "alive": bool(details.get("alive")),
+        "last_age_s": details.get("last_age_s"),
+        "last_kind": getattr(last, "kind", "") if last is not None else "",
+        "standalone": bool(details.get("standalone")),
+        "readonly": details.get("readonly") or "",
+        "halted": details.get("halted") or "",
+        "orders": int(details.get("orders") or 0),
+        "rejects": int(details.get("rejects") or 0),
+        "settled": int(details.get("settled") or 0),
+        "done": bool(details.get("done")),
+        "window_closed": bool(details.get("window_closed")),
+        "kinds": list(details.get("kinds") or []),
+        "stats": stats,
+        # 启动快照（来自 BOOT 行）：这是「这一轮到底想做什么」的唯一权威记录。
+        "account": str(boot_data.get("account") or ""),
+        "window": list(boot_data.get("window") or []),
+        "targets": boot_data.get("targets"),
+        "trading_enabled": boot_data.get("trading_enabled"),
+        "injected": list(boot_data.get("injected") or []),
+        "default_account_type": str(boot_data.get("default_account_type") or ""),
+        "query_account_type": str(boot_data.get("query_account_type") or ""),
+    }
+    # 心跳子对象刻意与旧模式 ``agent_status.json`` **同形**（alive/ts/agent_ver/
+    # runtime_mode）：前端只需换数据来源，不必学第二套字段名。
+    out["heartbeat"] = {
+        "alive": out["alive"],
+        "ts": to_iso(datetime.fromtimestamp(last_ts)) if last_ts else None,
+        "agent_ver": str(status_data.get("agent_ver") or ""),
+        "runtime_mode": "closed_loop",
+        "uptime_s": status_data.get("uptime_s"),
+        "nav": status_data.get("nav"),
+        "positions": status_data.get("positions"),
+        "pending": status_data.get("pending"),
+        "orders_sent": status_data.get("orders_sent"),
+        "turnover": status_data.get("turnover"),
+        "in_window": status_data.get("in_window"),
+    }
+    return out
 
 
 # ===========================================================================
@@ -304,6 +454,30 @@ def _strategy_dir(qmt_dir: str) -> str:
     return os.path.join(qmt_dir, "python")
 
 
+#: 已部署 bundle 的候选文件名（按优先级）。
+#: ★ 顺序有意义：显式传入的策略名优先，其次才是默认名；Windows 文件系统大小写
+#: 不敏感，所以 ``qmt_work_agent.py`` 与 ``QMT_WORK_AGENT.py`` 打开的是**同一个**
+#: 文件 —— 两个都列是为了兼容 Linux/mac 上的大小写敏感文件系统与历史部署。
+_BUNDLE_CANDIDATES = ("qmt_work_agent.py", "QMT_WORK_AGENT.py")
+
+
+def _find_deployed_bundle(strategy_dir: str, strategy: str = "") -> Path | None:
+    """在策略目录里找已部署的 bundle；找不到返回 None。
+
+    单独抽出来是为了让 ``/diagnose`` 与 ``/closed-loop`` **用同一套查找口径** ——
+    两处各写一份候选列表，早晚会分叉成「诊断说部署了、闭环页说没部署」。
+    """
+    names: list[str] = []
+    if strategy:
+        names.extend([f"{strategy}.py", f"{strategy.upper()}.py"])
+    names.extend(_BUNDLE_CANDIDATES)
+    for name in names:
+        path = Path(strategy_dir) / name
+        if path.is_file():
+            return path
+    return None
+
+
 def _agent_config_path(qmt_dir: str | None = None) -> Path:
     """agent_config.json 的规范路径。"""
     if qmt_dir:
@@ -343,6 +517,29 @@ def _build_bundle_text(stamp: str | None = None) -> tuple[str | None, str, str, 
     problems = list(mod.check(text) or [])
     size = f"{len(text)} chars / {text.encode('utf-8').__len__()} bytes"
     return (text, "utf-8", size, problems)
+
+
+def _bridge_compliance() -> dict:
+    """本端点产物的**合规画像**（2026-10-23 新规）。
+
+    ★ 为什么必须放进响应体，而不是只写文档：``/bundle`` 与 ``/deploy`` 产出的
+      是**文件桥**形态的 agent。新规关闭策略沙箱的本地文件读写之后，这条链路
+      在真机上**跑不起来** —— 每拍 ``open()`` 抛 ``Forbidden FileIO``，被主循环
+      的 try/except 吞掉，外部看到的正是「策略在跑但没有任何事件」。
+      只写文档的结果是「界面显示部署成功 → 用户以为成了 → 盘前发现没下单」，
+      本仓最忌讳的假绿灯。所以把结论放在调用方拿得到的地方。
+    """
+    return {
+        "mode": "bridge",
+        "regulation_cutoff": "2026-10-23",
+        "usable": False,
+        "reason": ("该产物走文件桥（bridge_dir + req/resp + events.ndjson）。新规关闭"
+                   "策略沙箱的本地文件读写，桥的每一拍都会抛 Forbidden FileIO —— "
+                   "表现为「策略在跑但没有任何事件」。"),
+        "next_action": ("改用烘焙计划的闭环 bundle（gen_qmt_agent_bundle.py --plan … "
+                        "--embed-config …），以公式模式挂载，外部端读 @@QMTW| 日志行。"
+                        "对照表见 backend/agent_bigqmt/DEPLOY.md §0.1。"),
+    }
 
 
 # ===========================================================================
@@ -558,6 +755,9 @@ async def get_bundle(request: Request):
         "problems": problems,
         "source_agent_dir": str(_agent_bigqmt_dir()),
         "source_tools_dir": str(_qmt_tools_dir()),
+        # ★ 合规画像随产物一起返回：调用方不必去翻文档才知道「这份产物在新规后
+        #   还能不能用」。见 _bridge_compliance 的注释。
+        "compliance": _bridge_compliance(),
     })
 
 
@@ -596,6 +796,9 @@ async def deploy(request: Request, body: DeployRequest):
     running = _qmt_running()
     result["txt_path"] = txt_path
     result["qmt_running"] = running
+    # ★ 部署「成功」只代表文件写下去了，不代表这份产物在新规下能跑。
+    #   两者混为一谈就是假绿灯（见 _bridge_compliance）。
+    result["compliance"] = _bridge_compliance()
     result["registered_hint"] = (
         "文件已就位但**不会**自动出现在「模型交易」里 —— 策略列表来自客户端持久化"
         "注册树，不是目录扫描。请走「导入本地策略」或「新建 + 粘贴」做一次注册动作。"
@@ -625,18 +828,12 @@ async def diagnose(request: Request, body: DiagnoseRequest):
     problems: list[dict[str, str]] = []
 
     # 1. 找 bundle
-    candidates = []
-    for name in (body.strategy + ".py", body.strategy.upper() + ".py",
-                 "qmt_work_agent.py", "QMT_WORK_AGENT.py"):
-        p = Path(sdir) / name
-        if p.is_file():
-            candidates.append(p)
-    if not candidates:
+    bundle_path = _find_deployed_bundle(sdir, body.strategy)
+    if bundle_path is None:
         return err(503, "未在策略目录找到 bundle",
                    {"strategy_dir": sdir,
                     "hint": "先跑 POST /qmt-agent/deploy 部署"})
 
-    bundle_path = candidates[0]
     bundle_info: dict[str, Any] = {"path": str(bundle_path), "size_bytes": bundle_path.stat().st_size}
     encoding_ok = True
     encoding_note = ""
@@ -656,19 +853,43 @@ async def diagnose(request: Request, body: DiagnoseRequest):
         except Exception as exc:  # noqa: BLE001
             bundle_info["health_error"] = str(exc)
     else:
-        # 降级：直接读字节判断是否 UTF-8
+        # 降级：直接读字节判断（与 scripts/qmt_agent_verify.check_bundle_encoding 同口径）。
+        # ★ 2026-10-15：GBK 是**受支持**编码，但**只在 CRLF 行尾下**（LF 行尾会让
+        #   内置 py3.6 丢开头两行 ⇒ docstring 失效 ⇒ SyntaxError）。所以这里不能
+        #   再「非 UTF-8 一律判红」—— 那会把一份真能跑的 GBK 策略误报成编码异常。
         try:
             raw = bundle_path.read_bytes()
-            try:
-                raw.decode("utf-8")
+            declared = None
+            for line in raw.split(b"\n", 2)[:2]:
+                if not line.lstrip().startswith(b"#"):
+                    break          # PEP263：cookie 只在前两行的注释里生效
+                m = _CODING_COOKIE_RE.search(line)
+                if m:
+                    declared = m.group(1).decode("ascii", "replace").lower()
+                    break
+            enc_eff = declared or "utf-8"
+            crlf = b"\r\n" in raw and not _BARE_LF_RE.search(raw)
+            if enc_eff in _QMT_SAFE_ENCODINGS:
                 encoding_ok = True
-            except UnicodeDecodeError:
+            elif enc_eff == "gbk" and crlf:
+                encoding_ok = True
+            elif enc_eff == "gbk":
                 encoding_ok = False
-                encoding_note = "非 UTF-8（可能是 gb18030）"
-                problems.append({"source": "encoding",
-                                 "msg": "bundle 编码不是 UTF-8，QMT 内置 py3.6 会 SyntaxError"})
+                encoding_note = ("源码是 gbk 但行尾是 LF —— QMT 内置 py3.6 的 tokenizer "
+                                 "会丢掉开头两行，docstring 失效 ⇒ SyntaxError"
+                                 "（gbk 必须配 CRLF；用 --encoding gbk 重新部署会自动写 CRLF）")
+                problems.append({"source": "encoding", "msg": encoding_note})
+            else:
+                encoding_ok = False
+                encoding_note = ("源码编码 %s 不被 QMT 内置 Python 3.6.8 支持"
+                                 "（支持 utf-8 与 gbk；gb18030 实测失败）" % enc_eff)
+                problems.append({"source": "encoding", "msg": encoding_note})
         except OSError as exc:
             bundle_info["read_error"] = str(exc)
+
+    # 1b. 闭环产物 ⇒ 运行态只能从客户端日志里读（新规禁文件读写，三份桥文件
+    #     一个都不会生成）。判据全部委托 qmt_closed_loop_verify.evaluate()。
+    closed_loop = _closed_loop_runtime(qmt, bundle_path)
 
     # 2. 读 agent_config 找 bridge_dir
     cfg_path = _agent_config_path(qmt)
@@ -677,8 +898,12 @@ async def diagnose(request: Request, body: DiagnoseRequest):
     if cfg:
         bridge_dir = cfg.get("bridge_dir")
         if bridge_dir and not Path(bridge_dir).is_dir():
-            problems.append({"source": "config",
-                             "msg": f"bridge_dir 不存在: {bridge_dir}"})
+            # ★ 闭环产物不写文件桥，``bridge_dir`` 对它是**无关配置**。
+            #   这里照旧报「bridge_dir 不存在」等于让用户去修一个用不上的目录
+            #   （旧模式留下的残留配置），属于典型的假告状。
+            if closed_loop is None:
+                problems.append({"source": "config",
+                                 "msg": f"bridge_dir 不存在: {bridge_dir}"})
 
     # 3. 检查 bridge_dir 里的心跳/自检文件
     heartbeat: dict[str, Any] = {"bridge_dir": bridge_dir, "alive": False, "ts": None}
@@ -751,11 +976,61 @@ async def diagnose(request: Request, body: DiagnoseRequest):
             problems.append({"source": f"probe/{s.get('name')}",
                              "msg": str(s.get("detail") or "")})
 
+    # 3c. 闭环运行态并入。
+    # ★ 必须**覆盖** heartbeat，而不是「额外加一段」：旧模式的 agent_status.json
+    #   在闭环下永远不存在，留着旧 heartbeat 会让下面第 4 步照旧报
+    #   「策略未运行」—— 那就是假红灯。
+    if closed_loop is not None:
+        if not closed_loop.get("available"):
+            problems.append({"source": "closed_loop",
+                             "msg": str(closed_loop.get("reason")
+                                        or "无法按闭环口径判定运行态")})
+            # ★ 判不出来时**不许**沿用「未运行」这个结论 —— 那只是「文件不存在」
+            #   的副作用，不是观测结果。用 known=False 表达三态里的第二态。
+            heartbeat = {"bridge_dir": bridge_dir, "alive": False, "ts": None,
+                         "known": False,
+                         "reason": str(closed_loop.get("reason") or "")}
+        else:
+            heartbeat = {"bridge_dir": bridge_dir,
+                         **closed_loop.get("heartbeat", {}), "known": True}
+            # 判定结论**只**从 evaluate() 的 [FAIL] 行取，不在这里另写一套判据 ——
+            # 界面与命令行体检必须永远同一句话。
+            for line in closed_loop.get("findings") or []:
+                text = str(line).strip()
+                if not text.startswith("[FAIL]"):
+                    continue
+                problems.append({"source": "closed_loop",
+                                 "msg": text[len("[FAIL]"):].strip()})
+            # 能力真相：闭环下没有 probe_result.json，唯一证据是 BOOT 自报的
+            # ``injected``（终端**实际注入**了哪些函数）。刻意不用
+            # ``trading_enabled`` —— 那是「用户允许交易」的开关，独立进程模式下
+            # 它为 true 却根本没有 passorder，拿它当能力会把「不能下单」报成能。
+            if not capabilities:
+                injected = list(closed_loop.get("injected") or [])
+                can_trade = "passorder" in injected
+                capabilities = {
+                    "trading": {
+                        "available": can_trade,
+                        "reason": ("终端已注入 passorder" if can_trade else
+                                   "终端未注入 passorder（独立进程模式，或未以"
+                                   "「模型交易/公式模式」注册运行）"),
+                        "source": "closed_loop/boot.injected",
+                    },
+                }
+                trade_surface = {
+                    "present": injected,
+                    "missing": [] if can_trade else ["passorder"],
+                    "can_submit": can_trade,
+                    "source": "closed_loop/boot.injected",
+                }
+
     # 4. QMT 客户端是否在跑
     running = _qmt_running()
     if running:
-        # 客户端在跑但策略未运行（心跳 stale）→ 提示
-        if not heartbeat.get("alive"):
+        # 客户端在跑但策略未运行（心跳 stale）→ 提示。
+        # ★ known is False 时**不许**说「未运行」：那只是「判不出来」，
+        #   再叠一句具体结论就变成了自相矛盾的假红灯。
+        if not heartbeat.get("alive") and heartbeat.get("known") is not False:
             problems.append({"source": "runtime",
                              "msg": "QMT 客户端在跑但 agent 策略未运行（心跳 stale），请在 QMT 里点「运行」"})
 
@@ -770,6 +1045,11 @@ async def diagnose(request: Request, body: DiagnoseRequest):
                    "bridge_dir": bridge_dir},
         "heartbeat": heartbeat,
         "qmt_running": running,
+        # ★ 闭环运行态（2026-10-31 新增）：``None`` = 这份 bundle 不是闭环产物
+        #   （走旧文件桥，heartbeat 来自 agent_status.json）；非 None 时
+        #   heartbeat 已由日志推导，本字段给出**依据**（BOOT/STATUS 明细、
+        #   本次会话的 ORDER/REJECT/SETTLED 计数、退出码与判定原文）。
+        "closed_loop": closed_loop,
         # ★ 能力真相（2026-10-09 新增）：{"trading": {available, reason,
         #   expected_in_mode}, "quote": {...}}。界面**必须**显式呈现 —— 这是
         #   「能不能下单 / 能不能取行情」的唯一权威答案，别再让用户从
@@ -779,6 +1059,68 @@ async def diagnose(request: Request, body: DiagnoseRequest):
         # capabilities.trading 给结论，本字段给**依据**（缺哪个下单入口）。
         "trade_surface": trade_surface,
         "problems": problems,
+    })
+
+
+@router.get("/closed-loop")
+async def closed_loop_status(request: Request, qmt_dir: str | None = None,
+                             strategy: str = "", log_path: str = ""):
+    """GET /qmt-agent/closed-loop —— 闭环策略「今天到底跑成什么样」。
+
+    与 ``POST /diagnose`` 的分工：
+      * ``diagnose`` 判**产物**（bundle 能不能跑、编码对不对、注册了没有），
+        要读策略文件、要跑体检，偏重；
+      * 本端点只判**运行**（心跳活不活、发了几单、有没有只读/停机/拒单），
+        只读客户端日志，可以放心让前端定时轮询。
+
+    ★ 存在的理由：闭环模式下策略不落盘，旧界面靠 ``agent_status.json`` 显示
+      「策略未运行」—— 而它可能正在正常下单。这个端点把「唯一证据链」
+      （``@@QMTW|`` 日志行）直接暴露出来，让界面不必再猜。
+
+    查询参数：
+      qmt_dir     QMT 安装根（缺省走自动探测）
+      strategy    策略名（缺省用默认 bundle 名）
+      log_path    直接指定日志文件（优先于 qmt_dir 自动定位；排障用）
+
+    ★ 成本：本端点**整份**读当日日志（实测 10 MB ≈ 0.46s）。刻意不改成「只读
+      尾部 N MB」—— 那会漏掉早盘的 BOOT 与中段的 ORDER/REJECT，让 `orders`
+      这类计数**静默少算**。宁可慢 0.5s，也不要给一个错的数字。轮询间隔
+      建议 ≥ 15s。
+
+    返回：{ok, qmt_dir, bundle, closed_loop}
+      ``closed_loop`` 为 None 表示这份 bundle **不是**闭环产物（旧文件桥模式）。
+    """
+    qmt = _find_qmt_dir(qmt_dir)
+    if not qmt:
+        return err(400, "未找到 QMT 安装目录")
+
+    sdir = _strategy_dir(qmt)
+    bundle_path = _find_deployed_bundle(sdir, strategy)
+    if bundle_path is None:
+        return err(503, "未在策略目录找到 bundle",
+                   {"strategy_dir": sdir,
+                    "hint": "先跑 POST /qmt-agent/deploy 部署"})
+
+    if log_path:
+        # 指定日志时绕过 newest_log（它会挑 mtime 最新的主日志）——
+        # 排障常常要看**历史某一天**的日志，此时「最新」恰好是错的。
+        state = _closed_loop_runtime(qmt, bundle_path, log_path)
+        if state is not None and not state.get("available"):
+            return err(503, str(state.get("reason") or "无法按闭环口径判定"))
+    else:
+        state = _closed_loop_runtime(qmt, bundle_path)
+
+    audit_log(_actor(request), "qmt_agent.closed_loop", bundle_path.name,
+              {"qmt_dir": qmt, "log_path": state.get("log_path") if state else ""},
+              result="ok" if state and state.get("exit_code") == 0 else "warn")
+
+    return ok({
+        "qmt_dir": qmt,
+        "strategy_dir": sdir,
+        "bundle": {"path": str(bundle_path),
+                   "size_bytes": bundle_path.stat().st_size},
+        "closed_loop": state,
+        "checked_at": now_iso(),
     })
 
 

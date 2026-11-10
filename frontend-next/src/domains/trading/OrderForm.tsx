@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button, ConfirmModal, FormRow, Input, Select } from "@/design/primitives";
 import { accountApi, signalApi, tradeApi, type OrderResult } from "@/services/api";
 import { useBrokerStore } from "@/stores/broker";
@@ -316,12 +316,34 @@ export function OrderForm({
    *   不必先 setState 再等下一次渲染 —— 否则连点两次会出现「按了卖出、按卖出的
    *   状态还没生效就已经提交成买入」。
    */
+  /**
+   * P0-1：结果未知的委托必须「锁住」同一操作，直到用户去核对。
+   * 只在前端禁用、不在后端按内容拦截 —— 人工重复下单本身是真实意图，
+   * 后端只对**同一个 client_order_id** 做幂等短路。
+   */
+  const unknownRef = useRef<{ key: string; until: number } | null>(null);
+  const UNKNOWN_LOCK_MS = 30_000;
+
   const onSubmit = async (dir?: Side) => {
     const d: Side = dir ?? side;
     if (dir) setSide(dir);
+    if (unknownRef.current && unknownRef.current.until > Date.now()) {
+      setBanner({
+        tone: "warning",
+        text: "上一笔委托结果待确认，请先到「委托」页核对，勿重复下单",
+      });
+      return;
+    }
     setBusy(true);
     setBanner(null);
     try {
+      // 同一次下单会话复用同一个 key：unknown 后重试会被后端短路，
+      // 而不是真的再下一单。
+      const clientOrderId =
+        unknownRef.current?.key ??
+        (typeof crypto !== "undefined" && "randomUUID" in crypto
+          ? crypto.randomUUID()
+          : `${Date.now()}-${Math.random().toString(16).slice(2)}`);
       const res = await tradeApi.order({
         conn_id: activeConn,
         code: normCode,
@@ -329,11 +351,14 @@ export function OrderForm({
         volume: Number(volume) || 0,
         price: priceType === "market" ? 0 : Number(price) || 0,
         price_type: priceType,
+        client_order_id: clientOrderId,
         // 空串不发（后端 None/'' → stock 兜底，避免无意义载荷漂移）
         ...(accountType ? { account_type: accountType } : {}),
       });
 
       if (res.pending_confirmation && res.confirm_token) {
+        // 挂起阶段也保留 key：确认执行时仍是同一笔委托。
+        unknownRef.current = { key: clientOrderId, until: Date.now() + 10 * 60_000 };
         setPending(res);
         setBanner({
           tone: "warning",
@@ -341,6 +366,20 @@ export function OrderForm({
         });
         return;
       }
+
+      if (res.status === "unknown") {
+        // 柜台没回委托号：可能已成交。锁住 30 秒并提示核对，绝不显示“失败可重试”。
+        unknownRef.current = { key: clientOrderId, until: Date.now() + UNKNOWN_LOCK_MS };
+        setBanner({
+          tone: "warning",
+          text: `结果待确认：${res.reason ?? "柜台未返回委托号"}。请到「委托」页核对后再操作（单号 ${res.intent_id ?? "—"}）`,
+        });
+        onDone?.();
+        return;
+      }
+
+      // 成功或明确拒单：本次会话结束，下次下单用新 key
+      unknownRef.current = null;
 
       if (!res.ok) {
         setBanner({ tone: "danger", text: `下单被拒：${res.reason ?? "未知原因"}` });
@@ -369,6 +408,7 @@ export function OrderForm({
     try {
       const res = await signalApi.confirm(pending.confirm_token, totp);
       if (res.ok) {
+        unknownRef.current = null;
         setBanner({ tone: "success", text: `委托已提交，委托号 ${res.order_id ?? "—"}` });
         setPending(null);
         setTotp("");

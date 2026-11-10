@@ -2,13 +2,16 @@
 from __future__ import annotations
 
 from .base import BaseTransport  # noqa: F401  (re-export)
+from .embedded import EmbeddedTransport
 from .file_signal import FileSignalTransport
 from .http_gateway import HttpGatewayTransport
 from .inprocess import InProcessTransport
 from .lowlatency import RedisTransport, ZmqTransport
+from .xtq_rpc import XtqRpcTransport
 
 __all__ = ["BaseTransport", "InProcessTransport", "FileSignalTransport",
-           "RedisTransport", "ZmqTransport", "HttpGatewayTransport", "get_transport"]
+           "RedisTransport", "ZmqTransport", "HttpGatewayTransport",
+           "EmbeddedTransport", "XtqRpcTransport", "get_transport"]
 
 _TRANSPORTS: dict[str, type] = {
     InProcessTransport.transport_id: InProcessTransport,
@@ -16,6 +19,8 @@ _TRANSPORTS: dict[str, type] = {
     RedisTransport.transport_id: RedisTransport,
     ZmqTransport.transport_id: ZmqTransport,
     HttpGatewayTransport.transport_id: HttpGatewayTransport,
+    EmbeddedTransport.transport_id: EmbeddedTransport,
+    XtqRpcTransport.transport_id: XtqRpcTransport,
 }
 # ★ 这里是**唯一**的注册表，刻意不提供 ``register_transport`` 那种装饰器：
 #   曾经有这么一个「另一个注册入口」，但全仓**零调用** —— 于是真实注册表是上面

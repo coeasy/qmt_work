@@ -92,6 +92,10 @@ jobs:
 
       - name: Execution architecture gate
         run: python ../scripts/check_execution_architecture.py
+      # P0-4：VERSION / pyproject / package.json / LICENSE 四处一致。
+      # 版本与许可证漂移属于「发布即错」，必须在构建前拦。
+      - name: Version and license consistency gate
+        run: python ../scripts/check_version_consistency.py
 
       # ★ R25 补齐：以下三条同属「没接在 CI 上的门禁会腐烂」家族。
       #   doc-links 抓「注释/文档指向已删除的文件」（读者按图索骥找不到）；

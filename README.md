@@ -13,7 +13,7 @@
 
 所有行情 / 交易 / 账户接口均通过真实券商 SDK 调用，**零 mock**：未连接券商时端点返回 HTTP 503 + 可操作引导，绝不返回假数据、绝不用空列表冒充。
 
-- 版本：`0.5.2`（单一真源为仓库根 `VERSION`，构建时随包分发并由 `build_exe.py` 校验）
+- 版本：以仓库根 `VERSION` 为准（唯一真源；构建时随包分发并由 `build_exe.py` 校验，不在文档中硬编码）
 - 许可证：Apache 2.0
 - 平台：Windows 10 / 11（迅投系券商依赖 xtquant 的 Windows 二进制，须与券商客户端**同机**运行）
 
@@ -55,7 +55,7 @@
 |------|------|
 | 可视化界面 | React + Vite + ECharts SPA，纯前端、前后端解耦；6 分组 / 46 页 + keep-alive 多标签工作区 |
 | MCP 接口 | FastMCP Streamable HTTP，Cursor / Claude Desktop 直连 |
-| REST API | FastAPI `/api/v1/*`，39 个路由模块（账户 / 行情 / 下单 / 回测 / 因子 / 再平衡 / 风控 / 配置 / 远程访问 / 大 QMT 部署 / 数据集…） |
+| REST API | FastAPI `/api/v1/*`，40 个路由模块（账户 / 行情 / 下单 / 回测 / 因子 / 再平衡 / 风控 / 配置 / 远程访问 / 大 QMT 部署 / 多 QMT 客户端接入 / 数据集…） |
 | 实时推送 | WebSocket，活跃券商只订阅一次，多客户端扇出；断线重连补发最近 30s 行情 |
 | 多账户网格 | 多券商 / 多账户统一看板，批量下单 / 撤单 / 重连 |
 | 回测引擎 | 向量化回测 + 参数扫描（与逐根信号一致），真实 K 线 |
@@ -355,7 +355,7 @@ curl -s -X POST -H "X-API-Key: $QMT_API_KEY" -H "Content-Type: application/json"
 curl -s -H "X-API-Key: $QMT_API_KEY" $BASE/capabilities
 ```
 
-> **零 mock 约定**：未连接券商时，行情 / 交易 / 账户等端点返回 **HTTP 503** + 可操作引导；券商可用但被拒（风控 / 柜台拒单 / 非交易时段）返回 **HTTP 400** + 真实原因。**绝不把失败包成 `code=0`** —— 否则拒单会被前端显示成「已报」= 假成功。
+> **零 mock 约定**：未连接券商时，行情 / 交易 / 账户等端点返回 **真实 HTTP 503 + `code=503`** + 可操作引导（可按 5xx 直接告警）；券商可用但被拒（风控 / 柜台拒单 / 非交易时段）返回 **`code=400`** + 真实原因，HTTP 状态仍为 200（调用方语义，重试无意义）。**绝不把失败包成 `code=0`** —— 否则拒单会被前端显示成「已报」= 假成功。
 
 ### MCP 接入（Cursor / Claude Desktop）
 
@@ -460,7 +460,7 @@ print(httpx.get(f"{BASE}/paper/positions", headers=HEAD).json())
 
 | 层级 | 命令 | 覆盖范围 |
 |------|------|----------|
-| 后端单测 | `cd backend && for f in tests/test_*.py; do python -m pytest "$f" -q -p no:cacheprovider; done` | 198 个 `test_*.py`，2571 个用例 |
+| 后端单测 | `cd backend && for f in tests/test_*.py; do python -m pytest "$f" -q -p no:cacheprovider; done` | 219 个 `test_*.py`，2945 个用例 |
 | 后端冒烟 | `python backend/tests/smoke2.py` | REST 主要端点 + 错误语义（**需先起后端**；默认连 `data/app.db`，检测到真实券商连接时自动跳过 3 条「未连接券商 → 503」断言并提示改用下方客户端测试做权威验证） |
 | 前端类型检查 | `cd frontend-next && npm run typecheck` | TypeScript strict 零错误 |
 | 前端单测 | `cd frontend-next && npm run test:serial` | vitest，**57 文件 / 556 用例**。**必须用 `test:serial`**：并行 worker 在受限 temp 环境下会 `EPERM` 死亡并**静默丢 1~4 个文件而汇总仍全绿**（详见 TD-24）。判据：文件数应等于 `include` 匹配数（57），底部无 `unhandled errors` / `resolveConfig.*.js writeFile EPERM` |
@@ -530,7 +530,7 @@ qmt_work/
 ├─ backend/              # FastAPI 统一后端（V10 重构：core/ 无依赖内核 + engines/ 引擎）
 │  ├─ run.py            # 启动入口（端口自动扫描 + 单实例锁 + AppContext 装配）
 │  ├─ app/              # 装配层：main / routes / services / gateway
-│  │  ├─ routes/        # 39 个 REST 路由模块（account/market/trade/backtest/broker/remote_access/qmt_agent/datasets/…）
+│  │  ├─ routes/        # 40 个 REST 路由模块（account/market/trade/backtest/broker/remote_access/qmt_agent/qmt_client/datasets/…）
 │  │  └─ gateway/       # 鉴权 / 限流 / 风控 / 审计 / 脱敏 / K 线缓存 / metrics / 日志告警
 │  ├─ core/             # 无依赖内核（context / crypto / db …）
 │  ├─ engines/          # 交易引擎（signal router / execution / backtest …）
@@ -541,7 +541,7 @@ qmt_work/
 │  ├─ connectors/ plugins/ sync/   # 外部连接器 / 插件内核 / WebSocket 同步引擎
 │  ├─ tools/ runtimes/  # 因子策略工具 / 捆绑 Python 运行时（cp311）
 │  ├─ data/ static/ dist/   # SQLite / 前端构建产物 / PyInstaller 产物
-│  ├─ tests/            # 198 个 test_*.py（2571 用例）+ 冒烟测试 smoke2.py
+│  ├─ tests/            # 219 个 test_*.py（2945 用例）+ 冒烟测试 smoke2.py
 │  ├─ scripts/          # 门禁脚本（许可 / 能力漂移 / 契约生成 / 架构校验）
 │  └─ build_exe.py      # EXE 打包脚本（含 static 闸门）
 ├─ frontend-next/         # 主前端：React 18 + Vite 5 + TS 5 strict（已退役旧 frontend/）

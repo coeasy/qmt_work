@@ -362,7 +362,10 @@ def _is_qmt_proc(name: str, exe: str) -> bool:
     """进程是否属于 QMT 系（排除本平台自身进程）。
 
     判定优先级（越稳越前）：
-    1) 排除关键词（qmt_work / workbuddy）直接剔除本平台自身进程；
+    1) 排除关键词（qmt_work / workbuddy）剔除本平台自身进程 —— 只比对**进程名 / exe 文件名**，
+       不比对整个路径：本平台可能就装在名为 qmt_work 的目录下，按路径子串匹配会把
+       同一目录里的真实 QMT 客户端一起误杀（2026-11-04 修复：仓库检出在 qmt_work 目录时，
+       discover() 返回空列表）；
     2) 显式进程名白名单（XtItClient / XtMiniQmt / xttrader ...）；
     3) exe 路径落在客户端典型目录（bin.x64 / userdata_mini / qmt / xtquant ...）——最强信号，
        覆盖所有「进程名不固定但装在 bin.x64 下」的券商客户端；
@@ -370,7 +373,8 @@ def _is_qmt_proc(name: str, exe: str) -> bool:
     """
     low = (name or "").lower()
     ex = (exe or "").lower()
-    if any(k in low or k in ex for k in _QMT_EXCLUDE_KEYWORDS):
+    base = ntpath.basename(ex).strip()
+    if any(k in low or k in base for k in _QMT_EXCLUDE_KEYWORDS):
         return False
     # 排除客户端内部的辅助进程（CEF 渲染壳等），只认交易主程序
     if any(k in low for k in _QMT_AUX_EXCLUDE):

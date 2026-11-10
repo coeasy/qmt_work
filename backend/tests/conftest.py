@@ -6,7 +6,8 @@ CI 无需存活后端即可验证 REST/WS/MCP 契约。
 注意：
 - TestClient 的请求 host 是 testserver（非 loopback），因此默认携带主密钥头，
   否则 /mcp 等被鉴权中间件 401；
-- 无券商连接时端点按「HTTP 200 + code=503 引导」收口；本机 DB 若有 autoconnect
+- 无券商连接时端点按「**HTTP 503** + code=503 引导」收口（2026-11-07 起 503 提升为
+  真实状态码，见 ``middleware/envelope.py``）；本机 DB 若有 autoconnect
   券商则返回真实数据——测试断言必须环境无关（503 引导或真实数据，绝不假数据）；
 - shutdown 阶段后台任务可能抛 CancelledError（TestClient 已完成真实停机序列：
   db backup / mcp session manager 均正常关闭），此处兜底吞掉退出噪声；

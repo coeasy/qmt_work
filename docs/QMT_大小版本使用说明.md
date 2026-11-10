@@ -398,7 +398,8 @@ is_connected() = self._connected and not self._agent_unresponsive
 | 心跳一直 stale 但「模型交易」里显示运行中                   | handlebar 未触发（无行情推进，常见于收盘后或策略未订阅）                          | 这是**误判活死**的常见来源 —— 心跳新鲜度只是判据之一，不能单独作为唯一判据（TD 系列根因）。用 `is_connected()` 的「现在可用」语义判                                          |
 | 策略「运行」时 `IndentationError` 或 `SyntaxError`     | **R17 真实事故**：bundle 头部被拼了另一支策略代码（如 `import pandas/numpy/talib`） | `qmt_agent_verify --json` → 看 `bundle.syntax_ok` / `bundle.pollution_ok`；重新 `deploy_qmt_work_agent.bat` 覆盖 |
 | `bundle.pollution_hits` 非空                           | bundle 前 20 行出现 pandas/numpy/talib/sklearn/torch 等非标准库 import           | 同上，重新部署；手工改过的 bundle **禁止**再往顶部塞任何代码（会污染 agent 入口）                          |
-| 策略在列表里、点「运行」**立刻停止**（`return code:1`），且 **bridge 里连 `probe_result.json` 都没有** | **R27 真实事故**：bundle 源码编码是 `gb18030`/`gbk`。QMT 内置 `bin.x64/pythonw.exe` 是 **Python 3.6.8**，它的 tokenizer 读带 `#coding:gbk` cookie 的源文件会在特定内容下报 `SyntaxError: encoding problem` / `invalid token`。**开发机的 Python 3.11 编译得过去，所以极难联想** | 跑 `python scripts/qmt_agent_deploy.py deploy --encoding utf-8 --filename QMT_WORK_AGENT.py` 重新部署；体检判据见 `qmt_agent_verify --json` 的 `bundle.encoding_ok` / `bundle.encoding_declared` |
+| 策略在列表里、点「运行」**立刻停止**（`return code:1`），且 **bridge 里连 `probe_result.json` 都没有** | **R27 真实事故**：bundle 源码编码既不是 utf-8 也不是 gbk，或**没有 coding cookie**（py3.6 默认按 UTF-8 解码非 UTF-8 文件 ⇒ 必然 SyntaxError）。`gb18030` 是实测失败项。**开发机的 Python 3.11 编译得过去，所以极难联想** | 跑 `python scripts/qmt_agent_deploy.py deploy --encoding utf-8 --filename QMT_WORK_AGENT.py` 重新部署；体检判据见 `qmt_agent_verify --json` 的 `bundle.encoding_ok` / `bundle.encoding_declared` |
+| 同上，但报 `SyntaxError: invalid character in identifier`，且**位置指向一行中文**（常落在 docstring 中间） | **2026-10-15 新查明**：源码是 `gbk` 但**行尾是 LF**。内置 py3.6 的 tokenizer 在 LF 行尾下读「带编码 cookie 的文件」会丢掉开头两行 ⇒ docstring 的三引号没生效 ⇒ 紧随其后的中文行被当成代码解析。报错位置极具误导性，**看着像「某个中文字写错了」**（本机实测指向第 7 行 `部署（唯一正确姿势）`） | 用 `--encoding gbk` 重新部署（该命令**自动写 CRLF**），或改回 `--encoding utf-8`。**别手工把文件存成 LF**（记事本/编辑器「另存为」是主要来源） |
 | 策略在列表里、点「运行」立刻停止，但**有** `probe_result.json` | 缺 `if __name__ == "__main__":` 自举。QMT 的「运行」= `pythonw.exe -u <策略.py> <userdata> <ts>`（**独立进程**），没有自举 = 起来没代码可跑就退出 | 用生成器重新构建（`gen_qmt_agent_bundle.py` 会自检此条）；本地跑通验证见 `scripts/qmt_agent_local_run.py --mode process` |
 | `bundle.encoding_ok: false`（但 `syntax_ok: true`）      | 同上编码事故的**结构化判据** —— 语法过 ≠ QMT 能跑                                   | 按上面那条重部署；**不要**因为开发机 `python X.py` 能跑就以为没问题（两边解释器版本不同）                                |
 | probe 里 `injected: []`（一个注入函数都没有）               | 独立进程模式的**常态**：终端只把 `passorder`/`get_trade_detail_data` 等注入**被挂载的那一个文件**的命名空间；以外部进程形态运行时拿不到 | 这是事实、不是 bug。probe 会写 `runtime_mode: standalone_process` 如实标注。要有下单能力，需让策略以**公式策略**形态被终端 in-process 挂载 |
@@ -411,14 +412,29 @@ is_connected() = self._connected and not self._agent_unresponsive
 |---|---|---|---|
 | **语法校验** | `check_bundle_syntax()` | AST `parse()` 是否通过 | 每次 `qmt_agent_verify.py` 运行时 |
 | **污染签名** | `check_bundle_pollution()` | 前 20 行是否出现 `pandas/numpy/talib/sklearn/scipy/matplotlib/seaborn/plotly/torch/tensorflow` | 同上 |
-| **源码编码** | `check_bundle_encoding()` | PEP263 cookie（或默认 utf-8）是否属于 `QMT_SAFE_ENCODINGS = {utf-8, utf8, ascii, us-ascii}`。**gbk/gb18030 ⇒ 判红** | 同上 |
+| **源码编码** | `check_bundle_encoding()` | PEP263 cookie（或默认 utf-8）是否属于 `QMT_SAFE_ENCODINGS = {utf-8, utf8, ascii, us-ascii, gbk}`；**`gbk` 另需 CRLF 行尾**（`QMT_CRLF_ONLY_ENCODINGS`）。**gb18030、以及「无 cookie 且非 UTF-8」⇒ 判红** | 同上 |
 
 > ★ 编码这条要单独拎出来说：它是**唯一一个「开发机绿灯、QMT 红灯」的判据**。
-> `bin.x64/pythonw.exe` 是 Python **3.6.8**，其 tokenizer 对 `#coding:gbk` cookie
-> 的容忍度**取决于内容长度**（实测 706 字节过、707 字节挂），不可依赖。
-> 所以部署口径定为 **UTF-8**，`deploy` 默认即是，且写出后会用 QMT 内置解释器
-> **实跑一遍**（跑不起来就中止部署并给出三条常见原因）。
-> 生成器 `recode()` 仍保留 `gbk`/`gb18030` 选项，但会强制打一条说清后果的告警。
+>
+> **2026-10-15 复测修正**（本机 `bin.x64/pythonw.exe` = Python 3.6.8 逐形态实跑）：
+>
+> | 形态 | 结果 |
+> |---|---|
+> | utf-8（LF / CRLF） | 通过 |
+> | utf-8 + BOM | 通过 |
+> | **gbk + CRLF** | **通过（连跑 3 次 3/3）** |
+> | gbk + LF | **必然 SyntaxError** |
+> | gb18030 + cookie | 失败 |
+>
+> 结论：**utf-8 与 gbk 都能真跑，但 gbk 必须配 CRLF 行尾** —— 「GBK 安全」是
+> **编码 + 行尾**的联合属性，缺一不可。GBK+LF 的报错是
+> `invalid character in identifier` 且位置指向**一行中文**（docstring 正中间），
+> 极易被误判成「中文写错了」—— 实为 tokenizer 丢掉了开头两行。
+> 所以 `deploy` 写文件时按编码自动选行尾（`gbk` ⇒ CRLF），写出后仍用 QMT 内置
+> 解释器**实跑一遍**（跑不起来就中止部署并给出四条常见原因）。
+> 生成器 `recode()` 对 `gbk` 会自动做**字符白名单替换**（GBK 编不出的 `⇒`/`⚠` 等
+> 换成等价写法并列出明细；白名单外的字符直接报错，不静默写坏），
+> `gb18030` 则强制打一条说清后果的告警。
 
 结构化输出（`diag_report.json` → `bundle` 字段）：
 
@@ -434,7 +450,7 @@ is_connected() = self._connected and not self._agent_unresponsive
 }
 ```
 
-`ok = syntax_ok AND pollution_ok AND encoding_ok`。任一为假 → `diag_report.json` 的 `problems[]` 里会带具体化建议（语法/污染 → 「重跑 `deploy_qmt_work_agent.bat` 覆盖为干净版本」；编码 → 「用 `--encoding utf-8` 重新部署」）。
+`ok = syntax_ok AND pollution_ok AND encoding_ok`。任一为假 → `diag_report.json` 的 `problems[]` 里会带具体化建议（语法/污染 → 「重跑 `deploy_qmt_work_agent.bat` 覆盖为干净版本」；编码 → 「用 `--encoding utf-8`（或 `--encoding gbk`，须 CRLF）重新部署」）。
 
 **运行期自举（R27）**：`deploy` 在宣布成功前，会用 QMT 内置解释器按
 `pythonw.exe -u <策略.py> <userdata> <ts>` 把刚写出的 bundle **真跑一遍**
@@ -677,13 +693,22 @@ return code: 1
 - **现行为**：`_scan_marker_lines` **按块全文件扫描**（1MiB/块、上限 64MiB、跨块残行拼接、utf-8↔gb18030 容错），并记录**绝对偏移**再按窗口读原文（不假定授权串永远单行）。读日志失败时走 `core.errors.swallow` 记因并退化返回已扫到的部分，**绝不抛错**（诊断自身崩溃比诊断不到更糟）。
 - **自证**：`python -c "from xtquant_client.xtp import read_client_auth_flags as f; print(f(r'<QMT>\userdata'))"` 应返回 `found: true` 与 **649** 个 `mdl_auth_*` 键（键数随券商版本不同，量级如此）。
 
+### 7.11 策略在跑、却「什么事件都没有」——2026-10-23 起先怀疑**文件 IO 被禁**
+
+- **症状**：策略在 QMT 里显示运行中，但外部端收不到任何事件；`bridge_dir/req/` 永远是空的；日志里能搜到 `PermissionError: Forbidden FileIO`。或者策略**启动即停止**，模型交易里只闪一下。
+- **根因**：券商公告（2026-10-23 收盘后生效）关掉了策略沙箱内的**本地文件读写**与**一切外部网络连接**（含 `127.0.0.1` 回环）。文件桥（`bridge_dir` + `req/resp` + `events.ndjson` + `agent_status.json`）的每一个支点都要读写文件 ⇒ **整条链路在新规下失效**，且失效方式是「每拍抛异常、被主循环 try/except 吞掉」，外部看到的正是「在跑但没有事件」。
+- **判据**（三条任一成立即确诊，不要靠猜）：① 日志含 `Forbidden FileIO`；② 策略在跑而 `req/` 与 `events.ndjson` 均无变化；③ 产物里 `EMBEDDED_PLAN` 为空（= 还是旧桥形态的 bundle）。
+- **处理**：改走**闭环形态** —— 用 `gen_qmt_agent_bundle.py --plan plan.json --embed-config cfg.json` 生成烘焙计划的 bundle，以**公式模式**被终端挂载，外部端改读客户端日志里的 `@@QMTW|` 行（`GET /qmt-agent/closed-loop`）。完整对照表见 `backend/agent_bigqmt/DEPLOY.md` §0.1。
+- **不要做的事**：不要为了「让它能写文件」去降级/绕过沙箱，也不要改成走本地端口（回环同样算外联，处置是**停模 + 防外挂弹窗**）。
+
 ---
 
 ## 8. 安全与硬约束（务必知道）
 
-- **零 mock**：所有行情 / 交易 / 账户接口都走券商**真实 SDK**，平台**不返回任何模拟数据**。未连券商 → HTTP 200 + 业务码 `503` + 引导；券商不可用 → `503`，可用但被拒 → `400` + 真因。失败**绝不包 `code=0`**（前端靠 `code!==0` 抛错）。
+- **零 mock**：所有行情 / 交易 / 账户接口都走券商**真实 SDK**，平台**不返回任何模拟数据**。未连券商 → **真实 HTTP 503** + 业务码 `503` + 引导（2026-11-07 起状态码如实提升，可按 5xx 告警）；券商可用但被拒 → `code=400` + 真因（HTTP 仍 200，调用方语义）。失败**绝不包 `code=0`**（前端靠 `code!==0` 抛错）。
 - **`SignalRouter.submit` 唯一交易入口**：任何下单都经它，风控 / 幂等 / TOTP / 审计不可绕过。大 QMT 的 `passorder` 也是经桥回到这条入口，不会绕过。
 - **运行期状态不进安装包**：`master.key` / `app.db` / `qmt_work_config.json` / `data/` / `logs/` 不会打进发布包（构建脚本有 `purge + verify` 硬门禁）。干净安装首次启动自行生成密钥。
+- **策略侧合规三条（2026-10-23 新规）**：① 不读写本地文件；② 不发起任何网络连接（含回环、含本机数据库）；③ 部署在物理机（不得在公有云虚拟机）。策略端做法与逐条证据见 `backend/agent_bigqmt/DEPLOY.md` §0.1；可执行证明见 `backend/tests/test_bigqmt_sandbox_compliance.py`（把禁止 API 换成抛异常的替身，跑完整生命周期断言零命中）。
 
 ---
 

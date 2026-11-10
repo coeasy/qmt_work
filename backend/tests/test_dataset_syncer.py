@@ -176,9 +176,17 @@ def test_ticks_fetcher_unpacks_items_and_trading_date(monkeypatch):
     from app.sync import datasets as dsync
     from app.sync.datasets import DatasetSyncer
 
+    # ★ 日期必须相对「今天」：_prune_event 按真实今天滚 7 天保留窗，
+    #   写死某天 ⇒ 该日期滑出窗口后被整批清掉，表现为「同步成功但查不到」。
+    #   用「今天-1」而不是今天：保留「源给的交易日 ≠ 今天」的判别力。
+    from datetime import timedelta as _td
+    from core.clock import local_now as _now
+    td = (_now().date() - _td(days=1)).strftime("%Y-%m-%d")
+    dt_expect = td.replace("-", "")
+
     class _Hub:
         async def get_ticks(self, code, count=60, source="auto", conn_id=None):
-            return {"code": code, "source": "eltdx", "trading_date": "2026-10-09",
+            return {"code": code, "source": "eltdx", "trading_date": td,
                     "count": 2,
                     "items": [{"time": "09:30:00", "price": 10.0, "volume": 100,
                                "amount": 100000.0, "side": "buy"},
@@ -194,7 +202,7 @@ def test_ticks_fetcher_unpacks_items_and_trading_date(monkeypatch):
         "SELECT dt,tm,price,volume,bs_flag FROM local_ticks "
         "WHERE code=? ORDER BY seq", ("600000.SH",))
     # 交易日取源给的 trading_date，不是「今天」——休市时源回的是上一交易日
-    assert rows[0]["dt"] == "20261009"
+    assert rows[0]["dt"] == dt_expect
     # 源键 time/side 映射到落库列 tm/bs_flag
     assert rows[0]["tm"] == "09:30:00"
     assert rows[0]["bs_flag"] == "buy"
@@ -205,9 +213,15 @@ def test_minutes_fetcher_unpacks_points(monkeypatch):
     from app.sync import datasets as dsync
     from app.sync.datasets import DatasetSyncer
 
+    # ★ 同 ticks：日期相对「今天」（保留窗 7 天），用「今天-1」保判别力
+    from datetime import timedelta as _td
+    from core.clock import local_now as _now
+    td = (_now().date() - _td(days=1)).strftime("%Y-%m-%d")
+    dt_expect = td.replace("-", "")
+
     class _Hub:
         async def get_minutes(self, code, trading_date=None, source="auto"):
-            return {"code": code, "trading_date": "2026-10-09", "pre_close": 9.9,
+            return {"code": code, "trading_date": td, "pre_close": 9.9,
                     "points": [{"t": "09:30", "price": 10.0, "avg": 9.95,
                                 "volume": 100},
                                {"t": "09:31", "price": 10.1, "avg": 9.98,
@@ -221,7 +235,7 @@ def test_minutes_fetcher_unpacks_points(monkeypatch):
     rows = get_db().query(
         "SELECT dt,tm,price,avg_price,volume FROM local_minutes "
         "WHERE code=? ORDER BY tm", ("600000.SH",))
-    assert rows[0]["dt"] == "20261009"
+    assert rows[0]["dt"] == dt_expect
     # 源键 t/avg 映射到落库列 tm/avg_price
     assert rows[0]["tm"] == "09:30"
     assert rows[0]["avg_price"] == 9.95

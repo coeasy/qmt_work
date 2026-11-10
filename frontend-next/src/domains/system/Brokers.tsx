@@ -13,6 +13,7 @@ import {
 } from "@/design/primitives";
 import { brokerApi } from "@/services/api";
 import type { AutoDetectCandidate, BigQmtProbe, BrokerDiagnostics } from "@/services/api";
+import type { ConnectorInfo } from "@/services/api/broker";
 import { useBrokerStore } from "@/stores/broker";
 import { bigQmtProbeHint, describeBigQmtProbe } from "./bigqmtProbe";
 import s from "./brokers.module.css";
@@ -57,35 +58,140 @@ export function modeSourceLabel(src?: string): { text: string; tone: "success" |
 }
 
 /**
+ * 接入模式 → 后端 ``connector_key``。``direct`` 提交空串（走客户端路径直连），
+ * 但它的**可用性**要看注册表里的 ``qmt.big.direct``。
+ *
+ * ★ 2026-10-23 后 ``qmt.big.closed`` 是唯一「可用且推荐」的大 QMT 组合。
+ *   之前这里没有 closed，模板却提示「请改用闭环」—— 指引指向一条 UI 上根本
+ *   选不到的路；默认值 ``direct`` 又是已停用项，用户不改就会提交必失败的连接。
+ */
+export const ACCESS_MODE_KEYS: Record<string, string> = {
+  direct: "",
+  bridgeFile: "qmt.big.bridge.file",
+  bridgeRedis: "qmt.big.bridge.redis",
+  bridgeZmq: "qmt.big.bridge.zmq",
+  closed: "qmt.big.closed",
+};
+
+const ACCESS_MODE_LABELS: Record<string, string> = {
+  direct: "xtquant 直连（极速版/完整版大客户端）",
+  bridgeFile: "大 QMT 桥接 · 文件",
+  bridgeRedis: "大 QMT 桥接 · Redis",
+  bridgeZmq: "大 QMT 桥接 · ZMQ",
+  closed: "大 QMT 闭环（盘前计划 + 日志回传）",
+};
+
+/** 该模式在连接器注册表里的 key（用于查 available / retired / recommended）。 */
+export function availabilityKeyForMode(mode: string): string {
+  return mode === "direct" ? "qmt.big.direct" : (ACCESS_MODE_KEYS[mode] ?? "");
+}
+
+/** 是否要填「桥接参数 / 令牌」。★ 闭环与直连都**不需要** ``bridge_dir``。 */
+export function needsBridgeParams(mode: string): boolean {
+  return mode === "bridgeFile" || mode === "bridgeRedis" || mode === "bridgeZmq";
+}
+
+/**
+ * 该模式有没有**实时会话**。闭环是嵌入式：策略在 QMT 进程内自主执行，
+ * 后端既不能握手（``autoconnect`` 必须为 false）也不能实时探测。
+ *
+ * ★ 少了这一条，闭环模式会被当成普通连接去建连，必然拿到 ``connected=false``，
+ *   界面把一条正常登记的闭环连接报成「连接失败」—— 与假绿灯对称的假红灯。
+ */
+export function hasRealtimeSession(mode: string): boolean {
+  return availabilityKeyForMode(mode) !== "qmt.big.closed";
+}
+
+export interface AccessModeOption {
+  value: string;
+  label: string;
+  disabled: boolean;
+}
+
+/**
+ * 由后端清单生成下拉项，而不是前端硬编码。
+ * 排序：可用且推荐 → 可用 → 已停用（禁用并标明）。
+ * 清单加载失败时 ``items=[]`` ⇒ 全部按「未知」处理、不禁用任何项 —— 一次网络
+ * 抖动不能把用户锁死在页面外；提交时同样只在**明确知道停用**时才拦截。
+ */
+export function buildAccessModeOptions(items: ConnectorInfo[]): AccessModeOption[] {
+  const byKey = new Map(items.map((i) => [i.key, i]));
+  const rank = (mode: string): number => {
+    const meta = byKey.get(availabilityKeyForMode(mode));
+    if (!meta) return 1;
+    if (!meta.available) return 3;
+    return meta.recommended ? 0 : 1;
+  };
+  return Object.keys(ACCESS_MODE_KEYS)
+    .sort((a, b) => rank(a) - rank(b))
+    .map((mode) => {
+      const meta = byKey.get(availabilityKeyForMode(mode));
+      const retired = meta?.available === false;
+      const recommended = !!meta?.recommended && !retired;
+      const suffix = retired ? "（已停用）" : recommended ? "（推荐）" : "";
+      return {
+        value: mode,
+        label: (ACCESS_MODE_LABELS[mode] ?? mode) + suffix,
+        disabled: retired,
+      };
+    });
+}
+
+/** 默认接入模式：先「可用且推荐」，再「可用」；全不可用 ⇒ ``""``（界面给空态）。 */
+export function defaultAccessMode(items: ConnectorInfo[]): string {
+  const byKey = new Map(items.map((i) => [i.key, i]));
+  const usable = Object.keys(ACCESS_MODE_KEYS).filter((mode) => {
+    const meta = byKey.get(availabilityKeyForMode(mode));
+    return !!meta && meta.available;
+  });
+  const recommended = usable.find((mode) =>
+    byKey.get(availabilityKeyForMode(mode))?.recommended);
+  return recommended ?? usable[0] ?? "";
+}
+
+/**
  * 快速模板：让新用户在「接入模式」下拉里不用自己猜「我这种情况该选哪个」。
- * 点模板按钮只填 accessMode（券商 id 由独立下拉控制，模板不越权），
- * 用户仍然要填资金账号 / clientPath / bridgeDir —— 那部分信息我们不知道。
+ * 点模板按钮只填 accessMode（券商 id 由独立下拉控制，模板不越权）。
  *
- * 三大场景：
- *   ① 大 QMT 桥接（推荐）：绝大多数大 QMT 用户的唯一选择，路径 B（策略桥）
- *   ② 小 QMT 极速版：券商给了「极速版 / MiniQMT」的时候
- *   ③ 大 QMT 直连：完整版 QMT 且未被授权封禁（少数券商场景）
+ * 两条职责：
+ *   ① 闭环模板 = 2026-10-23 后**唯一可下单**的路径，必须排第一且可套用；
+ *   ② 三个历史模板 = 明确告知不可用（点了只显示原因，不写入表单）。
  *
- * 导出以便 `tests/brokerTemplates.test.ts` 静态校验（模板不能被后续改动悄悄删掉）。
+ * 导出以便 `tests/brokerTemplates.test.ts` 静态校验，防止后续改动把它们悄悄
+ * 改回「可用」或把闭环入口删掉 —— 那会让界面重新出现「推荐文件桥」式假象。
  */
 export const QUICK_TEMPLATES = [
   {
+    id: "qmt-big-closed",
+    label: "大 QMT 闭环（推荐）",
+    accessMode: "closed" as const,
+    retired: false,
+    hint: "盘前把计划烘进策略源码、策略在 QMT 内自主执行，结果从客户端日志回传；"
+      + "本页只登记接入方式，部署与执行状态请到「QMT Agent 部署」页查看。",
+  },
+  {
     id: "qmt-big-bridge",
-    label: "大 QMT 桥接（推荐）",
+    label: "大 QMT 文件桥（已停用）",
     accessMode: "bridgeFile" as const,
-    hint: "零部署、秒级延迟。绝大多数大 QMT 用户的唯一选择——先跑 deploy_qmt_work_agent.bat。",
+    retired: true,
+    hint: "已停用：策略进程禁文件读写（PermissionError: Forbidden FileIO），"
+      + "该方式在当前券商环境下必然失败；请改用闭环（qmt.big.closed）部署。",
   },
   {
     id: "qmt-mini-direct",
-    label: "小 QMT 极速版",
+    label: "小 QMT 极速版（已停用）",
     accessMode: "direct" as const,
-    hint: "券商给了「极速版 / MiniQMT」时用；客户端路径填 userdata_mini。",
+    retired: true,
+    hint: "已停用：miniQMT/xtquant 外接已于 2026-10-23 被券商关停；"
+      + "仍有旧客户端的环境可只读查询，但无法下单。",
   },
   {
     id: "qmt-big-direct",
-    label: "大 QMT 直连",
+    label: "大 QMT 直连（已停用）",
     accessMode: "direct" as const,
-    hint: "完整版 QMT 且未被授权封禁时用；客户端路径填 userdata。多数券商已封禁此模式。",
+    retired: true,
+    hint: "已停用：xtquant 直连受授权串限制，且 miniQMT 已关停。"
+      + "仅用于历史环境排查，不要用于新部署。",
   },
 ] as const;
 
@@ -194,20 +300,36 @@ export function Brokers() {
   const [accountId, setAccountId] = useState("");
   const [accountType, setAccountType] = useState("STOCK");
   /**
-   * 接入模式：direct = xtquant 直连（极速版/完整版大客户端）；
-   * bridgeFile/bridgeRedis/bridgeZmq = 大 QMT 内置策略桥接（路径 B）。
-   * 提交时映射为后端 connector_key（空 = 直连）。
+   * 接入模式。初值**刻意留空**：真正的默认值由后端连接器清单决定
+   * （见 ``defaultAccessMode``）。写死 "direct" 会让页面一打开就选中一个
+   * 已停用的组合，用户不主动改就提交必失败的连接。
    */
-  const [accessMode, setAccessMode] = useState("direct");
+  const [accessMode, setAccessMode] = useState("");
+  /**
+   * 后端连接器注册表（唯一真源）。加载失败时保持空表 —— 此时按「未知」处理，
+   * 不禁用任何选项、提交也不拦截，避免一次网络抖动把用户锁死在页面外。
+   */
+  const [connectorItems, setConnectorItems] = useState<ConnectorInfo[]>([]);
+  useEffect(() => {
+    let alive = true;
+    brokerApi.connectors()
+      .then((r) => {
+        if (!alive) return;
+        const items = r.items ?? [];
+        setConnectorItems(items);
+        // 用户已手动选过就不覆盖；否则落到「可用且推荐」的模式。
+        setAccessMode((prev) => prev === "" ? defaultAccessMode(items) : prev);
+      })
+      .catch(() => { /* 契约缺失时保持旧行为，不阻断页面 */ });
+    return () => { alive = false; };
+  }, []);
+  const modeOptions = useMemo(
+    () => buildAccessModeOptions(connectorItems), [connectorItems]);
+  const selectedConnector = connectorItems.find(
+    (i) => i.key === availabilityKeyForMode(accessMode));
   const [bridgeDir, setBridgeDir] = useState("");
   const [bridgeToken, setBridgeToken] = useState("");
-  const ACCESS_MODES: Record<string, string> = {
-    direct: "",
-    bridgeFile: "qmt.big.bridge.file",
-    bridgeRedis: "qmt.big.bridge.redis",
-    bridgeZmq: "qmt.big.bridge.zmq",
-  };
-  const isBridge = accessMode !== "direct";
+  const isBridge = needsBridgeParams(accessMode);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
   /**
@@ -341,7 +463,12 @@ export function Brokers() {
     }
   };
 
-  /** 套用快速模板：只填 accessMode，其余字段留空由用户填。 */  const applyTemplate = (t: (typeof QUICK_TEMPLATES)[number]) => {
+  /** 套用快速模板：只填 accessMode，其余字段留空由用户填。 */
+  const applyTemplate = (t: (typeof QUICK_TEMPLATES)[number]) => {
+    if (t.retired) {
+      setMsg(t.hint);   // 已停用方式不写入表单，避免用户填完才发现不可用
+      return;
+    }
     setAccessMode(t.accessMode);
     setConnErr("");
     setMsg(`已套用「${t.label}」：${t.hint}`);
@@ -357,16 +484,27 @@ export function Brokers() {
   };
 
   const onAdd = async () => {
-    const connectorKey = ACCESS_MODES[accessMode] ?? "";
+    const connectorKey = ACCESS_MODE_KEYS[accessMode] ?? "";
+    const closedLoop = !hasRealtimeSession(accessMode);
     if (!brokerId || !accountId) {
       setMsg("券商 / 资金账号均为必填");
       return;
     }
-    if (!connectorKey && !clientPath) {
+    // ★ 提交前按后端清单拦截：明确知道已停用就不发请求，直接给原因。
+    //   下拉里 disabled 只是渲染层，编辑既有连接/异步清单迟到时仍可能选中退役项。
+    if (selectedConnector && selectedConnector.available === false) {
+      setMsg(`该接入方式已停用：${selectedConnector.retirement_notice || "见连接器清单"}；`
+        + "请改用「大 QMT 闭环」");
+      return;
+    }
+    if (!connectorKey && !clientPath && !closedLoop) {
       setMsg("直连模式必须填客户端路径（大 QMT 桥接请切换接入模式）");
       return;
     }
-    if (connectorKey && !bridgeDir) {
+    // ★ 只有三种真桥需要 bridge_dir。闭环是嵌入式（embedded），既不需要桥目录
+    //   也不需要客户端路径；旧代码「有 connector_key 就要 bridgeDir」会把闭环
+    //   卡在一个永远填不对的必填项上。
+    if (isBridge && !bridgeDir) {
       setMsg("大 QMT 桥接模式必须填桥接参数（file=桥目录 / redis=连接串 / zmq=tcp 地址）");
       return;
     }
@@ -381,8 +519,13 @@ export function Brokers() {
         ...(editingId ? { conn_id: editingId } : {}),
         broker_id: brokerId, client_path: clientPath,
         account_id: accountId, account_type: accountType,
+        // ★ 闭环模式没有实时会话：后端默认 autoconnect=true 会去拉子进程握手，
+        //   必然得到 connected=false，界面就会把一条正常登记的闭环连接报成
+        //   「连接失败」—— 与假绿灯对称的假红灯。这里显式关掉建连。
+        ...(closedLoop ? { autoconnect: false } : {}),
         connector_key: connectorKey,
-        ...(connectorKey ? { bridge_dir: bridgeDir, auth_token: bridgeToken } : {}),
+        // 只有真桥要带桥参数；闭环带上 bridge_dir 既是脏数据也会误导后端校验。
+        ...(isBridge ? { bridge_dir: bridgeDir, auth_token: bridgeToken } : {}),
       });
       const wasEdit = !!editingId;
       setClientPath("");
@@ -390,11 +533,14 @@ export function Brokers() {
       setEditingId("");
       await load();
       setMsg(
-        wasEdit
-          ? "已保存连接修改；如修改了客户端路径/账号，请点「健康」复核连通性"
-          : created?.reused
-            ? "已存在相同连接（同客户端 + 同资金账号），已复用，未重复添加"
-            : "已添加连接并尝试建立会话；结果见下方「已有连接」列表",
+        closedLoop
+          ? "已登记闭环接入方式（未建立实时会话，这是闭环的正常形态）："
+            + "盘前生成计划 → 部署策略 → QMT 内自主执行；运行态请到「QMT Agent 部署」页查看"
+          : wasEdit
+            ? "已保存连接修改；如修改了客户端路径/账号，请点「健康」复核连通性"
+            : created?.reused
+              ? "已存在相同连接（同客户端 + 同资金账号），已复用，未重复添加"
+              : "已添加连接并尝试建立会话；结果见下方「已有连接」列表",
       );
     } catch (e) {
       setMsg(e instanceof Error ? e.message : String(e));
@@ -404,12 +550,20 @@ export function Brokers() {
   };
 
   const onTest = async () => {
-    const connectorKey = ACCESS_MODES[accessMode] ?? "";
+    const connectorKey = ACCESS_MODE_KEYS[accessMode] ?? "";
+    const closedLoop = !hasRealtimeSession(accessMode);
+    // ★ 闭环没有实时通道：EmbeddedTransport 明确拒绝实时操作。发这个探测只会
+    //   拿到一次必然失败的请求，用户却会当成「闭环坏了」。直接说清去哪看运行态。
+    if (closedLoop) {
+      setMsg("闭环模式不支持实时探测：策略只在盘中执行且不对外提供会话；"
+        + "请到「QMT Agent 部署」页查看运行态（心跳 / 订单 / 执行结果）");
+      return;
+    }
     if (!brokerId || (!connectorKey && !clientPath)) {
       setMsg("探测需要券商 +（直连的客户端路径 或 桥接参数）");
       return;
     }
-    if (connectorKey && !bridgeDir) {
+    if (isBridge && !bridgeDir) {
       setMsg("桥接探测需要桥接参数（与大 QMT 端 agent 配置一致）");
       return;
     }
@@ -419,7 +573,7 @@ export function Brokers() {
       const res = await brokerApi.test({
         broker_id: brokerId, client_path: clientPath,
         connector_key: connectorKey,
-        ...(connectorKey ? { bridge_dir: bridgeDir, auth_token: bridgeToken } : {}),
+        ...(isBridge ? { bridge_dir: bridgeDir, auth_token: bridgeToken } : {}),
       });
       setMsg(
         res.ok
@@ -668,14 +822,16 @@ export function Brokers() {
             <Select
               value={accessMode}
               onChange={(e) => setAccessMode(e.target.value)}
-              options={[
-                { value: "direct", label: "xtquant 直连（极速版/完整版大客户端）" },
-                { value: "bridgeFile", label: "大 QMT 桥接 · 文件（零部署，秒级）" },
-                { value: "bridgeRedis", label: "大 QMT 桥接 · Redis（低延迟，需本机 relay）" },
-                { value: "bridgeZmq", label: "大 QMT 桥接 · ZMQ（同机极速）" },
-              ]}
+              placeholder="当前环境无可用接入方式（请查看连接器清单）"
+              options={modeOptions}
             />
           </FormRow>
+          {selectedConnector?.available === false ? (
+            <div className={s.err}>
+              该接入方式已停用：{selectedConnector.retirement_notice || "见连接器清单"}。
+              请改用「大 QMT 闭环」。
+            </div>
+          ) : null}
           {isBridge ? (
             <>
               <FormRow label="桥接参数">
@@ -699,6 +855,15 @@ export function Brokers() {
                 部署步骤见 backend/agent_bigqmt/DEPLOY.md。
               </div>
             </>
+          ) : !hasRealtimeSession(accessMode) ? (
+            // ★ 闭环既不填 bridge_dir 也不填 client_path：策略在 QMT 进程内跑，
+            //   本页只登记「接入方式」这个元数据。把桥接/直连的输入框摆在这里
+            //   会让人以为不填就跑不起来，是另一种形式的假象。
+            <div className={s.itemSub}>
+              闭环模式无需桥接参数，也没有实时会话：盘前把计划烘进策略源码，
+              QMT 内策略自主执行，结果从客户端日志回传。
+              部署与运行态请到「QMT Agent 部署」页查看（生成计划 → 部署策略 → 查看执行）。
+            </div>
           ) : (
             <FormRow label="客户端路径">
               <Input

@@ -17,8 +17,9 @@
 ## 通用约定（简明，详细见多语言接入指南）
 
 - **鉴权**：REST / MCP 均带 `X-API-Key` 头（由 `QMT_API_KEY` 配置，生产务必修改）；WebSocket 连接带 `?token=<API-KEY>` 查询参数。
-- **零 mock**：未连接券商时行情/交易/账户等端点返回 **HTTP 503** + 可操作引导；券商可用但被拒（风控/柜台拒单/非交易时段）返回 **HTTP 400** + 真实原因。**绝不把失败包成 `code=0`**，否则拒单会被前端显示成「已报」= 假成功。
+- **零 mock**：未连接券商时行情/交易/账户等端点返回 **真实 HTTP 503 + `code=503`** + 可操作引导（可按 5xx 直接告警/重试）；券商可用但被拒（风控/柜台拒单/非交易时段）返回 `code=400` + 真实原因，HTTP 状态仍为 **200**（调用方语义，重试无意义）。**绝不把失败包成 `code=0`**，否则拒单会被前端显示成「已报」= 假成功。
 - **统一响应包裹**：`{ code, message, data }`，`code !== 0` 即错误。健康检查探针（`/live` `/health` `/ready` `/metrics`）额外带 `service/version`。
+- **状态码分层**（2026-11-07 起，D-12）：`code=503` ⇒ 同时返回真实 HTTP 503（服务端依赖不可用）；`code=400/404/409` ⇒ HTTP 200 + `code`（调用方语义）。无论哪种，**body 形状完全一致**，前端统一取 `message` 即可。实现见 `middleware/envelope.py::_promote_status`。
 - **错误归因**：错误 `message` 给出根因分类（未连接券商 / 柜台拒单 / 风控拦截 / 参数错误 / 内部异常），前端按分类给出不同引导，不做「网络错误」兜底。
 
 ## REST API（254 端点）
@@ -333,13 +334,19 @@ Prometheus 指标暴露。
 |---|------|
 | G | `/api/v1/platform/status` |
 
-### qmt-agent（大 QMT Agent 部署）· 10 端点
+### qmt-agent（大 QMT Agent 部署）· 11 端点
 
 大 QMT Agent 一键部署 / 巡检 / 配置分发：bundle 生成、部署到策略目录、注册态与心跳诊断、agent_config 读写。
+闭环产物（新规形态，策略进程禁读写文件）的运行态由 `closed-loop` 端点给出：它只读客户端日志的 `@@QMTW|` 行，因此可以高频轮询；`diagnose` 也会在检测到闭环产物时自动改用同一套判据。
+
+> **`bundle` / `deploy` 的响应带 `compliance` 字段**（2026-10-23 新规）：`{mode, regulation_cutoff, usable, reason, next_action}`。
+> 这两个端点产出的是**文件桥**形态，`usable` 恒为 `false` —— 新规关闭策略沙箱的本地文件读写，桥每拍抛 `Forbidden FileIO`，表现为「策略在跑但没有任何事件」。
+> **`ok=true` 只代表文件写下去了**，不代表产物可用；两者是不同的轴，调用方必须分开呈现。
 
 | M | 路径 |
 |---|------|
 | G | `/api/v1/qmt-agent/bundle` |
+| G | `/api/v1/qmt-agent/closed-loop` |
 | G | `/api/v1/qmt-agent/config` |
 | G | `/api/v1/qmt-agent/distribute/status` |
 | G | `/api/v1/qmt-agent/status` |

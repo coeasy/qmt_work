@@ -80,4 +80,38 @@ describe("http · 错误文案", () => {
     console.log("   实测文案 =", msg);
     expect(msg).toBe(reason);
   });
+
+  it("④ 真 503（后端已提升状态码）：仍必须显示后端给的真因", async () => {
+    // ★ 2026-11-07（D-12）：后端把 `code=503` 提升为**真实 HTTP 503**，
+    //   于是响应走 `!res.ok` 分支而不是 `env.code !== 0` 分支。
+    //   两条分支都必须读 `env.message` —— 否则用户会从
+    //   「当前未连接任何券商客户端：请到「券商连接」页…」退化成
+    //   「请求失败（HTTP 503）」，把可执行的下一步弄丢。
+    const reason =
+      "当前未连接任何券商客户端：请到「券商连接」页添加并连接券商（国金/华鑫/银河等 MiniQMT）。";
+    mockFetch(() =>
+      Promise.resolve(
+        response({
+          ok: false,
+          status: 503,
+          body: JSON.stringify({ code: 503, message: reason, data: null }),
+        }),
+      ),
+    );
+    const { http } = await import("@/services/http");
+
+    let err: { message: string; status: number; code: number } | null = null;
+    try {
+      await http.get("/account/positions", { retry: 0 });
+    } catch (e) {
+      err = e as { message: string; status: number; code: number };
+    }
+    console.log("   实测文案 =", err?.message, "status =", err?.status);
+    expect(err).not.toBeNull();
+    // 真因原样透传，不被「请求失败（HTTP 503）」兜底覆盖
+    expect(err!.message).toBe(reason);
+    // 状态码也要如实带出（监控/排障靠它区分 5xx）
+    expect(err!.status).toBe(503);
+    expect(err!.code).toBe(503);
+  });
 });

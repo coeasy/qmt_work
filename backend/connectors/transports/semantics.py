@@ -42,6 +42,15 @@ TRANSPORT_SEMANTICS: dict[str, EventSemanticsSpec] = {
     "inprocess": EventSemanticsSpec(
         semantics=EventSemantics.PUSH,
     ),
+    # embedded（闭环）：事件只能经「策略 print → 客户端日志 → 本端 tail」回来，
+    # 天然是差分轮询，且上界要覆盖「日志落盘 + 采集间隔」两段 ⇒ 5000ms。
+    # 这个数会被 order_watchdog 用来推导超时守护窗口，宁宽不窄：
+    # 窄了会把「日志还没落盘」误判成「单子没发出去」而误撤。
+    "embedded": EventSemanticsSpec(
+        semantics=EventSemantics.POLL_DIFF,
+        max_latency_ms=5000,
+        poll_interval_ms=1000,
+    ),
 }
 
 _UNSET = EventSemanticsSpec(semantics=EventSemantics.NONE)

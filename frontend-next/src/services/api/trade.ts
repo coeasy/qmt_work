@@ -30,6 +30,12 @@ export interface SubmitOrderPayload {
   remark?: string;
   idempotency_key?: string;
   /**
+   * 调用方幂等键（推荐）。与 idempotency_key 同源，区别是语义更明确：
+   * 前端为一次下单会话生成，结果未知时**复用同一个值**重试，后端据此
+   * 判断是「同一笔」而不是「再买一笔」。
+   */
+  client_order_id?: string;
+  /**
    * 下单级账户/标的类型（stock/etf/future/option/credit）。
    * 不传 = 由 agent 侧 `default_account_type` / 默认 stock 兜底；
    * 期货 / 期权 / 两融**必须**显式给出，否则 agent 会按 A 股标准签名送单被柜台拒。
@@ -56,6 +62,12 @@ export interface OrderResult {
   amount?: number;
   requires_totp?: boolean;
   broker_unavailable?: boolean;
+  /** submitted=已提交；rejected=确定拒单；unknown=结果待确认（不可提示重试）。 */
+  /** 仅 rejected 为 true；unknown 必须为 false，避免误导用户重复下单。 */
+  retryable?: boolean;
+  /** 同一 client_order_id 命中未决单时为 true（未产生新委托）。 */
+  duplicated?: boolean;
+  intent_id?: string;
 }
 
 /**

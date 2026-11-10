@@ -143,8 +143,14 @@ def test_market_coverage_reports_only_days_with_data(tmp_path):
     db_mod.init_db(tmp_path / "cov.db")
     try:
         db = db_mod.get_db()
-        for dt, code in (("20260917", "600519.SH"),
-                         ("20260918", "600519.SH"), ("20260918", "000001.SZ")):
+        # ★ 日期必须相对「今天」：coverage_report 只看最近 lookback 窗口，
+        #   写死某天 ⇒ 日期滑出窗口后 per_day 恒为空（时间炸弹）。
+        from datetime import timedelta as _td
+        from core.clock import local_now as _now
+        d1 = (_now().date() - _td(days=1)).strftime("%Y%m%d")   # 较新：两只
+        d2 = (_now().date() - _td(days=2)).strftime("%Y%m%d")   # 较旧：一只
+        for dt, code in ((d2, "600519.SH"),
+                         (d1, "600519.SH"), (d1, "000001.SZ")):
             db.execute(
                 "INSERT INTO local_bars (code,period,adjust,dt,open,high,low,close,"
                 "volume,amount,provider_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
@@ -153,8 +159,8 @@ def test_market_coverage_reports_only_days_with_data(tmp_path):
                                              ctx=SimpleNamespace(db=db)))
         assert res["code"] == 0
         d = res["data"]
-        assert [r["dt"] for r in d["per_day"]] == ["20260918", "20260917"]
-        assert d["latest_day"] == "20260918" and d["latest_codes"] == 2
+        assert [r["dt"] for r in d["per_day"]] == [d1, d2]
+        assert d["latest_day"] == d1 and d["latest_codes"] == 2
         assert d["days_with_data"] == 2
         assert d["provider_share"][0]["provider_id"] == "tdx"
         # 从没跑过同步 ⇒ None（而不是伪造一条「已同步」记录）

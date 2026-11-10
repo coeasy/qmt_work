@@ -40,7 +40,8 @@ class _SpyRouter:
 
     async def submit(self, code, side, volume, price=0.0, price_type="limit",
                      source="", broker_id="", remark="", idempotency_key="",
-                     auto_confirm=False, payload=None, account_type=""):
+                     auto_confirm=False, payload=None, account_type="",
+                     client_order_id=""):
         self.calls.append({
             "code": code, "side": side, "volume": volume, "price": price,
             "price_type": price_type, "source": source, "broker_id": broker_id,

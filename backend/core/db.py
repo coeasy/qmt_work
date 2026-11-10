@@ -185,6 +185,7 @@ class DB:
         self._closed = False
         self._migrate()
         self._ensure_columns()
+        self._backfill_broker_tokens()
         self._conn.commit()
 
     def _migrate(self) -> None:
@@ -236,6 +237,51 @@ class DB:
                     with _rw.write():
                         self._conn.execute(
                             f"ALTER TABLE {table} ADD COLUMN {c} TEXT DEFAULT ''")
+
+    def _backfill_broker_tokens(self) -> None:
+        """把历史明文 ``auth_token`` 迁移到 ``auth_token_enc``（P0-2）。
+
+        约束：
+        - **幂等**：只处理「明文非空、密文为空」的行，重复启动不会二次加密；
+        - **可回滚**：先写密文、再清明文；加密失败时保留明文并告警；
+        - **不阻断启动**：任何异常都只记日志（密钥缺失时仍能进系统改配置）。
+        """
+        try:
+            cols = {r[1] for r in self._conn.execute("PRAGMA table_info(broker_connections)")}
+        except sqlite3.Error:
+            return
+        if not {"auth_token", "auth_token_enc"} <= cols:
+            return
+        try:
+            rows = self._conn.execute(
+                "SELECT conn_id, auth_token FROM broker_connections "
+                "WHERE COALESCE(auth_token,'') <> '' AND COALESCE(auth_token_enc,'') = ''"
+            ).fetchall()
+        except sqlite3.Error:
+            return
+        if not rows:
+            return
+        from core.crypto import encrypt_fields
+        migrated = 0
+        for conn_id, token in rows:
+            try:
+                enc = encrypt_fields({"auth_token": str(token)},
+                                     keys={"auth_token"})["auth_token"]
+            except Exception as exc:  # noqa: BLE001 密钥缺失/损坏：保留明文
+                log.warning("auth_token 加密失败（conn=%s）：%s", conn_id, exc)
+                continue
+            try:
+                with _rw.write():
+                    self._conn.execute(
+                        "UPDATE broker_connections SET auth_token_enc=?, auth_token='' "
+                        "WHERE conn_id=? AND COALESCE(auth_token_enc,'')=''",
+                        (enc, conn_id))
+                    self._conn.commit()
+                migrated += 1
+            except sqlite3.Error as exc:
+                log.warning("auth_token 回填写入失败（conn=%s）：%s", conn_id, exc)
+        if migrated:
+            log.info("auth_token 已加密迁移 %d 条", migrated)
 
     def close(self) -> bool:
         """P0-10：显式关闭数据库（停机逆序的最后一步）。

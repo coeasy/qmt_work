@@ -24,6 +24,8 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from app.middleware.envelope import EnvelopeMiddleware
+
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
@@ -59,6 +61,10 @@ def qa_module(tmp_path, monkeypatch):
 
     app = FastAPI()
     app.include_router(qa.router, prefix="/api/v1")
+    # ★ 必须挂信封中间件：`err(503, ...)` 的 HTTP 状态码由中间件提升
+    #   （见 middleware/envelope.py::_promote_status）。不挂的话本文件测到的是
+    #   「裸 router 的 200」——与生产装配不一致，状态码相关断言就成了假绿/假红。
+    app.add_middleware(EnvelopeMiddleware)
     client = TestClient(app)
     return qa, client, fake_qmt
 
@@ -90,6 +96,35 @@ def test_bundle_returns_text(qa_module):
     assert data["size_bytes"] > 10000
     # 关键契约：不含语法错误
     assert not data["problems"], data["problems"]
+
+
+def test_bundle_reports_bridge_compliance(qa_module):
+    """``/bundle`` 必须把「这份产物在新规后跑不起来」随产物一起说清楚。
+
+    ★ 反面教材就是本仓反复出现的假绿灯：产物能下载、能部署、策略也能「在跑」，
+      但一个事件都出不来。合规结论必须由**调用方拿得到的地方**给出，不能只写文档。
+    """
+    _, client, _ = qa_module
+    data = client.get("/api/v1/qmt-agent/bundle").json()["data"]
+    comp = data["compliance"]
+    assert comp["mode"] == "bridge"
+    assert comp["usable"] is False, "文件桥产物在新规后不可能可用，判 True 就是假绿灯"
+    assert comp["regulation_cutoff"] == "2026-10-23"
+    assert "Forbidden FileIO" in comp["reason"], "理由必须指向真实失效机制"
+    assert "--plan" in comp["next_action"], "必须给出可执行的下一步，而不只是说不能用"
+
+
+def test_deploy_reports_bridge_compliance(qa_module):
+    """部署「成功」≠ 产物可用 —— 两者必须在同一份响应里分开陈述。"""
+    _, client, _ = qa_module
+    data = client.post("/api/v1/qmt-agent/deploy",
+                       json={"filename": "QMT_WORK_AGENT.py",
+                             "strategy": "QMT_WORK_AGENT",
+                             "dry_run": True,
+                             "txt_copy": False}).json()["data"]
+    assert data["ok"] is True, "dry_run 本身应当成功"
+    assert data["compliance"]["usable"] is False, (
+        "部署成功却把产物报成合规可用 —— 用户会以为盘前能直接跑")
 
 
 def test_deploy_dry_run_does_not_write(qa_module):
@@ -151,8 +186,8 @@ def test_diagnose_reports_missing_bundle(qa_module):
     _, client, _ = qa_module
     r = client.post("/api/v1/qmt-agent/diagnose",
                     json={"strategy": "no_such_strategy"})
-    # envelope 契约：HTTP 200 + code!=0
-    assert r.status_code == 200
+    # 2026-11-07 起 code=503 提升为真实 HTTP 503，body 一字不改（D-12）
+    assert r.status_code == 503
     body = r.json()
     assert body["code"] == 503
     assert "找到" in body["message"]
@@ -226,7 +261,8 @@ def test_deploy_missing_qmt_dir_returns_400(qa_module, monkeypatch):
                     json={"filename": "qmt_work_agent.py",
                           "strategy": "qmt_work_agent",
                           "dry_run": False, "txt_copy": False})
-    # envelope 契约：HTTP 200 + code=400
+    # 400 = 调用方语义（环境不满足），按 2026-11-07 的分层口径仍是 HTTP 200 + code；
+    # 只有 503 才提升为真实状态码（见 middleware/envelope.py）
     assert r.status_code == 200
     body = r.json()
     assert body["code"] == 400

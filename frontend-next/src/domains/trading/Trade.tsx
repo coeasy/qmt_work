@@ -22,6 +22,7 @@ import { fmtPct, fmtPrice, normalizeCode, orderStatusLabel, orderStatusTone } fr
 import { isLivePrice, staleQuoteNote } from "@/shared/freshness";
 import type { Deal, Order, Position } from "@/shared/types";
 import { OrderForm } from "./OrderForm";
+import { ClosedLoopNotice } from "./ClosedLoopNotice";
 import s from "./trade.module.css";
 // 跨域通用样式（.stalePrice 等）在 domains/domain.module.css，本页已有 `s` 故别名引入
 import ds from "../domain.module.css";
@@ -304,6 +305,10 @@ export function Trade() {
   return (
     <div className={s.wrap}>
       <div className={s.left}>
+        {/* ★ 新规（2026-10-23 起）把「程序化实时远程下单」关掉了，但本地手动下单
+            仍然可用。这里把「哪条路还在、延迟是多少」写在按钮旁边 ——
+            没有这段，用户会把「点了没成交」当成系统坏了，而不是规则变了。 */}
+        <ClosedLoopNotice compact />
         <Panel title="下单">
           <OrderForm onDone={refresh} />
         </Panel>

@@ -16,14 +16,27 @@ _NUM = (int, float)
 
 def get(client, path, **params):
     r = client.get("/api/v1" + path, params=params or None)
-    assert r.status_code == 200, f"{path} HTTP {r.status_code}: {r.text[:200]}"
+    _assert_status_matches_code(r, path)
     return r.json()
 
 
 def post(client, path, payload):
     r = client.post("/api/v1" + path, json=payload)
-    assert r.status_code == 200, f"{path} HTTP {r.status_code}: {r.text[:200]}"
+    _assert_status_matches_code(r, path)
     return r.json()
+
+
+def _assert_status_matches_code(r, path):
+    """HTTP 状态码必须与信封 code 一致（2026-11-07 分层，见 middleware/envelope.py）。
+
+    * ``code=503``（数据源/券商未就绪）⇒ 真实 HTTP 503；
+    * 其余（含成功 ``code=0`` 与业务拒绝 ``code=400``）⇒ HTTP 200。
+
+    本文件的价值就在「降级路径不得 500」：若哪天降级变成 500，这里会立刻红。
+    """
+    body = r.json()
+    want = 503 if isinstance(body, dict) and body.get("code") == 503 else 200
+    assert r.status_code == want, f"{path} HTTP {r.status_code} 与 code 不一致: {r.text[:200]}"
 
 
 def _env_ok(resp):

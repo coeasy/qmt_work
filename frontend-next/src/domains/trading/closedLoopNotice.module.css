@@ -1,0 +1,119 @@
+/* 新规下单形态说明（ClosedLoopNotice）。
+ *
+ * 只用 tokens 变量，不写死颜色 —— 浅色/深色皮肤切换由 tokens.css 负责。
+ * 这里不引入任何阴影/圆角魔法，跟 Panel 保持一致即可。
+ */
+
+.panel {
+  margin-bottom: 12px;
+}
+
+.lead {
+  margin: 0 0 10px;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--text);
+}
+
+.lead code {
+  padding: 0 4px;
+  border-radius: 3px;
+  background: var(--bg-3);
+  font-size: 11px;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.cap,
+.capOff {
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-1);
+}
+
+/* 不可用项刻意降低对比度：它是「不存在」，不是「暂时坏」 */
+.capOff {
+  border-style: dashed;
+  opacity: 0.75;
+}
+
+.capHead {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+
+.capLabel {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.capLatency {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.capNote {
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--text-dim);
+}
+
+.stages {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 4px;
+  background: var(--bg-2);
+}
+
+.stage {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.stageNo {
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.stageName {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.stageDetail {
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--text-dim);
+}
+
+.footnote {
+  margin: 10px 0 0;
+  font-size: 11px;
+  line-height: 1.7;
+  color: var(--text-faint);
+}
+
+.compact {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border: 1px dashed var(--border);
+  border-radius: 4px;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--text-dim);
+}

@@ -13,6 +13,7 @@ import {
 } from "@/design/primitives";
 import { portfolioApi } from "@/services/api";
 import { ConnSelect } from "@/domains/research/ConnSelect";
+import { ClosedLoopNotice } from "./ClosedLoopNotice";
 import { fmtMoney, fmtPrice, normalizeCode } from "@/shared/format";
 import s from "../domain.module.css";
 
@@ -156,6 +157,10 @@ export function Rebalance() {
 
   return (
     <div className={s.page}>
+      {/* ★ 本页是「① 生成计划」这一段。新规下它产出的调仓单**不会**被外部实时驱动
+          执行 —— 落地要靠「② 部署策略 → ③ 查看执行」。不写清楚，用户会以为
+          点了「执行」就是远程实时下单。 */}
+      <ClosedLoopNotice />
       {banner && (
         <div className={`${s.note} ${banner.tone === "ok" ? s.noteOk : s.noteError}`}>
           {banner.text}

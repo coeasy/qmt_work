@@ -29,6 +29,7 @@ import app.routes.research as research
 import app.routes.runtime as runtime
 import app.routes.screen as screen
 import app.routes.qmt_agent as qmt_agent
+import app.routes.qmt_client as qmt_client
 import app.routes.signal as signal
 import app.routes.strategies as strategies
 import app.routes.strategy_market as strategy_market
@@ -77,3 +78,4 @@ router.include_router(datahub.router)
 router.include_router(datasets.router)
 router.include_router(remote_access.router)
 router.include_router(qmt_agent.router)
+router.include_router(qmt_client.router)

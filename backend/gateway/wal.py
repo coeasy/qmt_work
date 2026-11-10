@@ -29,10 +29,16 @@ log = logging.getLogger("qmt_work.wal")
 # 在**存储层**定义，业务层（gateway.signal_router）直接复用，避免反向依赖：
 #   intent         下单**前**落盘：崩溃后对账可发现「已决定下单但结果未知」的委托
 #   order          下单成功：payload 携带 intent_id 与 intent 配对
-#   intent_failed  拒单/异常：payload 携带 intent_id，表示该 intent 已终结
+#   intent_failed  拒单：payload 携带 intent_id，表示该 intent **确定**失败
+#   intent_unknown 结果未知：超时/无委托号/网络异常。**必须**核对柜台，
+#                  绝不能当作失败处理（否则用户重试会造成重复下单）
 WAL_OP_INTENT = "intent"
 WAL_OP_RESULT = "order"
 WAL_OP_INTENT_FAILED = "intent_failed"
+WAL_OP_INTENT_UNKNOWN = "intent_unknown"
+
+#: 需要继续核对柜台的 op；``unresolved_intents`` 与对账都以此为准。
+INTENT_PENDING_OPS = (WAL_OP_INTENT, WAL_OP_INTENT_UNKNOWN)
 
 
 class WAL:
@@ -222,12 +228,16 @@ class WAL:
         """P0-1：返回「已写 intent、无结果配对」的记录 —— 崩溃后对账入口。
 
         配对规则：下单路径在**下单前**写 ``op="intent"``（entity_id = intent_id），
-        拿到柜台结果后写 ``op="order"``（成功）或 ``op="intent_failed"``（拒单/异常），
-        且 payload 携带 ``intent_id`` 与之配对（语义常量见
-        ``gateway.signal_router.WAL_OP_*``）。
+        拿到柜台结果后写 ``op="order"``（成功）、``op="intent_failed"``（**明确拒单**）
+        或 ``op="intent_unknown"``（超时/无委托号/网络异常），payload 携带
+        ``intent_id`` 与之配对（语义常量见 ``gateway.wal`` 顶部）。
 
         于是「有 intent 但无配对结果」= 进程崩在「已决定下单、柜台结果未知」的窗口内。
         这类委托**必须**核对柜台实际状态，否则会永久失联（正是 P0-1 要消灭的问题）。
+
+        ``intent_unknown`` 本身也计入未决：它表示「请求已发出但没听到答复」，
+        与 ``intent``（尚未发出）一样需要核对；只有 ``order`` 与
+        ``intent_failed`` 才算终结。**这是本方法最容易写错的地方。**
         """
         records = self.all_records()
         resolved: set[str] = set()
@@ -236,14 +246,40 @@ class WAL:
                 iid = (rec.get("payload") or {}).get("intent_id")
                 if iid:
                     resolved.add(str(iid))
-        out: list[dict] = []
+        # 同一 intent 可能先写 ``intent``、再追加 ``intent_unknown``：
+        # 按 entity_id 去重并保留**最后一条**（最新状态），否则对账会把
+        # 同一笔委托当成两笔，重复核对/重复告警。
+        out_by_id: dict[str, dict] = {}
         for rec in records:
-            if rec.get("op") != WAL_OP_INTENT:
+            if rec.get("op") not in INTENT_PENDING_OPS:
                 continue
             iid = str(rec.get("entity_id") or "")
             if iid and iid not in resolved:
-                out.append(rec)
-        return out
+                out_by_id[iid] = rec
+        return list(out_by_id.values())
+
+    def find_unresolved_intent_by_key(self, client_order_id: str) -> dict | None:
+        """按调用方幂等键查找**仍未决**的 intent（重复提交短路用）。
+
+        只返回仍出现在 ``unresolved_intents()`` 里的记录：已配对的历史单
+        不能被当成未决，否则用户正常的再次下单会被误拦。
+        """
+        key = str(client_order_id or "").strip()
+        if not key:
+            return None
+        unresolved = {
+            str(rec.get("entity_id") or "") for rec in self.unresolved_intents()
+        }
+        latest: dict | None = None
+        for rec in self.all_records():
+            if rec.get("op") not in INTENT_PENDING_OPS:
+                continue
+            payload = rec.get("payload") or {}
+            if str(payload.get("client_order_id") or "").strip() != key:
+                continue
+            if str(rec.get("entity_id") or "") in unresolved:
+                latest = rec
+        return latest
 
     def snapshot(self) -> list[dict]:
         """读取全部记录，供外部状态机用于启动恢复。"""

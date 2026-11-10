@@ -84,6 +84,33 @@ def _is_root_level(p: str) -> bool:
     return os.path.basename(r).lower() not in _DATA_DIR_TAILS
 
 
+def _encode_auth_token(token: str) -> str:
+    """加密桥 token；失败返回空串（调用方回落明文，保证功能可用）。"""
+    token = str(token or "")
+    if not token:
+        return ""
+    try:
+        from core.crypto import encrypt_fields
+        return encrypt_fields({"auth_token": token}, keys={"auth_token"})["auth_token"]
+    except Exception as exc:  # noqa: BLE001 密钥缺失时不能让保存连接失败
+        log.warning("auth_token 加密失败，本次以明文保存：%s", exc)
+        return ""
+
+
+def _decode_auth_token(row: dict) -> str:
+    """读取桥 token：优先密文，失败/缺失时回落明文（兼容旧库）。"""
+    enc = str(row.get("auth_token_enc") or "")
+    if enc:
+        try:
+            from core.crypto import decrypt_fields
+            return str(decrypt_fields({"auth_token": enc},
+                                      keys={"auth_token"}).get("auth_token") or "")
+        except Exception as exc:  # noqa: BLE001
+            log.warning("auth_token 解密失败（conn=%s）：%s", row.get("conn_id"), exc)
+            return ""
+    return str(row.get("auth_token") or "")
+
+
 def _version_profile(adapter: BrokerAdapter, allow_block: bool = True) -> dict | None:
     """提取适配器的版本画像（xtp 系提供；其余适配器无则返回 None）。
 
@@ -188,7 +215,7 @@ class BrokerManager:
                     min_version=r.get("min_version", "") or "", active=bool(r.get("active", False)),
                     connector_key=r.get("connector_key", "") or "",
                     bridge_dir=r.get("bridge_dir", "") or "",
-                    auth_token=r.get("auth_token", "") or "")
+                    auth_token=_decode_auth_token(r))
                 if not cfg.conn_id:
                     continue
                 self._build(cfg, connect=False)
@@ -712,6 +739,7 @@ class BrokerManager:
                 and os.path.isdir(conn.cfg.client_path),
                 "connector_key": conn.cfg.connector_key or "",
                 "bridge_dir": conn.cfg.bridge_dir or "",
+                "has_auth_token": bool(conn.cfg.auth_token),
                 # 高频轮询路径：只取缓存画像，避免 ~47s 同步探测冻结事件循环
                 "version_profile": _version_profile(conn.adapter, allow_block=False),
             })
@@ -722,16 +750,20 @@ class BrokerManager:
         db = get_db()
         existing = db.query_one("SELECT id FROM broker_connections WHERE conn_id=?",
                                 (cfg.conn_id,))
+        enc = _encode_auth_token(cfg.auth_token)
+        # 加密成功 → 明文列留空；加密失败 → 回落明文，至少不丢配置。
+        plain = "" if enc else (cfg.auth_token or "")
         if existing:
             db.execute(
                 "UPDATE broker_connections SET name=?, broker_id=?, client_path=?, "
                 "client_mode=?, account_id=?, account_type=?, session_id=?, "
-                "min_version=?, active=?, connector_key=?, bridge_dir=?, auth_token=? "
+                "min_version=?, active=?, connector_key=?, bridge_dir=?, "
+                "auth_token=?, auth_token_enc=? "
                 "WHERE conn_id=?",
                 (cfg.name, cfg.broker_id, cfg.client_path, cfg.client_mode or "auto",
                  cfg.account_id, cfg.account_type, cfg.session_id, cfg.min_version,
                  1 if cfg.active else 0, cfg.connector_key or "",
-                 cfg.bridge_dir or "", cfg.auth_token or "", cfg.conn_id))
+                 cfg.bridge_dir or "", plain, enc, cfg.conn_id))
         else:
             db.insert("broker_connections", {
                 "conn_id": cfg.conn_id, "name": cfg.name, "broker_id": cfg.broker_id,
@@ -741,7 +773,8 @@ class BrokerManager:
                 "min_version": cfg.min_version, "active": 1 if cfg.active else 0,
                 "connector_key": cfg.connector_key or "",
                 "bridge_dir": cfg.bridge_dir or "",
-                "auth_token": cfg.auth_token or "",
+                "auth_token": plain,
+                "auth_token_enc": enc,
                 "created_at": now_iso()})
 
     def _persist_active(self, exclusive: bool = True) -> None:

@@ -6,7 +6,9 @@
 3. REST 接口契约（用最小 FastAPI app + 测试态挂载，验证零 mock、业务码约定、
    未知券商 400、已知券商注册后出现在连接列表）。
 
-约定强调：业务异常返回 **HTTP 200 + code != 0**（code=503 表示未连接券商）。
+约定强调：业务异常以 `code != 0` 表达；**HTTP 状态码按语义分层**（2026-11-07 起）：
+`code=503` 同时返回真实 HTTP 503（服务端依赖不可用），`400/404/409` 保持 HTTP 200。
+分层由 `middleware/envelope.py::_promote_status` 统一实现，本文件只校验业务码。
 未连接任何券商时 `/brokers` 必须返回 `data: []`（绝不造假）。
 """
 import time
@@ -36,10 +38,19 @@ def test_envelope_err():
     e2 = err(400, "参数错误", {"field": "broker_id"})
     assert e2["code"] == 400 and e2["data"] == {"field": "broker_id"}
 
-def test_envelope_business_error_is_http_200():
-    """业务错误（如未知券商）走 HTTP 200 + code!=0，而非 HTTP 4xx/5xx。"""
-    assert err(400, "x")["code"] == 400      # 路由直接返回 err 字典 → FastAPI 序列化为 200
+def test_envelope_business_error_codes():
+    """``err()`` 只产出信封字典；**HTTP 状态码由中间件按语义分层决定**。
+
+    2026-11-07 起（D-12）：
+    - ``code=503`` ⇒ 中间件提升为真实 HTTP 503（服务端依赖不可用，属传输层语义）；
+    - ``code=400/404/409`` ⇒ 保持 HTTP 200 + code（调用方语义，重试无意义）。
+
+    分层规则本身在 ``test_envelope_middleware.py`` 里逐条钉死；此处只锁
+    ``err()`` 的**形状**，避免把两层职责混在一个用例里。
+    """
+    assert err(400, "x")["code"] == 400
     assert err(503, "x")["code"] == 503
+    assert err(503, "x") == {"code": 503, "message": "x", "data": None}
 
 # ---------------- 2. 券商注册表契约 ----------------
 def test_builtin_profiles_present():

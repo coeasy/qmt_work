@@ -34,6 +34,37 @@ async def auto_detect_brokers(ctx: AppContext = Depends(get_ctx)):
         return err(500, f"自动探测失败：{exc}")
     return ok({"candidates": cands, "count": len(cands)})
 
+@router.get("/brokers/connectors")
+async def list_connectors():
+    """连接器（传输方式）清单：可用性 / 退役原因 / 是否推荐。
+
+    ★ 为什么必须有这个接口：``/brokers/profiles`` 返回的是**券商类型**，
+    不包含「文件桥 / Redis / 闭环」这些传输方式；前端此前只能硬编码列表，
+    于是后端已判定退役的方式在界面上仍标着「推荐」，用户选中后必然失败。
+    这里让 ``connectors.registry`` 成为唯一真源，前端只负责渲染。
+    """
+    from connectors.registry import (
+        available_keys, describe, display_meta, is_retired, retirement_notice,
+    )
+
+    items = []
+    for key in available_keys():
+        meta = describe(key)
+        disp = display_meta(key)
+        retired = is_retired(key)
+        items.append({
+            "key": key,
+            "label": disp["label"],
+            "transport": meta.get("transport") or "",
+            "dialect": meta.get("dialect") or "",
+            "available": not retired,
+            "retired": retired,
+            "retirement_notice": retirement_notice(key),
+            "recommended": bool(disp["recommended"]) and not retired,
+        })
+    # 可用且推荐的排前面；退役项置底，避免用户第一眼看到失效方式。
+    items.sort(key=lambda x: (not x["available"], not x["recommended"], x["key"]))
+    return ok({"items": items, "count": len(items)})
 
 def _resolve_account(client_path: str, account_id: str, account_type: str = "STOCK") -> dict:
     """账号自动补全：account_id 留空时从客户端配置自动发现（依赖不填即可连）。
@@ -190,7 +221,7 @@ def _validate_connector_key(connector_key: str, bridge_dir: str) -> str:
         profile = describe(connector_key)
     except Exception:
         return (f"未知 connector_key：{connector_key}。可用组合见 "
-                "connectors/registry.py（如 qmt.big.bridge.file / .redis / .zmq）")
+                "GET /brokers/connectors（2026-10-23 后大 QMT 请用 qmt.big.closed）")
     transport = str((profile or {}).get("transport") or "")
     if transport in ("file", "redis", "zmq") and not (bridge_dir or "").strip():
         return (f"连接器 {connector_key}（transport={transport}）必须提供 "

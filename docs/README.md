@@ -18,8 +18,11 @@
 |------|------|----------|
 | [`API接口文档.md`](API接口文档.md) | **接口使用文档（REST / MCP / WebSocket）**：从契约自动生成的完整端点 / 工具 / 事件清单（REST 254 / MCP 133 / WS 30 渠道 · 5 子类型），含鉴权、零 mock、错误归因约定 | 集成方 / 全体 |
 | [`QMT_大小版本使用说明.md`](QMT_大小版本使用说明.md) | **大小 QMT 使用说明**：概念差异、直连 / 策略桥（路径 B）部署步骤、接口与能力差异对照、故障排查、速查表 | 使用者 / 运维 |
+| [`大QMT_新规闭环改造方案.md`](大QMT_新规闭环改造方案.md) | **大 QMT 新规闭环改造方案 v2（2026-10-23 起生效）**：文件/网络边界实测矩阵（网络触发**停模**而非报错）、柜台重建持仓与「一策略一账号」硬纪律、四层闭环架构（源码即配置 + 日志/原生导出回传）、远程下单五种形态与产品口径、7 组 68 项探针（D 组按实测移除）与 P0–P3 落地清单、公众号与自媒体方案取舍 | 使用者 / 后端 / 运维 |
+| [`QMT_无文件桥下单方案.md`](QMT_无文件桥下单方案.md) | **大 QMT 无文件桥下单方案（决策与论证）**：为什么 2026-10-23 新规后文件桥（agent_status.json / bridge 指令文件）整条链路不可用，逐层切换到「源码即配置注入 + `@@QMTW` 日志行回传」的证据链与取舍；与闭环改造方案的关系（本文论证「为什么」，方案文档承载「怎么做」） | 后端 / 运维 |
 | [`BIG_QMT_LIVE_TRADING_RUNBOOK.md`](BIG_QMT_LIVE_TRADING_RUNBOOK.md) | **大 QMT 实盘下单操作手册**：当前阻塞链与证据、实盘链路全景、六阶段操作步骤（预检 → 部署 → GUI 挂载 → trading_enabled → 切 live → 首单对账）、每阶段验证命令、分级急停 Kill Switch、故障排查表 | 想开实盘的使用者 / 运维 |
 | [`BIG_QMT_ORDER_BLOCKER_FORENSICS.md`](BIG_QMT_ORDER_BLOCKER_FORENSICS.md) | **真实下单 513090 阻断链取证（2026-10-14 首轮 + 2026-10-15 二轮）**：原始未粉饰响应、四条互相印证的可复现证据链（路径 A 券商未授权 / 路径 B 桥活但拿不到 `passorder` / QMT 日志 `execude cmd` 证明策略被当**独立进程**拉起 / 内置Python 策略对照组）、唯一的人工动作与四条自证判据；二轮补自动连接**时序**修复（硬超时 + 守护先跑再睡，真机「就绪即连通」）与**误导归因**修复（能力门禁不再被伪装成「没连券商」）+ 真机复验 33/33。**操作性口径以 `BIG_QMT_LIVE_TRADING_RUNBOOK.md` 为准**，本文是「当时是怎么证出来的」 | 运维 / 排障 |
+| [`多QMT系统接口盘点与接入开发方案.md`](多QMT系统接口盘点与接入开发方案.md) | **多券商 QMT 行情/下单接口盘点与接入方案**：四套安装指纹与版本世代、Q1–Q6 行情通道（58600 三方法 / 58670 十六方法，含 `subscribeQuote` 三嵌套文档形状）、O1–O7 下单通道（外部 `xttrader` 的 PID 白名单根因、进程内 `passorder`、**DBF 文件单 15 列 schema 与监控目录实测**）、端口冲突与多券商并行端口方案、P0–P3 路线图与红线；**第 13/14 节为最新实测补记**（含「实时 tick 尚未证实」的诚实口径） | 架构 / 接入开发 |
 | [`ORDER_FLOW_E2E_VERIFICATION.md`](ORDER_FLOW_E2E_VERIFICATION.md) | **客户端下单流程端到端实测记录**：打包态客户端真实窗口下单全链路断言（启动 → REST 冒烟 → paper 撮合闭环 → UI 级 CDP 真实下单 → 模式归因 → 风控拒绝路径 → 停机零残留），32→**34 PASS / 0 FAIL**，附数据隔离手法（独立 profile + 禁自动连券商）。**记录的是 v0.5.2 / 2026-10-13 构建的行为**，换构建需复测 | 发布 / 回归 |
 | [`多语言接入指南.md`](多语言接入指南.md) | 接口接入详解：鉴权与 scope 口径、错误归因约定、Python / Node / curl 示例、端点速查表 | 集成方 |
 | [`BROKER_ONBOARDING.md`](BROKER_ONBOARDING.md) | 券商接入指南：新增券商只需追加 `BrokerProfile`，适配器约定与桥接运行时 | 想接新券商的开发者 |
@@ -28,6 +31,7 @@
 | [`G8_NL选股使用指南.md`](G8_NL选股使用指南.md) | 自然语言选股（NL 解析，非 LLM 对话） | 选股用户 |
 | [`DESIGN_SYSTEM.md`](DESIGN_SYSTEM.md) | 前端设计系统：色彩 / 间距 / 组件约定（对应 `frontend-next/src/design/`） | 前端开发者 |
 | [`TECH_DEBT.md`](TECH_DEBT.md) | 技术债 / 未决事项看板（每条可被一条测试或一个 `grep` 证伪，含 TD-01~TD-38 等门禁约束） | 全体 |
+| [`架构评审与重构方案.md`](架构评审与重构方案.md) | **架构评审与重构方案（2026-11-03，基线 v0.5.4）**：现状架构与五条关键链路、5 个根因 + 15 项架构问题（A-01~A-15）、35 项开发细节（D-01~D-35）、Phase 0–3 重构路线图与 6 个重点改造方案、Phase 0 逐文件实施手册（diff 骨架/测试清单/回滚）、Sprint 排期与可执行验收清单 | 全体 / 架构 |
 | [`REMOTE_ACCESS_DECISION.md`](REMOTE_ACCESS_DECISION.md) | **远程访问三档模型（`off`/`lan`/`wan`）**：对比分析、启动自检分档策略、`effective_host()` 绑定规则、API 层设计（被 `core/config.py` / `app/main.py` / `routes/remote_access.py` / `run.py` 活引用） | 部署者 / 后端 |
 | [`SECURITY_AND_DEPLOYMENT_AUDIT.md`](SECURITY_AND_DEPLOYMENT_AUDIT.md) | 部署与安全审计报告 + 改进方案：鉴权 / 加密 / 风控 / 信号路由 / 审计链 / CORS / 限流 / 打包 / 密钥管理逐项源码实查（v0.4.3 基线，与 TECH_DEBT 交叉核对） | 安全 / 发布 |
 | [`DATASTORE_SIZE_AND_SPLIT_ANALYSIS.md`](DATASTORE_SIZE_AND_SPLIT_ANALYSIS.md) | 主库体积诊断 · 拆库评估 · 数据瘦身方案：实测结论「1.35 GB 不是膨胀、**不建议拆库**，该回收的是 `local_bars` 二级索引 383.7 MB 中 137.4 MB 冗余」（被 `scripts/optimize_local_bars.py` 活引用为依据） | 数据 / 运维 |

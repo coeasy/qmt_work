@@ -150,9 +150,14 @@ def test_from_kline_without_broker_contract():
     # （code=0）；仅当公共源也不可用时才 503。两种均为合法结局，绝不伪造数据。
     r = client.post("/factors/from-kline",
                     json={"symbol": "600519.SH", "names": ["sma"]})
-    assert r.status_code == 200
     body = r.json()
     assert body["code"] in (0, 503)
+    # ★ 本文件的 app 是「裸 router，路径不带 /api/v1 前缀，且未挂信封中间件」
+    #   （见文件头 app 定义）。HTTP 状态码的提升由中间件负责，在 /api/v1 前缀下
+    #   才生效 —— 这里只校验**业务码**，状态码分层由
+    #   tests/test_envelope_middleware.py 逐条钉死。刻意不在此断言状态码，
+    #   否则要么逼着把本文件改成全量装配（超出其「业务契约」职责），
+    #   要么写出与实际装配不符的假断言。
     if body["code"] == 0:
         data = body["data"] or {}
         # 成功路径必须带真实来源标注

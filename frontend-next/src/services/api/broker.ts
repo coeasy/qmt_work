@@ -213,8 +213,29 @@ export interface BrokerDiagnostics {
 }
 
 /** 券商连接管理 API。路径与 backend/app/routes/broker.py 对应。 */
+/** 连接器（传输方式）清单项：可用性以后端 registry 为唯一真源。 */
+export interface ConnectorInfo {
+  key: string;
+  label: string;
+  transport: string;
+  dialect: string;
+  available: boolean;
+  retired: boolean;
+  retirement_notice: string;
+  recommended: boolean;
+}
+
 export const brokerApi = {
   profiles: () => http.get<BrokerProfile[]>("/brokers/profiles"),
+
+  /**
+   * 连接器清单（P0-3）。
+   *
+   * ★ 为什么不再让前端硬编码：后端早已把「文件桥 / Redis / ZMQ / mini」标为退役
+   * （券商策略进程禁文件读写与外网），但界面仍标着「推荐」。用户选中后必然失败，
+   * 且失败发生在提交之后，界面上看不到根因。
+   */
+  connectors: () => http.get<{ items: ConnectorInfo[]; count: number }>("/brokers/connectors"),
 
   list: () => http.get<BrokerConnection[]>("/brokers"),
 

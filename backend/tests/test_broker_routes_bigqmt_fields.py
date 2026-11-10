@@ -20,7 +20,11 @@ def test_empty_key_passes_through_mini_path():
 def test_unknown_key_rejected_with_hint():
     msg = _validate_connector_key("qmt.big.bridge.mqtt", "C:/bridge")
     assert "未知 connector_key" in msg
-    assert "qmt.big.bridge.file" in msg
+    # ★ 提示必须指向**还在用**的入口。2026-10-23 起三条旧桥已退役，
+    #   文案改为指向注册表端点 + 闭环 key；再提 qmt.big.bridge.file 会把用户
+    #   引回一条已停用的路（这正是 P0-3 要消灭的「假指路」）。
+    assert "/brokers/connectors" in msg
+    assert "qmt.big.closed" in msg
 
 
 def test_file_transport_requires_bridge_dir():

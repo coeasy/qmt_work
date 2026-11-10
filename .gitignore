@@ -5,6 +5,7 @@ __pycache__/
 .venv/
 venv/
 .pytest_cache/
+.pytest_tmp/
 
 # ---------- 后端构建产物 ----------
 backend/build/
@@ -22,6 +23,10 @@ backend/qmt_strategies/
 # ---------- 运行期数据 ----------
 # SQLite + 加密主密钥不入库
 backend/data/
+# 运行期事件流，以及文件单暂存区（stage 接口的冒烟产物）：都不是源码，
+# 尤其 export/ 下若误提交 DBF，容易被误当成可交付的下单模板。
+backend/events.ndjson
+backend/export/
 # 前端构建产物（npm run build 生成）
 backend/static/
 # 构建前把旧 static 改名移开（避开 safe-delete 护栏）时产生的暂存目录，

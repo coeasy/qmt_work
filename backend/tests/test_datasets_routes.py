@@ -54,7 +54,7 @@ def test_list_items_have_status_fields(client):
 
 def test_detail_unknown_is_400_with_reason(client):
     r = client.get("/api/v1/datasets/not-a-dataset")
-    assert r.status_code == 200          # envelope 约定：HTTP 恒 200
+    assert r.status_code == 200          # 400 属调用方语义 ⇒ HTTP 200 + code（分层见 envelope.py）
     b = r.json()
     assert b["code"] == 400
     assert "not-a-dataset" in b["message"]

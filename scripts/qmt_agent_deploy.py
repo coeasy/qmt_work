@@ -329,16 +329,20 @@ def _backup_if_exists(path):
     return bak
 
 
-def _atomic_write(path, content, encoding="utf-8"):
+def _atomic_write(path, content, encoding="utf-8", newline="\n"):
     """先写 ``<path>.tmp`` 再 os.replace，避免半写入留下截断文件。
 
     与后端 ``app/routes/qmt_agent.py::_atomic_write`` 同一语义。
+
+    ``newline`` 由 ``bundle.recode()`` 决定：**GBK 必须 CRLF**（LF 会让 QMT 内置
+    py3.6 的 tokenizer 丢掉开头两行，docstring 失效 ⇒ SyntaxError）。写文件时
+    传 ``newline="\\r\\n"`` 表示「把 ``\\n`` 翻译成 CRLF」，正是这里要的语义。
     """
     d = os.path.dirname(path) or "."
     if not os.path.isdir(d):
         os.makedirs(d)
     tmp = path + ".tmp"
-    with io.open(tmp, "w", encoding=encoding, newline="\n") as fh:
+    with io.open(tmp, "w", encoding=encoding, newline=newline) as fh:
         fh.write(content)
         fh.flush()
         try:
@@ -417,7 +421,7 @@ def cmd_deploy(args):
         for p in problems:
             print("[FAIL] bundle 自检: %s" % p)
         return 1
-    text, enc, notes = bundle.recode(text, args.encoding)
+    text, enc, notes, newline = bundle.recode(text, args.encoding)
     for n in notes:
         print("[WARN] %s" % n)
     out = os.path.join(sdir, getattr(args, "filename", "") or "qmt_work_agent.py")
@@ -427,9 +431,10 @@ def cmd_deploy(args):
     backup = _backup_if_exists(out)
     if backup:
         print("[i] 已备份旧文件 → %s" % backup)
-    _atomic_write(out, text, enc)
-    print("[OK] 已部署单文件 agent: %s (%d bytes, encoding=%s)"
-          % (out, os.path.getsize(out), enc))
+    _atomic_write(out, text, enc, newline=newline)
+    print("[OK] 已部署单文件 agent: %s (%d bytes, encoding=%s, newline=%s)"
+          % (out, os.path.getsize(out), enc,
+             "CRLF" if newline == "\r\n" else "LF"))
     print("     策略显示名/注册名 = 注册树里的条目名（本机实测为 %s）"
           % getattr(args, "strategy", "qmt_work_agent"))
     print("     ★ 落盘文件名必须与注册树条目指向的文件名一致，否则 QMT 找不到源码。")
@@ -437,7 +442,7 @@ def cmd_deploy(args):
     # 路径 B 辅助：同内容 .txt 副本，记事本双击打开粘贴更顺手（--txt 显式请求）
     if getattr(args, "txt", False):
         out_txt = os.path.splitext(out)[0] + ".txt"
-        with io.open(out_txt, "w", encoding=enc, newline="\n") as fh:
+        with io.open(out_txt, "w", encoding=enc, newline=newline) as fh:
             fh.write(text)
         print("[OK] 已额外写出 .txt 副本（供路径 B「新建策略→粘贴代码」用）: %s (%d bytes)"
               % (out_txt, os.path.getsize(out_txt)))
@@ -452,10 +457,11 @@ def cmd_deploy(args):
             print("\n[FAIL] 前置门禁未通过 —— 这份 bundle 在 QMT 内置解释器上跑不起来。")
             print("       文件已写出（便于排查），但**先别去模型交易里点运行**。")
             print("       常见原因：")
-            print("         ① 编码不是 utf-8（gbk/gb18030 会触发内置 py3.6 "
-                  "tokenizer 报 encoding problem / invalid token）")
-            print("         ② 缺 `if __name__ == \"__main__\":` 自举（进程启动即退出）")
-            print("         ③ agent_config.json 的 bridge_dir 不可写或两端不一致")
+            print("         ① 行尾不是 CRLF（**GBK 源码在 LF 行尾下必然 SyntaxError**："
+                  "内置 py3.6 tokenizer 会丢开头两行、docstring 失效，报错却指向一行中文）")
+            print("         ② 编码不是 utf-8/gbk（gb18030 实测失败）")
+            print("         ③ 缺 `if __name__ == \"__main__\":` 自举（进程启动即退出）")
+            print("         ④ agent_config.json 的 bridge_dir 不可写或两端不一致")
             return 1
 
     print("\n[!!] 重要：拷贝文件**不会**让策略出现在「模型交易」里。")
@@ -697,6 +703,22 @@ def cmd_check(args):
                                    time.strftime("%Y-%m-%d %H:%M",
                                                  time.localtime(os.path.getmtime(top))))
                                 if os.path.exists(top) else "缺失 → 跑 deploy"))
+    # ★ 闭环 / 文件桥的**判据完全不同**，必须先分清再往下说。
+    #   闭环模式不写 agent_status.json / probe_result.json（新规禁文件 IO），
+    #   用旧判据去体检只会得出「策略从未成功启动过」，而它可能正在正常下单。
+    closed_loop = False
+    if os.path.exists(top):
+        try:
+            sys.path.insert(0, _HERE)
+            import qmt_closed_loop_verify as clv  # noqa: E402
+            closed_loop = bool(clv.inspect_bundle(top).get("closed_loop"))
+        except Exception:                     # pragma: no cover - 诊断工具，失败不掩盖主结论
+            closed_loop = False
+    if closed_loop:
+        print("运行模式     : **闭环**（EMBEDDED_PLAN 已烘焙）—— 不写心跳/事件文件，"
+              "回传走客户端日志")
+        print("               核验请用: python scripts/qmt_closed_loop_verify.py "
+              "--bundle \"%s\"" % top)
     print("旧子目录包   : %s" % ("存在（列表不可见，仅作配置兜底）" if os.path.exists(legacy) else "无"))
     for cand in (os.path.join(sdir, "agent_config.json"),
                  os.path.join(sdir, "agent_bigqmt", "agent_config.json")):
@@ -771,8 +793,15 @@ def cmd_check(args):
         print("             重新**编译/保存**后重启策略。")
         print("       自证：本机日志里该策略应只出现 `doRun: ... m_scriptType:1 ...`，")
         print("             且**不再**出现 `execude cmd: -u \"<本文件>\"`；")
-        print("             且 bridge_dir/agent_status.json 的 runtime_mode 变成")
-        print("             `qmt_formula`、injected 含 passorder。")
+        if closed_loop:
+            # 闭环不写 agent_status.json（新规禁文件 IO）⇒ 旧自证口径会误导。
+            print("             且日志里出现 `@@QMTW|` 记录（BOOT 的 standalone=false、"
+                  "injected 含 get_trade_detail_data）；")
+            print("             核验: python scripts/qmt_closed_loop_verify.py "
+                  "--bundle \"%s\"" % top)
+        else:
+            print("             且 bridge_dir/agent_status.json 的 runtime_mode 变成")
+            print("             `qmt_formula`、injected 含 passorder。")
         print("!" * 70)
         # ★ 退出码必须如实（2026-10-14）：体检**打出 [FAIL] 却 return 0** 属于本项目
         #   最忌讳的「假绿灯」—— `if qmt_agent_deploy.py check; then echo ok; fi`
@@ -802,13 +831,10 @@ def main(argv=None):
                     help="关闭下单开关")
     ap.add_argument("--encoding", default="utf-8",
                     choices=["utf-8", "gbk", "gb18030"],
-                    help="bundle 源码编码。**默认 utf-8（必须）** —— 2026-10-08 实测："
-                         "QMT 内置 bin.x64/pythonw.exe（Python 3.6.8）的 tokenizer 读 "
-                         "#coding:gbk / gb18030 的源文件会在特定内容下报 "
-                         "`SyntaxError: encoding problem` / `invalid token`，"
-                         "策略进程 return code:1、模型交易里只见「启动即停止」。"
-                         "utf-8（有无 cookie 均可）在 67KB 全量中文下稳定跑通。"
-                         "gbk/gb18030 仅留给「不在本机跑、只给编辑器阅读」的场景。")
+                    help="bundle 源码编码。**utf-8（默认）与 gbk 都在本机 QMT 内置 "
+                         "Python 3.6.8 上实测跑通**；gbk 会自动改用 CRLF 行尾"
+                         "（LF 行尾的 GBK 源码必然 SyntaxError），并自动把 GBK 表示"
+                         "不了的少数装饰字符换成等价写法。gb18030 实测失败，仅作兼容保留。")
     ap.add_argument("--no-run-check", action="store_true",
                     help="deploy: 跳过「用 QMT 内置解释器把刚写出的 bundle 真跑一遍」"
                          "的前置门禁（默认开启，跑不起来就中止部署）")

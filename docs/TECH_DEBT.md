@@ -1171,6 +1171,34 @@
   `check_bundle_encoding()`（判 `QMT_SAFE_ENCODINGS`，读 PEP263 cookie；无 cookie 但
   内容非 UTF-8 同样判红），`bundle_health.ok = syntax_ok AND pollution_ok AND encoding_ok`。
 
+  > **★ 2026-10-15 复测修正（上面这条结论被推翻了一半）**：当时把失败归因成
+  > 「GBK 系编码整体不可用」，并给出「706 字节过 / 707 字节挂」的**长度边界**结论 ——
+  > 那条是**错的**。用 `bin.x64/pythonw.exe` 做受控 A/B 后发现真正的自变量是**行尾**：
+  >
+  > | 形态 | 结果 |
+  > |---|---|
+  > | utf-8（LF / CRLF） | 通过 |
+  > | utf-8 + BOM | 通过 |
+  > | **gbk + CRLF** | **通过（连跑 3 次 3/3）** |
+  > | gbk + LF | **必然 SyntaxError** |
+  > | gb18030 + cookie | 失败 |
+  >
+  > 同一份 GBK 字节只改行尾就 3/3 翻转；纯大小扫描（300 B ~ 90 KB）全绿 ⇒ 与长度无关。
+  > GBK+LF 的报错 `invalid character in identifier` 指向 **docstring 正中间的一行中文**
+  > （本机实测第 7 行 `部署（唯一正确姿势）`）—— 因为 tokenizer 丢掉了开头两行，
+  > docstring 的三引号没生效，中文行被当代码解析。**「看着像中文写错」是这个 bug
+  > 最贵的伪装，也是当时一路查错方向的直接原因。**
+  >
+  > 修法随之调整：`recode()` 现返回 `(text, enc, notes, newline)`，`gbk` 强制 CRLF
+  > 并做**字符白名单替换**（GBK 编不出的 `⇒`/`⚠`/U+FE0F 换成等价写法并列出明细；
+  > 白名单外直接报错，绝不静默写坏）；`QMT_SAFE_ENCODINGS` 纳入 `gbk`，另设
+  > `QMT_CRLF_ONLY_ENCODINGS` 把「行尾」也变成判据 —— 否则 `encoding_ok` 会对一个
+  > 跑不起来的 GBK+LF 文件报绿灯（同族假绿灯）。
+  >
+  > 教训（可复用）：**「A 编码/格式不行」这类否定结论，必须在受控变量下重测**。
+  > 当时的二分法只扫了「内容」与「长度」，漏掉了「行尾」—— 一个与编码正交、
+  > 却单独决定成败的变量。扫描维度少一个，结论就可能整个反过来。
+
 - **② P0 模块级 `__file__` 硬依赖 ⇒ 公式模式下连自检都不落盘。**
   QMT 的**公式策略**形态是 `exec(compile(src, "<string>", "exec"), ns)` ——
   那个命名空间**没有 `__file__`**。原代码 `_HERE = os.path.dirname(os.path.abspath(__file__))`
@@ -1582,3 +1610,146 @@ live 下单前先问活跃通道 `connector_probe().can_submit`，明确为 `Fal
 **为什么单开一条**：这三个假象的共同结构是「**把副作用当结果**」
 （建连 → 当成接通；重试 → 当成自救）。它和 TD-33「诊断工具假告状」是
 同一家族的两面：一个谎报成功，一个谎报失败。
+
+### TD-44（R44，2026-10-31）：诊断工具对**闭环形态**假告状 —— 一条正在下单的策略被报成「策略未运行」
+
+**背景**：2026-10-23 起券商禁策略进程读写文件（详见
+`docs/大QMT_新规闭环改造方案.md`）。闭环模式下策略**不落盘**，于是
+`agent_status.json` / `probe_result.json` / `events.ndjson` 三份桥文件
+**一个都不会生成**。而 `POST /qmt-agent/diagnose` 判心跳的唯一依据正是
+`agent_status.json`：
+
+```python
+if status_file.is_file():
+    st = _read_json(status_file)
+    heartbeat["alive"] = bool(st.get("alive"))
+```
+
+文件不存在 ⇒ `alive` 恒为 `False` ⇒ 命中第 4 步那条分支：
+
+```
+QMT 客户端在跑但 agent 策略未运行（心跳 stale），请在 QMT 里点「运行」
+```
+
+**危害**：这是**假红灯**，与 TD-33 的「假告状」同族，但后果更直接 ——
+用户照着提示去点「运行」，会把一条**正在按当日计划正常下单**的策略重启掉，
+当天的仓位计划断在半路。而重启后 `seq` 归零、持仓需重建，日志里看起来
+「什么都没发生」。假绿灯让人以为好了，假红灯让人**主动把好的弄坏**。
+
+**根因**：判据绑定在**产物形态**上，而不是「当前形态该看哪个证据」。
+新规换掉了证据来源，判据没跟着换。
+
+**已修**（`backend/app/routes/qmt_agent.py`）：
+
+1. 新增 `_closed_loop_runtime()`：检测到 bundle 里 `EMBEDDED_PLAN` 非 `None`
+   就**换判据** —— 心跳改从客户端日志的 `@@QMTW|` 行推导；
+2. 判定逻辑**一行都不重写**：直接调 `scripts/qmt_closed_loop_verify.evaluate()`，
+   保证「界面看到的结论」与「命令行体检的结论」永远同一句话（判据只有一份，
+   这正是 TD-33 的教训）；
+3. `problems[]` 只取 `evaluate()` 的 `[FAIL]` 行 —— 不在路由层另写一套判据；
+4. 能力真相改用 `BOOT.injected`（终端**实际注入**了哪些函数），
+   **刻意不用** `trading_enabled`：独立进程模式下它为 `true` 却根本没有
+   `passorder`，拿它当判据等于用「用户开关」冒充「能力」；
+5. 闭环产物不再报「bridge_dir 不存在」—— 它不写文件桥，那是无关配置；
+6. 新增 `GET /qmt-agent/closed-loop`（只读日志，可轮询；支持 `log_path`
+   指定历史日志 —— 排障要看的是**那一天**，不是最新那份）；
+7. 判不出来时（脚本缺失）显式返回 `available: false` + 原因，
+   **不静默退回旧判据** —— 静默退化正是本条的成因。
+
+**护栏**：`backend/tests/test_qmt_agent_closed_loop_diagnose.py`（19 例，
+日志行用真实 `closed_loop.emit()` 构造、bundle 用真实生成器、判定走真实
+`evaluate()`）+ `frontend-next/tests/qmtAgentClosedLoop.test.ts`（15 例）。
+
+**证伪方式**：把心跳覆盖那行改回 `heartbeat = dict(heartbeat)`（即「不覆盖」），
+`test_diagnose_closed_loop_does_not_cry_strategy_not_running` 立刻变红，
+并**原样复现**上面那句假红灯原文 —— 已实测确认（2 failed / 17 passed）。
+
+**状态**：`已修（判据分叉 + 端点 + 界面 + 护栏 + 契约基线）`
+
+**关联**：TD-33（诊断工具「假告状」）/ TD-43（把副作用当结果）/
+TD-31·TD-36（假绿灯与孤儿逻辑家族）。本条是该家族的**第四个亚型**：
+不是算错、不是没算，而是**证据来源换了却没跟着换判据**。
+
+**可推广的纪律**：任何「读产物文件判运行态」的判据，都必须先问一句
+「这个产物在当前运行形态下**应该存在**吗」。形态变了（新规、沙箱、
+只读挂载），判据必须跟着分叉；否则「没有产物」会被读成「没有运行」。
+
+### TD-45（R45，2026-11-07）：**HTTP 状态码全仓失真** —— 券商断开时监控看到的是满屏 200
+
+**背景**：`routes/_common.py::err()` 只返回一个字典：
+
+```python
+def err(code: int, message: str, extra=None) -> dict:
+    return {"code": code, "message": message, "data": extra if extra is not None else None}
+```
+
+路由 `return err(503, MSG_NO_BROKER)`，FastAPI 把它**序列化成 HTTP 200**。
+全仓 **155 处 `err(503)`**、161 处 `err(400)` 全部如此。
+
+**影响（三层，从轻到重）**：
+
+1. **监控失效**：券商断连时 `/metrics` 的 5xx 计数不涨，看板上 HTTP 全是 200。
+   告警规则写 `rate(http_5xx[5m]) > 0` 永远不会触发 —— 等于**没有告警**。
+2. **反代/网关无法重试**：nginx `proxy_next_upstream http_503` 不生效。
+3. **前端 `res.ok` 恒 true**：`http.ts` 里 `if (!res.ok)` 那段兜底文案
+   （「服务暂不可用（HTTP 503）—— 后端可能仍在启动…」）**从未被执行过**。
+
+**最讽刺的一点**：`docs/API接口文档.md` 早就写着「未连接券商时返回 **HTTP 503**」。
+**文档比实现正确** —— 这类「文档描述的是设计意图、代码实现的是历史妥协」的
+偏差，比代码写错更难发现，因为读文档的人会以为已经是对的。
+
+**已修（2026-11-07，只修 503 一类）**：`middleware/envelope.py::_promote_status()`
+
+```python
+_PROMOTE_CODES = frozenset({503})
+
+def _promote_status(status_code, data, path):
+    if status_code != 200:                       # 闸门 1：不覆盖路由显式状态码
+        return status_code
+    if not path.startswith("/api/v1/"):          # 闸门 2：不误伤 /mcp 等非 REST
+        return status_code
+    if not _is_envelope(data):                   # 闸门 3：只处理信封
+        return status_code
+    code = data.get("code")
+    if code in _PROMOTE_CODES:
+        return int(code)
+    return status_code
+```
+
+**为什么只提 503，不连 400 一起改**（这是本条最重要的判断）：
+
+* `503` = **服务端依赖不可用**（券商未连 / 引擎未初始化 / 数据源未就绪）。
+  这正是 HTTP 503 的定义，属**传输层语义** —— 监控该告警、反代该重试。
+* `400/404/409` = **调用方语义**（参数不对、资源不存在、状态冲突）。重试无意义，
+  且全仓大量代码与用例按 `code` 分支判断。一起改会把「修一个缺陷」变成
+  「迁移全仓契约」，收益与风险不成比例。
+
+**body 一字不改**：只改状态码，`{code, message, data}` 原样保留。
+前端 `http.ts` 两个分支（`!res.ok` 与 `env.code !== 0`）都能拿到 `message`，
+所以 **UI 行为零变化** —— 变的只是 `ApiError.status` 与 `brokerUnavailable`
+（后者全站无人读取，见 `http.ts` 的注释）。
+
+**护栏**：`backend/tests/test_envelope_middleware.py`（13 例）逐条钉死三重闸门，
+外加 `test_promoted_503_keeps_body_length_consistent`（提升后 content-length
+必须与 body 一致，否则客户端会截断/挂起）。
+
+**证伪方式**（均已实测）：
+* 把 `_PROMOTE_CODES` 改成空集 ⇒ 2 failed；
+* 去掉路径闸门 ⇒ `test_non_api_path_503_not_promoted` 红（证明 MCP 不会被误伤）。
+
+**顺带修掉的两个「测试装配与生产不一致」**：
+
+* `tests/test_qmt_agent_routes.py` 的 `qa_module` 是裸 `include_router` 装配，
+  **没挂 EnvelopeMiddleware** ⇒ 它测到的 200 是「未装配的 200」。已补挂。
+* `tests/test_market_contract.py` 的 `get()/post()` 辅助函数写死 `status_code == 200`
+  ⇒ 无数据源时必然红。已改为「状态码必须与 code 一致」，这反而更严格。
+
+**仍未做（明确留白，不是遗漏）**：`400/404/409` 仍返回 HTTP 200。
+要改时只需扩 `_PROMOTE_CODES`，但**必须先确认前端/监控没有依赖 code 分支的
+既有逻辑**，并按 TD-45 的方式逐条补护栏。**不要一次性全改。**
+
+**状态**：`503 已修；400/404/409 留白（有意）`
+
+**关联**：D-12（架构评审方案）/ TD-33（诊断工具假告状）—— 同一家族：
+**对外呈现的信号与真实状态不符**。一个是「状态码说成功」，一个是「体检说没跑」。
+

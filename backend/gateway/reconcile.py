@@ -71,12 +71,29 @@ class OrderReconciler:
             raise WalReadError(f"WAL 读取失败：{exc}") from exc
         pending: dict[str, dict] = {}
         done: set[str] = set()
+        resolved_intents: set[str] = set()
         for rec in records:
             op = rec.get("op", "")
             entity = rec.get("entity", "")
             oid = str(rec.get("entity_id") or "")
             if op == "reconciled":
                 done.add(oid)
+                continue
+            if op in ("order", "intent_failed"):
+                iid = (rec.get("payload") or {}).get("intent_id")
+                if iid:
+                    resolved_intents.add(str(iid))
+            # P0-1：未决 intent 也进入对账。它没有 order_id，用 intent_id 做键，
+            # 由 reconcile() 按 client_order_id 去柜台认领。
+            if op in ("intent", "intent_unknown") and entity in ("order", "signal"):
+                iid = oid
+                if not iid:
+                    continue
+                payload = rec.get("payload", {}) or {}
+                pending[f"intent:{iid}"] = {
+                    **payload, "kind": "intent", "intent_id": iid,
+                    "wal_ts": rec.get("ts", 0),
+                }
                 continue
             if entity not in ("signal", "order", "condition"):
                 continue
@@ -89,6 +106,9 @@ class OrderReconciler:
             pending[oid] = {**payload, "wal_ts": rec.get("ts", 0)}
         for oid in done:
             pending.pop(oid, None)
+        # 已被 order/intent_failed 配对的 intent 不再列为待核销
+        for iid in resolved_intents:
+            pending.pop(f"intent:{iid}", None)
         return pending
 
     # ---------------- 券商侧：当日委托 / 成交 ----------------
@@ -132,11 +152,51 @@ class OrderReconciler:
             self.last_result = {"checked": 0, "ok": True, "note": "无待核销委托"}
             return self.last_result
         orders, deals = await self._broker_snapshot(conn_id)
+        # P0-1：柜台不一定回传 client_order_id；按常见字段建一份反查索引，
+        # 用于把「无委托号的 intent」认领到真实委托上。
+        by_client: dict[str, str] = {}
+        for _oid, _row in orders.items():
+            for _k in ("client_order_id", "order_remark", "remark"):
+                _cid = str(_row.get(_k) or "").strip()
+                if _cid:
+                    by_client.setdefault(_cid, _oid)
         # 状态计数键统一为规范词汇（与 xtquant_client.order_status 对齐）
         summary = {"checked": len(pending), "ok": True, "filled": 0, "partial": 0,
                    "cancelled": 0, "rejected": 0, "open": 0, "stale": 0,
                    "unknown": 0, "mismatched": 0, "details": []}
         for oid, payload in pending.items():
+            if payload.get("kind") == "intent":
+                iid = str(payload.get("intent_id") or "")
+                cid = str(payload.get("client_order_id") or "").strip()
+                matched = by_client.get(cid) if cid else None
+                if matched:
+                    # 柜台确实接单了：补写 order 配对，后续按普通委托跟踪。
+                    self._wal.append("order", "order", matched, {
+                        "intent_id": iid, "client_order_id": cid,
+                        "code": payload.get("code"), "side": payload.get("side"),
+                        "volume": payload.get("volume"), "price": payload.get("price"),
+                        "matched_by": "client_order_id",
+                    })
+                    oid = matched
+                else:
+                    # 查不到：不立即判失败（可能尚未回报），按轮次累计；
+                    # 超过阈值才终结为 intent_failed，并保留可追溯原因。
+                    self._missing[oid] = self._missing.get(oid, 0) + 1
+                    if self._missing[oid] < self.missing_rounds:
+                        summary["open"] += 1
+                        continue
+                    self._wal.append("intent_failed", "order", iid, {
+                        "intent_id": iid, "reason": "柜台查无此单（对账连续未命中）",
+                        "code": payload.get("code"), "side": payload.get("side"),
+                        "volume": payload.get("volume"), "price": payload.get("price"),
+                    })
+                    summary["unknown"] += 1
+                    summary["details"].append({
+                        "intent_id": iid, "code": payload.get("code", ""),
+                        "side": payload.get("side", ""), "status": "unknown",
+                        "reason": "柜台查无此单",
+                    })
+                    continue
             row = orders.get(oid)
             traded = deals.get(oid, 0.0)
             want = float(payload.get("volume") or 0)

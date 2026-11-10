@@ -99,13 +99,29 @@ _AGENT_STDLIB_IMPORTS = frozenset({
     "__future__",
 })
 
-#: QMT 内置解释器（bin.x64/pythonw.exe = Python 3.6.8）**只认这些源码编码**。
-#: 见模块 docstring「源码编码（R27）」——gbk/gb18030 会在特定内容长度下让
-#: py3.6 tokenizer 直接 SyntaxError，且失败模式是「启动即停止 + 零自检」。
-QMT_SAFE_ENCODINGS = frozenset({"utf-8", "utf8", "ascii", "us-ascii"})
+#: QMT 内置解释器（bin.x64/pythonw.exe = Python 3.6.8）**能跑的源码编码**。
+#:
+#: ★ 2026-10-15 真机逐形态实测（修正 2026-10-08 的结论）：
+#:     utf-8（LF/CRLF）、utf-8+BOM 通过；**gbk + CRLF 通过（3/3）**；
+#:     gbk + LF 必然 SyntaxError；gb18030 失败。
+#:   ⇒ gbk 是**受支持**的，但**必须配 CRLF 行尾**，见 ``_uses_crlf``。
+QMT_SAFE_ENCODINGS = frozenset({"utf-8", "utf8", "ascii", "us-ascii", "gbk"})
+
+#: 这些编码只有在 **CRLF 行尾** 下才安全（LF 会让 py3.6 tokenizer 丢开头两行）。
+QMT_CRLF_ONLY_ENCODINGS = frozenset({"gbk"})
 
 #: PEP263 编码 cookie：只在前两行生效。
 _CODING_COOKIE_RE = re.compile(r"^[ \t\f]*#.*?coding[:=][ \t]*([-\w.]+)")
+
+
+def _uses_crlf(path):
+    """文件是否**全部**用 CRLF 行尾（存在裸 LF 即返回 False）。"""
+    try:
+        with open(path, "rb") as fh:
+            data = fh.read()
+    except OSError:
+        return False
+    return b"\r\n" in data and not re.search(rb"(?<!\r)\n", data)
 
 
 def _declared_encoding(text):
@@ -154,6 +170,20 @@ def check_bundle_encoding(path):
             "无 coding cookie 且内容不是合法 UTF-8（实际按 %s 才读得通）—— "
             "py3.6 默认按 UTF-8 解码源文件，该文件必然 SyntaxError。"
             "请用 --encoding utf-8 重新部署。" % enc)
+    elif effective in QMT_CRLF_ONLY_ENCODINGS and not _uses_crlf(path):
+        # ★ 2026-10-15 实测：GBK 源码在 **LF 行尾** 下必然 SyntaxError ——
+        #   内置 py3.6 的 tokenizer 会丢掉开头两行，模块 docstring 的三引号因此
+        #   没生效，紧随其后的中文行被当代码解析，报 `invalid character in
+        #   identifier` 并指向**一行中文**（本机实测第 7 行）——极具误导性。
+        #   同一份字节改 CRLF 后 3/3 通过。所以「GBK 安全」必须连行尾一起判。
+        out["ok"] = False
+        out["note"] = (
+            "源码是 %s 但行尾是 LF —— QMT 内置 Python 3.6.8 的 tokenizer 在 LF 行尾下"
+            "读带编码 cookie 的文件会丢掉开头两行，docstring 失效，随后报 "
+            "`SyntaxError: invalid character in identifier`（错误位置指向一行中文，"
+            "极易误判成中文写错）。**GBK 必须配 CRLF 行尾**。"
+            "请用 `python scripts/qmt_agent_deploy.py deploy --encoding gbk` 重新部署"
+            "（该命令会自动写 CRLF）。" % effective)
     return out
 
 

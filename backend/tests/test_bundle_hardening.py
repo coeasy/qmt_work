@@ -34,6 +34,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "scripts"
 
 from qmt_agent_verify import (  # noqa: E402
     POLLUTION_IMPORTS,
+    QMT_CRLF_ONLY_ENCODINGS,
     QMT_SAFE_ENCODINGS,
     bundle_health,
     check_bundle_encoding,
@@ -148,11 +149,43 @@ def test_encoding_cookie_detection_stops_at_code_line(tmp_path):
     assert out["ok"] is True
 
 
-def test_encoding_safe_set_is_utf8_family():
-    for enc in ("utf-8", "utf8", "ascii", "us-ascii"):
+def test_encoding_safe_set_covers_utf8_and_gbk_but_not_gb18030():
+    """QMT 能跑的编码集合：utf-8 家族 + **gbk**（gbk 另需 CRLF，见下一条）。
+
+    ★ 2026-10-15 真机复测修正（此前口径是「只认 utf-8」）：
+      gbk + CRLF 在 QMT 内置 py3.6.8 上连跑 3 次全通过；gbk + LF 必然
+      SyntaxError；gb18030 仍是实测失败项。所以 gbk 进白名单，
+      同时必须在 QMT_CRLF_ONLY_ENCODINGS 里（行尾是安全性的另一半）。
+    """
+    for enc in ("utf-8", "utf8", "ascii", "us-ascii", "gbk"):
         assert enc in QMT_SAFE_ENCODINGS
-    for enc in ("gbk", "gb18030", "utf-16", "latin-1", "cp936"):
+    for enc in ("gb18030", "utf-16", "latin-1", "cp936"):
         assert enc not in QMT_SAFE_ENCODINGS
+    assert QMT_CRLF_ONLY_ENCODINGS == frozenset({"gbk"}), (
+        "gbk 的「安全」是编码+行尾的联合属性，必须单独登记行尾要求")
+
+
+def test_gbk_with_lf_is_rejected_gbk_with_crlf_is_accepted(tmp_path):
+    """行尾门禁：同一份 gbk 字节，CRLF 放行、LF 判红。
+
+    LF 行尾的 GBK 会让内置 py3.6 的 tokenizer 丢掉开头两行，docstring 的三引号
+    因此没生效，紧随其后的中文行被当代码解析，报 `invalid character in
+    identifier` 并指向**一行中文** —— 极易被误判成「中文写错了」。
+    实测同一份字节 LF 3/3 失败、CRLF 3/3 通过。
+    """
+    body = u"# -*- coding: gbk -*-\n\"\"\"\u4e2d\u6587 docstring\n\u90e8\u7f72\uff08\u6b63\u786e\uff09\n\"\"\"\nx = 1\n"
+    crlf = tmp_path / "ok_crlf.py"
+    with io.open(str(crlf), "w", encoding="gbk", newline="\r\n") as fh:
+        fh.write(body)
+    assert check_bundle_encoding(str(crlf))["ok"] is True
+
+    lf = tmp_path / "bad_lf.py"
+    with io.open(str(lf), "w", encoding="gbk", newline="\n") as fh:
+        fh.write(body)
+    out = check_bundle_encoding(str(lf))
+    assert out["ok"] is False
+    assert out["declared"] == "gbk"
+    assert "CRLF" in (out["note"] or "")
 
 
 # ---------------------------------------------------------------------------

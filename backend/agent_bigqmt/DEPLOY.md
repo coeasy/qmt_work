@@ -18,12 +18,38 @@
 
 ------------------------------------------------------------------------
 
+## 0.1 2026-10-23 新规：三条限制与本策略的对应关系（**先读这一节**）
+
+券商公告（2026-10-23 收盘后生效）关掉了三样东西，本策略的形态由它决定：
+
+| 公告条款 | 原文要点 | 本策略怎么做 | 怎么证明 |
+|---|---|---|---|
+| **一、关闭本地文件读写** | `open`/`read`/`write` 及相关第三方库 | 闭环模式**一次磁盘访问都不做**：配置读 `EMBEDDED_CONFIG`、计划读 `EMBEDDED_PLAN`（都烘焙在源码里）、回传走 `print` 一行 `@@QMTW\|{json}`（由 **QMT 客户端**收进 `userdata/log/XtClient_<date>.log`，不是策略写文件） | `tests/test_bigqmt_sandbox_compliance.py` 把 `open`/`os.*` 换成抛 `Forbidden FileIO` 的替身，跑完整生命周期，断言零命中 |
+| **二、关闭外部网络连接** | 策略发起的 HTTP/TCP/UDP、本机/局域网数据库、IP/端口连接 | 不 `import socket/urllib/http/sqlite3`（`os` 白名单里的 `os.system`/`popen` 等执行面也被 G4 拦）；**闭环模式下连 `xtdata` 都不导入** —— xtdata 取行情要连 `127.0.0.1:58610`，回环不豁免 | 同上（替身同时拦 `socket`/`sqlite3`/`os.system`）+ `scripts/check_bigqmt_agent_py36.py` 的 G2/G4 静态闸门 |
+| **三、限制在虚拟机运行** | 腾讯云、阿里云等公有云服务器 | 代码层无从验证：**这是部署形态**。用**物理机**运行客户端内置 Python，且不与外部交互的策略不受影响 | 本文 §2 前置条件 + 部署核对表（见 §11） |
+
+**由此产生一条硬结论：旧「文件桥」形态（`bridge_dir` + `req/resp` + `events.ndjson`）在 2026-10-23 之后不可用。**
+桥的每个支点都要读写文件，在新规下第一句就抛 `PermissionError: Forbidden FileIO`，
+表现为「策略在跑但没有任何事件」——一个标准假绿灯。**新规之后只有一种合规形态**：
+
+1. 用 `gen_qmt_agent_bundle.py --plan plan.json --embed-config cfg.json` 生成**烘焙了计划的 bundle**；
+2. 让该 bundle 以 **公式模式**被终端挂载（终端只把 `passorder`/`get_trade_detail_data`
+   注入**被挂载的那一个文件**）；
+3. 外部端跟 **客户端日志**读 `@@QMTW|` 行（`GET /qmt-agent/closed-loop`）。
+
+> ★ **用「模型交易 → 运行」拉起闭环 bundle 会只读**：独立进程模式拿不到终端注入的查询函数，
+> 无法重建持仓，按纪律不交易（原因会以 `READONLY` 记录回传）。这不是 bug，是模式定义。
+> 顺带说明：该路径下**不会**导入 `xtdata` —— 明知只读还去连本地行情服务，只会换来一次违规。
+
+------------------------------------------------------------------------
+
 ## 1. 先判断走哪条路径
 
 | 路径 | 形态（V4 组装） | 何时用 | 客户端要做的配置 |
 |---|---|---|---|
 | **A：xtquant 直连** | `XtQuantV1` + `InProcess`，`client_mode=full` | 券商**未**启用 PID 白名单时**优先**（延迟最低、零部署） | 客户端正常运行极速/完整版 QMT 并登录柜台即可；qmt_work 侧选券商档案的 `full` 模式 |
-| **B：内置策略桥** | `BigQmtV1` + `FileSignal` | PID 白名单封死外部直连时的**兜底**（未来主流形态） | **本文全部内容**：部署 `agent_bigqmt` + 配置 `agent_config.json` |
+| **B：内置策略桥** | `BigQmtV1` + `FileSignal` | PID 白名单封死外部直连时的**兜底** | **本文全部内容**：部署 `agent_bigqmt` + 配置 `agent_config.json`（**仅 2026-10-23 前**） |
+| **B′：内置策略闭环** | `qmt.big.closed`（烘焙计划的 bundle + 公式模式挂载） | **2026-10-23 起的唯一合规形态**（新规关掉文件 IO 与外联） | 见 §0.1；不需要 `bridge_dir`，不需要 `agent_config.json` |
 
 > 如何判断被封？qmt_work 连接诊断若出现 `ret error-1` 且 QMT 极速版日志含
 > `quant session N, pid X not allowed, return`，即授权串
