@@ -583,3 +583,70 @@ def test_stage_detects_monitor_dir_without_roots(qc, tmp_path, monkeypatch):
                        json={"rows": _rows()}).json()
     assert body["code"] == 400
     assert "生成即等于下单" in body["message"]
+
+
+# ----------------------------------------------------------------------
+# 2026-11-11 落地：/qmt/file-order/readiness 前置链
+# ----------------------------------------------------------------------
+def test_readiness_route_reports_blocking_step_when_not_armed(qc, tmp_path):
+    """armed=0 时目录齐备也不许说 ready —— 必须指名卡在 armed。"""
+    _, client, _ = qc
+    root = _make_install(tmp_path / "stock" / "a", automonitor="0")
+    (root / "export_data").mkdir()
+
+    data = client.get("/api/v1/qmt/file-order/readiness",
+                      params={"roots": str(tmp_path / "stock"),
+                              "client_running": "1"}).json()["data"]
+    assert data["total"] == 1 and data["ready_count"] == 0
+    acc = data["accounts"][0]
+    assert acc["blocking_step"] == "armed"
+    assert acc["probe_write_skipped"] is True
+    assert acc["columns_verified"] is True
+    assert "自动监控" in data["warning"] or "无法产生委托" in data["warning"]
+
+
+def test_readiness_route_ready_when_armed(qc, tmp_path):
+    _, client, _ = qc
+    root = _make_install(tmp_path / "stock" / "a", automonitor="1")
+    (root / "export_data").mkdir()
+
+    data = client.get("/api/v1/qmt/file-order/readiness",
+                      params={"roots": str(tmp_path / "stock"),
+                              "client_running": "1"}).json()["data"]
+    assert data["ready_count"] == 1
+    assert data["accounts"][0]["blocking_step"] == ""
+    assert "warning" not in data
+
+
+def test_readiness_route_client_running_unchecked_by_default(qc, tmp_path):
+    """不传 client_running 时只能是"未检查"，不能默认成"在运行"。"""
+    _, client, _ = qc
+    root = _make_install(tmp_path / "stock" / "a", automonitor="1")
+    (root / "export_data").mkdir()
+
+    data = client.get("/api/v1/qmt/file-order/readiness",
+                      params={"roots": str(tmp_path / "stock")}).json()["data"]
+    steps = {s["name"]: s for s in data["accounts"][0]["steps"]}
+    assert "未检查" in steps["client"]["detail"]
+
+
+def test_readiness_route_never_writes_into_monitor_dir(qc, tmp_path):
+    """★ 路由层同样不许写探测：armed 时写探针文件即等于下单。"""
+    _, client, _ = qc
+    root = _make_install(tmp_path / "stock" / "a", automonitor="1")
+    mon = root / "export_data"
+    mon.mkdir()
+
+    client.get("/api/v1/qmt/file-order/readiness",
+               params={"roots": str(tmp_path / "stock"), "client_running": "1"})
+    assert sorted(p.name for p in mon.iterdir()) == []
+
+
+def test_readiness_route_empty_roots_gives_hint(qc, tmp_path):
+    _, client, _ = qc
+    empty = tmp_path / "stock"
+    empty.mkdir()
+    data = client.get("/api/v1/qmt/file-order/readiness",
+                      params={"roots": str(empty)}).json()["data"]
+    assert data["total"] == 0 and data["ready_count"] == 0
+    assert "没有找到 QMT 安装" in data["hint"]

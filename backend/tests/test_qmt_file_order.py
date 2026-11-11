@@ -463,3 +463,120 @@ def test_batch_order_of_lists_each_account(tmp_path):
     rows = batch_order_of(str(root / "userdata"))
     assert len(rows) == 1 and rows[0][0] == "410001005814"
     assert rows[0][1]["key_enable"] is False
+
+
+# ----------------------------------------------------------------------
+# 2026-11-11 落地：列名锁二进制出处 / INSERTTIME 单点 / readiness 前置链
+# ----------------------------------------------------------------------
+from connectors.qmt_file_order import (  # noqa: E402
+    CLIENT_DBF_COLUMNS_BINARY,
+    CLIENT_DBF_COLUMNS_EVIDENCE,
+    CLIENT_INSERT_TIME_FORMAT_BINARY,
+    INSERT_TIME_FORMAT,
+    INSERT_TIME_FORMAT_EVIDENCE,
+    file_order_readiness,
+)
+
+
+def test_dbf_columns_match_binary_evidence():
+    """列名与列序**必须**与 OrderService.dll 里那段连续数组逐字逐序一致。
+
+    为什么单列一份常量而不是复用 DBF_COLUMNS：同源即同错。哪天有人"顺手重排"
+    DBF_COLUMNS，若断言写的是 `DBF_COLUMNS == DBF_COLUMNS` 就永远绿。
+    """
+    assert tuple(DBF_COLUMNS) == tuple(CLIENT_DBF_COLUMNS_BINARY)
+    assert len(CLIENT_DBF_COLUMNS_BINARY) == 15
+    ev = CLIENT_DBF_COLUMNS_EVIDENCE
+    assert ev["binary"] == "OrderService.dll"
+    assert ev["start_offset"] == "0x3100F8" and ev["end_offset"] == "0x3101C4"
+    assert "setColumnParam" in ev["adjacent_symbol"]
+
+
+def test_insert_time_format_is_single_source_with_documented_mismatch():
+    """格式串只允许有一个定义处，且与二进制的不一致必须**明写**、不得静默改。
+
+    二进制 0x310418 处是 ``yyyy-MM-ddHH:mm:ss.zzz``（dd 与 HH 之间无空格），
+    我们写带空格的 23 字符。谁对谁错未裁决 —— 所以断言的是"分歧被记录"，
+    而不是"我们是对的"。这样将来真机验证后改口径，测试会提醒同步证据。
+    """
+    assert " " in INSERT_TIME_FORMAT, "我们的写法带空格（23 字符）"
+    assert " " not in CLIENT_INSERT_TIME_FORMAT_BINARY, "二进制串无空格（22 字符）"
+    assert INSERT_TIME_FORMAT_EVIDENCE["status"] == "unresolved"
+    assert INSERT_TIME_FORMAT_EVIDENCE["offset"] == "0x310418"
+    # 写入口径必须真的走这个常量：改常量即改行为，不存在第二处内联
+    stamp = _row().to_record()["INSERTTIME"]
+    assert len(stamp) == len(INSERT_TIME_FORMAT.replace("%Y", "2026")
+                                         .replace("%m", "11").replace("%d", "11")
+                                         .replace("%H", "00").replace("%M", "00")
+                                         .replace("%S", "00"))
+
+
+def test_readiness_blocks_on_not_armed(tmp_path):
+    """开关没开就是没开：目录存在、可写，也不许说 ready。"""
+    mon = tmp_path / "export_data"
+    mon.mkdir()
+    _write_config(tmp_path, "acctA", automonitor="0",
+                  monitor=str(mon), backup=str(tmp_path / "export_data_backup"))
+
+    r = file_order_readiness(str(tmp_path / "userdata"), client_running=True)
+    assert r["account"] == "acctA"
+    assert r["armed"] is False
+    assert r["ready"] is False
+    assert r["blocking_step"] == "armed"
+    by = {s["name"]: s for s in r["steps"]}
+    assert by["monitor_dir"]["ok"] is True and by["writable"]["ok"] is True
+    assert r["probe_write_skipped"] is True
+    assert r["columns_verified"] is True
+
+
+def test_readiness_ready_when_armed_and_dir_exists(tmp_path):
+    mon = tmp_path / "export_data"
+    mon.mkdir()
+    _write_config(tmp_path, "acctA", automonitor="1",
+                  monitor=str(mon), backup=str(tmp_path / "export_data_backup"))
+
+    r = file_order_readiness(str(tmp_path / "userdata"), client_running=True)
+    assert r["armed"] is True and r["ready"] is True
+    assert r["blocking_step"] == ""
+    # 反向锚：ready 不等于"已证实能成交"，这句诚实边界必须还在
+    assert "不代表该通道已被证实能成交" in r["honesty"]
+
+
+def test_readiness_never_writes_probe_file_into_monitor_dir(tmp_path):
+    """★ 最关键的一条安全不变量：armed 时往监控目录写探针文件**就等于下单**。
+
+    所以 readiness 只允许 os.access 判只读权限。这里在 armed=1 且目录存在
+    的情况下调用它，然后断言目录**仍然是空的** —— 一旦有人"顺手加个写探测"，
+    这条会立刻变红。
+    """
+    mon = tmp_path / "export_data"
+    mon.mkdir()
+    _write_config(tmp_path, "acctA", automonitor="1",
+                  monitor=str(mon), backup=str(tmp_path / "export_data_backup"))
+
+    before = sorted(p.name for p in mon.iterdir())
+    file_order_readiness(str(tmp_path / "userdata"), client_running=True)
+    after = sorted(p.name for p in mon.iterdir())
+    assert before == after == [], f"readiness 往监控目录写了东西：{after}"
+
+
+def test_readiness_reports_missing_monitor_dir_as_blocking(tmp_path):
+    """目录不存在必须卡在 monitor_dir，而不是"目录为空所以没单"。"""
+    _write_config(tmp_path, "acctA", automonitor="1",
+                  monitor=str(tmp_path / "no_such_dir"),
+                  backup=str(tmp_path / "export_data_backup"))
+    r = file_order_readiness(str(tmp_path / "userdata"), client_running=True)
+    assert r["armed"] is True and r["ready"] is False
+    assert r["blocking_step"] == "monitor_dir"
+
+
+def test_readiness_unchecked_client_is_not_reported_as_running(tmp_path):
+    """未上报客户端运行态时只能写"未检查"，不能默认成"在运行"。"""
+    mon = tmp_path / "export_data"
+    mon.mkdir()
+    _write_config(tmp_path, "acctA", automonitor="1",
+                  monitor=str(mon), backup=str(tmp_path / "export_data_backup"))
+    r = file_order_readiness(str(tmp_path / "userdata"))
+    by = {s["name"]: s for s in r["steps"]}
+    assert "未检查" in by["client"]["detail"]
+    assert by["client"]["blocking"] is False

@@ -14,10 +14,20 @@
 
 import os
 import re
+import socket
 
 from core.errors import swallow
 
 from ._common import _candidate_roots, _normalize
+
+
+#: 官方 xtdata 行情服务地址（两套安装的 `xtdata.ini` 都是 `127.0.0.1:58610`）。
+#: ★ 与 58600（公式 RPC）/ 58670（XtModel）是**三条独立通道**，不可互相代表。
+_XTDATA_SERVICE_ADDR = ("127.0.0.1", 58610)
+
+#: 增量扫描上限：一次 connect 尝试写进日志的字节数远小于此值。
+#: 取 256KB 是为了「即使同机有其它进程在狂刷日志也不漏」。
+_DELTA_SCAN_BYTES = 262144
 
 
 # 客户端主日志文件名前缀（按客户端模式区分）：
@@ -77,6 +87,11 @@ def _latest_login_log(trade_dir: str) -> str:
 #     客户端日志 `quant session N, pid X not allowed, return`
 #               `[quant]XtQuantServer:: connect ret error-1`
 #     平台侧     XtQuantTrader.connect() 恒返回 -1（**行情侧 xtdata 不受影响**）
+# ★ 2026-11-10（§21.R2 国信真机）补充：同一根因还有第二种、且本机**唯一出现**的
+#   措辞 `[TC::COrderServiceQuantAdaptor::onConnected] quant session N, illegal pid M`
+#   （当日 133 行；`pid N not allowed` 0 行）。旧 marker 集与正则都不认它 ⇒ 诊断
+#   返回空、上层退回「换 session」等已证伪的泛化建议。现两种措辞统一归入
+#   `pid_not_allowed`，并额外给出 `session_retry_useless=True` 供上层跳过该建议。
 # 该开关由券商服务端下发，平台无法自行改写 —— 只能精确告知用户去申请授权，
 # 而不是把用户误导到「重装 SDK / 检查行情登录 / 会话冲突」这些无关方向上。
 #
@@ -107,11 +122,24 @@ _SERVER_BLOCKED_MARKER = "The XtQuantServer is not allowed to start."
 #: 授权串 JSON 是按单行写下的（实测 49,910 B），从偏移读 400KB 足够覆盖；
 #: 若未来客户端改成跨行，偏移读取仍能拿到完整 JSON。
 _AUTH_SEG_BYTES = 400_000
-#: 真正的「PID 白名单拒绝」行形如 `quant session N, pid X not allowed, return`。
+#: 「PID 白名单拒绝」在客户端日志里有**两种实测措辞**：
+#:   ① 旧版 / 光大现场：`quant session N, pid X not allowed, return`
+#:   ② 国信 2026-11-10 现场（§21.R2）：
+#:      `[TC::COrderServiceQuantAdaptor::onConnected] quant session 900001, illegal pid 21664`
+#:      （当日 `illegal pid` 133 行、`pid N not allowed` **0 行**；cp36/Jupyter 上报
+#:       `illegal pid 0`，故 PID 必须允许 0）。
+#: ★ 2026-11-10 修复：旧实现只认措辞 ①，且 marker 集里没有 `illegal pid` ⇒
+#:   真实拒绝行根本进不了候选、四个归因分支全落空、诊断返回空，上层退回泛化
+#:   四步（含已被「session 0..5 全被同一 PID 拒绝」证伪的「换 session」）。
 #: ★ 旧实现用 `"not allowed" in ln` 粗判，会把 `The XtQuantServer is not allowed to start.`
-#:   也归为 PID 拒绝 ⇒ **归因错误**（把「服务没授权启动」说成「你的进程被拉黑」，
-#:   用户按 PID 白名单方向排查必然徒劳）。改为匹配 pid + not allowed 的组合。
-_PID_DENY_RE = re.compile(r"\bpid\b[^\n]{0,40}not allowed", re.IGNORECASE)
+#:   也归为 PID 拒绝 ⇒ **归因错误**（把「服务没授权启动」说成「你的进程被拉黑」）。
+#:   故此处两个分支都要求出现 `pid` 字样，`XtQuantServer ... not allowed to start`
+#:   仍恒不匹配（有断言锁住，见 test_qmt_client_log_diagnosis.py）。
+_PID_ILLEGAL_MARKER = "illegal pid"
+_PID_ILLEGAL_RE = re.compile(r"\billegal\s+pid\b\s*[:=]?\s*\d+", re.IGNORECASE)
+_PID_DENY_RE = re.compile(
+    r"(?:\bpid\b[^\n]{0,40}not allowed|\billegal\s+pid\b\s*[:=]?\s*\d+)",
+    re.IGNORECASE)
 _AUTH_SNIPPET_RE = re.compile(
     r'"(mdl_auth_[A-Za-z0-9_]+)"\s*:\s*(\d+)')
 
@@ -217,7 +245,8 @@ _SCAN_MAX_BYTES = 64 << 20     # 扫描上限 64 MiB
 _SCAN_KEEP_LINES = 8           # 每个标记只保留最后 8 条（够给证据，不涨内存）
 
 
-def _scan_marker_lines(path: str, markers, max_bytes: int = _SCAN_MAX_BYTES) -> dict:
+def _scan_marker_lines(path: str, markers, max_bytes: int = _SCAN_MAX_BYTES,
+                       ci_markers=()) -> dict:
     """按块扫描全文件，返回 ``{marker: [(绝对字节偏移, 行文本), ...]}``。
 
     - 分块读取并保留跨块残行，避免把一行切成两半导致漏匹配；
@@ -226,9 +255,13 @@ def _scan_marker_lines(path: str, markers, max_bytes: int = _SCAN_MAX_BYTES) -> 
     - 命中行用 `_decode_bytes` 容错解码（同一日志里可能混有 utf-8 与 gb18030 字节）；
     - 每个标记只保留最后 `_SCAN_KEEP_LINES` 条；任何 OSError 都退回已扫到的部分，
       绝不因读日志失败而让诊断抛错（诊断自身崩溃比诊断不到更糟）。
+    - ``ci_markers``：需要**大小写不敏感**匹配的标记（如 `illegal pid` / `Illegal Pid`）。
+      默认 ``markers`` 仍是原来的字节精确匹配，保持既有判据行为不变；只有显式列入
+      ``ci_markers`` 的标记才对该行做 lower() 比较，避免为所有行引入无谓开销。
     """
-    out: dict = {m: [] for m in markers}
-    pairs = [(m, m.encode("utf-8")) for m in markers]
+    out: dict = {m: [] for m in (*markers, *ci_markers)}
+    pairs = ([(m, m.encode("utf-8"), False) for m in markers]
+             + [(m, m.encode("utf-8").lower(), True) for m in ci_markers])
     try:
         size = os.path.getsize(path)
     except OSError:
@@ -264,8 +297,21 @@ def _scan_marker_lines(path: str, markers, max_bytes: int = _SCAN_MAX_BYTES) -> 
 
 
 def _collect_marker_line(out: dict, pairs, offset: int, bl: bytes) -> None:
-    """把一行（bytes）收进命中的标记桶（保留最后 _SCAN_KEEP_LINES 条）。"""
-    hit = [m for m, mb in pairs if mb in bl]
+    """把一行（bytes）收进命中的标记桶（保留最后 _SCAN_KEEP_LINES 条）。
+
+    ``pairs`` 元素为 ``(marker, marker_bytes, case_insensitive)``；仅当
+    ``case_insensitive`` 为真时才对该行计算一次 lower()（惰性、每行至多一次）。
+    """
+    low = None
+    hit = []
+    for m, mb, ci in pairs:
+        if ci:
+            if low is None:
+                low = bl.lower()
+            if mb in low:
+                hit.append(m)
+        elif mb in bl:
+            hit.append(m)
     if not hit:
         return
     txt = _decode_bytes(bl).strip()
@@ -327,13 +373,187 @@ def read_client_auth_flags(trade_dir: str) -> dict:
     return out
 
 
+def log_cursor(trade_dir: str) -> dict:
+    """取「当前最新客户端日志 + 其字节长度」作为**增量扫描游标**。
+
+    为什么需要游标：客户端日志是**按天累积**的（当日实测已到 17MB+），历史里
+    随时可能躺着上一天的 `illegal pid`。只有「本次 connect 尝试之前取快照、
+    失败后只扫增量」，才能把「这次尝试被拒绝」与「历史上的拒绝」严格分开 ——
+    否则早停会误杀（把昨天的证据当成今天的结果）。
+
+    返回 ``{"log": str, "offset": int}``；无日志时 ``log`` 为 ``''``、``offset`` 为 0。
+    """
+    p = _newest_client_log(trade_dir)
+    size = 0
+    if p:
+        try:
+            size = os.path.getsize(p)
+        except OSError:
+            size = 0
+    return {"log": p, "offset": size}
+
+
+def _sessions_in(text: str) -> list[int]:
+    """抽取日志行里的 `quant session <N>` 会话号（升序去重）。"""
+    return sorted({int(m) for m in re.findall(r"quant\s+session\s+(\d+)", text)})
+
+
+def pid_denial_since(cur: dict, sessions=None,
+                     max_bytes: int = _DELTA_SCAN_BYTES) -> dict:
+    """只扫 ``cur`` 之后**新增**的日志，判定本次尝试是否被 PID 鉴权拒绝。
+
+    返回 ``{"log","offset","next_offset","denied","lines","wording","sessions"}``。
+
+    ★ 归属规则（宁可继续重试，也不误杀）：
+      · ``sessions`` 给了、且增量里能解析出会话号 ⇒ 必须**有交集**才算本次尝试被拒；
+      · 增量里解析不出会话号 ⇒ 无法归属，``denied`` 保持 False；
+      · 日志轮转/被截断（``size < offset``）⇒ 游标失效，从 0 重扫。
+    """
+    out: dict = {"log": cur.get("log") or "", "offset": int(cur.get("offset") or 0),
+                 "next_offset": int(cur.get("offset") or 0), "denied": False,
+                 "lines": [], "wording": "", "sessions": []}
+    p = out["log"]
+    if not p or not os.path.isfile(p):
+        return out
+    try:
+        size = os.path.getsize(p)
+    except OSError:
+        return out
+    if size < out["offset"]:
+        out["offset"] = 0
+    raw = _read_at(p, out["offset"], max_bytes)
+    out["next_offset"] = min(size, out["offset"] + max_bytes)
+    if not raw:
+        return out
+    lines = [t for t in raw.splitlines() if _PID_DENY_RE.search(t)]
+    if not lines:
+        return out
+    found = _sessions_in("\n".join(lines))
+    out["sessions"] = found
+    want = {int(s) for s in (sessions or [])}
+    if want and found and not (want & set(found)):
+        # 增量里确实有拒绝行，但属于**别的** session（同机其它进程/其它连接）
+        # ⇒ 不能据此判定本次尝试被拒，让调用方继续重试。
+        return out
+    out["denied"] = True
+    out["lines"] = lines[-3:]
+    out["wording"] = ("illegal pid"
+                      if any(_PID_ILLEGAL_RE.search(t) for t in lines)
+                      else "pid not allowed")
+    return out
+
+
+def probe_xtdata_service(address=None, timeout: float = 0.3, _connect=None) -> dict:
+    """探一次官方 xtdata 行情服务端口是否**可连接**（只做 TCP connect，不发协议帧）。
+
+    返回 ``{"address","listening","cause","detail"}``：
+      ``listening`` 为 ``True`` / ``False`` / ``None``（None = 探测自身失败，未判定）；
+      ``cause`` 为 ``ok`` / ``refused`` / ``timeout`` / ``error``。
+
+    ★ 语义边界（**不可混淆**）：
+      · ``True`` 只说明**服务已绑定**，不代表本轮验证过它返回什么行情内容；
+      · ``refused`` 才足以断言「服务没在监听」；
+      · ``timeout`` 只能断言「这个端口不可用」，**不能**断定客户端未启动
+        —— 防火墙丢包、backlog 打满都会表现成超时（本机 58610 实测就是超时）。
+    """
+    host, port = address or _XTDATA_SERVICE_ADDR
+    out: dict = {"address": f"{host}:{port}", "listening": None,
+                 "cause": "error", "detail": ""}
+    conn = _connect
+
+    def _default_connect(addr, timeout_):
+        s = socket.create_connection(addr, timeout=timeout_)
+        s.close()
+
+    try:
+        (conn or _default_connect)((host, port), timeout)
+        out["listening"] = True
+        out["cause"] = "ok"
+        out["detail"] = "端口可连接（服务已绑定）；本轮未验证其返回内容，不等于行情已证实"
+    except OSError as exc:
+        out["listening"] = False
+        if isinstance(exc, ConnectionRefusedError):
+            out["cause"] = "refused"
+            out["detail"] = ("端口明确拒绝连接（ConnectionRefused）⇒ 服务未监听："
+                             "xtdata 相关失败应归因为「客户端未启动/未绑定该服务」，"
+                             "不是「行情接口不通」")
+        elif isinstance(exc, TimeoutError):
+            out["cause"] = "timeout"
+            out["detail"] = (f"端口在 {timeout}s 内无应答（TimeoutError）⇒ 判定「不可用」；"
+                             "但超时也可能由防火墙丢包造成，**不能**据此断定客户端未启动")
+        else:
+            out["cause"] = "error"
+            out["detail"] = (f"端口不可连接（{type(exc).__name__}）⇒ 判定「不可用」；"
+                             "未绑定还是被拦截需另查")
+    except Exception as exc:  # noqa: BLE001  探测自身异常不得冒泡
+        out["listening"] = None
+        out["cause"] = "error"
+        out["detail"] = f"探测异常（{type(exc).__name__}: {exc}）⇒ 未判定"
+    return out
+
+
+def diagnose_tri_state(trade_dir: str, trader_rc=None, sdk_import_ok=None,
+                       xtdata_probe: dict | None = None) -> dict:
+    """三条**互不顶替**的证据轴：SDK 导入 / 行情服务绑定 / 交易会话。
+
+    ★ 为什么必须分列：现场极易把「交易 connect 返回 rc=-1」读成「行情接口不通」，
+      或把「58610 未监听」读成「xtquant 整套不能用」。三者是**独立通道**：
+        · SDK 导入失败 ⇒ 连接阶段根本走不到，报错应指向安装/版本；
+        · 行情服务未绑定 ⇒ 只影响 xtdata 实时行情，与交易会话无关；
+        · 交易会话失败 ⇒ 只说明 XtQuantTrader 没建起来，与行情服务无关。
+      任一轴为 ok/failed 都**不能**推断其余两轴。
+
+    返回 ``{"sdk_import_ok","xtdata_service_bound","trader_session_ok",
+    "independent_axes","note","log"}``，每轴形如 ``{"state","detail"}``。
+    """
+    if sdk_import_ok is None:
+        sdk = {"state": "unchecked",
+               "detail": "本轮未检查（未导入 xtquant，或调用方未上报）"}
+    elif sdk_import_ok:
+        sdk = {"state": "ok", "detail": "调用方上报：xtquant 已导入成功"}
+    else:
+        sdk = {"state": "failed",
+               "detail": "调用方上报：xtquant 导入失败 ⇒ 连接阶段不可能成功"}
+
+    probe = xtdata_probe if isinstance(xtdata_probe, dict) else probe_xtdata_service()
+    if probe.get("listening") is True:
+        xt_state = "bound"
+    elif probe.get("listening") is False:
+        # 「不可用」是操作事实；`cause` 才是原因（refused=未监听 / timeout=不可达）
+        xt_state = "unusable"
+    else:
+        xt_state = "unknown"
+    xt = {"state": xt_state, "address": probe.get("address") or "",
+          "cause": probe.get("cause") or "error",
+          "detail": probe.get("detail") or ""}
+
+    if trader_rc is None:
+        tr = {"state": "unchecked", "detail": "本轮未发起 connect()"}
+    elif int(trader_rc) == 0:
+        tr = {"state": "ok", "detail": "connect() 返回 0（会话已建立）"}
+    else:
+        tr = {"state": "failed",
+              "detail": f"connect() 返回 {trader_rc}（非 0 即会话未建立）"}
+
+    return {
+        "sdk_import_ok": sdk,
+        "xtdata_service_bound": xt,
+        "trader_session_ok": tr,
+        "independent_axes": True,
+        "note": "三轴互不顶替：任一轴的结果都不能推断其余两轴",
+        "log": _newest_client_log(trade_dir) if trade_dir else "",
+    }
+
+
 def diagnose_trade_connect(trade_dir: str) -> dict:
     """诊断「交易连接 rc=-1」的客户端侧真实原因（只读客户端日志，无副作用）。
 
     返回 {"reason","title","evidence","steps","auth","log"}：
       reason == "xtquant_server_blocked"     → 客户端未获授权启动量化服务
                                                （`The XtQuantServer is not allowed to start.`）
-      reason == "pid_not_allowed"            → 严格连接校验按 PID 拉黑了本平台进程
+      reason == "pid_not_allowed"            → 客户端按 PID 鉴权拒绝了本平台进程
+                                               （`pid X not allowed` 或 `illegal pid M`；
+                                               附带 session_retry_useless=True / pid_deny_wording）
       reason == "strict_check"               → 授权串显示已开启严格校验，但本轮日志未见显式拒绝
       reason == "xtquant_module_unauthorized"→ 无拒绝行/无严格校验，但 mdl_auth_xtquant=0
       reason == ""                           → 无明确证据（上层保持原有四步排查文案，不臆测）
@@ -344,22 +564,45 @@ def diagnose_trade_connect(trade_dir: str) -> dict:
     「完整版」模式连接时会拿不到任何诊断（实测：授权串只出现在当时在跑的极速版日志里）。
     """
     res = _diagnose_one(trade_dir)
-    if res.get("reason"):
-        return res
+    if not res.get("reason"):
+        try:
+            roots = _candidate_roots(trade_dir)
+        except Exception:  # noqa: BLE001
+            roots = []
+        base = roots[0] if roots else ""
+        if base:
+            for sib in ("userdata", "userdata_mini"):
+                alt = os.path.join(base, sib)
+                if os.path.isdir(alt) and _normalize(alt) != _normalize(trade_dir):
+                    alt_res = _diagnose_one(alt)
+                    if alt_res.get("reason"):
+                        alt_res["title"] += f"（证据取自同客户端另一数据目录：{alt}）"
+                        alt_res["sibling_of"] = trade_dir
+                        res = alt_res
+                        break
+    return _attach_tri_state(res, trade_dir)
+
+
+def _attach_tri_state(res: dict, trade_dir: str) -> dict:
+    """给诊断结果挂上三轴证据；**只在证到「未绑定」时**改写行情侧结论。
+
+    ★ 本函数只在 connect 返回非 0 的失败路径上被调用，故 ``trader_rc=-1`` 是
+      该路径的既定事实，不是猜测。``sdk_import_ok`` 在此路径上无法观测（能走到
+      connect 说明导入已成功），故保持 ``unchecked`` —— 不拿「没检查」冒充「检查过」。
+    """
     try:
-        roots = _candidate_roots(trade_dir)
-    except Exception:  # noqa: BLE001
-        roots = []
-    base = roots[0] if roots else ""
-    if base:
-        for sib in ("userdata", "userdata_mini"):
-            alt = os.path.join(base, sib)
-            if os.path.isdir(alt) and _normalize(alt) != _normalize(trade_dir):
-                alt_res = _diagnose_one(alt)
-                if alt_res.get("reason"):
-                    alt_res["title"] += f"（证据取自同客户端另一数据目录：{alt}）"
-                    alt_res["sibling_of"] = trade_dir
-                    return alt_res
+        tri = diagnose_tri_state(trade_dir, trader_rc=-1)
+    except Exception:  # noqa: BLE001  三轴取证失败绝不阻断主诊断
+        return res
+    res["tri_state"] = tri
+    if res.get("reason") and tri["xtdata_service_bound"]["state"] == "unusable":
+        _cause = tri["xtdata_service_bound"].get("cause")
+        _why = ("服务未监听（连接被拒绝）" if _cause == "refused"
+                else "端口不可达（超时/异常，不能断定进程未启动）")
+        res["steps"] = (res.get("steps") or "") + (
+            f"\n  ★ 行情侧实测：127.0.0.1:58610 {_why} ⇒ 官方 xtdata 实时行情"
+            "当前**不可用**；这与上面的交易拒绝是**两件独立的事**，处置方向不同"
+            "（行情侧要客户端启动/绑定该服务，交易侧要券商授权）。")
     return res
 
 
@@ -385,12 +628,18 @@ def _diagnose_one(trade_dir: str) -> dict:
     if not p:
         return res
     res["log"] = p
+    # ★ 2026-11-10：新增 `illegal pid` 标记（大小写不敏感），与旧 `pid X not allowed`
+    #   并列取证。两种措辞同属「客户端按调用进程 PID 拒绝」，不得拆成两个 reason。
     found = _scan_marker_lines(
-        p, (_SERVER_BLOCKED_MARKER, "connect ret error", "not allowed"))
+        p, (_SERVER_BLOCKED_MARKER, "connect ret error", "not allowed"),
+        ci_markers=(_PID_ILLEGAL_MARKER,))
     blocked = found.get(_SERVER_BLOCKED_MARKER) or []
     connect_err = [t for _o, t in (found.get("connect ret error") or [])]
     denies = [t for _o, t in (found.get("not allowed") or [])]
-    pid_denied = [t for t in denies if _PID_DENY_RE.search(t)]
+    illegal_pid = [t for _o, t in (found.get(_PID_ILLEGAL_MARKER) or [])]
+    # 一行可能同时含 "not allowed" 与 "illegal pid" ⇒ 去重，避免同一条证据重复计数。
+    deny_lines = list(dict.fromkeys(denies + illegal_pid))
+    pid_denied = [t for t in deny_lines if _PID_DENY_RE.search(t)]
     if blocked:
         res["reason"] = "xtquant_server_blocked"
         res["title"] = (
@@ -406,9 +655,14 @@ def _diagnose_one(trade_dir: str) -> dict:
                            + connect_err[-1:])[:3]
     elif pid_denied:
         res["reason"] = "pid_not_allowed"
+        res["session_retry_useless"] = True
+        res["pid_deny_wording"] = (
+            "illegal pid" if any(_PID_ILLEGAL_RE.search(t) for t in pid_denied)
+            else "pid not allowed")
         res["title"] = (
-            "客户端启用了「量化连接严格校验」，拒绝了本平台进程的 xtquant 连接"
-            f"（客户端日志：{pid_denied[-1][-140:]}）")
+            "客户端按**调用进程 PID**鉴权，拒绝了本平台进程的 xtquant 连接"
+            f"（客户端日志：{pid_denied[-1][-140:]}）。这与 session_id 无关："
+            "逐个换 session 重试不会改变被拒绝的 PID")
         res["evidence"] = (pid_denied[-2:] + connect_err[-1:])[:3]
     elif (auth.get("strict_xttrader") == 1
           and auth.get("no_pid_check") in (0, None)):
@@ -437,11 +691,22 @@ def _diagnose_one(trade_dir: str) -> dict:
         "xtquant_module_unauthorized":
             "日志中**没有任何拒绝行、也没有严格校验**，纯粹是模块授权未下发 ⇒ "
             "重点是「申请 xtquant 模块授权」；\n",
+        "pid_not_allowed":
+            "客户端日志证据是**按调用进程 PID 拒绝**（`illegal pid <pid>` / "
+            "`pid <pid> not allowed`），根因在券商/客户端授权面，不在 session_id。\n"
+            "  · **换 session_id 无效**：§21.R2 现场实测 session 0..5 全被同一 PID "
+            "规则拒绝；改登录模式、重装/切换 SDK 都**不改变调用进程 PID**；\n"
+            "  · 处置方向只有「券商/客户端把调用进程加入 PID 白名单」或「改用客户端"
+            "内置 Python 策略通道」；平台侧不改写授权串、不绕过 PID 校验。\n"
+            "  · 授权串里的 strict_connection_check / no_pid_check / mdl_auth_xtquant "
+            "取值只作实证记录，不据此推断券商授权策略；本分支也**不**断言量化服务"
+            "是否在运行（需另看日志证据）。\n",
     }.get(res["reason"], "")
     res["steps"] = (
         _lead
-        + "该开关由券商服务端下发的模块授权控制（xttrader/xtdata "
-        "strict_connection_check=1、xtquant_no_pid_check=0），平台侧无法自行改写。\n"
+        + "相关开关由券商服务端下发的模块授权串控制（strict_connection_check / "
+        "mdl_auth_xtquant_no_pid_check / mdl_auth_xtquant 等，以日志实证值为准），"
+        "平台侧无法自行改写。\n"
         "  1) 联系券商，为该资金账号申请「程序化交易/外部策略接入」授权，"
         "并要求关闭「xtquant 严格连接校验」（或把调用进程加入 PID 白名单）；\n"
         "  2) 若券商要求白名单：将本平台后端进程（打包态 qmt_work.exe / 开发态 "
@@ -454,7 +719,8 @@ def _diagnose_one(trade_dir: str) -> dict:
         "（agent_bigqmt/BIGQMT_AGENT.py，文件桥零部署），随后在「券商接入」新建连接"
         "时接入模式选「大 QMT 桥接·文件」（connector_key=qmt.big.bridge.file）—— "
         "该通道走客户端内置 Python，**不受 PID 白名单限制**。\n"
-        "  注意：本问题**只影响交易通道**，行情（xtdata）不受影响，行情功能可继续使用。")
+        "  注意：本条只裁决**交易通道**；行情是另一条独立通道（官方 xtdata 走 "
+        "127.0.0.1:58610），本诊断**未**验证行情侧，不能据此断言行情可用或不可用。")
     return res
 
 
@@ -473,6 +739,9 @@ __all__ = [
     '_AUTH_IPC_PAIR_KEY',
     '_SERVER_BLOCKED_MARKER',
     '_PID_DENY_RE',
+    '_PID_ILLEGAL_MARKER',
+    '_PID_ILLEGAL_RE',
+    '_collect_marker_line',
     '_scan_marker_lines',
     '_read_at',
     '_decode_bytes',
@@ -484,4 +753,13 @@ __all__ = [
     'read_client_auth_flags',
     'diagnose_trade_connect',
     '_diagnose_one',
+    # ---- 2026-11-10 §22.R7：早停 + 三轴证据 ----
+    '_XTDATA_SERVICE_ADDR',
+    '_DELTA_SCAN_BYTES',
+    'log_cursor',
+    '_sessions_in',
+    'pid_denial_since',
+    'probe_xtdata_service',
+    'diagnose_tri_state',
+    '_attach_tri_state',
 ]

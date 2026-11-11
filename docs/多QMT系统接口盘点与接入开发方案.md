@@ -2023,3 +2023,1761 @@ verdict: 实时行情未证实：58670 在监听但订阅抓帧未出现行情�
 | paper 下单是否成功 | **是**。PAPER-40 `filled=100`、EXIT=0；仅 1 笔、零真实资金 |
 | 真实撤单是否验证 | **否**。paper 撤单不适用（刻意契约），live 未放行，零真实委托 |
 | live 被哪几项挡住 | **3 项**：`/signal/mode=paper`、`trading_enabled=false`、`injected` 缺 `passorder`（`standalone_process`）；第 4 项 broker `connected=true` 已绿 |
+
+## 20 REA 静态逆向：主进程 / miniquote / TradeClient / OrderService 的可对接性
+
+> 编号说明：§19  reserved 给「11:00 第 3 次定时任务与三次对照表」，该轮无产物，故本节跳到 **§20**。
+> §15.7 / §15.8 / §16 / 两个 §17 / §18 均**逐字未改**。
+> 取证方式：REA `inspect_native_exports` / `inspect_pe_imports` / `inspect_analysis_view` + `Get-Process.Modules` + `netstat`。
+> **纯静态 + 只读枚举**：未下单、未撤单、未改任何配置、未拉起或结束任何进程、未注入任何代码。
+> 结构化证据：`output/qmt_rea_module_analysis_20261110.json`。
+
+### 20.R0 结论先行（四问）
+
+| 问 | 答 |
+| --- | --- |
+| 主进程 + miniquote 能否「直接对接」 | **能，但只能走进程间协议，不能走函数级调用**。二者是 EXE、不是库；合法缝隙是本地监听端口与官方 SDK，跨进程调内部函数需注入（本方案明确不做） |
+| `TradeClient.dll` / `OrderService.dll` 能否直接调用 | **技术上能反解签名，工程上不可取**。仅 MSVC C++ mangled 成员导出（1085 / 446 个），无 `extern "C"` 平坦 ABI，且对象必须由宿主进程登录态初始化 |
+| `qmt_work` 应接哪个模块 | **官方 `xtquant` Python SDK**（`xtdata` 行情 + `XtQuantTrader` 交易）—— 而且**项目已经接好了**：`XTPQuantAdapter` + `BridgeAdapter` 子进程桥 + `runtime.py` ABI 选择 + `backend/runtimes/cp311` |
+| 能否「直接调用」原生模块 | **不能/不recommend**。`xtpythonclient` 与 `IPythonApiClient` 的 `.pyd` 只有一个真入口 `PyInit_*`，必须 `import` 进 CPython 3.11，**不能** `ctypes.CDLL`；`XtQuantServer*` 的 `handleOrderReq` 是 private 成员，由消息队列循环驱动 |
+
+### 20.R1 运行时模块拓扑（决定性证据）
+
+`Get-Process.Modules` 对活体进程只读枚举，把「静态导出表」和「谁真的加载了它」对齐：
+
+* **PID 23112 `XtItClient.exe`**（20:02:22）：`XtQuantServer_qmt.dll`、`ipcmessagequeue.dll`、`TradeClient.dll`、`OrderService.dll`、`OrderServiceMemory.dll`、`OrderServiceUi.dll`、`QuoteClient.dll`、`BrokerService.dll`、`LinkageTrade.dll`、`GuosenQmtProvider.dll` / `GuosenMsgTemplate.dll` / `GuosenOXData.dll` / `GuosenOXDict.dll`、`DataApi.dll`、`quoter.dll`，以及 **`python36.dll` + `boost_python-vc140-mt-1_58.dll`**。
+  ⇒ 全量客户端内嵌 **CPython 3.6 + boost.python(vc140)**；这也解释了策略注入进程为何必须是 py3.6 语法（与本机内置 Python 实测 py3.6.8 一致）。
+* **PID 23916 `miniquote.exe`**（父 23112，`linkMiniQuoteHide`）：`XtQuantServer.dll`、`ipcmessagequeue.dll`、`TradeClient_mini.dll`、`OrderService_mini.dll`、`LinkageTrade_mini.dll`、`quoter.dll`。
+  ⇒ miniquote 是 **mini 版 `XtQuantServer.dll` 的宿主**，与主进程的 `_qmt` 版是**两套独立栈**，不存在「主进程把交易 DLL 共享给 miniquote」。
+
+同一时刻端口（`netstat -ano -p tcp`）：`0.0.0.0:58600 LISTENING(23112)`、`127.0.0.1:58341 LISTENING(23916)`；**`58610` / `58670` / `58620` / `64000` 全部未监听**。远端 `119.147.202.41:55300`×2（两进程各一条，迅投行情云）、`36.99.48.21:55300`（miniquote HK_L1 选站）、`120.83.10.160:56000`（国信 GTS 交易网关）。
+
+> ★ 关键推论：**miniquote 已经把 `XtQuantServer.dll` 载进内存，但 58610 仍未绑定**（配置 `isAutoBind=0`）。这正是 `xtdata.get_client()` 抛「无法连接行情服务！」、以及 `/market` 系列 `SYN_SENT`/503 的成因——不是「模块不存在」，是「服务未绑定」。
+
+### 20.R2 原生 DLL 导出面：没有 C ABI
+
+| 模块 | sha256（前 16） | bytes | exports | ABI 判读 |
+| --- | --- | --- | --- | --- |
+| `TradeClient.dll` | `7be24d25e82d083c` | 4,080,640 | **1085** | 全是 MSVC C++ mangled 成员方法 |
+| `OrderService.dll` | `2b3a24ca52486ce` | 4,444,160 | **446** | 同上 |
+| `QuoteClient.dll` | `1a0951178d05bdc` | 879,104 | **183** | 同上 |
+| `XtQuantServer.dll` | `0785cff18fbd7729` | 294,400 | **100** | `xtquantsdk::XtQuantServer` / `XtQuantServerTradeAdaptor` |
+| `XtQuantServer_qmt.dll` | `7fa395d50888f998` | 174,080 | **72** | 同上（full 版） |
+
+`XtQuantServer.dll` 的关键导出（**`AEAA` 前缀 = private 非静态成员**）：
+
+```
+?handleOrderReq@XtQuantServer@xtquantsdk@@AEAAXPEBU_OrderStockReq@2@_KPEBX@Z
+?handleCancelReq@XtQuantServer@xtquantsdk@@AEAAXPEBU_CancelOrderStockReq@2@_KPEBX@Z
+?handleConnectReq@XtQuantServer@xtquantsdk@@AEAAXPEBU_ConnectReq@2@_KPEBX@Z
+?handleQueryStockAssetReq@XtQuantServer@xtquantsdk@@AEAAXPEBU_QueryStockAssetReq@2@_KPEBX@Z
+?handleStartQuantServer@XtQuantServer@xtquantsdk@@AEAAXPEBU_StartQuantServer@2@_KPEBX@Z
+?start@XtQuantServer@xtquantsdk@@QEAAXXZ
+?sendData@XtQuantServerTradeAdaptor@...@@AEAA_NIPEBX_K1W4MessageAction@ipmq@base@@1_N@Z
+```
+
+`XtQuantServer_qmt.dll` 从 `ipcmessagequeue.dll` 导入 `MessageQueueWriter` / `MessageQueueReader` / `resumeOrCreateIfNotExist` / `setHandler` / `start`。
+⇒ **内部真实通道是共享内存消息队列**；`handleOrderReq` 是消息循环分派的私有处理器，不是对外可调用的下单 API。`setFuncTable` 的签名里带 `std::map<std::string, boost::function<BSONObj(...)>>`、`init()` 带 `std::string` / `std::unique_ptr`，全是**编译器版本强绑定**的 C++ ABI。
+
+据此判「直接调用」的三重代价：① 必须 vc140/MSVC 同工具链且对象布局逐字一致；② 需要宿主进程内已登录的账户/会话上下文（另起一个进程 `LoadLibrary` 只会得到一套未认证的空栈）；③ 绕过消息循环等于绕过回调、风控与状态机。**REA 能反解签名，不能替代运行态上下文** ⇒ 不新增原生 ABI 适配器。
+
+### 20.R3 官方 SDK 的 `.pyd`：只能 import，不能 ctypes
+
+| 模块 | sha256（前 16） | exports | 唯一真入口 | 其余 |
+| --- | --- | --- | --- | --- |
+| `xtquant/xtpythonclient.cp311-win_amd64.pyd` | `bfefebaa08f2566` | 126 | `PyInit_xtpythonclient` | 125 个 pybind11 异常类/辅助符号 |
+| `xtquant/IPythonApiClient.cp311-win_amd64.pyd` | `eac51f9dedb8a44` | 129 | `PyInit_IPythonApiClient` | 122 个 pybind11 符号 + 6 个 `libiconv` |
+
+导入表实证：
+
+* `xtpythonclient.pyd` → **`python311.dll`**（约 120 个 `Py*` API）、`KERNEL32.dll::CreateFileMappingA` / `MapViewOfFileEx` / `PostQueuedCompletionStatus`（共享内存 + IOCP 的客户端侧）、`WS2_32.dll`、`MSVCP140.dll`。
+* `IPythonApiClient.pyd` → `python311.dll`、`WS2_32.dll::WSARecv/WSASend/WSASocketW`、`LIBEAY32.dll`、`SSLEAY32.dll`、`log4cxx.dll`（自带 TCP/SSL 栈，对应 58610 RPC）。
+
+⇒ 二者是 **CPython 3.11 扩展模块**：`PyInit_*` 返回 module 对象，用 `ctypes.CDLL(...).func()` 调用既取不到类也拿不到 GIL 语义。正确用法只有 `import xtquant.xtdata` / `from xtquant.xttrader import XtQuantTrader`。
+两套安装都提供 `cp36/37/38/39/310/311` 的 `.pyd`（gd_qmt 另有 `cp312/cp313` 的 `datacenter`）；项目 `backend/runtimes/cp311` + `runtime.py::detect_xtquant_abis()` 正好命中，**ABI 不是当前阻塞点**。
+
+### 20.R4 SDK 两端各自落在哪个模块
+
+**行情侧**
+
+```
+xtquant.xtdata (Python)
+  -> xtdata.ini  [client_xtdata] address=127.0.0.1:58610
+  -> IPythonApiClient.cp311-win_amd64.pyd (TCP/BSON RPC client)
+  -> 58610 server_xtquant / server_ipythonapi (isAutoBind=0)
+  -> miniquote.exe 内 XtQuantServer.dll (PID 23916)
+```
+`xtdata.py::get_client()` 失败即抛「无法连接行情服务！」；当前 **58610 未监听**，`get_full_tick` / `subscribe_quote` / `get_market_data` 全部无从谈起。
+
+**交易侧**
+
+```
+xtquant.xttrader.XtQuantTrader(path, session, callback)
+  -> XTQC.XtQuantAsyncClient(path.encode('gb18030'), 'xtquant', session)
+  -> xtpythonclient.cp311-win_amd64.pyd
+  -> ipcmessagequeue.dll 共享内存（path = <root>/userdata 或 userdata_mini）
+  -> XtQuantServer_qmt.dll (full, PID 23112) / XtQuantServer.dll (mini, PID 23916)
+  -> TradeClient.dll / OrderService.dll -> GuosenQmtProvider -> GTS :56000
+```
+回调面 `XtQuantTraderCallback`：`on_stock_order` / `on_stock_trade` / `on_stock_asset` / `on_stock_position` / `on_order_error` / `on_cancel_error`。
+注意 `path` 是**目录**不是网络地址——`XtQuantTrader` 靠本地 userdata 里的共享内存队列与客户端握手，这也说明为什么 `client_path` 的 full/mini 分派（`adapter.py` 已实现）不能写死。
+
+### 20.R5 `qmt_work` 现状盘点：官方链路已存在
+
+| 层 | 文件 | 事实 |
+| --- | --- | --- |
+| 适配器 | `backend/xtquant_client/xtp/adapter.py::XTPQuantAdapter.start()` | `import xtquant.xtdata` + `_load_trader_api()` → `XtQuantTrader`，含新旧 `xt_trader`/`xttrader` 兼容 |
+| 子进程桥 | `bridge_client.py::BridgeAdapter` + `bridge_server.py` | 把原生 SDK 隔离到独立进程，NDJSON RPC 回传；正是为了躲开「pyd ABI + 全局 writer 池」 |
+| ABI 选择 | `runtime.py::detect_xtquant_abis()` / `select_runtime()` | 扫 `.cpXXX-win_amd64.pyd`，与 `backend/runtimes/cp311` 匹配 |
+| 一次性诊断 | `scripts/probe_xtquant_once.py` | 区分 `WaitingFreeWriter` 是重试自伤还是券商侧限制 |
+| 只读旁路 | `connectors/transports/xtq_rpc.py::XtqRpcTransport` | 58600/58670 原始 NetPackage/BSON；`_fail` 明确写「**58600/58670 实测无任何下单方法**」 |
+
+⇒ **不需要新增任何原生模块对接层**。当前该做的是把「为什么连不上」拆成可证伪的三态，而不是换通道。
+
+### 20.R6 建议改动（分析结论，未实施、未改代码）
+
+1. **保持** `XTPQuantAdapter` + `BridgeAdapter` 为唯一生产链路；明确否决 `LoadLibrary`/`GetProcAddress` 直调 `TradeClient.dll`、`OrderService.dll`、`XtQuantServer*.dll`，以及手写共享内存 IPC。
+2. 交易时段验证器（`scripts/qmt_tradehours_validate.py`）增加 **`channel_58610_listening`** 轴：`wanted` 已含 58610，但 `axes` 未单列，导致 `xtdata` 失败被笼统归到「接口不通」。应精确归因为「服务未绑定」。
+3. 诊断三态分列、互不顶替：`sdk_import_ok`（cp311 `.pyd` 可 import）/ `xtdata_service_bound`（58610 LISTENING）/ `trader_session_ok`（`connect() == 0` 且 `path` 指向正确 userdata）。「没查」不得写成「查过且干净」。
+4. `XtQuantTrader` 的 `path` 继续按 full=`userdata` / mini=`userdata_mini` 分派；两套安装均已存在 `userdata_mini` 目录，可作为下一轮只读探针的目标。
+5. 58600 旁路**永久标注只读诊断**：`getFullTick` / `subscribeQuote` 已实测 `ErrorID=200005`，不得承载下单、不得当行情主干。
+6. **不得**为了绑 58610 去改 `isAutoBind` / `broker.ini` / `Config.xml`（约束：配置改动需用户批准）；是否开启 mini 行情服务属人工动作。
+
+### 20.R7 约束如实性
+
+* 未向真实柜台发单、未撤单、未伪造凭证、未绕 PID 白名单、未拉起/结束客户端进程。
+* 20:02 主进程 `LOGIN account 410001005814 status=0` 已证；§17/§18 的 `account is expired` **仅属 XtModel/58670 支线**，本分析不外推、也不回改既往章节。
+* live 四道前置仍缺 3 项（`/signal/mode=paper`、`trading_enabled=false`、`standalone_process` 缺 `passorder`）；全量客户端 `passorder` 注入需在 QMT GUI 切换策略形态（加密注册树，不可自动化）。
+* 本节只回答「能否对接 / 接哪个模块」，**没有改动任何代码、测试、门禁计数或配置文件**；文档保持 LF。
+
+## 21 官方 xtquant 分层取证（2026-11-10 20:55–21:05）：不是「不能用了」，是外部进程被 PID 鉴权拒
+
+> 用户问：「官方 xtquant 现在不能用了？是否有办法下单？继续深度分析下」。
+> 本轮**纯只读**：0 次下单 / 0 次撤单、未改任何配置或生产代码、未拉起或结束任何进程、未绕 PID 白名单、未伪造凭证。
+> 结构化证据：`output/qmt_xtquant_deep_verdict_20261110.json`（schema `qmt_work.xtquant_deep_verdict.v1`）。
+
+### 21.R0 结论先行（三问三答）
+
+1. **「官方 xtquant 不能用了」是过宽的判定。** `xttrader` 可导入、下单 API 面齐全、cp311 `.pyd` ABI 匹配、客户端 `XtQuantServer` 已启动且**确实收到了我们的连接**。坏的只有三处：guoxin 当前 `xtdata.py` 与 `.pyd` 版本错配、58610 服务未绑定、外部进程被 PID 鉴权拒绝。
+2. **本轮没有任何一条真实下单路径被证实可用。** 外部直连（路径 A）被券商/客户端授权面挡住，且按硬约束**不得绕过**；结构上唯一不受该限制的是客户端内置策略（路径 B/B′），但需 GUI 人工部署 + 四道 live 前置全绿，本轮未验证、未发单。
+3. **平台自己的诊断看不见这个根因。** `xtp/diagnostics.py` 匹配不到真实日志措辞 `illegal pid 21664`，会返回**空诊断**，再退回 `adapter.py` 的四步泛化文案 —— 其中「换 session」已被实证证伪。
+
+### 21.R1 分层实测矩阵（同一句「连不上」下藏五层）
+
+| 层 | guoxin_iquant_11 | gd_qmt | 判读 |
+|---|---|---|---|
+| `xtquant.xtdata` import | **FAIL** `cannot import name 'get_local_data_field_list'` | **OK** 167 exports | guoxin 是 `.py`/`.pyd` 版本错配，非 SDK 整体失效 |
+| `xtquant.xttrader` import | **OK** 8 exports | **OK** 9 exports | 交易包装层两边都好 |
+| `xtquant.datacenter` | MISSING | **OK** 25 exports（`cp311` pyd） | 只 gd_qmt 有 |
+| 下单 API 面 | `order_stock` / `order_stock_async` / `cancel_order_stock` / `cancel_order_stock_async` / `query_stock_orders` / `query_stock_asset` / `connect` / `start` / `stop` 全在 | 同左 | 方法没被删 |
+| 58610 `xtdata` 服务 | **NOT LISTENING** | **NOT LISTENING** | `isAutoBind=0`，实时 xtdata RPC 不可用 |
+| `connect()` | `rc=-1` | `rc=-1` | 同一个返回码，**三种不同现场**（见 21.R3） |
+
+* guoxin `xtdata.py` 29,807 B（2020 版）需要 `get_local_data_field_list` / `get_local_tick_data_batch` / `get_np_tool`；当前 `IPythonApiClient.cp311-win_amd64.pyd` 只暴露 `IPythonApiClient` / `register_create_nparray` / `rpc_init` ⇒ 缺 3 个名字。
+* `xtquant.swapped_20261108_1630/xtdata.py`（52,838 B）在包上下文里 exec **成功**（89 exports、`has_get_full_tick=true`、`data_dir=../userdata_mini/datadir`）；**未**替换客户端安装目录。
+* `gd_qmt` 本地历史数据探针报 `ImportError: Missing required dependencies ['numpy','pytz']` ⇒ 属探针 `sys.path` 问题（cp311 运行时实有 numpy/pandas/pytz，`_common.py` 亦预暖），**未复跑**，故本地历史数据能力记为「未证实」，不是「可用」。
+
+### 21.R2 决定性证据：服务端收到并拒绝了我们的连接
+
+`P:\stock\guoxin_iquant_11\userdata\log\XtClient_20261110.log`：
+
+```
+L21600 20:53:57,910  Allow the XtQuantServer to start.
+L21601 20:53:57,910  [orderservice] start quant server thread [P:\stock\guoxin_iquant_11\userdata]
+L21602 20:53:57,916  [orderservice] start quant server v2 thread [P:\stock\guoxin_iquant_11\userdata]
+L21804 20:55:57,449  [TC::COrderServiceQuantAdaptor::onConnected] quant session 900001, illegal pid 21664
+```
+
+* `900001` 正是本轮 `guoxin/userdata` 探针的 session；`down_queue_900001` 创建于 `20:55:57,416`，与日志相差 **33 ms**；PID `21664` 在探针退出后已消失。⇒ **共享内存 IPC 通、服务端在跑、请求被应用层拒绝**，不是传输层/ABI/依赖问题。
+* 当日 `illegal pid` **133 行**（11-08 另有 6 行），而 `pid N not allowed` 格式 **0 行**。08:27–08:50 的 `quant session 0..5, illegal pid 2796` 证明**换 6 个 session 全被同一个 PID 规则拒绝** ⇒ `adapter.py` 四步里的「③ 换 session」在本机无效。
+* **纠正一处易错归因**：`CIPCManager::init, not auth:mdl_auth_gt_ipc_pair` 今天确实出现（08:04 / 08:53 / 20:02 / 20:53），但每次都紧跟 `Allow the XtQuantServer to start.`；全日志 `The XtQuantServer is not allowed to start.` **0 命中**。⇒ 不能把前者当成「量化服务没被授权启动」，那会误导到「申请模块授权」方向。
+
+### 21.R3 同一个 `rc=-1` 的三种现场（必须分开报）
+
+| 目标 | 真因 | 证据 |
+|---|---|---|
+| `guoxin/userdata` | **应用层 PID 鉴权拒绝** | 见 21.R2：服务端在跑 + `onConnected illegal pid` + 会话队列被创建 |
+| `guoxin/userdata_mini` | **该数据目录没有交易侧 quant server** | 目录内**无** `up_queue_xtquant` / `up_queue_win_xtquant`；miniquote 日志只有行情连接；`down_queue_900002` 由探针自身创建 |
+| `gd_qmt/userdata_mini` | **探针时点根本没有客户端在跑** | `P:\stock` 下只有 guoxin 的 4 个进程；gd_qmt mini 日志最后写入 2026-09-29；`down_queue_win_910001` 由探针自身创建 |
+
+### 21.R4 授权串实证（登录时服务端下发，L97，49,529 字符）
+
+```
+mdl_auth_xtquant = 1                              (交易模块有授权)
+mdl_auth_xttrader_strict_connection_check = 0
+mdl_auth_xtdata_strict_connection_check   = 0
+mdl_auth_xtquant_strict_connection_check = 0
+mdl_auth_xtquant_no_pid_check            = 0     (0 = PID 校验开启)
+mdl_auth_gt_ipc_pair                     = 0
+mdl_auth_ipython = 1   mdl_auth_use_cpp_sdk = 1  mdl_auth_python_anti_plugin = 1
+mdl_auth_login_lite_mode                 = 0     (极简模式未开)
+mdl_auth_allow_system_strategy_trade     = 0     (券商语义未核实，见 21.R8)
+```
+
+⇒ 模块授权在、三个 `strict_*` 全 0，但 `no_pid_check=0` 使 PID 校验生效，与 `illegal pid` 现场自洽。**这些是实证值，不是对券商授权策略的解释**；`allow_system_strategy_trade=0` / `trader_use_api=0` 的含义尚未核实，故路径 B 不写「已绿」。另 L22055 `AccountModelAuthority:true`（但 `m_bStartupAutorun:false`、`automatic run fail`）是一个有利但**不充分**的信号。
+
+### 21.R5 我们自己的诊断会返回空（缺陷，本轮未修）
+
+`backend/xtquant_client/xtp/diagnostics.py`：
+
+```python
+# L389
+found = _scan_marker_lines(p, (_SERVER_BLOCKED_MARKER, "connect ret error", "not allowed"))
+# L114
+_PID_DENY_RE = re.compile(r"\bpid\b[^\n]{0,40}not allowed", re.IGNORECASE)
+```
+
+真实行是 `illegal pid 21664`：**三个 marker 一个都不含**（连 `not allowed` 都没有），所以根本进不了 `denies`；`_PID_DENY_RE` 又硬性要求字面量 `not allowed`。四个分支逐一落空：
+
+| 分支 | 判据 | 本现场 |
+|---|---|---|
+| `xtquant_server_blocked` | `The XtQuantServer is not allowed to start.` | 0 命中 |
+| `pid_not_allowed` | `pid ... not allowed` | 真实措辞是 `illegal pid` |
+| `strict_check` | `strict_xttrader == 1` | 实际 `=0` |
+| `xtquant_module_unauthorized` | `xtquant_auth == 0` | 实际 `=1` |
+
+⇒ `res["reason"]` 保持空 → L429-430 提前 return → **无 title / 无 evidence / 无 steps**；上层退回 `adapter.py` 的泛化四步（极简模式 / 路径 / session / 权限），用户会被推去做已证伪的无效重试，还会白烧 45 s 重试预算。这是本项目反复出现的「**诊断自己说谎**」家族，但**本轮为只读分析，未改生产代码**。
+
+### 21.R6 下单路径逐条裁决
+
+| 路径 | 状态 | 依据 |
+|---|---|---|
+| **A** 官方 `XtQuantTrader` 外部直连 | **BLOCKED（已证）** | PID 鉴权拒绝；需券商侧加白名单或下发 `no_pid_check=1`，平台不得改写、不得绕过 |
+| **B / B′** 内置策略 `passorder`（`agent_bigqmt`） | **设计上不受 PID 限制，但本轮未证实** | 客户端自启 `pythonw.exe`（pid=24232, ppid=17040）属合法宿主进程；但需 GUI 公式部署（加密注册树，不可自动化）+ 四道 live 前置全绿；后端三个端点本轮 **502**，`/signal/mode`、`trading_enabled`、`passorder injected` **均未复核** |
+| **C** DBF 文件单 | **BLOCKED（配置）** | 四个安装 `is_automonitor=0`；改配置需用户批准；且 2026-10-23 起文件 IO/外联被关，B′ 才是合规形态 |
+| **D** 58600 / 58670 原始 RPC | **死路** | `xtq_rpc.py` 明确记录实测无任何下单方法，且约定只读诊断 |
+| **E** 58620 `server_tradecom` | **未监听** | `isAutoBind=0`，无 qmt_work 可用 API，未验证任何下单语义 |
+| **F** 直调 `TradeClient/OrderService/XtQuantServer*.dll` | **不采纳** | §20 已证全是 MSVC C++ mangled 私有成员方法，无平坦 C ABI |
+
+### 21.R7 建议改动（分析结论，**未实施**）
+
+1. **P0**：扩 `_PID_DENY_RE` 与 marker 集，识别 `illegal pid <N>` 并归入 `pid_not_allowed`；补 3 条纯函数测试锁住新旧两种日志措辞。改用例需同步 `ci_reconcile.EXPECTED_TESTS` + 根 README **两处**硬编码计数。
+2. **P0**：`adapter.py` 四步文案在「已实证为 PID 鉴权拒绝」时跳过「③ 换 session」，避免无效重试。
+3. **P1**：诊断三态分列 `sdk_import_ok` / `xtdata_service_bound` / `trader_session_ok`（互不顶替），另增 `sdk_variant_compat` 与 `channel_58610_listening` 轴。
+4. **P1**：按安装目录 ABI 兼容性选 `xtdata` 变体；**不修改客户端安装目录**，除非用户明确批准。
+5. **P2**：路径 B/B′ 部署与 live 四前置复核，需 GUI 人工动作与明确授权。
+6. **禁止项**：为绑 58610 改 `isAutoBind` / `broker.ini` / `Config.xml`；伪造凭证；绕 PID 白名单；把纸面成功说成实盘成功。
+
+### 21.R8 约束如实性与「未查」清单
+
+* 未向真实柜台发单/撤单、未绕 PID 白名单、未改配置或生产代码、未拉起或结束任何进程；`connect()` 每条只调一次且 `finally stop()`。
+* 现场复核（21:03:16）：58600@17040、58341@23832、8086@17040 LISTEN；58610/58620/58670/64000 全 NOT LISTENING；`P:\stock` 下仅 guoxin 的 4 个进程，**gd_qmt 未运行**。
+* 后端 `127.0.0.1:21118` 的 `/api/v1/health`、`/api/v1/qmt-agent/status`、`/api/v1/signal/mode` 全部 **502 Bad Gateway** ⇒ 运行模式与 live 前置**本轮未复核**，不写「已检查且干净」，也不沿用 §18 的旧值冒充本轮实测。
+* 其余未查：`allow_system_strategy_trade=0` / `trader_use_api=0` 的券商语义；58610 绑定后实时行情能否取到；路径 B 的 `passorder` 注入与真实撤单；修好依赖注入后本地历史数据能否真取（探针未复跑）。
+* §19 仍留给缺失的 11:00 三次对照表，未占用；文档保持 **LF**。
+
+## 22 §21.R7 的 P0 实施与门禁验证（2026-11-10 21:35–21:50）
+
+> 与 §20 / §21 的**纯只读分析不同**，本节记录用户「继续改进」后真正改动了生产代码的一轮。
+> 范围严格限于 §21.R7 的两条 **P0** 与第 3 条中的 `channel_58610_listening` 轴；
+> 三态诊断 / `sdk_variant_compat` / 路径 B 部署 / live 四前置复核 **仍未实施**。
+
+### 22.R0 约束（与 21.R8 逐条对齐）
+
+* **0 单、0 撤、未连真券商**；未改 `broker.ini` / `Config.xml` / `isAutoBind` / `xtdata.ini` / 任何客户端安装目录；未拉起或结束任何 QMT 进程；未绕 PID 白名单、未伪造凭证。
+* 改动仅限 `qmt_work` 仓库内的 Python / 测试 / README / 门禁常量 / 文档。
+* 后端 21118 的 `/health`、`/qmt-agent/status`、`/signal/mode` 上一轮为 **502**，本轮**未复核** ⇒ 运行模式、`trading_enabled`、`passorder injected` 一律不写「已检查且干净」。
+* **修复对象是我们自己的诊断与文案，不是券商授权**：PID 鉴权拒绝依旧存在，本轮没有、也不允许绕过它。
+
+### 22.R1 P0① `xtp/diagnostics.py`：让诊断看得见 `illegal pid`
+
+| 项 | 改前 | 改后 |
+|---|---|---|
+| marker 集 | `(_SERVER_BLOCKED_MARKER, "connect ret error", "not allowed")` | 增 `ci_markers=("illegal pid",)` —— 新增**大小写不敏感**扫描通道（`_scan_marker_lines` / `_collect_marker_line` 的 pairs 改三元组，`lower()` 惰性、每行至多一次） |
+| PID 判据 | `\bpid\b[^\n]{0,40}not allowed` | 并列 `\billegal\s+pid\b\s*[:=]?\s*\d+`（**PID 允许 0**：cp36/Jupyter 实测上报 `illegal pid 0`） |
+| 证据去重 | 无 | `deny_lines = list(dict.fromkeys(denies + illegal_pid))`，一行同时命中两个 marker 只计一次 |
+| 输出 | `reason=""` → 无 title / evidence / steps | `reason="pid_not_allowed"` + `session_retry_useless=True` + `pid_deny_wording` |
+
+真实现场回放（`mdl_auth_xtquant=1`、三个 `strict_connection_check=0`、`no_pid_check=0`、日志含 `quant session 900001, illegal pid 21664`）已从「四分支全落空」变为 **`pid_not_allowed` 且证据/处置齐全**。
+
+**护栏（反退化）**：`The XtQuantServer is not allowed to start.` 仍**不匹配**新正则 ⇒ `xtquant_server_blocked` 不会被抢走；测试 `test_illegal_pid_is_case_insensitive_and_accepts_pid_zero` 锁住这一条。
+
+**顺带纠正一处「诊断自己说谎」**：`steps` 首句原硬编码 `strict_connection_check=1、xtquant_no_pid_check=0`，与本现场实证值（三个 strict 全 0）直接矛盾。改为「以日志实证值为准」的开关清单，并把 `pid_not_allowed` 的处置首句单列：换 session 无效、处置只有「券商加 PID 白名单」或「客户端内置 Python 策略通道」；同时明确**不**断言量化服务是否在跑（需另看日志证据）。
+
+### 22.R2 P0② `xtp/adapter.py`：报错按证据改写，不再推荐已证伪的动作
+
+| 位置 | 诊断为空（默认） | `reason == "pid_not_allowed"` |
+|---|---|---|
+| 四步 ③ | 「换另一个 session_id 再试（间隔 >3 秒）」 | 「**本项已由客户端日志证伪，请勿执行**；换 session 不改变被拒绝的 PID」 |
+| 四步前 | 无 | 加注「①/③/④ 均非该根因的处置方向，请以上方『客户端侧根因』为准」 |
+| 末尾建议 | 「以极简模式重新登录完整版大客户端」/「运行极速版」 | 改走「### 已证伪的方向」+「券商加 PID 白名单」或「大 QMT 桥接·文件」 |
+
+判据**只认** `_diag["reason"] == "pid_not_allowed"`；诊断抛错 / 返回空时原四步与模式建议**一字不改**（反向锚 `test_trade_failure_keeps_generic_faq_when_diagnosis_is_empty`，同时保住既有 `test_trade_failure_suggestion_follows_primary_mode` 的断言）。
+
+### 22.R3 P1 部分：58610 独立轴
+
+`scripts/qmt_tradehours_validate.py`：`_conclusion().axes` 与 `report["axes"]` 增 `channel_58610_listening`；`report["xtdata_channel"]` 单列归因 —— 未监听写「**服务未绑定**（客户端未启动/未绑 58610），不是行情接口不通」；在监听写「服务已绑定，但**本轮未验证其返回内容，不等于行情已证实**」。该轴**不参与** `env_ok` / `exit_code`（本脚本 0/1/2 只裁决 58600/58670 的行情证据），并有反向测试锁住「58610 单独在监听绝不把未证实的一轮判绿」。
+
+### 22.R4 测试与门禁
+
+* 新增 **7 条**纯函数/替身用例：诊断 3（真实国信措辞 / `illegal pid 0` 与大小写变体 / 新旧措辞并存不重复计数）、adapter 2（证据驱动跳过建议 / 诊断为空反向保留）、验证器 2（58610 独立轴 / 不得假绿）。文件数仍 **220**。
+* 定向复跑：`test_qmt_client_log_diagnosis` + `test_qmt_client_mode` + `test_qmt_tradehours_validate` → **73 passed**（cp311）。
+* **三处同源计数**：`ci_reconcile.EXPECTED_TESTS` 2952→**2959**（含注释溯源）+ 根 README 第 463 行（带反引号）与第 544 行（不带）同步改 2959；两处都含裸数字 `2952`，`replace_all` 命中 2 处，改完 `grep` 复核。
+* 全量门禁 `ci_reconcile.py`：**2959 / 76 / 46 RECONCILE OK**，六项检查全绿（后端用例 / 前端组件 / 注册页 / README 计数 / 前端 API 契约 / 行尾），退出码 0，耗时 385 s。
+* Gate 4（backend 非测试 `*.py` ≤ 50KB）：`diagnostics.py` 29,357 B、`adapter.py` 36,054 B，均留足余量。
+* 全量 `pytest backend/tests/`：**2949 passed / 10 skipped / 7 warnings，406.19 s，EXIT=0**（2959 总数与门禁常量一致），日志 `output/pytest_full_20261110_gate2.log`。
+* **真实日志端到端复验**（比合成用例更硬的证据）：直接对 `P:\stock\guoxin_iquant_11\userdata` 的最新 `XtClient_20261110.log` 调 `diagnose_trade_connect()`，返回 `reason=pid_not_allowed`、`pid_deny_wording="illegal pid"`、`session_retry_useless=True`、`server_blocked/module_unauthorized/strict_check` 全为 `None`，`title` 231 字符 / `steps` 1018 字符 / `evidence` 2 条真实日志行（`quant session 4/5, illegal pid 24620`）。**修复前同一入口对该现场返回空**（无 title/evidence/steps），adapter 只能回落通用四步 FAQ —— 这条复验是本轮「诊断不再说谎」的可证伪判据。
+* 生产代码改动后**重跑**全量门禁 `ci_reconcile.py`：仍 **2959 / 76 / 46 RECONCILE OK**，六项全绿，退出码 0，日志 `output/ci_reconcile_20261110_gate2.log`。
+
+### 22.R4b 首轮全量 pytest 的 2 处既有基线违规（非本轮引入）
+
+首轮全量 pytest 报 `2 failed, 2947 passed`，两条都落在 `HEAD` 已存在的代码上，与本轮 P0 改动无关。按「先查是不是自己造的」逐一核实后处理：
+
+1. **`test_audit_doc_links` 断链 1 处**：本文档 §「QMT 策略落盘」段落里裸写了一个**硬约束索引文件名**（带 `.md` 后缀）。该文件只存在于隐藏的记忆目录 `.workbuddy-ai/memory/` 下，而 `scripts/audit_doc_links.py` **跳过隐藏目录**，所以对产品文档而言它是断链（文件真实存在 ≠ 链接可解析）。改为「与本机内置 Python 实测 py3.6.8 一致」，不再构成路径引用。
+2. **`test_clock_unity` 3 处内联时刻生产者**（`HEAD` 即违规，非本轮新增）：
+
+   | 位置 | 原写法 | 改后 |
+   |---|---|---|
+   | `app/routes/qmt_client.py:494` | `_dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S.000")` | `local_now().strftime(...)` |
+   | `app/routes/qmt_client.py:551` | `_dt.datetime.now().strftime("%Y%m%d_%H%M%S_%f")` | `local_now().strftime(...)` |
+   | `connectors/qmt_file_order.py:386` | `datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.000")` | `local_now().strftime(...)` |
+
+   格式串**逐字不变**，`core.clock.local_now()` 本体就是 naive `datetime.now()`，属行为等价重构（`INSERTTIME` 与 DBF 文件名语义零变化，相关断言未改）。改动后定向 **185 passed**、全量 **2949 passed / EXIT=0**。
+
+**刻意不动**：`connectors/qmt_file_order.py` 的 `datetime.date.today()`（DBF 头部日期）未改 —— 该测试的正则是 `(?<![\w.])date\.today\(`，负向后顾排除 `.` 前缀，`datetime.date.today()` 本就不命中；没有证据表明它是缺陷，按「判断 ≠ 缺陷」不 churn。
+
+### 22.R5 仍未解决（不得与「已修」混写）
+
+1. **重试控制流未改**：PID 鉴权已证时仍会跑完 6 session × 2 目录、`_CONNECT_RETRY_BUDGET=45s`；本轮只改文案，提前收敛记为 P1（改动循环需配合 `diagnose_trade_connect` 的 64MB 日志扫描预算，避免把连接路径拖慢）。
+2. 诊断三态 `sdk_import_ok` / `xtdata_service_bound` / `trader_session_ok` 与 `sdk_variant_compat` 轴未做；国信 `xtdata.py`(29,807B/2020) 与 cp311 `.pyd` 的名字错配**未修**（不修改客户端安装目录，需用户明确批准）。
+3. 11:00 定时任务静默失败未定位，§19 继续留空。
+4. 路径 B/B′ 的 GUI 公式部署、live 四前置复核、真实撤单均未证实；58610 仍未监听，未改任何客户端配置。
+5. **当前被证实的真实下单路径仍是 0 条**。本轮修复的是「诊断说谎」，不得把纸面/诊断成功说成实盘可用。
+
+### 22.R6 产物
+
+结构化证据 `output/qmt_pid_diagnosis_fix_20261110.json`（schema `qmt_work.pid_diagnosis_fix.v1`，13 键 / 5 项改动 / 6 条未修，含 `verification.post_gate_baseline_repairs`）；门禁日志 `output/ci_reconcile_20261110_gate.log`、`output/ci_reconcile_20261110_gate2.log`（改后重跑）、`output/pytest_full_20261110_gate.log`（首轮 2 failed）、`output/pytest_full_20261110_gate2.log`（终态 2949 passed）。文档保持 **LF**。
+
+## 23 §22.R5 的 P1 落地：重试早停 + 三轴证据（2026-11-10）
+
+### 23.R0 约束与边界
+
+本轮只改**诊断路径的代码**，不做任何交易侧动作：
+
+* 0 单 0 撤；未启动/结束任何客户端进程；
+* 未改 `broker.ini` / `Config.xml` / `isAutoBind` / `xtdata.ini` 或任何客户端配置；
+* 未绕过券商 PID 鉴权、未伪造凭证、未改白名单；
+* **本轮改的是「诊断的速度与诚实度」，不是下单能力**。
+
+### 23.R1 P1-① 重试早停：为什么必须先解决「归属」
+
+现象：PID 鉴权已实证拒绝时，`start()` 仍会跑完 6 session × 2 目录（最多 12 次 `connect()`、最长 `_CONNECT_RETRY_BUDGET=45s`）。换 session 不改变被拒绝的 PID，所以这 45 秒是**纯空烧**，还额外占用 SDK 会话。
+
+直觉做法「连失败就看日志里有没有 `illegal pid`，有就停」是**错的**，会误杀：
+
+1. 客户端日志按天累积（当日实测 17MB+），历史里躺着上一天的 `illegal pid`；
+2. 同机可能有别的进程/别的连接也在被拒，拒绝行不一定是**本次**产生的。
+
+因此实现成三段式（`xtp/diagnostics.py`）：
+
+| 环节 | 做法 | 防的是什么 |
+|---|---|---|
+| 取游标 | `log_cursor(trade_dir)` = (最新日志路径, **当前文件长度**) | 把历史行排除在增量之外 |
+| 只扫增量 | `pid_denial_since(cur)` 从游标读到文件尾（上限 256KB），游标随之前进 | 不重复扫描、不漏新行 |
+| 归属本次 | 增量里的 `quant session <N>` 必须命中刚试过的 `sid` 才算 | 不把别人的拒绝算到自己头上 |
+
+两条补充规则：
+
+* 增量里**解析不出** `quant session` 的措辞（如 `pid 24620 not allowed`）**仍算拒绝** —— 无法归属 ≠ 不是拒绝；
+* 日志被轮转/截断（`size < offset`）时游标失效，从 0 重扫 —— 不能因此永久失明。
+
+`adapter.py` 的接线：`connect` 返回非 0 后立刻 `pid_denial_since(cur, sessions=[sid])`，命中即 `pid_denied_early_stop` 并 break 出双层循环。实测效果：**12 次 → 1 次**。
+
+★ 顺带修掉一处「说大话」：旧文案无论跑没跑完都写 `session_id 0~5 均 rc=-1`。早停时我们**没跑完**，那句就是把「没试」说成「试过」。现改为「已尝试 N 次后**提前终止**（原因…）」并附「提前终止的依据」日志行；未早停时才保留原句。
+
+### 23.R2 P1-② 三轴证据：互不顶替
+
+现场最容易犯的两类误读：
+
+* 把「交易 `connect` 返回 rc=-1」读成「行情接口不通」；
+* 把「58610 没监听」读成「xtquant 整套不能用」。
+
+三者是**独立通道**，故 `diagnose_tri_state()` 并列输出三轴：
+
+| 轴 | 取值 | 取证方式 |
+|---|---|---|
+| `sdk_import_ok` | `ok` / `failed` / `unchecked` | 调用方上报（本路径能走到 `connect` 说明导入已成功，故保持 `unchecked` 而非伪填 `ok`） |
+| `xtdata_service_bound` | `bound` / `unusable` / `unknown`（附 `cause`） | 对 `127.0.0.1:58610` 做一次 TCP connect（0.3s 超时，不发协议帧） |
+| `trader_session_ok` | `ok` / `failed` / `unchecked` | `connect()` 返回值 |
+
+★ **`refused` 与 `timeout` 必须分开**（`probe_xtdata_service` 的 `cause`）：
+
+* `ConnectionRefusedError` ⇒ 可断言「服务未监听」；
+* `TimeoutError` ⇒ 只能断言「端口不可用」，**不能**断定客户端未启动 —— 防火墙丢包、backlog 打满都表现成超时。本机 58610 实测就是 **timeout**，若按 refused 写文案就是新的「假告状」。
+
+★ 未检查恒为 `unchecked`：任一轴为 `ok`/`failed` 都不得推断其余两轴。
+
+### 23.R3 删掉一句无条件假话
+
+`_diagnose_one` 的 `steps` 末句原文：
+
+> 注意：本问题**只影响交易通道**，行情（xtdata）不受影响，行情功能可继续使用。
+
+而实测 58610 **不可达** ⇒ 这句是假话。现改为：
+
+> 注意：本条只裁决**交易通道**；行情是另一条独立通道（官方 xtdata 走 127.0.0.1:58610），本诊断**未**验证行情侧，不能据此断言行情可用或不可用。
+
+再由 `_attach_tri_state` 在实测 `unusable` 时补一句**有证据**的结论（`refused` 与 `timeout` 分开措辞）；`bound` 时**不补**、也不改写成「行情可用」。
+
+### 23.R4 测试与门禁
+
+* 新增 **12 条**用例（全部追加在既有文件内，`test_*.py` 仍 **220** 个）：
+  * `test_qmt_client_log_diagnosis` **+9**：游标=尝试前文件长度故历史行不进增量 / 别的 session 的拒绝行不得早停（且不限 session 时反向成立）/ 无 session 标记仍算拒绝 / 日志截断时重扫 / 无日志不抛异常 / refused 与 timeout 的措辞分叉 / 三轴互不填平 / 行情侧结论只在 `unusable` 时补写 / 旧假话必须消失但「只裁决交易通道」边界保留；
+  * `test_qmt_client_mode` **+3**：证到 PID 拒绝只试 1 次且不写「均失败」/ **无证据时必须照旧跑满 12 次组合**（反向锚，不得凭猜测早停）/ 三轴并列渲染。
+* 三处同源计数：`ci_reconcile.EXPECTED_TESTS` 2959→**2971**（含溯源注释）+ 根 README 第 463 行与第 544 行同步改 2971。
+* Gate 4（backend 非测试 `*.py` ≤ 50KB）：`diagnostics.py` 39,863 B、`adapter.py` 40,291 B、`env.py` 47,940 B，均有余量。
+* 真实日志端到端复验（比合成用例更硬）：对 `XtClient_20261110.log` 调 `diagnose_trade_connect()` ⇒ `reason=pid_not_allowed`、三轴 `unchecked / unusable(timeout) / failed(-1)`、`行情（xtdata）不受影响` 已不存在、末行补出真实的「行情侧实测」结论。
+
+### 23.R5 仍未解决（不得与「已修」混写）
+
+1. 券商侧 PID 鉴权拒绝**本身未变**（未改、未绕过）；交易仍连不上。
+2. 58610 仍未监听；`isAutoBind` 等客户端配置一个没动。
+3. 国信 `xtdata.py`（29,807B / 2020 版）与 cp311 `.pyd` 的名字错配**未修**（不动客户端安装目录，需用户批准）。
+4. `sdk_variant_compat` 轴未做：要证明「客户端安装里 `.py` 与 `.pyd` 是否配套」，需在不污染当前进程的前提下验证 `.pyd` 的名字面，方案未定。
+5. 11:00 定时任务静默失败未定位，§19 继续留空。
+6. 路径 B/B′ 的 GUI 公式部署、live 四前置复核、真实撤单均未证实。
+7. **当前被证实的真实下单路径仍是 0 条。**
+
+### 23.R6 产物
+
+结构化证据 `output/qmt_early_stop_tristate_20261110.json`（schema `qmt_work.early_stop_tristate.v1`，13 键 / 5 项改动 / 7 条未修）；门禁日志 `output/pytest_full_20261110_gate3.log`、`output/ci_reconcile_20261110_gate3.log`。文档保持 **LF**。
+
+## 24 交易通道 REA：客户端能下单，但程序化入口在哪（2026-11-11 08:00–08:10）
+
+### 24.R0 本轮问题与约束
+
+用户主张：`P:/stock/guoxin_iquant_11/bin.x64/XtItClient.exe` **现在可以下单**，要求用 REA 分析交易通道、判断能否实现程序化交易。
+
+先把两件事分开，否则一定混淆：
+
+* **GUI 手工下单** —— 人点鼠标，走客户端内部 C++（`OrderService` → `TradeClient` → 国信 GTS）。用户看到的就是这条；
+* **程序化下单** —— 外部进程发起，必须有对外入口。
+
+本轮只证第二条，且全程只读：0 单 0 撤、未改任何客户端配置、未启停进程、未绕 PID 鉴权。
+
+### 24.R1 现场：交易侧确实在线（这是用户主张的证据）
+
+| 观测 | 值 |
+|---|---|
+| 客户端 | `XtItClient.exe` PID **19340**，07:57:36 启动 |
+| 柜台连接 | `59.36.9.32:56000`（国信 GTS）**ESTABLISHED** |
+| 行情连接 | `119.147.202.41:55300`（迅投行情云 QuoterServer）ESTABLISHED |
+| 登录 | 07:58:13 `onTradeServerLoginSuccess`：**trade server login success** |
+| 就绪 | 07:58:25 `合约和交易用户数据准备完成，通知登录成功` |
+| 账号 | 07:58:27 `refreshAccounts ... account_num = 5` |
+
+⇒ **「现在可以下单」成立**，且是柜台级在线，不是缓存态。
+
+### 24.R2 下单的真实形态：一条 BSON-RPC 命令，不是独立接口
+
+`xtquant/qmttools/functions.py` 里 `passorder` 的实现只有一句：
+
+```python
+client = xtdata.get_client()
+client.callFormula(requestid, 'passorder', bson.BSON.encode(data))
+```
+
+调用链：`ContextInfo.passorder` → `_passorder_impl(..., this.request_id)` → `IPythonApiClient.callFormula`。
+
+**这条结论很重要**：既然下单和查询共用一条命令总线，那就可以用**只读的 `gettradedetail`** 去判定「总线通不通」，完全不必投单。本轮正是这么做的。
+
+### 24.R3 端口矩阵：唯一开着的门不承载交易
+
+| 端口 | 角色 | 监听 | 能否下单 |
+|---|---|---|---|
+| 58600 | `server_iPythonNotebook` / tag=`server_formula` | **是** | **否（已枚举证明）** |
+| 58610 | `server_xtquant`（官方 xtdata 目标） | 否 | 未知 |
+| 58620 | `server_tradecom`（`isAutoBind=0`） | 否 | 未证实 |
+| 58670 | XtModel 分支 / `config/xtdata.ini` 目标 | 否 | 未证实 |
+| 64000 | `server_miniqmtdata` | 否 | — |
+| 63100 | `brokerserverport`（`brokerserverrun=1`） | 否 | — |
+
+58600 是**唯一**活着的端口，所以必须把它证死。方法：先校准「不存在」的判据 —— 用一个显然不存在的名字探，得到 `ErrorID=200005 未找到处理函数`；再用同一判据扫全部候选。
+
+结果（`output/probe_58600_surface_result.json`）：
+
+* **存在 5 个**：`getDividFactors`、`getInstrumentDetail`、`getMarketData`、`getStockListInSector`、`getTradingDates`；
+* **不存在 19 个**：含 `callFormula`、`gettradedetail`、`get_trade_detail`、`subscribeQuote`、`getFullTick` 等。
+
+对照锚：同端口 `getInstrumentDetail` 返回 `status=0`（无 `ErrorID`），证明连接与帧格式没问题 —— 所以 200005 是**方法不存在**，不是我们探针写错。
+
+⇒ **58600 上没有任何下单入口**，这是「枚举证明」，不是「没找到」。
+
+### 24.R4 REA 静态：订单核心在哪、卡点在哪
+
+| 二进制 | 关键结构 | 含义 |
+|---|---|---|
+| `XtQuantServer_qmt.dll`（72 导出） | `handleOrderReq(_OrderStockReq)`、`handleCancelReq`、`handleQuery*`、`handleConnectReq`、`setFuncTable` | 下单处理器**确实存在**，但全是 `AEAA` 私有成员函数，无 C ABI，外部无法直接调 |
+| `OrderService.dll`（439 导出） | `COrderFuncService::orderStock`、`COrderService::loadFromConfig`、`COrderServiceQuantAdaptor::onConnected`、`COrderServiceDbfHelper`、`TradeCommandRcvd` | **订单核心**；PID 鉴权与 DBF 通道都在这里 |
+| `TradeHub.dll`（50 导出，已加载） | `RZRKTrade::TradeUtils::placeOrder/passOrder/placeCommand/cancleCommand/queryCommand`，BSON-RPC over asio | 交易网关插件，但方向是**出站** |
+| `ipcmessagequeue.dll`（97 导出） | `MessageQueueReader`、`MessageHandler::onStart` | xttrader 的共享内存通道 |
+
+`OrderService.dll` 里那句日志把「内部函数」暴露得很清楚：
+
+```text
+passorder by percent,accid={0},opType={1},orderType={2},code={3},price={4},percent={5},calcNum={6}
+TC::COrderFuncService::orderStock
+```
+
+即：所有门最终都汇进 `COrderFuncService::orderStock`。**门可以有很多，闸只有一个。**
+
+### 24.R5 PID 闸门：不只是硬拒绝，还有一套白名单
+
+```text
+TC::COrderServiceQuantAdaptor::onConnected(unsigned __int64, int)
+  e:/v2.0/src/business/orderservice/corderservicequantadaptor.cpp
+  允许：quant session {0}, pid {1} connected
+  拒绝：quant session {0}, illegal pid {1}
+```
+
+★ 本轮新增发现：`OrderService.dll` 里存在**设计好的授权通道**，不是只有硬拒绝：
+
+* 配置键 `m_bUseWhiteList` / `m_bUsePrevWhitelist` / `importwhitelist`；
+* `COrderService::queryFrameworkWhitelist(bool)` + `onQueryFrameworkWhiteList(bool, TTError, vector<...>)`；
+* `sigFrameworkWhitelistChanged` / `slotFrameworkWhitelistChanged`；
+* `se::DMAWhitelistInfo` / `TradeCommandRcvd::getDMAWhitelistInfo`；
+* `CIPWhitelistCollector::slot_readBrokerIniTimer` → `IP white list changed from broker ini!`。
+
+⇒ 合法路径是**把本平台进程纳入白名单**（券商/客户端侧动作），不是改进程名、注入、伪造 PID。后者属禁止行为，本轮未做，也不该做。
+
+### 24.R6 五条门的判定
+
+| 门 | 入口 | 状态 | 卡点 |
+|---|---|---|---|
+| A | `XtQuantTrader.order_stock`（共享内存） | 关 | `onConnected` 的 PID 鉴权（`illegal pid`） |
+| B | `callFormula('passorder')`（58610 总线） | 关 | 58610/58670 均未绑定；58600 已枚举证明无此方法 |
+| C | DBF 文件单（`export_data` + `dbf_order_thread`） | 关但**可开** | `is_automonitor=0`（两处配置）；线程未启动（日志 0 条） |
+| D | `TradeHub` / `orderplugin.conf`（`doorder=1`） | **不是入站门** | 方向是出站（`send order to tradeModule`），且未连 `127.0.0.1:5000` |
+| E | GUI 手工 | 开 | 人点鼠标，不可自动化审计 |
+
+`orderplugin.conf` 实际内容（`doorder=1`）：`serverip=127.0.0.1` / `serverport=5000` / `user=123` / `pass=123`。它读的是 `[Global]`，配 `[order] socket`，用 BSON-RPC 连出去 —— **是「把单发出去」的插件，不是「把单收进来」的入口**。这一点必须说清，否则很容易被误当成下单通道。
+
+### 24.R7 结论与仍未证实
+
+* **客户端现在能下单** —— 成立，GUI 路径，柜台在线、5 账号就绪。
+* **程序化下单当前不能** —— 三条候选门全关，卡点已精确到函数与配置项。
+* **最现实的一条** —— DBF 文件单：唯一入站、且不依赖 PID 白名单，但要开 `is_automonitor`，**须用户批准**。
+* **被证实的真实下单路径数量：0 条。**
+
+未证实（不得写成已解决）：58610 绑定后是否同样被 PID 闸拦；58620 tradecom 的协议与鉴权；框架白名单的写入流程；DBF 开启后券商端是否接受。
+
+证据：`output/qmt_trade_channel_rea_20261111.json`（schema `qmt_work.trade_channel_rea.v1`，14 键 / 5 门 / 6 结论），探针与静态分析产物见 `output/probe_trade_bus_58600_result.json`、`output/probe_58600_surface_result.json`、`output/rea_trade_channel_static.json`、`output/rea_orderservice_strings.json`、`output/rea_tradehub.json`。
+
+## 25 文件单通道落地：把「猜的列」换成「有出处的列」（2026-11-11 08:1x）
+
+### 25.R0 触发与约束
+
+用户要求「继续落地实现」。上一节（§24）的结论是：五条门里只有 DBF 文件单是
+**入站且不依赖 PID 白名单**的一条，但它卡在 `is_automonitor=0`。
+
+本轮**不动客户端配置**，只把 qmt_work 侧这条通道从「库代码」变成「有出处、
+有前置链、有安全不变量」的可交付能力：
+
+* 0 单 0 撤；未改 `Config.xml` / `broker.ini` / `is_automonitor` 或任何客户端配置；
+* 未启停进程；未往任何监控目录写入文件；
+* 保留 `stage` 端点「**故意不提供** `allow_monitor_dir`」的既有设计（§刻意不动）。
+
+### 25.R1 二进制实证：15 个列名与列序
+
+此前 `DBF_COLUMNS` 的依据只有一句「实测顺序」。本轮在 `OrderService.dll` 里
+找到**连续**的 15 个列名字符串，区间 `0x3100F8`–`0x3101C4`：
+
+```text
+ORDER_TYPE PRICE_TYPE MODE_PRICE STOCK_CODE VOLUME ACCOUNT_ID ACT_TYPE
+BROKERTYPE STRATEGY NOTE TRADEPARAM INSERTTIME BASKETPATH EXTRAPARAM NOTE1
+```
+
+紧随其后就是 `TC::CDbfStrategyRecord::setColumnParam` 与
+`[dbfStrategy [{0}] init [{1}] column Failure!` —— 说明这段数组就是列参数源。
+
+落地方式：新增 `CLIENT_DBF_COLUMNS_BINARY`（**另抄一份**，不直接复用
+`DBF_COLUMNS`）+ `CLIENT_DBF_COLUMNS_EVIDENCE`（记录二进制、偏移、相邻符号），
+并用测试断言两者相等。**另抄一份的理由是「同源即同错」** —— 若断言写成
+`DBF_COLUMNS == DBF_COLUMNS`，有人重排列表时测试永远绿。
+
+### 25.R2 顺带查出一处真实分歧：INSERTTIME 的格式
+
+`OrderService.dll` 的 `0x310418` 处格式串原始字节是：
+
+```text
+yyyy-MM-ddHH:mm:ss.zzz          ← dd 与 HH 之间没有空格（22 字符）
+```
+
+而本模块写的是带空格的 23 字符（`%Y-%m-%d %H:%M:%S.000`）。
+
+这不是小事：`COrderServiceDbfHelper::checkInsertTimeInvalid` 存在，说明客户端
+**确实会校验 INSERTTIME**。若它按上面那串解析，我们的时间戳会解析失败。
+
+但该串也可能只用于日志 —— 它紧邻 `read {0} rows from {1} lastModify {2}`。
+
+**处置：不改默认值，只把口径收成单点常量 `INSERT_TIME_FORMAT`，并把分歧
+写成 `INSERT_TIME_FORMAT_EVIDENCE`（`status="unresolved"`）+ 测试。**
+理由：没有 armed 状态实测就改，等于把「一种可能错」换成「另一种可能错」，
+还顺手丢掉当前行为的可追溯性。等真机验证后再定，届时改一个常量即可。
+
+### 25.R3 真机事实（只读读出，不是推断）
+
+| 安装 | 账号 | `monitor_path` | `is_automonitor` |
+|---|---|---|---|
+| 国信 | **15624979679** | `P:/stock/guoxin_iquant_11/export_data` | `0` |
+| gd_qmt | 22453951 | `P:/stock/gd_qmt/export_data` | `0` |
+
+两个监控目录**都是空的**（无模板 DBF），`batchOrder\orderFile.csv` 也不存在，
+`key_enable=False`。⇒ 没有模板可抄列宽，只能走 `DEFAULT_WIDTHS` 保守列宽；
+但**列名与列序现在有二进制出处**，这一点不再是猜的。
+
+### 25.R4 落地：readiness 前置链
+
+`armed` 只是总开关，不是全部前置。新增 `file_order_readiness(userdata, *,
+client_running=None)` 与只读路由 `GET /qmt/file-order/readiness`，把七步摊开：
+
+| 步骤 | 判据 | 是否阻断 |
+|---|---|---|
+| `config` | 能解析出 `<DbfMonitorSetting>` | 是 |
+| `armed` | `is_automonitor=1` 且 `monitor_path` 非空 | 是 |
+| `monitor_dir` | 目录存在 | 是 |
+| `writable` | `os.access(W_OK)` | 是 |
+| `template` | 监控目录里有无 DBF 可作列宽模板 | 否（只告警） |
+| `client` | 调用方上报的运行态 | 否 |
+| `insert_time_format` | 口径是否已裁决 | 否（只告警） |
+
+输出 `ready` / `blocking_step` / `blocking_detail`，并在 `honesty` 里写清
+「`ready=True` 只表示客户端侧前置齐全，不代表该通道已被证实能成交」。
+
+★ **最关键的一条安全设计：readiness 不做写探测。**
+验证「目录可写」最直觉的做法是往监控目录写个探针文件 —— 但 **armed 时写文件
+就等于下单**。所以只用 `os.access` 判只读权限，并在返回值里给
+`probe_write_skipped=True` 明示「没试过」，不把「没试过」说成「试过且没问题」。
+配套两条测试（函数级 + 路由级）断言调用后监控目录**仍然是空的**。
+
+### 25.R5 测试与门禁
+
+* 新增 **12 条**用例（都追加在既有文件内，`test_*.py` 仍 **220** 个）：
+  * `test_qmt_file_order` **+7**：列名/列序锁二进制出处；INSERTTIME 单点且分歧被记录；
+    `armed=0` 时目录齐备也不许 ready；`armed=1` 且目录存在才 ready（honesty 边界仍在）；
+    readiness 绝不往监控目录写探针；目录不存在卡在 `monitor_dir`；未上报客户端运行态只能写「未检查」。
+  * `test_qmt_client_routes` **+5**：readiness 路由的 `blocking_step` / `ready` /
+    client 未检查 / 路由层不写监控目录 / 空 roots 提示。
+* 三处同源计数：`ci_reconcile.EXPECTED_TESTS` 2971→**2983**（含溯源注释）+
+  根 README 第 463 行与第 544 行同步改 2983。
+* Gate 4（backend 非测试 `*.py` ≤ 50KB）：`qmt_file_order.py` 36,011 B、
+  `qmt_client.py` 31,660 B，均有余量。
+
+### 25.R6 仍未解决（不得与「已做」混写）
+
+1. `is_automonitor` **仍是 0** —— 文件单当前**依然不能产生委托**；开它需用户批准。
+2. INSERTTIME 格式分歧**未裁决**（需 armed 实测）。
+3. `DEFAULT_WIDTHS` 仍是保守列宽，无真机模板校准（监控目录为空）。
+4. 批量单 CSV 通道字段集仍未解，`implemented=False`。
+5. 券商侧 PID 鉴权拒绝未变；`callFormula('passorder')` 仍不可达。
+6. **被证实的真实下单路径仍为 0 条。**
+
+### 25.R7 产物
+
+代码：`backend/connectors/qmt_file_order.py`（列名出处 + INSERTTIME 单点 + readiness）、
+`backend/app/routes/qmt_client.py`（readiness 路由）、两个测试文件。
+证据：`output/qmt_file_order_landing_20261111.json`（schema `qmt_work.file_order_landing.v1`），
+门禁日志 `output/pytest_full_20261111_gate1.log`、`output/ci_reconcile_20261111_gate1.log`。
+
+## 26 `COrderFuncService::orderStock` 能不能直接调？（2026-11-11 08:2x）
+
+### 26.R0 结论
+
+**不能。** 不是「难」，是**符号层面就不成立**：它是私有成员函数、需要 `this`、
+参数类没有导出构造函数、返回 `void`、单例是进程内的。逐条给证据。
+
+### 26.R1 符号本身说明了什么
+
+`OrderService.dll` 里的精确导出名（未删减）：
+
+```text
+?orderStock@COrderFuncService@TC@@AEAAXAEBVCOrderFuncParam@2@AEBVCOrderStrategyParam@2@@Z
+```
+
+按 MSVC 修饰规则拆开：
+
+| 片段 | 含义 |
+|---|---|
+| `?orderStock@COrderFuncService@TC@@` | `TC::COrderFuncService::orderStock` |
+| `AEAA` | `A`=__ptr64，`E`=__thiscall，**`A`=private**，`A`=非静态 |
+| `X` | **返回 `void`** |
+| `AEBVCOrderFuncParam@2@` | `const COrderFuncParam &` |
+| `AEBVCOrderStrategyParam@2@@Z` | `const COrderStrategyParam &` |
+
+也就是说：**它连 public 都不是**（对比同库的 `?cancel@COrderFuncService@TC@@QEAAX...`
+是 `QEAA` = public）。「直接调用」= 直接调私有成员。
+
+### 26.R2 五条独立的阻断点
+
+1. **访问级**：`AEAA` = private。没有合法调用面。
+2. **需要 `this`**：`__thiscall`，必须先拿到 `COrderFuncService*`。
+3. **参数造不出来**：`COrderFuncParam` / `COrderStrategyParam` 的导出构造函数数量是 **0**
+   （该 DLL 里 68 个相关导出**全部是"接收者"**，没有 `??0COrderFuncParam@TC@@`）。
+   这两个类内含 Qt `QString`/`QMap` 与 `boost::shared_ptr`，布局随编译器/STL/boost
+   版本变化 ⇒ 手工按偏移拼一个假对象，几乎必然在第一次析构时崩。
+4. **单例是进程内的**：`utils::CManualSingletonT<COrderFuncService>::instance()`
+   确实是 **public static**（`SA`）且可导出：
+
+   ```text
+   ?instance@?$CManualSingletonT@VCOrderFuncService@TC@@@utils@@SAPEAVCOrderFuncService@TC@@XZ
+   ```
+
+   但它返回的是**当前进程**里已构造的那一份（`s_pInstance` 是 `boost::shared_ptr`）。
+   在**外部进程**里调它，只会拿到自己那份未初始化的空单例。
+5. **返回 `void`**：没有返回码。即使注入成功，也**无法从返回值判断下单成功与否** ——
+   成败只通过回调/信号送出，而那些回调需要先在宿主里注册。
+
+### 26.R3 顺带确认：官方 API 也是「发出去就不管」
+
+`functions.py::_passorder_impl` 同样是 `return`（None）：
+
+```python
+client.callFormula(requestid, 'passorder', bson.BSON.encode(data))
+return
+```
+
+所以「下单成功」在任何路径上**都不是返回值给的**，必须靠后续
+`gettradedetail` / 委托回报来确认。这一点对上层封装是硬要求：
+**不能把"函数没抛异常"当成"单已下成"。**
+
+### 26.R4 还存在的问题（分层列清，不混写）
+
+**A. 通道层（能不能发出去）**
+
+1. 58610 / 58670 未绑定 ⇒ `callFormula` 总线不可达；58600 已枚举证明无此方法。
+2. 券商侧 PID 鉴权拒绝（`illegal pid`）未变；合法路径是纳入框架白名单。
+3. `is_automonitor=0` ⇒ DBF 文件单不产生委托；开启需用户批准。
+4. `TradeHub` / `orderplugin.conf` 是**出站**插件，不是入站入口。
+
+**B. 正确性层（发出去会不会错）**
+
+5. `INSERTTIME` 格式分歧未裁决（二进制 `0x310418` 无空格 vs 我们带空格）。
+6. `DEFAULT_WIDTHS` 是保守列宽，无真机模板校准（两个监控目录都是空的）。
+7. 批量单 CSV 通道字段集未解，`implemented=False`。
+
+**C. 语义层（怎么知道成了）**
+
+8. 下单路径全部 `void` / `None` 返回 ⇒ 必须靠回报确认，不能靠"没报错"。
+9. `stage` → 交付仍是人工两步（刻意设计，未改）。
+
+**D. 结论**
+
+10. **被证实的真实下单路径：0 条。**
+11. 唯一有「合法授权通道」的是 PID 白名单（`FrameworkWhiteList` / `DMAWhitelistInfo`），
+    唯一「入站且不依赖白名单」的是 DBF（需 `is_automonitor=1`）。
+
+---
+
+## 27. PID 闸的授权位找到了：`mdl_auth_xtquant_no_pid_check = 0`
+
+### 27.R0 这一轮要回答的问题
+
+§24 的结论是「合法路径是把本平台进程**纳入框架白名单**」，但留下一个更基础的问题没答：
+
+> `FrameworkWhiteList` 这份白名单，**是谁写进去的**？本机文件，还是柜台下发？
+
+这个问题决定了后面所有动作的性质：
+
+* 如果是**本机文件** ⇒ 存在技术路径（写文件）；
+* 如果是**柜台下发** ⇒ 所谓"合法路径"是**业务申请**，任何本地改法都是伪造。
+
+本轮答案是后者，而且找到了那个开关的名字。
+
+### 27.R1 先分清三个 whitelist（混为一谈必然误判）
+
+三者名字都含 `whitelist`，含义完全不同。把它们当成一回事，会得出
+「本机已经有白名单了，为什么还被拒」这种自相矛盾的结论。
+
+| 名称 | 管什么 | 归谁管 | 本机证据 |
+| --- | --- | --- | --- |
+| `FrameworkWhiteList` | **进程/会话**授权：谁可以连上来下单 | 柜台 `ttservice` 下发 | 缓存文件 `whitelist.json`，当前**不存在** |
+| `DMAWhitelistInfo` | **账号**可交易的 DMA 标的（能不能买这只票） | 柜台 | `get_DMA_whitelist()` 返回 `canBuy` |
+| `blackwhitelist` / `stkwhitelist` | 交易界面里的**股票**黑白名单标记 | 用户本地 | `Config.xml` 第 57 行、第 212 行 |
+
+第二条的公开文档在 `config/fun.xml` 第 5606–5618 行：
+
+```text
+get_DMA_whitelist(accountID, strAccountType)
+  返回：list，元素为 PythonObj，dir() 可看属性，例如 obj.canBuy
+```
+
+注意它的语义是"这个账号能买什么"，**不是**"哪个进程能连上来"。
+拿它当授权依据是错的方向。
+
+### 27.R2 关键证据一：授权串里本来就有这个开关
+
+登录成功后，客户端收到柜台下发的授权串（`[auth log] [CProxyClient] receive module auth string`），
+共 **1332** 个键。其中与本议题直接相关的：
+
+| 键 | 值 | 含义 |
+| --- | --- | --- |
+| `mdl_auth_xtquant` | **1** | 量化（xtquant）通道本身是**授权开的** |
+| `mdl_auth_xtquant_no_pid_check` | **0** | 「免 PID 检查」这个授权位是**关的** ⇒ 保留 PID 校验 |
+| `mdl_auth_xtquant_strict_connection_check` | 0 | 严格连接检查关闭 |
+| `mdl_auth_broker_whitelist` | **0** | 白名单模块整体**未启用** ⇒ `whitelist.json` 从来不会生成 |
+| `mdl_auth_show_dma_stock_white_list` | 0 | DMA 白名单界面不显示 |
+| `mdl_auth_ipython` | 1 | iPython 可用 |
+| `mdl_auth_forbidden_python` | 0 | 未禁用 Python |
+
+这解释了两件此前只能"推测"的事：
+
+1. **为什么 `whitelist.json` 不存在** —— `mdl_auth_broker_whitelist=0`，白名单模块没启用，
+   根本不会去查询、也不会去落盘。
+2. **为什么 PID 校验一定会生效** —— `no_pid_check=0`，校验位是关的。
+
+而且这两个键**只出现在日志里，不出现在任何配置文件里**：
+
+```text
+grep -rl mdl_auth_xtquant_no_pid_check userdata/ config/
+  → 只命中 XtClient_2026*.log，无任何 ini / xml / json
+```
+
+**只由柜台在登录时下发，本地不持久化** —— 这一条直接排除了"改本地配置"这条路：
+本地压根没有这个开关可以改，能改的只有日志本身，那是伪造审计。
+
+### 27.R3 关键证据二：回调签名说明数据来自交易服务
+
+`FrameworkWhiteList` 在二进制里的形态是一个**请求-应答**，不是文件读取：
+
+```text
+OrderService.dll  @0x2FEEF0  TC::COrderService::onQueryFrameworkWhiteList
+OrderService.dll  @0x2FEF20  void __cdecl TC::COrderService::onQueryFrameworkWhiteList(
+                                 bool, const utils::TTError &,
+                                 const std::vector<boost::shared_ptr<ttservice::IData>, ...>)
+TradeClient.dll   @0x2B36B8  TC::CWhiteListManager::onQueryWhiteList
+TradeClient.dll   @0x2B36E0  void __cdecl TC::CWhiteListManager::onQueryWhiteList(
+                                 const utils::TTError &,
+                                 const std::vector<boost::shared_ptr<ttservice::IData>, ...>)
+```
+
+三个判据同时指向"柜台给"：
+
+* 参数里有 `utils::TTError` —— 这是**网络应答的错误码**，不是文件 IO 的错误码；
+* 数据容器是 `std::vector<boost::shared_ptr<ttservice::IData>>` —— `ttservice` 就是交易服务；
+* `OrderService.dll @0x415B89` 还有一个 `?AVStockQueryDMAWhitelistDateResp@ttservice@@`，
+  命名空间里明写 `Resp`（响应）。
+
+对应的本地文件只是**缓存**，写入者与读取者都在 `CWhiteListManager` 里：
+
+```text
+TradeClient.dll  @0x2B3438  e:/v2.0/src/business/tradeclient/cwhitelistmanager.cpp
+TradeClient.dll  @0x2B34C0  TC::CWhiteListManager::save(const std::string &)
+TradeClient.dll  @0x2B35B0  TC::CWhiteListManager::load(std::string &)
+TradeClient.dll  @0x2B3668  whitelist.json.lock
+TradeClient.dll  @0x2B3680  whitelist.json
+TradeClient.dll  @0x34D052  ?getRzrkDir@CWhiteListManager@TC@@IEAA?AVQString@@XZ
+TradeClient.dll  @0x34B69E  ?getLockPath@CWhiteListManager@TC@@IEAA?AVQString@@XZ
+```
+
+### 27.R4 关键证据三：本机根本没有这个缓存文件
+
+```text
+find P:/stock/guoxin_iquant_11 -iname "*whitelist*"
+  → 只有 pandas / tensorflow 自带的测试文件
+find P:/stock/gd_qmt        -iname "*whitelist*"
+  → 同上
+```
+
+两个安装都没有 `whitelist.json`。配合今日日志里 **0 条**
+`CWhiteListManager` / `QueryFrameworkWhiteList` 记录，可以确认：
+**框架白名单查询在本会话里根本没发生过。**
+
+### 27.R5 现场日志：拒绝是纯 PID 维度，不是 IP
+
+今日日志共 **9 次**拒绝，全部同形：
+
+```text
+5649: 2026-11-11 08:11:09,777 [TC::COrderServiceQuantAdaptor::onConnected]
+      quant session 0, illegal pid 4012
+```
+
+而 `illegal IP` 命中 **0 次**。这一条很重要：说明问题不在来源地址，
+**往 IP 白名单方向改是错的方向**。
+
+容易被误读的两条 IP 日志，其实与 PID 闸无关：
+
+```text
+2000: TC::CIPWhitelistCollector::slot_readBrokerIniTimer  IP white list changed from broker ini!
+2532: TC::CIPWhitelistCollector::updateIPWhitelist        IP white list changed from setting!
+```
+
+它们是客户端自己的**服务器地址收集器**（行情/交易服务器 IP 列表），
+而且 `config/broker.ini` 与 `config/broker.xml` 里 `ip` / `white` 关键字 **0 命中**。
+
+### 27.R6 PID 判定函数本身是 public，但仍然不是门
+
+`Formula.dll` 里有一个 `mdl_auth_xtquant_no_pid_check` 的消费点，
+紧邻 `TC::CStrategyTradeManager` 的非法检查族：
+
+```text
+Formula.dll  @0x1F0160  mdl_auth_xtquant_no_pid_check
+Formula.dll  @0x1EFF50  illegal IP: {0}
+Formula.dll  @0x1EFF60  TC::CStrategyTradeManager::onIllegalIPFind
+Formula.dll  @0x1F0040  TC::CStrategyTradeManager::onIllegalFileFind
+Formula.dll  @0x1F4E8B  sigFindIllegalIP
+Formula.dll  @0x1F4EA8  sigFindIllegalFile
+Formula.dll  @0x26D7C4  ?checkProcessID@CStrategyTradeManager@TC@@QEAA_N_J@Z
+```
+
+最后一个符号解码：
+
+```text
+QEAA  = public + __thiscall + __ptr64
+_N    = 返回 bool
+_J    = 参数 __int64（pid）
+```
+
+即 `bool CStrategyTradeManager::checkProcessID(__int64 pid)`，**是 public 导出的**。
+但它不是门：
+
+* 它只**回答**"这个 pid 是否被允许"，不**授予**权限；
+* 宿主是 `utils::CSingletonT<CStrategyTradeManager>` 单例，`s_pInstance` 是进程内的
+  `boost::shared_ptr` ⇒ 外部进程拿到的是自己那份未初始化的空实例，
+  与 §26 里 `COrderFuncService::instance()` 完全同一个坑。
+
+同理，查询入口也是私有：
+
+```text
+OrderService.dll @0x3D410A  ?queryFrameworkWhitelist@COrderService@TC@@AEAAX_N@Z
+AEAA = private + __thiscall + __ptr64；X = 返回 void
+OrderService.dll @0x3D5344  ?sigFrameworkWhitelistChanged@COrderService@TC@@QEAAXXZ   (public，但只是 Qt 信号)
+OrderService.dll @0x3D548D  ?slotFrameworkWhitelistChanged@COrderService@TC@@IEAAXXZ  (IEAA = protected)
+```
+
+### 27.R7 五条被关掉的路（逐条给理由，不含糊）
+
+| 做法 | 结论 | 理由 |
+| --- | --- | --- |
+| 本地写 `whitelist.json` 伪造 | **禁止且无效** | 伪造授权凭证；且它只是缓存，下次 `onQueryWhiteList` 回来就覆盖。`m_bUsePrevWhitelist` 只在**查询失败**时才回退旧值 |
+| 把 `no_pid_check` 改成 1 | **禁止** | 该值只在日志里、不在任何配置文件；本地无处可改，能改的只有日志 = 伪造审计 |
+| 外部调 `checkProcessID` | **不可行** | public 但宿主是进程内单例；且它只回答不授权 |
+| 外部调 `queryFrameworkWhitelist` | **不可行** | `AEAA` = private + `__thiscall`，需要 `this` |
+| 改 IP 白名单 | **方向错误** | 今日 `illegal IP` 命中 0 次，9 次拒绝全是 `illegal pid` |
+
+`OrderService.dll` 里还有一块容易被误当成"白名单文件格式"的键名表
+（`0x2FD408`–`0x2FD538`）：
+
+```text
+m_bAutoBalance / m_nBalanceTime / m_bStartupAutorun / m_bSwitchAutorun
+m_bUsePrevWhitelist / m_bAutoStoploss / m_bAutoStopBalance / m_bUseWhiteList
+m_nMaxLoss / m_bForbidUseWhiltelist / m_nAccountType
+m_nT0CreditOrderType / m_nT0CreditSellOrderType / m_strMd5
+whitelist / importwhitelist
+```
+
+这是**持久化设置对象的属性名表**（注意 `m_bForbidUseWhiltelist` 里 `Whiltelist` 是源码拼写错误），
+不是文件结构。按它去造文件同样属于伪造。
+
+### 27.R8 第四条通道：XtModel 配对 IPC —— 本地开关已开，照样被授权位拦住
+
+这是本轮最值得记的一条，因为它把「本地改配置有没有用」这个问题**直接实证掉了**，
+不需要我们去动任何配置。
+
+`Formula.dll` 里除了下单相关的东西，还藏着一个**独立的 IPC 服务器**：
+
+```text
+Formula.dll  @0x1E3258  CIPCManager::init, not auth:mdl_auth_gt_ipc_pair
+Formula.dll  @0x1E3290  void __cdecl TC::CIPCManager::init(void)
+Formula.dll  @0x1E32C0  e:\v2.0\src\indexmodel\formula\cipcmanager.cpp
+Formula.dll  @0x1E3330  ..\userdata_ipc
+Formula.dll  @0x1E3340  CIPCManager::startServer listen, path:{}, succ:{}
+Formula.dll  @0x1E33B0  CIPCManager::startClient connect, path:{}, sessionID:{}, connected:{}
+Formula.dll  @0x1E34C0  CIPCManager::handleRequest func:{}, boParam:{}
+Formula.dll  @0x1E34F0  bool __cdecl TC::CIPCManager::handleRequest(
+                            const std::string &func, const bson::BSONObj &boParam, ...)
+```
+
+`handleRequest(func, boParam)` 是 **BSON-RPC 式函数分发** —— 与 `callFormula` 总线同族形态。
+而且客户端实现**就在同一个 DLL 里**（XtModel SDK）：
+
+```text
+Formula.dll  @0x1F7370  xtipc::IPCClient::onMessage(const struct base::ipmq::PackageHeader &, void *)
+Formula.dll  @0x1F7898  xtipc::IPCClient::handleStartServer
+Formula.dll  @0x1F7A68  xtipc::IPCClient::handleConnect
+Formula.dll  @0x1F8098  xtipc::IPCClient::sendBsonRequest
+Formula.dll  @0x1F7C18  xtipc::IPCClient::sendHeartBeatReq
+Formula.dll  @0x1F74A0  e:\v2.0\src\miniqmt\minquote\xtmodelsdk\xtipcclient\ipcclient.cpp
+```
+
+也就是说：**通道两端都在本机**，服务端 `TC::CIPCManager`、客户端 `xtipc::IPCClient`，
+带心跳（`sendHeartBeatReq` / `handleHeartBeatResp`）与 BSON 请求（`sendBsonRequest`）。
+这是设计上给**外部进程配对**用的口子。
+
+**但它没起来，而且客户端自己说了原因：**
+
+```text
+2979: 2026-11-11 07:58:25,761  CIPCManager::init, not auth:mdl_auth_gt_ipc_pair
+```
+
+而本地开关**本来就是开的**：
+
+```text
+userdata/users/15624979679/Config.xml:47  <TradeSetting ... ipc_pair_flag="1" ...>
+userdata/users/15624979679/Config_backup.xml:47  同为 1
+```
+
+现场状态也对得上：`P:\stock\guoxin_iquant_11\userdata_ipc` **目录不存在** ——
+`init` 在授权检查处就 return 了，`startServer` 从未执行，所以没有任何端点可连。
+
+这条证据的价值在于它回答了「那我改本地配置行不行」：
+
+> **本地开关已经是 1 了，通道依然没开。** 决定权在柜台下发的
+> `mdl_auth_gt_ipc_pair=0` 手里，不在 `Config.xml` 手里。
+
+需要强调边界：这**不是**"绕过"的机会。它是官方设计的外部进程配对通道，只是当前账号未开通；
+在授权位为 0 时强行起 server 或伪造配对，属于绕过授权，禁止。
+
+### 27.R9 合法路径，以及开通后怎么验
+
+**合法路径**：由券商（国信）在柜台侧开通
+`mdl_auth_xtquant_no_pid_check`；或整体启用 `mdl_auth_broker_whitelist`
+并把本平台进程纳入框架白名单；或开通 `mdl_auth_gt_ipc_pair` 启用 XtModel 配对 IPC。
+**三条都是业务开通，不是本地配置。**
+
+开通后必须用**两处独立证据**验证，缺一不可：
+
+1. **授权位变了**：重登后看日志 auth string 里
+   `"mdl_auth_xtquant_no_pid_check" : 1`；
+2. **闸真的开了**：再连一次会话，日志出现
+   `quant session N, pid M connected`，而**不是** `illegal pid`。
+
+只看到第 1 条就说"能下单了"是错的 —— 授权位变了不等于这条链路上每个 gate 都放行。
+
+### 27.R10 本轮没证明的（不写成已证明）
+
+1. 没有实测"`no_pid_check=1` 后 `illegal pid` 必然消失"——需券商开通，当前不可达。
+2. 没有确认 `CWhiteListManager::getRzrkDir()` 具体落在哪个磁盘路径（未加载 DLL，静态不可判）。
+3. 没有确认 `m_bUsePrevWhitelist` / `m_bForbidUseWhiltelist` 的确切语义（仅从键名与相邻关系推断）。
+4. 没有确认 `mdl_auth_broker_whitelist=0` 是"未申请"还是"券商未部署该模块"。
+5. 没有确认 `mdl_auth_gt_ipc_pair=1` 后 `CIPCManager` 是否会正常 `startServer`（需券商开通）。
+6. 没有解出 `xtipc` 的 `PackageHeader` 结构与 `func` 名字集合——授权位为 0、端点不存在，无法观测。
+
+**被证实的真实下单路径仍然是 0 条。** 本轮的价值是把 §24 里"有白名单机制"
+这句含糊的话，收紧成了"机制存在、授权位为 0、数据由柜台下发、本地无合法写入点"。
+
+---
+
+## 28. 行情与交易分开推进：当前实测状态与改进方案
+
+本节记录 2026-11-11 08:32–08:40 的**只读**实测（未改配置、未投单、未启停客户端），
+并据此给出改进方案。结论先说：**行情和交易不能一起推**，它们的卡点性质完全不同。
+
+### 28.R0 现场状态
+
+| 进程 | 状态 |
+| --- | --- |
+| `XtItClient.exe` | 运行中，pid 19340 |
+| `miniquote.exe` | 运行中，pid 20076（对应 58341） |
+| `XtMiniQuote.exe` | 未运行 |
+| `XtModel.exe` | **未运行**（`xtmodel/data/log` 下无当日日志） |
+
+| 端口 | 结果 |
+| --- | --- |
+| 58600 | LISTEN/ACCEPT |
+| 58341 | LISTEN/ACCEPT（miniquote） |
+| 58610 / 58620 / 58670 / 64000 / 63100 | **TIMEOUT**（端口不可用，不能断定未启动） |
+
+### 28.R1 行情：不可用，而且根因不在我们这侧
+
+`config/xtdata.ini` 的 `[client_xtdata] address=127.0.0.1:58670` —— 官方行情入口是 **58670（XtModel）**，
+而 58670 现在不监听，因为 **XtModel.exe 没在跑**。
+
+有人会退而用 58600（`server_formula`）凑行情。**这条路不能当主通道**，两个实测证据：
+
+**证据一：方法面会漂移。** 同一组参数 `['600000.SH','1d',0,1]`：
+
+```text
+08:02  getMarketData -> status=0, ErrorID=None, result_keys=['result']   ⇒ 判为「存在」
+08:33  getMarketData -> status=1, ErrorID=200005 未找到处理函数          ⇒ 判为「不存在」
+```
+
+参数完全一致，所以**不是参数差异**，是 58600 的方法面本身在变
+（疑似 formula worker 生命周期相关，未证实）。
+
+> **⚠ 本结论已于 §29.R2 撤回。** 四次连续采样（10:04 / 10:24 / 10:26 / 11:04）
+> 中 `getMarketData_1d` 全部 `exists=True`；08:33 那次 `200005` 落在客户端重启窗口内，
+> 属**瞬时缺失**（`transient_missing`），不是漂移。正确表述是
+> 「58600 稳定存在 5 个只读行情方法，但**恒返回空数据**」。
+> 它不能当行情主通道的理由是「稳定但空」，不是「漂移」。
+
+**证据二：方法在，数据是空的。**
+
+```text
+getInstrumentDetail  -> {"result": {}}
+getTradingDates      -> {"result": [], "last": true}
+getDividFactors      -> {"result": []}
+getStockListInSector -> {"result": [], "last": true}
+```
+
+「方法存在」≠「有数据」，更 ≠「实时」。58600 上 `getFullTick` 直接返回
+`200005 未找到处理函数`，也没有订阅推送；而日线/分钟线同样带 `open/high/low`，
+所以**不能靠字段名推实时**。
+
+**XtModel 昨天确实起来过，但要看清它当时的状态**（`xtquantservice_20261110.log`）：
+
+```text
+IPythonApiServer::createServer listen, finished:true, ip:0.0.0.0, port:58670, autobind:1
+saveConfig cp, config:{"autobind":1,...,"port":58670,...}
+QuoteSubscriber::initQSDataImp key: 5_SH_L1, server: 115.231.218.73:55310
+setLoginStatus true > true
+```
+
+绑定成功、行情服务器连上、登录状态 true —— 但同一份日志里还有：
+
+```text
+MarketInst::_loadFromLocal ... tdl:[0, 0, 0] / sl:[0]
+MetaInfoManager::loadMetaInfo home dir not exists, path:.\data\datadir\metainfo
+WARN WholeMarketQuoter::waitForMarketSub wholequote not ready, login:false, stocklistCompleted:true
+```
+
+**本地基础数据是空的**（交易日 0、股票列表 0、metainfo 目录不存在），
+wholequote 也没 ready。所以：**启动 XtModel ≠ 行情可用**，中间还差一层基础数据。
+
+### 28.R2 交易：程序化不可用，GUI 手工可下单
+
+卡点已在 §24–§27 逐条证实，这里只做汇总：
+
+1. PID 闸授权位 `mdl_auth_xtquant_no_pid_check=0`，柜台下发，**本地无开关可改**；
+2. `mdl_auth_broker_whitelist=0`，`whitelist.json` 从未生成；
+3. `callFormula` 总线依赖 58610/58670 绑定，二者当前都不通；58600 无此方法（200005）；
+4. DBF 文件单需 `is_automonitor=1`，当前为 0。
+
+**被证实的真实下单路径：0 条。**
+
+### 28.R3 改进方案（分轨，每步都可验证）
+
+原则：**行情先自救，交易等授权**；不把猜测写成方案。
+
+**行情轨（不需要额外批准，均在已授权范围内）**
+
+| 步 | 动作 | 预期判据 | 注意 |
+| --- | --- | --- | --- |
+| M1 | 启动 `xtmodel/XtModel.exe` | 58670 监听 + `IPythonApiServer listen finished:true` | 启动≠可用，见 28.R1 |
+| M2 | 用 xtdata SDK 验证 `getFullTick` / `getMarketData` 是否**非空** | 必须有 tick 级证据，日线字段不算 | 空数据要如实报空 |
+| M3 | 若 M2 仍空：补基础数据（股票列表 / 交易日 / 历史K线） | `tdl`/`sl` 非空、metainfo 目录生成 | 可能耗时，先小样本 |
+| M4 | 行情源定稿：58670 为主，58600 仅兜底且标「不稳定」 | 适配层按源分级，空数据不当成功 | 不把 58600 当主通道 |
+
+**交易轨（每一步都需要用户或券商）**
+
+| 步 | 动作 | 预期判据 | 前置 |
+| --- | --- | --- | --- |
+| T1 | 开启 `is_automonitor=1`，走 DBF 文件单 | `file_order_readiness` 全绿 → 生成委托文件 | **需用户批准**；armed 后写文件即等于下单 |
+| T2 | 向国信申请柜台授权（`no_pid_check` / `broker_whitelist`） | 授权位变 1 **且** 日志出现 `pid connected` | 业务开通，需对接客户经理 |
+| T3 | 官方 xtquant 直连下单（`callFormula passorder`） | 58610/58670 绑定 + 授权位放行 | 前置全不满足，不可先行 |
+
+**明确不可行的（不要再试）**
+
+* 直接调 `COrderFuncService::orderStock`（private + 参数类 0 导出构造函数，见 §26）；
+* 调 `TradeHub::placeOrder`（出站转发插件，不是入站门）；
+* 伪造 `whitelist.json` / 改授权串 / 改日志（伪造凭证）；
+* 授权位为 0 时强行起 `CIPCManager`（绕过授权，见 §27.R8）。
+
+### 28.R4 定时巡检
+
+已建三条工作日巡检（09:30 / 10:00 / 11:00），每次跑同一份检查清单并**强制写证据**：
+行情端口与方法面、58600 是否仍漂移、交易授权位现值、DBF readiness、当日 `illegal pid` 计数。
+即使前置全红也必须落盘，不得静默退出。
+
+### 28.R5 本轮没证明的
+
+1. 启动 XtModel 后 58670 是否**稳定**绑定（今日未启动，只有昨日日志佐证）；
+2. 本地基础数据为空时 `getFullTick` 到底返回空还是报错；
+3. 58600 方法面漂移的确切触发条件；
+4. `is_automonitor=1` 后客户端是否真的读取并产生委托。
+
+## 29. 盘中第 3 次采样（2026-11-11 09:56–10:04）：授权位随重登不变、58600 方法面再漂移
+
+> 编号顺延自 §28（文中两个同名 §17 属历史遗留，本节不回改）。本轮是**纯只读**巡检：
+> 未改配置、未投单（含模拟/纸面）、未启停客户端、未伪造凭证或授权、未绕 PID 白名单。
+> 交易日判定：周三、11 月无中国法定节假日；当日两次交易服务登录成功、
+> `refreshAccounts account_num = 5`、GTS `59.36.9.32:56000` ESTABLISHED ⇒ 在场，
+> 09:56–10:04 处于 09:30–11:30 连续竞价，故做完整动态检查而非仅静态检查。
+
+### 29.R0 现场状态与「重登」这个新变量
+
+| 进程 | 08:32（§28） | 10:04（本节） | 说明 |
+| --- | --- | --- | --- |
+| `XtItClient.exe` | 运行中，pid 19340 | 运行中，pid **24240** | **08:53:21 重启过**（非本轮所为，本轮未启停任何进程） |
+| `miniquote.exe` | 运行中，pid 20076 | 运行中，pid **21764** | 58341 仍 LISTEN |
+| `XtMiniQuote.exe` | 未运行 | 未运行 | 未检查通过 ≠ 已检查通过，记为 unavailable |
+| `XtModel.exe` | 未运行 | 未运行 | `xtmodel/data/log` 无当日日志 |
+
+端口矩阵（`timeout` 与 `refused` 必须分清，本轮 0 个 refused）：
+
+| 端口 | 判定 | 措辞 |
+| --- | --- | --- |
+| 58600 | **ok / LISTEN** | TCP connect 成功，`netstat` 显示 pid 24240 |
+| 58610 / 58620 / 58670 / 63100 / 64000 | **unavailable / TimeoutError** | 「端口不可用」；**不能**写成「服务未监听/拒绝」——只有 `ConnectionRefusedError` 才支持该结论 |
+
+登录态：当日日志有 **8 行** `onTradeServerLoginSuccess`（07:58:13 / 08:53:40 两轮），
+GTS 一条 ESTABLISHED（本地 61974 → 59.36.9.32:56000，属 pid 24240），
+`refreshAccounts` 12 行且 `account_num` 恒为 5 ⇒ 柜台级在线，**GUI 手工下单不受程序化结论约束**。
+
+### 29.R1 行情：仍不可用，且拿到两个新事实
+
+**新事实 ①：58600 方法面第三次漂移，且这次「方法全在、数据全空」。**
+
+| 采样点 | `getMarketData` 同一组参数 `['600000.SH','1d',0,1]` | 判读 |
+| --- | --- | --- |
+| 08:02 | `status=0, ErrorID=None` | 存在 |
+| 08:33 | `status=1, ErrorID=200005 未找到处理函数` | 不存在 |
+| **10:04** | `status=0, ErrorID=None`（五个只读方法**全部**存在） | 又存在 |
+
+同一组参数、同一端口、同一客户端 ⇒ 漂移是方法面自身在变，不是参数差异。
+本轮把「存在性 / 数据性 / 时效性」三轴拆开记：五个方法 `method_available=ok`，
+但 `getInstrumentDetail` / `getMarketData(1d)` / `getMarketData(1m)` /
+`getTradingDates` / `getDividFactors` / `getStockListInSector` 的
+`data_available` **全部 unavailable**（结果体 `classify_payload.kind=empty, size=0`）。
+⇒ 「方法在」既推不出「有数据」，更推不出「实时」。
+
+**新事实 ②：昨日的上游拒绝今日不存在，但阻塞换成了「进程没起」。**
+`XtClient_20261111.log` 中 `account is expired` **0 次**（2026-11-10 曾 33 次）；
+然而 `XtModel.exe` 仍未运行、58670 仍 TIMEOUT。这两种阻塞**互不顶替**：
+不能因为「上游没拒了」就说行情可用，也不能把昨日的上游拒绝当成今日成因。
+
+证据分级（本轮实测，非推断）：
+
+* `realtime_eligible = false` —— 58670（官方 xtdata 入口，见 `config/xtdata.ini` 的
+  `[client_xtdata] address=127.0.0.1:58670`）与 58610 均不可用；58600 无 `getFullTick`
+  （`ErrorID=200005`），也没有订阅推送。
+* `tick_proven = false` —— 本轮用**不存在的方法名**独立复验了 `200005 = 未找到处理函数`，
+  再用同一判据确认 `getFullTick` 不存在；没有任何结果体可判为 tick。
+* `period` 显式参与分级：日线 `1d` / 分钟线 `1m` 同样可能带 `open/high/low`，
+  「有行情字段」≠「真实时 tick」。`getFullTick` 的真 tick 形状是
+  `{代码: {lastPrice, …}}`，**外层没有 `stockCode` 键**，只看 `_CODE_KEYS` 会漏判真 tick；
+  分级走 `classify_payload` 的 `code_shaped_keys` 分支兜住该形状（判据可复核）。
+* 补充：昨日 `xtquantservice_20261110.log` 即使 `listen finished:true` 也有
+  `tdl:[0,0,0] / sl:[0]`、`metainfo home dir not exists`、`wholequote login:false`
+  ⇒ **启动 XtModel ≠ 行情可用**，中间还差一层本地基础数据。
+
+### 29.R2 交易：程序化仍不可用；「重启客户端能不能刷出授权」被证伪
+
+**只读总线探测**：只对 58600 发 `callFormula(requestid,'gettradedetail',BSON)`，
+**全程未发 `passorder` 或任何下单/撤单命令**（其余五个端口不可连接 ⇒ `skipped`，未发 RPC）。
+应答 `ErrorID=200005 未找到处理函数`，与同轮校准锚一致 ⇒ 58600 上**没有** `callFormula`
+方法，交易总线不可达；这与 §24 的枚举结论一致（58600 只有 5 个只读行情方法）。
+
+**授权位随重登不变（本节最硬的新证据）**：当日有**两次** `receive module auth string`
+（L2025 @07:58:13、L8672 @08:53:33），四个键**逐字相同**：
+
+| 键 | 07:58 会话 | 08:53 会话 | 含义 |
+| --- | --- | --- | --- |
+| `mdl_auth_xtquant` | 1 | 1 | 模块开了 |
+| `mdl_auth_xtquant_no_pid_check` | **0** | **0** | PID 闸仍生效 |
+| `mdl_auth_broker_whitelist` | **0** | **0** | 框架白名单未启用 |
+| `mdl_auth_gt_ipc_pair` | **0** | **0** | 配对 IPC 未授权 |
+
+⇒ 授权串是**柜台每次登录重新下发**的，客户端重启不会把它刷成 1；
+「重启试试」不是可行路径，本地也没有该开关可改（键只在日志里，不在任何 ini/xml/json）。
+
+**PID 闸与其它通道**：当日 `quant session 0, illegal pid 4012` **9 次**、
+`quant session N, pid M connected` **0 次**、`illegal IP` **0 次** ⇒ 拒绝是纯 PID 维度。
+★ 归属声明：这 9 次发生在 08:11–08:16，是早前探针留下的**当日累计**，
+本轮 09:56–10:04 未发起任何 PID 闸连接，不能把它们算成本轮结果，更不能把「0 次 connected」
+读成「本轮被放行过 0 次」。`CIPCManager::init, not auth:mdl_auth_gt_ipc_pair`
+在**两次登录各出现一次**（L2979、L9638），`userdata_ipc` 目录仍不存在；
+而本地 `ipc_pair_flag="1"` 本来就是开的 ⇒ 改本地配置无效再次被实证。
+
+**`is_automonitor` 与 DBF**：四份配置（`Config.xml` L43、`Config_backup.xml` L43、
+`xtuserconfig.xml` L2073、`xtMiniConfig.xml` L182）**全部 `is_automonitor="0"`**，
+CSV 监控同样为 0。readiness 七步逐项结论：
+
+| 步 | 国信 15624979679 | gd_qmt 22453951 | blocking |
+| --- | --- | --- | --- |
+| `config` | ok | ok | 是 |
+| `armed` | **false** | **false** | 是 ⇒ **`blocking_step=armed`** |
+| `monitor_dir` | ok | ok | 是 |
+| `writable` | ok（仅 `os.access`） | ok | 是 |
+| `template` | ok（0 个 DBF ⇒ 用保守列宽） | ok | 否 |
+| `client` | ok（国信 pid 24240 在跑） | **unavailable**（该安装无 `XtItClient.exe`） | 否 |
+| `insert_time_format` | ok（口径未裁决） | ok | 否 |
+
+★ 客户端运行态按**安装**分别上报（`Get-CimInstance Win32_Process` 证实只有
+`P:/stock/guoxin_iquant_11/bin.x64/` 下有进程）；不能因为国信在跑就把 gd_qmt 的
+`client` 也写成「客户端在运行」。该步非 blocking，两个安装的 `blocking_step` 仍是 `armed`。
+
+`columns_verified=True`（15 列与 `OrderService.dll` 0x3100F8–0x3101C4 逐字同序）；
+INSERTTIME 分歧仍 `unresolved`（二进制 0x310418 为 `yyyy-MM-ddHH:mm:ss.zzz`，
+无空格 22 字符），**未 armed 实测前不改默认值**。两个监控目录均空、
+`template_dbf_count=0`，`probe_write_skipped=True` ⇒ 本轮**未往监控目录写任何文件**
+（armed 时写文件即等于下单）。
+**结论：`is_automonitor=0` ⇒ 无法产生委托**，不得表述成「通道已通」或「已就绪」。
+
+### 29.R3 三问的直接回答
+
+| 问题 | 回答 | 卡在哪一步 |
+| --- | --- | --- |
+| 行情现在能不能用？ | **不能**（unavailable） | 官方入口 58670 = `XtModel.exe` 未运行；58600 只有漂移的空壳方法，无 tick |
+| 交易现在能不能用？ | **不能**（unavailable，程序化） | PID 闸授权位 0 + 交易总线端口全不可用 + `is_automonitor=0`；GUI 手工通道另计 |
+| 能不能直接下单？ | **不能** | 被证实的真实下单路径仍 **0 条**；前置 11 项未全绿，且用户未当次批准 |
+
+本轮 `real_order_attempt = skipped`：未投生产单、也未做纸面/模拟单，
+因此不存在任何可误述为「真实成交」的结果。
+
+### 29.R4 改进方案（只写有证据支撑的下一步）
+
+| 步 | 状态 | 动作 | 判据与证据 | 前置 |
+| --- | --- | --- | --- | --- |
+| M1 | skipped | 由用户批准并**手动**启动 `xtmodel/XtModel.exe` | 58670 LISTEN + `IPythonApiServer listen finished:true`；依据是 `config/xtdata.ini` 指向它、本轮 `account is expired=0` | 本轮按约束未启停任何进程；**启动≠可用**，见 29.R1 |
+| M2 | skipped | 58670 起来后只读验 `getFullTick` 是否非空 | `quote_proven=True` 且 `period=tick`；日线字段不算 | 依据本轮 `tick_proven=false` |
+| T1 | skipped | 改 `is_automonitor=1` 走 DBF 文件单 | `file_order_readiness` 全绿；armed 后写文件即等于下单，须小样本 + 撤单预案 | **需用户当次明确批准**；依据本轮 `armed=false` |
+| T2 | skipped | 向国信柜台申请开通 `no_pid_check` / `broker_whitelist` | **两处独立证据**：授权位变 1 **且**日志出现 `pid M connected`；只看前者不算 | 依据两次登录授权位恒 0、9 次 `illegal pid` |
+
+**明确不可行（不要再试）**：58600 作为下单入口（`200005` 已校准）；
+`TradeHub::placeOrder`（出站转发插件，非入站门）；改授权串 / 伪造 `whitelist.json` /
+改日志（伪造凭证）；授权位为 0 时强起 `CIPCManager` 或伪造 IPC 配对（绕过授权）；
+「重启客户端刷授权」（29.R2 两次登录证伪）。
+
+### 29.R5 本轮没证明的
+
+1. 启动 XtModel 后 58670 是否稳定绑定（本轮未启动，仅昨日日志佐证）；
+2. 本地基础数据为空时 `getFullTick` 返回空还是报错；
+3. 58600 方法面漂移的确切触发条件（现已三个采样点：存在 → 不存在 → 存在）；
+4. `is_automonitor=1` 后客户端是否真的读取 DBF 并产生委托；
+5. 58610 绑定后是否同样被 PID 闸拦；券商柜台侧开通授权位的流程与时效；
+6. INSERTTIME 二进制格式串究竟用于日志还是校验（未 armed 实测，保持 `unresolved`）。
+
+证据文件：`output/qmt_iface_check_20261111_1004.json`（schema `qmt_work.iface_check.v1`，
+含 `failed_preconditions` 11 项）、`output/probe_iface_check_20261111.py`、
+客户端 `userdata/log/XtClient_20261111.log`。
+
+## 30. 10:20–10:26 盘中复检：58341 证伪、同轮 A/B 漂移轴、接入方案收敛
+
+本节是 10:04 之后的又一份 `qmt_work.iface_check.v1` 证据（采样 10:26:53）。
+交易日盘中**只读**：未改任何配置、未投单（含纸面/模拟）、未启停任何客户端进程、
+未伪造凭证或授权、未绕 PID 白名单。本节不回改 §28 / §29。
+
+### 30.R0 现场与探针自身的诚实性修正
+
+| 轴 | 本轮实测 | 状态 |
+| --- | --- | --- |
+| `XtItClient.exe` | pid 24240（国信安装，08:53:21 启动） | ok |
+| `miniquote.exe` | pid 21764（国信安装，08:53:33 启动） | ok |
+| `XtMiniQuote.exe` / `XtModel.exe` | 未运行，本轮按约束未拉起 | unavailable |
+| GTS | `59.36.9.32:56000` ESTABLISHED（pid 24240） | ok |
+| 交易登录 | `onTradeServerLoginSuccess` 8 条（L2456 / L9613） | ok |
+| 账户 | `refreshAccounts account_num = 5`（L9750） | ok |
+| 监听端口 | 58600(24240) / 58341(21764) / 8086(24240) | ok |
+| 行情云 | 3 条 ESTABLISHED 到 `:55300`（其中 2 条属 pid 21764） | 只证连接，不证数据 |
+
+★ 安装归属由 `Get-CimInstance Win32_Process` 当次采集：只有国信安装有客户端，
+gd_qmt 没有 `XtItClient.exe` ⇒ DBF readiness 的 `client` 步对它记 `unavailable`，
+不把「未运行」写成「已检查通过」。
+
+**v1 探针（10:04）里写死的现场值，v2 全部改成实算**：pid 与安装归属、日志路径与行号、
+授权位、PID 闸次数、配置现值、端口 Timeout/Refused 措辞、`failed_preconditions` 文案、
+证据分级 basis、三问结论。v2 另加四根轴：58341 方法面、58600 同轮 A/B、
+日志增量归属游标、与 10:04 基线逐项差分；异常路径也强制写证据文件
+（记 `failed_preconditions`，不静默退出）。
+
+**基线差分（18 根轴）**：与 `output/qmt_iface_check_20261111_1004.json` 相比，
+17 根不变，唯一变化是客户端日志行数 12497 → 13349（心跳类增长）。
+⇒ 本轮的新知识来自**新增检查轴**，不是现场状态变好或变坏；
+不能把「没变化」写成「重新验证通过」。
+
+### 30.R1 新事实①：miniquote 58341 是第三个 BSON-RPC 端点，但不是行情旁路
+
+58341 之前只被记过「LISTEN」，从未做方法面扫描。本轮用**与 58600 完全相同的**
+只读方法名 + 不存在方法名校准锚，在同一采样窗口直接对照：
+
+| 方法族 | 58600 / A 轮 | 58341 |
+| --- | --- | --- |
+| 6 个行情只读方法（`getStockListInSector` / `getInstrumentDetail` / `getMarketData(1d,1m)` / `getTradingDates` / `getDividFactors`） | 6/6 `method_exists=true`，结果体**全空** | **全部 `ErrorID=200005`** |
+| 5 个 xtquant 基座方法（`getTag` / `checkVersion` / `getDataDir` / `getAppBinDir` / `getSectorList`） | 全部 `200005` | 全部 `200005` |
+| `getFullTick` | `200005` | `200005` |
+| 校准锚 `__qmtwork_calibration_unknown__` | `200005 未找到处理函数` | `200005 未找到处理函数` |
+| `callFormula('gettradedetail')` | `200005` | `200005` |
+
+58341 能正确回 `200005` ⇒ 它**讲同一套帧协议**（不是连不通、也不是协议错），
+但本轮枚举的 13 个只读名字/校准锚全部「方法不存在」⇒ **不能当行情旁路**。
+★ 边界：这只证明「枚举过的这些名字不存在」，**不能**推断「该端口没有任何方法」；
+也没有用官方 xtdata 客户端的握手方式试过 ⇒ 计入 30.R7 的未证实项。
+
+另一个额外轴：8086 发 BSON-RPC 帧后 `EOFError: 连接被对端关闭` ⇒
+它是 CEF/HTTP 本地端口，不是 xtquant RPC 入口；`EOF` 与「方法不存在」是两回事，
+不得混谈。客户端与行情云有 3 条 ESTABLISHED 也**不能**推出「本地 RPC 能取到 tick」。
+
+### 30.R2 新事实②：58600 同轮 A/B 一致，且它连 xtquant 基座方法都没有
+
+* 同一轮内间隔 2 秒做 A/B 两次采样，13 个名字的存在性 `changed_count=0`
+  ⇒ **本轮内没有漂移**；跨轮仍是四个采样点：08:02 存在 → 08:33 `200005`
+  → 10:04 存在 → 10:26 存在。漂移的确切触发条件仍未证实。
+* 新增证据：58600 上 `getTag` / `checkVersion` / `getDataDir` /
+  `getAppBinDir` / `getSectorList` 也全是 `200005` ⇒ 它不是 xtquant 官方服务，
+  只是 `server_formula` 暴露的 6 个行情方法壳。
+* 6 个存在的方法 `data_available` 全部 `unavailable`
+  （`classify_payload.kind=empty, size=0`）⇒ **方法存在 ≠ 有数据 ≠ 实时**。
+* `period` 显式参与分级：`1d` / `1m` 同样可能带 `open/high/low`，
+  「有行情字段」绝不是「真实时 tick」；`getFullTick` 的真 tick 形状
+  `{代码: {lastPrice, …}}` 外层没有 `stockCode` 键，分级靠 `code_shaped_keys` 兜住。
+
+### 30.R3 行情：三根轴分开，且修掉 v1 的一处分类错误
+
+端口矩阵 6 个：58600 `ok`；58610 / 58620 / 58670 / 63100 / 64000 全 **TimeoutError**、
+`ConnectionRefusedError` 0 个 ⇒ 措辞只能是「端口不可用」，
+绝不能写成「服务未监听 / 拒绝」。
+
+★ **判据修正**：v1 把 `realtime_eligible` 建立在「58670/58610 上 `gettradedetail`
+有应答」上——那是**交易总线**，不能顶替行情侧证据。v2 改成
+「官方实时端口在听 **且** 其上行情侧只读方法（`getTag` / `getInstrumentDetail` /
+`getMarketData` / `getFullTick`）有应答」。两个端口都 TIMEOUT ⇒ 该轴是
+`skipped`（未发 RPC），不是「已检查通过」。`realtime_eligible=false`、
+`tick_proven=false`（没有任何 `period=tick` 且 `quote_proven=true` 的结果体）。
+
+上游侧：当日 `account is expired = 0`（11-10 曾 33 次），行情云有 3 条连接；
+但 `XtModel.exe` 未运行、当日 xtmodel 日志不存在、58670 仍 TIMEOUT。
+**「上游没拒」与「本地没起」是两种阻塞，互不顶替**；2026-11-10 日志即使
+`listen finished:true` 也有 `tdl:[0,0,0] / sl:[0]`、`wholequote login:false`
+⇒ 启动 XtModel ≠ 行情可用。
+
+### 30.R4 交易：程序化仍不可用，PID 拒绝行的归属被单独裁定
+
+* **只读总线**：58600 与 58341 的 `callFormula('gettradedetail')` 及不存在命令名
+  均 `200005`；8086 `EOF`；58610 / 58620 / 64000 / 63100 端口不可用 ⇒ `skipped`，
+  未发 RPC。全程**未发 `passorder`**、未投任何单。
+* **授权位**：auth string 两次（L2025 @07:58:13、L8672 @08:53:33）五键逐字相同：
+  `mdl_auth_xtquant=1`、`no_pid_check=0`、`broker_whitelist=0`、
+  `gt_ipc_pair=0`、`strict_connection_check=0` ⇒ 「重启刷授权」再次证伪，
+  且该键只在柜台下发的日志里，本地没有可改的开关。
+* **PID 闸**：当日 `illegal pid 4012` **9 次**（08:11:09–08:16:38）、
+  `pid M connected` **0 次**、`illegal IP` **0 次** ⇒ 拒绝是纯 PID 维度。
+  ★ 归属：本轮日志字节游标 2,035,604 → 2,048,151（增量 62 行）里
+  `illegal_pid_in_delta=0`、`pid_connected_in_delta=0` ⇒ 本轮只读 RPC
+  **没有触发新的 PID 鉴权**；那 9 次是早前探针的当日累计，不能算成本轮结果。
+* **配对 IPC**：`CIPCManager::init, not auth:mdl_auth_gt_ipc_pair` 两次登录各一次
+  （L2979 / L9638），`userdata_ipc` 目录不存在；本地 `ipc_pair_flag="1"` 开着也无效。
+* **DBF 文件单**：4 份配置共 8 处 `is_automonitor="0"`（每份 Dbf + Csv 各一处），
+  `ipc_pair_flag="1"` 两处，`Config.xml:L43` 现值 0。readiness 七步：
+
+  | 步 | 国信 15624979679 | gd_qmt 22453951 | blocking |
+  | --- | --- | --- | --- |
+  | `config` | ok | ok | 是 |
+  | `armed` | **unavailable** | **unavailable** | 是 ⇒ `blocking_step=armed` |
+  | `monitor_dir` | ok | ok | 是 |
+  | `writable` | ok（仅 `os.access`） | ok | 是 |
+  | `template` | ok（0 个 DBF ⇒ 保守列宽） | ok | 否 |
+  | `client` | ok（pid 24240） | **unavailable**（该安装无客户端） | 否 |
+  | `insert_time_format` | ok（口径 `unresolved`） | ok | 否 |
+
+  两个监控目录均空、0 个 DBF 模板、`probe_write_skipped=True` ⇒
+  **本轮未往监控目录写任何文件**（armed 时写文件即等于下单）。
+  `is_automonitor=0` ⇒ **无法产生委托**，不得表述成「通道已通」。
+
+### 30.R5 三问的直接回答
+
+| 问题 | 回答 | 卡在哪一步 |
+| --- | --- | --- |
+| 行情现在能不能用？ | **不能**（unavailable） | 官方 58670（XtModel）未运行/未监听；58600 与 58341 均无 `getFullTick`，58600 六个方法结果体全空 |
+| 交易现在能不能用？ | **不能**（unavailable，程序化） | 授权位 `no_pid_check=0` + 交易总线端口全不可用 + `callFormula` 不存在 + `is_automonitor=0` |
+| 能不能直接下单？ | **不能** | 被证实的真实下单路径仍 **0 条**；12 项 `failed_preconditions` 未全绿，且用户未当次批准 |
+
+`gui_manual_order=ok` 只说明柜台级在线（GTS + 登录 + `account_num=5`），
+是人工通道，不构成程序化接口可用，也不等于已验证成交。
+`real_order_attempt=skipped`：本轮连纸面/模拟单都没做，
+不存在任何可误述为真实成交的结果。
+
+### 30.R6 改进后的接入方案（只保留有证据的下一步）
+
+**收敛原则**：候选通道从「很多个」砍成两条；所有动作本轮一律 `skipped`，
+凡涉及改配置/启进程/下单的，必须用户当次明确批准。
+
+| 处置 | 通道 | 本轮证据 |
+| --- | --- | --- |
+| 删除 | 58600 作行情/下单主通道 | 无 `getFullTick` / `callFormula`，方法面跨轮漂移，结果体全空 |
+| **删除（新）** | miniquote 58341 作行情旁路 | 13 个只读名 + 校准锚全 `200005`（30.R1） |
+| **删除（新）** | 8086 作 RPC 入口 | 发 BSON 帧直接 `EOF`，CEF/HTTP 端口 |
+| 删除 | 改本地配置 / 重启刷授权 | 授权位柜台下发、两次登录逐字相同；`ipc_pair_flag=1` 已开仍被拦 |
+| 删除 | `TradeHub::placeOrder` / 伪造授权 / 强起 CIPC | 出站插件 / 伪造凭证 / 绕过授权，硬约束禁止 |
+| 保留（blocked） | **DBF 文件单**：唯一入站且不依赖 PID 白名单 | 卡在 `armed`：`is_automonitor=0` |
+| 保留（blocked） | **官方 58670/XtModel 行情 + 官方 `passorder`** | 卡在 XtModel 未起、授权位 0 |
+
+下一步（状态全为 `skipped`，依据是当次实测而非猜测）：
+
+| 步 | 动作 | 判据 | 前置 |
+| --- | --- | --- | --- |
+| M0（新） | 把 58341 / 8086 从候选清单移除 | 已由本轮证据证伪，无需再试 | 无 |
+| M1 | 用户批准并**手动**启动 `XtModel.exe` | 58670 LISTEN + `listen finished:true` | 本轮未启停任何进程；启动 ≠ 可用 |
+| M2 | 58670 起来后只读验 `getFullTick` 是否非空 | `period=tick` 且 `quote_proven=true`；日线字段不算 | 依据本轮 `tick_proven=false` |
+| T1 | 批准后改 `is_automonitor=1` 走 DBF | `file_order_readiness` 全绿；armed 后写文件即等于下单，须小样本 + 撤单预案 | **需用户当次明确批准** |
+| T2 | 向国信柜台申请开通 `no_pid_check` / `broker_whitelist` | **两处独立证据**：授权位变 1 **且**日志出现 `pid M connected` | 依据两次登录恒 0、9 次 `illegal pid` |
+
+同时把两条判据写进方案本身：① 行情资格只看行情侧证据，
+不许用交易总线 `gettradedetail` 顶替；② 三态恒为
+`ok` / `unavailable` / `skipped`，未检查不得写成通过。
+对证据 JSON 全量校验 `state` 字段：ok 75 / unavailable 20 / skipped 13，
+**无第四态**（v2 初稿里两处计划态标签 `blocked` 已归一为 `unavailable`）。
+
+### 30.R7 本轮没证明的 / 明确不可行
+
+未证实：58341 是否有本轮未枚举的方法、或需要官方 xtdata 握手才能列出方法面；
+启动 XtModel 后 58670 是否稳定绑定；本地基础数据为空时 `getFullTick` 返回空还是报错；
+58600 方法面漂移的触发条件；`is_automonitor=1` 后是否真会读取 DBF 并产生委托；
+58610 绑定后是否同样被 PID 闸拦；柜台侧开通授权位的流程与时效；
+INSERTTIME 二进制格式串究竟用于日志还是校验。
+
+明确不可行：58600 / 58341 / 8086 作为下单或实时行情入口；
+`TradeHub::placeOrder`；改授权串、伪造 `whitelist.json`、改日志；
+授权位为 0 时强起 `CIPCManager` 或伪造 IPC 配对。
+
+证据文件：`output/qmt_iface_check_20261111_1026.json`（schema `qmt_work.iface_check.v1`，
+含 `sampled_at` / `preconditions` / `market` / `trade` / `dbf` / `verdicts` /
+`not_proven`，`failed_preconditions` 12 项、`delta_vs_baseline` 18 轴）、
+`output/probe_iface_check_v2_20261111.py`、客户端 `XtClient_20261111.log`。
+
+## 31. 11:00 盘中复检（采样 11:04:48）：端口面完备 + 内部实时链活着 ⇒ 阻塞收敛到「对外导出层」
+
+### 31.R0 本轮边界
+
+- 交易日按 `weekday=Wednesday` + 11:04 落在 09:30–11:30 判定为盘中；★ 节假日日历未接入（`holiday_calendar_checked=false`），该判定本身记为未完全证实。
+- 纯只读：0 单 0 撤、0 次配置改动、0 次进程启停、0 次 DBF 写探测；补充探针 **0 帧**发往客户端端口。
+- 三态恒为 `ok` / `unavailable` / `skipped`；`real_order_attempt=skipped`（连纸面/模拟单都没做，不存在可误述为真实成交的结果）。
+- 证据：`output/qmt_iface_check_20261111_1104.json`（schema `qmt_work.iface_check.v1`，20 键）。
+
+### 31.R1 A 环境与登录态
+
+`XtItClient.exe` pid 24240、`miniquote.exe` pid 21764 在跑；`XtMiniQuote.exe` / `XtModel.exe` 未运行（按约束不启停，如实报告 `unavailable`）。GTS `59.36.9.32:56000` ESTABLISHED 1 条；行情云 `:55300` ESTABLISHED 3 条 —— **只证明有 TCP 连接，不等于有行情数据**。
+
+当日日志 14,723 行 / 2,198,081 B：`onTradeServerLoginSuccess` 8 次（首 L2456 07:58:13）、`refreshAccounts account_num=5` 14 次（末 L9750）。auth string **2 次登录**（07:58 与 08:53 重启）四键逐字相同：`mdl_auth_xtquant=1`、`no_pid_check=0`、`broker_whitelist=0`、`gt_ipc_pair=0`（`auth_bits_stable_across_sessions=true`）⇒ 第三次复证「重启刷授权」无效。
+
+### 31.R2 B 行情接口
+
+端口矩阵 6 个：`58600` = `ok`（LISTENING）；`58610/58620/58670/63100/64000` 共 5 个全为 **TimeoutError**，0 个 `ConnectionRefusedError` ⇒ 措辞只能是「端口不可用」，不能写成「服务未监听/拒绝」。额外轴 `58341`/`8086` 在听。
+
+`58600` 同轮 A/B 两次采样 `changed_count=0`。A 轮方法面：`getStockListInSector` / `getInstrumentDetail` / `getMarketData(1d,1m)` / `getTradingDates` / `getDividFactors` 6 个存在但**结果体全空**；`getFullTick` 与 xtquant 基座 5 方法（`getTag` / `checkVersion` / `getDataDir` / `getAppBinDir` / `getSectorList`）全 `200005`。校准锚（不存在的同名族方法）在 `58600` 与 `58341` 双端口均返回 `200005 未找到处理函数` ⇒ 判据本轮独立复验成立。`58341` 的 13 个只读名 + 校准锚全 `200005`（30.R1 结论复现）。
+
+证据分级：`realtime_eligible=false`（官方 58610/58670 在听的 = []）、`tick_proven=false`（`period=tick` 且 `quote_proven=true` 的候选 = []）、`period_participates=true`。★ 日线/分钟线同样带 `open/high/low`，`getFullTick` 的 `{代码:{lastPrice,…}}` 外层无 `stockCode` 键 ⇒ 「有行情字段」绝不等于「真实时 tick」。
+
+本轮复核 `config/xtdata.ini` 仍为 `[client_xtdata] address=127.0.0.1:58670` ⇒ 58670 是官方行情入口的配置判据；`bin.x64/xtdata.ini` 本轮**不存在**（§28 曾记为「空文件」，历史状态未复查，记为口径不一致待核）。
+
+### 31.R3 C 交易接口
+
+只读总线探测（**只发 `callFormula(...,'gettradedetail',...)`，绝不 `passorder`**）：`58600` / `58341` 均 `ErrorID=200005`，`8086` 发 BSON 帧被对端关闭（`ErrorID=None`）⇒ 交易总线在任何可达端口上都不存在。
+
+当日 PID 闸：`illegal pid` **9 次**（L5649…L6082，08:11:09–08:16:38，全为早前探针 pid 4012）、`pid connected` **0 次**、`illegal IP` **0 次** ⇒ 拒绝是纯 PID 维度。日志字节游标 2,197,365 → 2,209,912（增量 62 行）里 **0 条**新拒绝 / 0 条放行 ⇒ 当日 9 次是历史累计，**不能算本轮新产生**。
+
+`CIPCManager::init, not auth:mdl_auth_gt_ipc_pair` 2 次（L2979 / L9638），`userdata_ipc` 目录不存在、`init_auth_granted=false`；本地 `ipc_pair_flag=1` 本来就是开的（§27.R8）⇒ 本地开关无效。
+
+### 31.R4 D DBF 文件单（只读 readiness，唯一入站且不依赖白名单）
+
+`is_automonitor=0` 共 8 处（4 个配置文件各 2 处：`Config.xml` L43/L44、`Config_backup.xml` L43/L44、`xtuserconfig.xml` L2073/L2074、`xtMiniConfig.xml` L182/L183）；`Config.xml:L43` 的 `DbfMonitorSetting` 现值 `"0"`。两个安装 `blocking_step=armed`、`ready=false` ⇒ **无法产生委托**，不得表述成「通道已通」。监控目录空、0 个 DBF 模板、`probe_write_skipped=true`；`columns_verified=true`（`DBF_COLUMNS` 与客户端二进制 15 列一致），INSERTTIME 格式串口径仍 `unresolved`。gd_qmt 的 `client` 步记 `unavailable`（该安装无客户端在跑），不粉饰为通过。
+
+事后完整性复核（11:10，纯只读）：`Config.xml` 的 mtime 为 11:09:42，属**客户端自身 GUI 状态写入**（探针全程只读，未打开过写句柄）；L43/L44 `is_automonitor="0"` 与本轮采样一致。两个监控目录仍为空，未生成 `whitelist.json` / `userdata_ipc`；目录下只有一个与文件单无关的 `userdata/data/xt_client_status.dbf`（不在监控目录，不计入 `template_dbf_count`）。
+
+### 31.R5 ★ 新事实 F1：全量 LISTENING 归属 ⇒ 端口矩阵对 TCP 入站面完备
+
+此前每次只逐个探固定 6+2 个端口，从未证明「没有别的隐藏入站端点」。本轮 `netstat -ano -p tcp` 全量 **48** 个 LISTENING 端点 + `Get-CimInstance Win32_Process` 逐 PID 归属：
+
+| 端口 | PID | 进程 | 归属 | 已在矩阵 |
+| --- | --- | --- | --- | --- |
+| 58600 | 24240 | `XtItClient.exe` | 国信安装 | 是 |
+| 8086 | 24240 | `XtItClient.exe` | 国信安装 | 是 |
+| 58341 | 21764 | `miniquote.exe` | 国信安装 | 是 |
+| 8888 | 23528 | `pythonw.exe -m notebook` | 国信安装 | 否 |
+| 5766 | 8380 | `GuosenPassGuardXInput.exe` | 券商密码保护组件 | 否 |
+
+矩阵外两个都**已有文档结论**：8888 = 客户端内嵌 Jupyter（明文 token，见 L40/L73/L307），历史实测其 kernel 交易被 PID 闸拒（`illegal pid 0`）；5766 是密码输入保护组件。⇒ **不存在尚未枚举的行情/交易 RPC 端点**，「还有没试过的端口」从待办删除。
+边界：只覆盖 netstat 可见的 TCP LISTENING；UDP / 共享内存 / 命名管道 / 进程内调用 / 出站连接**未检查**，不能推断没有其它形态的通道。
+
+### 31.R6 ★ 新事实 F2：盘中客户端内部实时行情链是活的
+
+`XtClient_Formula_20261111.log`（GBK）实算：`REALTIME*/… data complete, start calc` **380 条** + `send model result` **380 条**，09:31:00（L85）→ 11:06:06（L1224），按小时 09:116 / 10:236 / 11:28，4 个固定 reqid（`0REALTIME_0000012` / `0REALTIME_0000095` / `0REALTIMEVOL_0000011` / `0REALTIMEVOL_0000096`），分钟计数 `before 1, curr 2` → `before 96, curr 97`。
+
+⇒ 交易时段内客户端内部持续收到数据、完成计算并回送结果。**行情不可用的根因不是「没开盘」「上游断流」「行情云没连」**，而是「没有可用的对外接口把数据导出来」；结合 F1，导出层唯一官方候选仍是 58670/XtModel。交叉验证：09:56 / 10:04 / 10:26 / 11:04 四个**盘中**采样点，`58600` 结果体一致为空、`getFullTick=200005` ⇒ 「等开盘就有数据」被证伪。
+边界：这是**进程内公式模型日志**，不等于外部进程能经 RPC 取到 tick，也不证明 tick 级完备（可能只是分钟级）；日志没有周期字段 ⇒ 本轴**不得**写进 `tick_proven`，`realtime_eligible` 仍为 `false`。
+
+### 31.R7 ★ 差分探针自身的诚实性修正（判据教训）
+
+补充探针首版把 10:26 的 `market.surface_58600` 当平铺字典读，实际它是 `{"round_A":…, "round_B":…}`，于是 7 个方法轴读成 `None` → 误报「7 项漂移」。改法：取 `round_A`，并把「上一轮缺该轴」单列 `unreadable_before`（不可比），绝不并入 `changed`。重算后 `axes_checked=24`、`changed_count=0`、`unchanged=24`、`unreadable=0` ⇒ 与 10:26 相比三问结论与 12 项 `failed_preconditions` 均**未变**，无新增放行。
+★ 与「探针断言不可证伪 = 探针错」同族：**差分出现大面积变化时先怀疑差分器，不要先宣布现场变了**。
+
+### 31.R8 三问的直接回答与改进后的接入方案
+
+| 问题 | 回答 | 卡在哪一步 |
+| --- | --- | --- |
+| 行情现在能不能用？ | **不能**（unavailable） | 不是没数据：F2 证明内部实时链活着；卡在**对外导出层** —— 58670/XtModel 未运行且 5 个候选端口全 Timeout，`58600`/`58341` 无 `getFullTick`、结果体全空 |
+| 交易现在能不能用？ | **不能**（unavailable，程序化） | 授权位 `no_pid_check=0` / `broker_whitelist=0`（只能柜台侧开通）+ 总线 `callFormula`/`gettradedetail` 在任何可达端口都不存在 + `is_automonitor=0` |
+| 能不能直接下单？ | **不能** | 被证实的真实下单路径仍 **0 条**；12 项 `failed_preconditions` 未全绿，用户未当次批准；`real_order_attempt=skipped` |
+
+`gui_manual_order=ok` 仅指柜台级在线（GTS + 登录 8 次 + `account_num=5`）的人工通道，不构成程序化接口可用，也不等于已验证成交。
+
+| 处置 | 项 | 当次证据 |
+| --- | --- | --- |
+| 删除 | 换交易时点 / 排查上游行情源 | F2：盘中 380 条实时计算 + 四采样点一致 |
+| 删除 | 继续扩大端口矩阵找隐藏端点 | F1：全量 48 端点归属，矩阵外仅 8888/5766 且已有结论 |
+| 新增 `skipped` | M0b：不再消耗轮次，直接推进 M1 | 同上 |
+| 新增 `skipped` | M1b：**需用户当次批准**才可在内嵌 Jupyter kernel 里只跑 xtdata 只读行情探测 | F1 实证 8888 由 QMT `pythonw.exe` 监听；会创建 kernel ⇒ 属客户端状态变更，本轮未执行；★ 绝不碰 `passorder`/xttrader，交易侧 kernel 历史被 PID 闸拒 |
+| 保留 blocked | M1 启动 XtModel → 58670；M2 只读验 `getFullTick`（`period=tick` 且非空） | `tick_proven=false` |
+| 保留 blocked | T1 `is_automonitor=1`（需批准）；T2 柜台开通授权位（授权位变 1 **且**日志出现 `pid M connected`） | `armed=false`、两次登录恒 0 |
+
+新增未证实：节假日日历、UDP/共享内存/命名管道形态通道、内嵌 Jupyter 行情侧 xtdata 是否可用、Formula REALTIME 数据的时间粒度；原有未证实项见 30.R7。明确不可行不变：58600/58341/8086 作行情或下单入口、`TradeHub::placeOrder`、改授权串/伪造 whitelist/改日志、授权位为 0 时强起 CIPC 或伪造 IPC 配对。
+
+证据文件：`output/qmt_iface_check_20261111_1104.json`（含 `sampled_at` / `preconditions`（`failed_preconditions` 12 项）/ `market` / `trade` / `dbf` / `verdicts` / `not_proven` + `supplement_1100`）、`output/probe_iface_1100_supplement.py`、`output/probe_iface_check_v2_20261111.py`、`output/probe_iface_check_v2_20261111_1100.log`、`output/probe_iface_1100_supplement.log`。
+
+---
+
+## 29. 三次定时巡检的实际结果与方案改进（含对 §28 的纠错）
+
+本节回答一个问题：09:30 / 10:00 / 11:00 三次巡检到底买到了什么，方案该改哪里。
+结论先说：**三次运行没有带来任何新结论，但暴露了三个方案层面的缺陷**，
+其中一个是上一轮自己写错的判断。
+
+### 29.R0 三次运行的实际产出
+
+| 计划时点 | 证据文件 | 实际采样 | 当场生成的探针 | 键数 | failed_preconditions |
+| --- | --- | --- | --- | --- | --- |
+| 09:30 | `qmt_iface_check_20261111_1004.json` | 10:04:53（草稿 09:56） | v1，36,237 B，6 步 | 16 | 11 |
+| 10:00 | `qmt_iface_check_20261111_1024.json` / `_1026.json` | 10:24:32 / 10:26:53 | v2，58,665 B，8 步 | 19 | 12 |
+| 11:00 | `qmt_iface_check_20261111_1104.json` | 11:04:48（补充轴 11:06:38） | v2 + 另一个 supplement 脚本 | 20 | 12 |
+
+三次的 `verdicts` **完全一致**：
+
+```text
+market_can_use_now      unavailable
+trade_can_use_now       unavailable
+can_place_order_directly unavailable
+gui_manual_order        ok（柜台级在线，人工通道）
+real_order_attempt      skipped（未投单）
+```
+
+11:00 那轮还做了与上一份的逐项差分：**24 个轴 checked，changed=0**。
+也就是说，在同一交易时段内再跑一遍同样的探针，信息增量为零。
+
+### 29.R1 三次运行暴露的三个方案缺陷
+
+| 编号 | 缺陷 | 证据 |
+| --- | --- | --- |
+| D1 | **每次巡检都重新生成探针** | v1 36KB → v2 58KB → 又写一个 supplement；三次跑的是三个不同程序，跨轮对比要靠事后补差分代码 |
+| D2 | **判据不稳，单次缺失被写成长期结论** | 08:33 一次 `200005` 被写成「方法面会漂移」，而 10:04/10:24/10:26/11:04 四次采样全部 `exists=True` |
+| D3 | **三次同质重复，且跨 mission 缺轴被伪装成可比** | 24 轴 0 变化；没采的轴被记成 `unreadable`，看起来像「读了但读不到」，实际是「没读」 |
+
+### 29.R2 纠错：撤回 §28 的「方法面会漂移」
+
+§28.R1 里写过：
+
+> 参数完全一致，所以**不是参数差异**，是 58600 的方法面本身在变（疑似 formula worker 生命周期相关，未证实）。
+
+这句话**不成立**，必须撤回。四次连续采样的实测序列：
+
+```text
+getInstrumentDetail    [True, True, True, True, True]   stable_present
+getMarketData_1d       [True, True, True, True, True]   stable_present
+getMarketData_1m       [True, True, True, True, True]   stable_present
+getTradingDates        [True, True, True, True, True]   stable_present
+getDividFactors        [True, True, True, True, True]   stable_present
+getStockListInSector   [True, True, True, True, True]   stable_present
+getFullTick            [False, False, False, False, False] stable_absent
+```
+
+`getMarketData_1d` 五次全 `True`。08:33 那次 `200005` 落在客户端重启窗口内
+（当日 pid 从 19340 → 24240 → 3624 变了三次），属于**瞬时缺失**，不是漂移。
+
+**正确的表述是**：58600 稳定存在 5 个只读行情方法，但**恒返回空数据**
+（`result_class.kind=empty, size=0`），且没有 `getFullTick`（稳定不存在）。
+它不能当行情主通道的理由是「**稳定但空**」，不是「漂移」。
+
+这两件事必须分开写：**「方法在」≠「有数据」≠「实时」**。
+把「空」说成「漂移」，会导致下一步去查生命周期这种错方向。
+
+### 29.R3 改进一：把巡检收敛成常驻引擎（治 D1）
+
+新增 `scripts/qmt_iface_check.py`，一个引擎 + 三个 mission：
+
+| mission | 时段 | 覆盖的轴 |
+| --- | --- | --- |
+| `preopen` | 09:30 | `env` / `auth` / `ports` / `dbf` —— **故意不扫方法面** |
+| `market` | 10:00 | `env` / `ports` / `surface` / `official_ports` / `formula_realtime` / `upstream` / `dbf` |
+| `trade` | 11:00 | `env` / `auth` / `ports` / `bus` / `pid_gate` / `listening_inventory` / `dbf` |
+
+`preopen` 不扫方法面是刻意的：开盘前 formula worker 可能未就绪，
+扫了只会得到假缺失——这正是 D2 的成因。
+
+三条定时任务已改为调用同一引擎的不同 mission，不再各自生成探针。
+产物名带 mission：`qmt_iface_check_<YYYYMMDD>_<HHMM>_<mission>.json`。
+
+### 29.R4 改进二：R1「单次缺失不得称为漂移」写进代码（治 D2）
+
+```python
+def classify_presence(series):
+    """全部 True ⇒ stable_present；全部 False ⇒ stable_absent；
+       有 True 有 False ⇒ flapping；最近一次 False 但历史全 True ⇒ transient_missing"""
+```
+
+配套 `drift_claim_allowed(label)`：**只有 `flapping` 才返回 True**。
+
+还有一条容易被忽略的细节：稳定性序列只收**真正采过该方法的轮次**。
+没采该轴的 mission 不贡献 `None`，否则 `None` 会冒充「读了但读不到」，
+把「没查」写成「查了没结果」——这属于同一族错误。
+
+### 29.R5 改进三：R2 客户端重启 = 新授权会话（治授权时效）
+
+授权位是**按登录下发**的，不落盘。当日客户端重启了三次
+（19340 → 24240 → 3624），所以每一轮的授权位都必须重新读，不能沿用上一轮。
+
+引擎用 `session_boundary()` 比对上一份证据里的 `client_pid`，变化即标记
+`client_restarted=true`。本轮实测到一次真实触发：
+
+```json
+{"current_pid": 3624, "previous_pid": 24240,
+ "previous_file": "qmt_iface_check_20261111_1104.json",
+ "client_restarted": true}
+```
+
+重启后重新读取的授权位**没有变化**（`no_pid_check=0` / `broker_whitelist=0` /
+`gt_ipc_pair=0`），说明柜台侧当日未做任何变更——这是一个干净的否证，
+比「大概没变」有用。
+
+### 29.R6 改进四：R3 未查的轴记 `skipped`，不记 `unavailable`（治 D3）
+
+每份证据都带 `axes_covered` 与 `axes_skipped_by_mission`。
+跨 mission 比较时，没覆盖的轴明确是 `skipped`，
+不再出现「`unreadable` 看起来像读了但读不到」的假象。
+
+### 29.R7 改进五：调度从「三次相同」改为「三次分工」（治 D3）
+
+原设计是三次跑同一份检查清单，实测 24 轴 0 变化。现在：
+
+* 09:30 只判**开盘前能不能开始**（环境/登录态/授权位/DBF），不碰方法面；
+* 10:00 只判**行情能不能导出来**（方法面 A/B 双采样 + 官方端口判活 + Formula 实时日志）；
+* 11:00 只判**交易通道通不通**（总线只读探测 + PID 闸增量 + 全量 LISTENING 归属）。
+
+并且每条任务的 prompt 都写明：**若 `failed_preconditions` 与上一轮完全相同，
+明确写「本轮无变化」，不要重复造方案**。这是对「同质重复」的直接约束。
+
+### 29.R8 方案重排：行情先证导出，交易转向内置策略
+
+三次运行里唯一真正的新事实来自 11:00 的补充轴：
+
+```text
+XtClient_Formula_20261111.log
+  realtime_data_complete_count = 380
+  realtime_send_result_count   = 380
+  09:31–11:06 连续，reqid 形如 0REALTIME_0000095 / 0REALTIMEVOL_0000011
+```
+
+即：**交易时段内客户端内部公式模型持续收到实时数据并完成计算**。
+所以行情不可用不是「没开盘 / 上游断流」，而是「**没有可用的对外接口把数据导出来**」。
+这条直接改变了优先级：
+
+| 原计划 | 新排序 | 理由 |
+| --- | --- | --- |
+| M3 补基础数据 | **降为 deferred** | 数据链本来就是活的；在 M1b 未证伪前先补数据属于猜因 |
+| M1 启动 XtModel | 保留但降级 | 昨日日志显示能绑 58670，但本地 `tdl:[0,0,0]`、`wholequote login:false` ⇒ 启动 ≠ 可用 |
+| — | **M1b 新增且前置** | 客户端内嵌 Jupyter（`127.0.0.1:8888`，QMT 目录 `pythonw.exe`）与数据引擎同宿主，是唯一「用活数据」的路径；需用户当次批准 |
+
+交易侧同理重排。外部 RPC 已被**结构性**排除（58600 无 `callFormula`/`gettradedetail`、
+58610/58670 未绑定、PID 闸授权位为 0），DBF 需要改配置，
+于是**内置策略（路径 B/B′）+ 本地桥升为唯一主线**——它不是「绕过」，
+而是客户端自启进程内的官方通道；仓库已有 `agent_bigqmt` 栈可复用。
+
+### 29.R9 本轮没证明的
+
+1. 09:30 那次为何 10:04 才落盘（草稿 09:56）——调度延迟原因未查清，不写成已查清。
+2. 节假日日历未接入 ⇒ 交易日判定只按 weekday。
+3. UDP / 共享内存 / 命名管道 / 进程内调用形态的入站通道（只枚举 TCP LISTENING）。
+4. 客户端内嵌 Jupyter kernel 的行情侧 `xtdata` API 是否可用（未执行，需批准）。
+5. Formula 引擎 REALTIME 数据的时间粒度（分钟线还是 tick），日志未给周期字段。
+6. 路径 B/B′ 的 GUI 公式部署与 live 四前置复核。
+7. `is_automonitor=1` 后客户端是否真的读取并产生委托。
+
+**被证实的真实下单路径仍然是 0 条。** 本节的价值是把「三次跑完没有新结论」
+这件事本身变成可执行结论：**问题不在采样次数，在采样方式**。

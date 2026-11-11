@@ -304,6 +304,7 @@ def _conclusion(report: dict) -> dict:
     ports = report.get("ports") or {}
     listeners = ports.get("ports") or {}
     p58600 = bool(listeners.get("58600"))
+    p58610 = bool(listeners.get("58610"))
     p58670 = bool(listeners.get("58670"))
     capture70 = report.get("capture_58670") or {}
     capture00 = report.get("capture_58600") or {}
@@ -325,6 +326,11 @@ def _conclusion(report: dict) -> dict:
         "realtime_tick_proven": realtime_tick_proven,
         "code_list_proven": code_list_proven,
         "channel_58600_listening": p58600,
+        # ★ 2026-11-10 §21：官方 xtdata 固定指向 127.0.0.1:58610，与 58600/58670
+        #   是**三条独立通道**。单列一轴，才能把「xtdata 连不上」如实归因为
+        #   「服务未绑定」，而不是泛化成「行情接口不通」。该轴不参与 env_ok /
+        #   exit_code 判定（本脚本的 0/1/2 只裁决 58600/58670 行情证据）。
+        "channel_58610_listening": p58610,
         "channel_58670_listening": p58670,
         "channel_58670_missing": not p58670,
     }
@@ -424,8 +430,20 @@ def main() -> int:
     conclusion = _conclusion(report)
     report["axes"] = {k: conclusion[k] for k in (
         "push_proven", "pull_proven", "realtime_tick_proven", "code_list_proven",
-        "channel_58600_listening", "channel_58670_listening",
-        "channel_58670_missing")}
+        "channel_58600_listening", "channel_58610_listening",
+        "channel_58670_listening", "channel_58670_missing")}
+    # xtdata 服务通道单列证据：在监听 ≠ 行情已证实；未监听 ⇒ 服务未绑定（环境事实），
+    # 不是「接口不可用」，更不构成本脚本改 isAutoBind / 配置文件的理由（本脚本只读）。
+    report["xtdata_channel"] = {
+        "port": 58610,
+        "listening": bool(listeners.get("58610")),
+        "attribution": ("服务已绑定；本轮未验证其返回内容，不等于行情已证实"
+                        if listeners.get("58610") else
+                        "服务未绑定（未 LISTENING）：xtdata 相关失败应归因为"
+                        "「客户端未启动/未绑定 58610 服务」，不是「行情接口不通」；"
+                        "本脚本不修改 isAutoBind 或任何客户端配置"),
+        "note": "xtdata.ini 的 client_xtdata.address=127.0.0.1:58610（两套安装一致）",
+    }
     report["verdict"] = conclusion["verdict"]
     exit_code = conclusion["exit_code"]
     verdict = conclusion["verdict"]

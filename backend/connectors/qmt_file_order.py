@@ -54,6 +54,8 @@ import struct
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Sequence
 
+from core.clock import local_now
+
 #: 下单 DBF 的列，**顺序即实测顺序**，不要重排（客户端按列序读）。
 DBF_COLUMNS: tuple[str, ...] = (
     "ORDER_TYPE",
@@ -72,6 +74,69 @@ DBF_COLUMNS: tuple[str, ...] = (
     "EXTRAPARAM",
     "NOTE1",
 )
+
+#: ★ 2026-11-11 二进制实证的同一份列名（**逐字逐序**，用于回归锁定）。
+#:
+#: `OrderService.dll` 的 `0x3100F8`–`0x3101C4` 是一段**连续**的 15 个列名字符串，
+#: 紧随其后就是 `TC::CDbfStrategyRecord::setColumnParam` 与
+#: `[dbfStrategy [{0}] init [{1}] column Failure!`。也就是说：
+#: 「列名 + 列序」不再只是"实测顺序"的说法，而是**有二进制出处**。
+#:
+#: 之所以单列一份常量而不是直接复用 ``DBF_COLUMNS``：两者相等必须由测试
+#: 来断言，否则哪天有人"顺手重排"``DBF_COLUMNS``，测试会跟着一起错（同源即同错）。
+CLIENT_DBF_COLUMNS_BINARY: tuple[str, ...] = (
+    "ORDER_TYPE",
+    "PRICE_TYPE",
+    "MODE_PRICE",
+    "STOCK_CODE",
+    "VOLUME",
+    "ACCOUNT_ID",
+    "ACT_TYPE",
+    "BROKERTYPE",
+    "STRATEGY",
+    "NOTE",
+    "TRADEPARAM",
+    "INSERTTIME",
+    "BASKETPATH",
+    "EXTRAPARAM",
+    "NOTE1",
+)
+
+#: 上述列名的取证出处（可复现：按偏移 dump `OrderService.dll` 的 ASCII 串）。
+CLIENT_DBF_COLUMNS_EVIDENCE: dict[str, str] = {
+    "binary": "OrderService.dll",
+    "start_offset": "0x3100F8",
+    "end_offset": "0x3101C4",
+    "adjacent_symbol": "TC::CDbfStrategyRecord::setColumnParam",
+    "adjacent_log": "[dbfStrategy [{0}] init [{1}] column Failure!",
+    "verified_at": "2026-11-11",
+}
+
+#: INSERTTIME 的写入口径（**单点定义**，不要在别处内联格式串）。
+#:
+#: ★ 已知不一致，尚未裁决：`OrderService.dll` 的 `0x310418` 处格式串是
+#: ``yyyy-MM-ddHH:mm:ss.zzz`` —— ``dd`` 与 ``HH`` 之间**没有空格**（22 字符），
+#: 而这里写的是带空格的 23 字符。若客户端用它解析 INSERTTIME
+#: （`COrderServiceDbfHelper::checkInsertTimeInvalid` 存在，说明确有校验），
+#: 我们的时间戳就会解析失败。
+#:
+#: 但该串也可能只用于日志：它紧邻 `read {0} rows from {1} lastModify {2}`。
+#: **在没有 armed 状态实测之前不改默认值** —— 改了同样是"无据的另一种写法"，
+#: 只会把"可能错"换成"另一个可能错"。先把它收成单点常量，等实测再定。
+INSERT_TIME_FORMAT = "%Y-%m-%d %H:%M:%S.000"
+
+#: 二进制里出现的 INSERTTIME 候选格式（仅供对照与告警，不参与写入）。
+CLIENT_INSERT_TIME_FORMAT_BINARY = "yyyy-MM-ddHH:mm:ss.zzz"
+
+INSERT_TIME_FORMAT_EVIDENCE: dict[str, str] = {
+    "binary": "OrderService.dll",
+    "offset": "0x310418",
+    "raw": "yyyy-MM-ddHH:mm:ss.zzz",
+    "ours": INSERT_TIME_FORMAT,
+    "status": "unresolved",
+    "why": ("二进制串无空格（22 字符），我们写带空格（23 字符）；"
+            "该串也可能只用于日志，未 armed 实测前不改"),
+}
 
 #: 客户端自有 DBF 的写法（实测 xt_client_status.dbf）：版本 0x03、C 型、长 20。
 DBF_VERSION = 0x03
@@ -383,8 +448,12 @@ class FileOrderRow:
             "STRATEGY": self.strategy,
             "NOTE": self.note,
             "TRADEPARAM": self.trade_param,
-            "INSERTTIME": self.insert_time or datetime.datetime.now().strftime(
-                "%Y-%m-%d %H:%M:%S.000"),
+            # ★ 2026-11-10：改走 core.clock.local_now()（唯一时刻实现），
+            #   DBF 的 INSERTTIME 格式串逐字不变（test_clock_unity 禁内联 now）。
+            # ★ 2026-11-11：格式串收进 ``INSERT_TIME_FORMAT`` 单点定义
+            #   （二进制里另有一个无空格写法，见该常量注释，未裁决前不改）。
+            "INSERTTIME": self.insert_time or local_now().strftime(
+                INSERT_TIME_FORMAT),
             "BASKETPATH": self.basket_path,
             "EXTRAPARAM": self.extra_param,
             "NOTE1": self.note1,
@@ -688,11 +757,106 @@ def write_order_file(path: str, rows: Iterable[FileOrderRow], *,
     }
 
 
+#: readiness 里「不过就真的下不了单」的步骤；其余步骤只告警不拦。
+READINESS_BLOCKING_STEPS: tuple[str, ...] = ("config", "armed", "monitor_dir", "writable")
+
+
+def file_order_readiness(userdata: str, *,
+                         client_running: bool | None = None) -> dict:
+    """文件单从「发现」到「真能下单」的完整前置链，逐项给结论。
+
+    ★ 为什么需要它
+    --------------
+    ``armed`` 只是**总开关**，不是全部前置。一条文件单要变成委托，至少还要：
+    监控目录存在、目录可写、列名/列序对得上、INSERTTIME 口径对得上、客户端在线。
+    过去只有一个 ``armed`` 布尔，很容易把「开关开了」读成「可以下单」。
+
+    ★ 刻意**不做**写探测
+    --------------------
+    验证「目录可写」最直觉的做法是往监控目录写个探针文件 —— 但 **armed 时
+    写文件就等于下单**。所以这里只用 ``os.access`` 做只读权限判断，并在返回值里
+    写明 ``probe_write_skipped=True``：不把「没试过」说成「试过且没问题」。
+
+    返回 ``{"ready","blocking_step","blocking_detail","steps":[...],...}``。
+    ``ready=True`` 只表示**客户端侧前置齐全**，不代表通道已被证实能成交。
+    """
+    steps: list[dict] = []
+
+    def add(name: str, is_ok: bool, detail: str) -> None:
+        steps.append({"name": name, "ok": is_ok, "detail": detail,
+                      "blocking": name in READINESS_BLOCKING_STEPS})
+
+    accounts: list[tuple[str, DbfMonitorSetting]] = []
+    cfg_err = ""
+    try:
+        accounts = find_monitor_settings(userdata)
+    except Exception as exc:  # noqa: BLE001 配置读不出来要如实报，不能当成"没开"
+        cfg_err = f"{type(exc).__name__}: {exc}"
+    add("config", bool(accounts),
+        cfg_err or (f"解析到 {len(accounts)} 个账号" if accounts
+                    else "未找到 <DbfMonitorSetting>（Config.xml 可能不在该 userdata 下）"))
+
+    account, setting = (accounts[0][0], accounts[0][1]) if accounts else ("", None)
+    monitor = setting.monitor_path if setting else ""
+    armed = bool(setting and setting.armed)
+    add("armed", armed,
+        f"is_automonitor={getattr(setting, 'is_automonitor', None)}，"
+        f"monitor_path={monitor or '(空)'}"
+        + ("" if armed else " ⇒ 丢 DBF 不会产生任何委托，文件只会躺在目录里"))
+
+    exists = bool(monitor) and os.path.isdir(monitor)
+    add("monitor_dir", exists, f"{monitor or '(空)'} " + ("存在" if exists else "不存在"))
+
+    writable = bool(exists) and os.access(monitor, os.W_OK)
+    add("writable", writable,
+        ("未做写探测（armed 时写探针文件即等于下单），仅用 os.access 判只读权限"
+         f" → {writable}") if exists else "目录不存在，未判定")
+
+    templates: list[str] = []
+    if exists:
+        try:
+            templates = sorted(n for n in os.listdir(monitor) if n.lower().endswith(".dbf"))
+        except OSError:
+            templates = []
+    add("template", True,
+        (f"监控目录有 {len(templates)} 个 DBF 可作列宽模板" if templates else
+         "无 DBF 模板 ⇒ 只能用 DEFAULT_WIDTHS 保守列宽（列名/列序已由二进制证实）"))
+
+    add("client", client_running is not False,
+        "未检查（调用方未上报客户端运行态）" if client_running is None
+        else ("客户端在运行" if client_running else "客户端未运行：文件不会被读取"))
+
+    add("insert_time_format", True,
+        f"写入用 {INSERT_TIME_FORMAT}；二进制为 {CLIENT_INSERT_TIME_FORMAT_BINARY}，"
+        "口径未裁决（见 INSERT_TIME_FORMAT_EVIDENCE）")
+
+    blocking_bad = [s for s in steps if s["blocking"] and not s["ok"]]
+    return {
+        "userdata": userdata,
+        "account": account,
+        "monitor_path": monitor,
+        "armed": armed,
+        "ready": not blocking_bad,
+        "blocking_step": blocking_bad[0]["name"] if blocking_bad else "",
+        "blocking_detail": blocking_bad[0]["detail"] if blocking_bad else "",
+        "steps": steps,
+        "columns_verified": tuple(DBF_COLUMNS) == CLIENT_DBF_COLUMNS_BINARY,
+        "columns_evidence": dict(CLIENT_DBF_COLUMNS_EVIDENCE),
+        "insert_time_format": dict(INSERT_TIME_FORMAT_EVIDENCE),
+        "probe_write_skipped": True,
+        "honesty": ("ready=True 只表示客户端侧前置齐全；本轮仍未投单，"
+                    "不代表该通道已被证实能成交"),
+    }
+
+
 __all__ = [
     "DBF_COLUMNS", "DEFAULT_WIDTHS", "DEFAULT_ENCODING", "DBF_VERSION",
+    "CLIENT_DBF_COLUMNS_BINARY", "CLIENT_DBF_COLUMNS_EVIDENCE",
+    "INSERT_TIME_FORMAT", "CLIENT_INSERT_TIME_FORMAT_BINARY",
+    "INSERT_TIME_FORMAT_EVIDENCE", "READINESS_BLOCKING_STEPS",
     "DbfField", "FileOrderRow", "FileOrderError", "DbfMonitorSetting",
     "write_dbf", "read_dbf", "read_schema", "adopt_schema", "default_fields",
-    "is_under", "write_order_file",
+    "is_under", "write_order_file", "file_order_readiness",
     "parse_monitor_setting", "read_monitor_setting", "find_monitor_settings",
     "monitor_paths_of", "monitor_paths_near",
     "parse_batch_order", "batch_order_of",

@@ -112,3 +112,37 @@ def test_netstat_unavailable_is_exit_one_not_green(validator):
     got = validator._conclusion(rep)
     assert got["exit_code"] == 1
     assert got["push_proven"] is False and got["pull_proven"] is False
+
+
+# ---------------------------------------------------------------- 58610 独立轴
+# ★ 2026-11-10 §21：官方 xtdata 固定指向 127.0.0.1:58610，与 58600（公式 RPC）/
+#   58670（XtModel）是三条**互不等价**的通道。少这一轴时「xtdata 连不上」只能
+#   笼统写成「行情接口不通」，把「服务未绑定」这个环境事实写成接口缺陷。
+
+def test_channel_58610_axis_is_reported_independently(validator):
+    """58610 未监听要如实记 False，且不得改动 58600/58670 的裁决。"""
+    base = validator._conclusion(_report())
+    assert base["channel_58610_listening"] is False
+    assert base["channel_58600_listening"] is True
+    assert base["channel_58670_listening"] is False
+    assert base["exit_code"] == 2 and base["blocking_class"] == "channel_58670_absent"
+
+    rep = _report(ports={"status": "ok",
+                         "ports": {"58600": ["18924"], "58610": ["31104"],
+                                   "58670": []}})
+    bound = validator._conclusion(rep)
+    assert bound["channel_58610_listening"] is True
+    # 「服务已绑定」不等于「行情已证实」：结论轴与退出码都必须原样不动。
+    assert bound["exit_code"] == base["exit_code"]
+    assert bound["verdict"] == base["verdict"]
+    assert bound["push_proven"] is False and bound["pull_proven"] is False
+
+
+def test_58610_listening_alone_never_greens_an_unverified_run(validator):
+    """反向锚：58610 起来、但本轮没查到监听状态 ⇒ 仍是 exit 1，不许假绿。"""
+    rep = _report(ports={"status": "unavailable",
+                         "ports": {"58610": ["31104"]}})
+    got = validator._conclusion(rep)
+    assert got["channel_58610_listening"] is True
+    assert got["exit_code"] == 1
+    assert "环境缺失" in got["verdict"]

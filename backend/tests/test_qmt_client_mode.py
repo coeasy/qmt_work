@@ -455,6 +455,59 @@ def test_trade_failure_suggestion_follows_primary_mode(tmp_path, monkeypatch):
     assert "XtMiniQmt.exe" in msg
 
 
+def test_trade_failure_skips_disproven_advice_when_pid_denial_is_proven(
+        tmp_path, monkeypatch):
+    """★ 2026-11-10 §21.R2：PID 鉴权已实证时不得再建议「换 session / 重登极简模式」。
+
+    本机 session 0..5 全部被同一 `illegal pid` 规则拒绝，且这两种动作都不改变
+    **调用进程 PID** ⇒ 继续照抄迅投四步 FAQ 就是「诊断自己说谎」：把用户推去做
+    已证伪的无效重试，还会白烧 _CONNECT_RETRY_BUDGET 预算。
+    """
+    A, full, _mini, _seen = _patch_trade_failure(monkeypatch, tmp_path, "full")
+    diag = {
+        "reason": "pid_not_allowed",
+        "title": "客户端按调用进程 PID 鉴权拒绝（illegal pid 21664）",
+        "evidence": ["quant session 900001, illegal pid 21664"],
+        "steps": "换 session_id 无效；请券商为本平台进程加 PID 白名单，联系券商。",
+        "session_retry_useless": True,
+        "pid_deny_wording": "illegal pid",
+    }
+
+    def _shell(name):
+        if name == "diagnose_trade_connect":
+            return lambda *a, **k: diag
+        return lambda *a, **k: {}
+
+    monkeypatch.setattr(A, "_shell_attr", _shell)
+    ad = A.XTPQuantAdapter(full, "22453951", account_type="STOCK", client_mode="auto")
+    with pytest.raises(Exception) as ei:
+        ad.start()
+    msg = str(ei.value)
+    # 根因证据必须出现在报错里，且泛化 FAQ 的两条无效建议必须被明确替换。
+    assert "客户端侧根因" in msg, msg
+    assert "illegal pid 21664" in msg, msg
+    assert "换另一个 session_id 再试" not in msg, msg
+    assert "已由客户端日志证伪" in msg, msg
+    assert "以极简模式重新登录完整版大客户端" not in msg, msg
+    assert "已证伪的方向" in msg, msg
+    assert "PID 白名单" in msg, msg
+    # 客观事实（首选判定 / 回退 / 四步标题）不能因为改文案而丢失。
+    assert "首选判定 @full" in msg, msg
+    assert "官方四步排查" in msg, msg
+
+
+def test_trade_failure_keeps_generic_faq_when_diagnosis_is_empty(
+        tmp_path, monkeypatch):
+    """反向锚：诊断没给结论时保持原四步 FAQ，不擅自「跳过」任何一条。"""
+    A, full, _mini, _seen = _patch_trade_failure(monkeypatch, tmp_path, "full")
+    ad = A.XTPQuantAdapter(full, "22453951", account_type="STOCK", client_mode="auto")
+    with pytest.raises(Exception) as ei:
+        ad.start()
+    msg = str(ei.value)
+    assert "换另一个 session_id 再试" in msg, msg
+    assert "以极简模式重新登录完整版大客户端" in msg, msg
+    assert "已证伪的方向" not in msg, msg
+
 
 # ---------------------------------------------------------------- 路由层：非法 mode 如实 400
 
@@ -514,3 +567,118 @@ def test_launch_route_accepts_valid_mode_and_normalizes_case(mode, tmp_path, mon
     assert r["code"] == 0, r
     assert r["data"]["launched"] is True, r
     assert len(calls) == 1, calls
+
+
+# ---------------------------------------------------------------- §22.R7 早停
+# PID 鉴权已证时不再跑完 6 session × 2 目录（最多 12 次 connect / 45s 预算）。
+
+def _counting_trader(A, monkeypatch, made):
+    class _CountingTrader:
+        def __init__(self, path, session):
+            self.path, self.session = path, session
+            made.append((path, session))
+
+        def start(self):
+            return None            # xtquant 真实语义：start() 无返回值
+
+        def connect(self):
+            return -1              # 客户端拒绝
+
+        def stop(self):
+            return None
+
+    class _Acc:
+        def __init__(self, aid, atype):
+            self.account_id, self.atype = aid, atype
+
+    monkeypatch.setattr(A, "_load_trader_api",
+                        lambda: (_CountingTrader, {"STOCK": _Acc}))
+
+
+def _shell_with_denial(A, monkeypatch, tmp_path, denied: bool):
+    log_path = str(tmp_path / "XtClient_20261110.log")
+
+    def _shell(name):
+        if name == "log_cursor":
+            return lambda d: {"log": log_path, "offset": 0}
+        if name == "pid_denial_since":
+            def _pds(cur, sessions=None, **k):
+                sids = list(sessions or [])
+                return {"log": log_path, "offset": 0, "next_offset": 128,
+                        "denied": bool(denied), "sessions": sids,
+                        "wording": "illegal pid" if denied else "",
+                        "lines": ([f"quant session {sids[0]}, illegal pid 24620"]
+                                  if denied and sids else [])}
+            return _pds
+        return lambda *a, **k: {}
+
+    monkeypatch.setattr(A, "_shell_attr", _shell)
+
+
+def test_trade_failure_early_stops_when_pid_denial_is_proven(tmp_path, monkeypatch):
+    """★ 证到 PID 拒绝即收敛：只试 1 次，且不再谎称「session 0..5 均失败」。"""
+    A, full, _mini, _seen = _patch_trade_failure(monkeypatch, tmp_path, "full")
+    made: list = []
+    _counting_trader(A, monkeypatch, made)
+    _shell_with_denial(A, monkeypatch, tmp_path, denied=True)
+
+    ad = A.XTPQuantAdapter(full, "22453951", account_type="STOCK", client_mode="auto")
+    with pytest.raises(Exception) as ei:
+        ad.start()
+    msg = str(ei.value)
+
+    assert len(made) == 1, made                      # 1 次，而不是 12 次
+    assert "提前终止" in msg, msg
+    assert "提前终止的依据" in msg, msg
+    # 反腐烂锚：没跑完就不能写「均失败」——那是把「没试」说成「试过」。
+    assert "session_id 0~5 均" not in msg, msg
+    assert "illegal pid 24620" in msg, msg
+
+
+def test_trade_failure_still_tries_all_sessions_without_pid_evidence(tmp_path, monkeypatch):
+    """反向锚：没有 PID 证据时必须照旧跑完全部组合（不得凭猜测早停）。"""
+    A, full, _mini, _seen = _patch_trade_failure(monkeypatch, tmp_path, "full")
+    made: list = []
+    _counting_trader(A, monkeypatch, made)
+    _shell_with_denial(A, monkeypatch, tmp_path, denied=False)
+
+    ad = A.XTPQuantAdapter(full, "22453951", account_type="STOCK", client_mode="auto")
+    with pytest.raises(Exception) as ei:
+        ad.start()
+    msg = str(ei.value)
+
+    assert len(made) == 12, made                     # 6 session × 2 目录
+    assert "提前终止" not in msg, msg
+    assert "session_id 0~5 均" in msg, msg
+
+
+def test_trade_failure_renders_three_independent_axes(tmp_path, monkeypatch):
+    """三轴必须并列出现在报错里，且不得互相顶替。"""
+    A, full, _mini, _seen = _patch_trade_failure(monkeypatch, tmp_path, "full")
+    tri = {
+        "independent_axes": True,
+        "sdk_import_ok": {"state": "unchecked", "detail": "本轮未检查"},
+        "xtdata_service_bound": {"state": "unusable", "cause": "timeout",
+                                 "address": "127.0.0.1:58610",
+                                 "detail": "端口不可达（超时/异常）"},
+        "trader_session_ok": {"state": "failed", "detail": "connect() 返回 -1"},
+    }
+
+    def _shell(name):
+        if name == "diagnose_trade_connect":
+            return lambda *a, **k: {"reason": "pid_not_allowed",
+                                    "title": "按 PID 拒绝", "evidence": [],
+                                    "steps": "换 session 无效", "tri_state": tri}
+        return lambda *a, **k: {}
+
+    monkeypatch.setattr(A, "_shell_attr", _shell)
+    ad = A.XTPQuantAdapter(full, "22453951", account_type="STOCK", client_mode="auto")
+    with pytest.raises(Exception) as ei:
+        ad.start()
+    msg = str(ei.value)
+
+    assert "三条独立证据轴" in msg, msg
+    assert "SDK 导入：unchecked" in msg, msg
+    assert "行情服务 58610：unusable" in msg, msg
+    assert "交易会话：failed" in msg, msg
+    assert "互不顶替" in msg, msg

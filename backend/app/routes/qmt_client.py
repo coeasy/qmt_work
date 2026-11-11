@@ -36,6 +36,7 @@ import os
 from fastapi import APIRouter, Depends
 
 from app.routes._common import audit_log, err, ok
+from core.clock import local_now
 from core.config import export_dir
 from core.context import AppContext, get_ctx
 
@@ -303,6 +304,50 @@ async def qmt_file_order_monitors(roots: str = "",
     return ok(out)
 
 
+@router.get("/qmt/file-order/readiness")
+async def qmt_file_order_readiness(roots: str = "", client_running: str = "",
+                                   ctx: AppContext = Depends(get_ctx)):
+    """文件单「能不能真下单」的完整前置链（**只读**，不写任何文件）。
+
+    ``armed`` 只是总开关。本端点把监控目录、可写性、列名/列序、INSERTTIME 口径、
+    客户端在线一次性摊开，并给出 ``blocking_step`` —— 避免把「开关开了」
+    读成「可以下单」。
+
+    ★ 不做写探测：armed 时往监控目录写探针文件**就等于下单**，所以只用
+      ``os.access`` 判只读权限，返回里 ``probe_write_skipped=True`` 明示这一点。
+
+    ★ ``client_running`` 由调用方上报（``1``/``0``）；不传时为 ``None``，
+      该项如实标「未检查」，不默认成「在运行」。
+    """
+    from connectors.qmt_file_order import file_order_readiness
+
+    resolved, source = _resolve_roots(roots, ctx)
+    if not resolved:
+        return ok({"roots": [], "source": source, "accounts": [], "total": 0,
+                   "ready_count": 0, "hint": _no_roots_hint()})
+
+    running = {"1": True, "true": True, "0": False, "false": False}.get(
+        (client_running or "").strip().lower())
+    installs = await asyncio.to_thread(_collect_installs, resolved)
+    rows: list[dict] = []
+    for inst in installs:
+        rec = await asyncio.to_thread(file_order_readiness, inst.userdata,
+                                      client_running=running)
+        rec["install"] = inst.label
+        rec["root"] = inst.root
+        rows.append(rec)
+
+    ready = sum(1 for r in rows if r.get("ready"))
+    out = {"roots": resolved, "source": source, "accounts": rows,
+           "total": len(rows), "ready_count": ready}
+    if not installs:
+        out["hint"] = "这些目录里没有找到 QMT 安装（判据是 bin.x64/XtItClient.exe）。"
+    elif ready == 0:
+        out["warning"] = ("没有一个账号 ready：文件单当前无法产生委托，"
+                          "看每项的 blocking_step 定位卡在哪一步。")
+    return ok(out)
+
+
 def _as_int(value, default=None):
     """宽松取整数：数字直接用，纯数字字符串转 int，其余原样返回交给校验报错。"""
     if isinstance(value, bool):
@@ -487,11 +532,12 @@ async def qmt_file_order_stage(body: dict, roots: str = "",
     if problems:
         return err(400, "下单行校验失败：" + "；".join(problems))
 
-    # ★ 冻结 INSERTTIME：to_record() 在缺省时取 datetime.now()，写一次性调用、
+    # ★ 冻结 INSERTTIME：to_record() 在缺省时取当前时刻，写一次性调用、
     #   回读核对再调用一次，跨秒就会得到两个不同值 ⇒ 自检随机报 500。
     #   更要紧的是"人核对过的那份文件"与"实际写进去的值"必须是同一个时间戳。
-    import datetime as _dt
-    stamp = _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S.000")
+    # ★ 2026-11-10：改走 core.clock.local_now()（唯一时刻实现），格式串逐字不变
+    #   —— test_clock_unity 禁止在生产代码内联 datetime.now().strftime。
+    stamp = local_now().strftime("%Y-%m-%d %H:%M:%S.000")
     for row in rows:
         if not row.insert_time:
             row.insert_time = stamp
@@ -547,8 +593,8 @@ async def qmt_file_order_stage(body: dict, roots: str = "",
 
     name = os.path.basename(str(body.get("name", "") or "")).strip()
     if not name:
-        import datetime as _dt
-        name = "order_%s.dbf" % _dt.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        # 文件名带微秒以保证同一秒内多次 stage 不互相覆盖；格式串逐字不变。
+        name = "order_%s.dbf" % local_now().strftime("%Y%m%d_%H%M%S_%f")
     if not name.lower().endswith(".dbf"):
         name += ".dbf"
     target = os.path.join(staging, name)

@@ -350,6 +350,13 @@ class XTPQuantAdapter(QuotesMixin, AccountMixin, TradingMixin, InstrumentMixin, 
             budget_exhausted = False
             # ★ 自伤型失败（SDK 资源池耗尽）：命中即**立刻停止**后续重试。
             resource_exhausted = False
+            # ★ 2026-11-10（§22.R7）：PID 鉴权拒绝**早停**。客户端按调用进程 PID
+            #   拒绝时，换 session / 换目录都不改变被拒绝的 PID —— 继续跑完
+            #   6 session × 2 目录（最多 12 次 connect、最长 45s）纯属空烧，还会
+            #   额外占用 SDK 会话。故每次 connect 失败后只看**本次尝试新增的日志**，
+            #   一旦证到 PID 拒绝就立刻收敛（增量扫描，见 diagnostics.pid_denial_since）。
+            pid_denied_early_stop = False
+            pid_denied_lines: list[str] = []
             for d in candidate_dirs:
                 if trader is not None:
                     break
@@ -359,6 +366,11 @@ class XTPQuantAdapter(QuotesMixin, AccountMixin, TradingMixin, InstrumentMixin, 
                 used_dir = d
                 resolved_mode_final = _dir_modes.get(os.path.normcase(d)) or (
                     "mini" if d.endswith("userdata_mini") else "full")
+                # 增量日志游标：取「尝试前」的快照，失败后只扫新增字节。
+                try:
+                    _cur = _shell_attr("log_cursor")(d)
+                except Exception:  # noqa: BLE001  取证失败绝不阻断连接流程
+                    _cur = {}
                 for attempt in range(6):
                     if time.monotonic() >= deadline:
                         budget_exhausted = True
@@ -396,7 +408,19 @@ class XTPQuantAdapter(QuotesMixin, AccountMixin, TradingMixin, InstrumentMixin, 
                     last_err = f"connect rc={crc}"
                     # 释放本次失败的会话，避免连续重试泄漏多个 session
                     _safe_stop(t)
-                if trader is not None or resource_exhausted:
+                    # 只认「本次 session」的拒绝行，历史行/别的进程不算（见 pid_denial_since）。
+                    try:
+                        _den = _shell_attr("pid_denial_since")(_cur, sessions=[sid])
+                    except Exception:  # noqa: BLE001
+                        _den = {}
+                    if _den.get("log"):
+                        _cur = {"log": _den["log"],
+                                "offset": _den.get("next_offset", 0)}
+                    if _den.get("denied"):
+                        pid_denied_early_stop = True
+                        pid_denied_lines = list(_den.get("lines") or [])
+                        break
+                if trader is not None or resource_exhausted or pid_denied_early_stop:
                     break
             trade_dir = used_dir
             if trader is None and resource_exhausted:
@@ -436,6 +460,20 @@ class XTPQuantAdapter(QuotesMixin, AccountMixin, TradingMixin, InstrumentMixin, 
                 except Exception:  # noqa: BLE001  诊断失败绝不阻断报错
                     _diag = {}
                 _diag = _diag if isinstance(_diag, dict) else {}
+                # ★ 2026-11-10（§21.R2 国信真机）：客户端日志已实证「按调用进程 PID
+                #   鉴权拒绝」时，四步 FAQ 里的 ③「换 session」与末尾「重登极简模式」
+                #   建议都已被证伪 —— 本机 session 0..5 全被同一 `illegal pid` 规则
+                #   拒绝，且改登录模式不改变 PID。继续照抄泛化文案会把用户推去做
+                #   无效重试、白烧 _CONNECT_RETRY_BUDGET 预算。故按证据改写文案。
+                _pid_denied_proven = _diag.get("reason") == "pid_not_allowed"
+                _session_step = (
+                    "  ③ [session] **本项已由客户端日志证伪，请勿执行**："
+                    "拒绝原因是按调用进程 PID 鉴权（`illegal pid` / `pid not allowed`），"
+                    "与 session_id 无关；换 session 不改变被拒绝的 PID"
+                    "（§21.R2 现场 session 0..5 全被同一规则拒绝）。\n"
+                    if _pid_denied_proven else
+                    "  ③ [session] 换另一个 session_id 再试（同一 session 两次 connect "
+                    "间隔需 >3 秒）；\n")
                 _diag_block = ""
                 if _diag.get("reason"):
                     _ev = "\n".join(f"      {e}" for e in (_diag.get("evidence") or []))
@@ -444,6 +482,21 @@ class XTPQuantAdapter(QuotesMixin, AccountMixin, TradingMixin, InstrumentMixin, 
                         f"  {_diag.get('title')}\n"
                         + (f"  客户端日志证据：\n{_ev}\n" if _ev else "")
                         + f"{_diag.get('steps')}\n")
+                # ★ 三轴证据（2026-11-10 §22.R7）：现场最容易犯的错是把「交易 rc=-1」
+                #   读成「行情接口不通」，或把「58610 没监听」读成「xtquant 全废」。
+                #   三轴各自独立，任一轴的结果都不得推断其余两轴，故并列展示。
+                _tri_block = ""
+                _tri = _diag.get("tri_state")
+                if isinstance(_tri, dict) and _tri.get("independent_axes"):
+                    _rows = []
+                    for _k, _lbl in (("sdk_import_ok", "SDK 导入"),
+                                     ("xtdata_service_bound", "行情服务 58610"),
+                                     ("trader_session_ok", "交易会话")):
+                        _a = _tri.get(_k) or {}
+                        _rows.append(f"      · {_lbl}：{_a.get('state')} — "
+                                     f"{_a.get('detail')}")
+                    _tri_block = ("### ★ 三条独立证据轴（互不顶替，不得互相推断）\n"
+                                  + "\n".join(_rows) + "\n")
                 # 多因子真实归因（替代旧版「一律归因程序化权限请联系券商」的误导文案）：
                 # rc=-1 常见根因按官方排查顺序为 ①登录模式 ②路径 ③session ④权限。
                 # 这里把已实测到的事实（运行进程 / 尝试的模式 + 目录互备 / client_mode）
@@ -453,11 +506,56 @@ class XTPQuantAdapter(QuotesMixin, AccountMixin, TradingMixin, InstrumentMixin, 
                                 f"{self._CONNECT_RETRY_BUDGET:.0f}s，共尝试 "
                                 f"{attempts_made} 次；未尝试剩余组合）"
                                 if budget_exhausted else "")
+                # ★ 早停时**不能**再写「session 0..5 均失败」——我们没跑完，
+                #   那是把「没试」说成「试过」。改为如实报「试了几次、为什么停」。
+                if pid_denied_early_stop:
+                    _tried_note = (
+                        f"已尝试 {attempts_made} 次后**提前终止**（{last_err}；"
+                        "客户端日志证明是按调用进程 PID 拒绝，换 session/换目录都无效）")
+                    _ev = "\n".join(f"      {e[-150:]}" for e in pid_denied_lines)
+                    _early_note = (
+                        "### ★ 提前终止的依据（本次尝试新增的客户端日志）\n"
+                        + (f"{_ev}\n" if _ev else "      （日志行已匹配 PID 拒绝措辞）\n")
+                        + "  · 已跳过剩余 session 与备用目录：PID 鉴权按**进程**判定，"
+                        "换 session_id、换 userdata/userdata_mini 都不会改变结果；\n"
+                        "  · 省下的是重试时间与 SDK 会话占用，不改变券商侧的拒绝结论。\n")
+                else:
+                    _tried_note = (f"session_id {self.session_id}~"
+                                   f"{self.session_id + 5} 均 {last_err}")
+                    _early_note = ""
+                # ★ 建议必须**跟着首选模式走**（大客户端在跑却建议「去装极速版」，等于
+                #   让用户换一套体系）；但 PID 鉴权已证时，两条「改登录模式」建议
+                #   同样无效 ⇒ 单独走「已证伪的方向」文案。
+                _faq_note = (
+                    "（下方是通用 FAQ；本现场已由客户端日志证实为 PID 鉴权拒绝，"
+                    "①/③/④ 均非该根因的处置方向，请以上方「客户端侧根因」为准）\n"
+                    if _pid_denied_proven else "")
+                if _pid_denied_proven:
+                    _advice = (
+                        "### 已证伪的方向（不要再试）\n"
+                        "  · 换 session_id 已实证无效（§21.R2 现场 session 0..5 全被"
+                        "同一 `illegal pid` 规则拒绝）；重装/切换 SDK 与重登极简模式"
+                        "都不改变调用进程 PID，也不是本根因的处置方向；\n"
+                        "  · 正确方向：请券商或客户端把本平台进程加入 PID 白名单，"
+                        "或改用上方根因处置第 5 步的「大 QMT 桥接·文件」通道；\n"
+                        "  · 平台侧不会改写客户端授权串，也不会绕过 PID 校验。\n")
+                elif primary_mode == "full":
+                    _advice = (
+                        "建议优先：**以极简模式重新登录完整版大客户端**"
+                        "（登录界面勾选「极简模式」）—— 这是让外部 API 交易连接可用、"
+                        "同时不改变数据目录（userdata）的最省事路径；"
+                        "若券商客户端无该勾选项，再考虑运行并登录极速版 "
+                        "bin.x64\\XtMiniQmt.exe（数据目录将变为 userdata_mini）。\n")
+                else:
+                    _advice = (
+                        "建议优先：运行并登录极速版 bin.x64\\XtMiniQmt.exe（登录时勾选极简"
+                        "模式），或以极简模式重新登录完整版客户端后再连接。\n")
                 raise BrokerNotConnectedError(
-                    f"交易连接失败（session_id {self.session_id}~{self.session_id + 5} "
-                    f"均 {last_err}）{_budget_note}。\n"
-                    + _diag_block +
-                    f"### 已实测的排查事实\n"
+                    f"交易连接失败（{_tried_note}）{_budget_note}。\n"
+                    + _early_note
+                    + _diag_block
+                    + _tri_block
+                    + f"### 已实测的排查事实\n"
                     f"  1) 客户端进程：{_exe_procs or '未检测到'}；\n"
                     f"  2) 尝试的数据目录（按顺序）：{tried or (trade_dir or '（无）')}；\n"
                     f"  3) 配置客户端模式：client_mode={self._client_mode}"
@@ -465,26 +563,16 @@ class XTPQuantAdapter(QuotesMixin, AccountMixin, TradingMixin, InstrumentMixin, 
                     f"，回退后停在 @{resolved_mode_final}。\n"
                     f"     ↳ 首选模式才是「按实际运行客户端解析出来的事实」；"
                     f"回退只说明另一模式的目录也试过，不代表解析结论变了。\n"
-                    f"### 官方四步排查（迅投 FAQ）\n"
+                    + _faq_note
+                    + f"### 官方四步排查（迅投 FAQ）\n"
                     f"  ① [极简模式] QMT 登录时是否勾选「极简模式」——完整版大客户端未以"
                     f"极简模式登录时，外部 API 交易连接（XtQuantTrader）会返回 rc=-1；\n"
                     f"  ② [路径/模式匹配] 极速版必须指向 <安装目录>\\userdata_mini，"
                     f"完整版指向 \\userdata；C 盘安装需以管理员权限运行连接端；\n"
-                    f"  ③ [session] 换另一个 session_id 再试（同一 session 两次 connect "
-                    f"间隔需 >3 秒）；\n"
-                    f"  ④ [权限] 若以上均正确仍 rc=-1，才是【资金账号未开通 QMT "
+                    + _session_step
+                    + f"  ④ [权限] 若以上均正确仍 rc=-1，才是【资金账号未开通 QMT "
                     f"「程序化交易/策略交易权限」】（仅「基础交易权限」不够），联系券商核实。\n"
-                    # ★ 建议必须**跟着首选模式走**：大客户端在跑却建议「去装极速版」，
-                    #   等于让用户换一套体系（另一个数据目录 / 另一套登录），成本与风险
-                    #   都被无谓放大。大客户端场景下最省事的路是「同一客户端勾极简模式」。
-                    + ("建议优先：**以极简模式重新登录完整版大客户端**"
-                       "（登录界面勾选「极简模式」）—— 这是让外部 API 交易连接可用、"
-                       "同时不改变数据目录（userdata）的最省事路径；"
-                       "若券商客户端无该勾选项，再考虑运行并登录极速版 "
-                       "bin.x64\\XtMiniQmt.exe（数据目录将变为 userdata_mini）。\n"
-                       if primary_mode == "full" else
-                       "建议优先：运行并登录极速版 bin.x64\\XtMiniQmt.exe（登录时勾选极简"
-                       "模式），或以极简模式重新登录完整版客户端后再连接。\n")
+                    + _advice
                     + f"（客户端登录日志 {_login_log}）")
             resolved_mode = resolved_mode_final
             if self._account_type not in _acc_classes:

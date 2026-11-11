@@ -213,3 +213,244 @@ def test_every_reason_carries_steps(tmp_path, reason):
     res = G._diagnose_one(str(trade_dir))
     assert res["reason"] == reason
     assert "联系券商" in res["steps"]
+
+
+# ---------------------------------------------------------------- D3 真实措辞
+# ★ 2026-11-10 国信真机（§21.R2）：拒绝行是
+#   `[TC::COrderServiceQuantAdaptor::onConnected] quant session 900001, illegal pid 21664`
+#   当日 `illegal pid` 133 行、`pid N not allowed` **0 行**；授权串却是
+#   mdl_auth_xtquant=1 / 三个 strict_connection_check=0 / no_pid_check=0。
+#   旧实现的 marker 集与正则都要求字面量 "not allowed" ⇒ 四个归因分支全落空，
+#   reason 为空、无 title/evidence/steps，上层退回泛化四步（含已被证伪的换 session）。
+
+_GUOXIN_FLAGS = {
+    "mdl_auth_xtquant": 1,
+    "mdl_auth_gt_ipc_pair": 0,
+    "mdl_auth_xttrader_strict_connection_check": 0,
+    "mdl_auth_xtdata_strict_connection_check": 0,
+    "mdl_auth_xtquant_strict_connection_check": 0,
+    "mdl_auth_xtquant_no_pid_check": 0,
+}
+
+
+def test_illegal_pid_wording_from_real_guoxin_log_is_diagnosed(tmp_path):
+    """真实现场四个分支本应全空 → 修复后必须判 pid_not_allowed 并给出证据。"""
+    decisive = (b"2026-11-10 20:55:57,449 [TC::COrderServiceQuantAdaptor::onConnected] "
+                b"quant session 900001, illegal pid 21664\n")
+    trade_dir, _ = _write_log(tmp_path, [
+        _auth_line(_GUOXIN_FLAGS),
+        b"2026-11-10 20:53:57,909 CIPCManager::init, not auth:mdl_auth_gt_ipc_pair\n",
+        b"2026-11-10 20:53:57,910 Allow the XtQuantServer to start.\n",
+        decisive,
+        b"2026-11-10 20:55:57,450 [quant]XtQuantServer:: connect ret error-1\n",
+    ], name="XtClient_20261110.log")
+
+    # 反腐烂锚：证明这条真实证据**确实**不含旧判据依赖的字面量。
+    assert b"not allowed" not in decisive
+    assert G._PID_DENY_RE.search(decisive.decode()) is not None
+
+    res = G._diagnose_one(str(trade_dir))
+    assert res["reason"] == "pid_not_allowed"
+    assert res["pid_deny_wording"] == "illegal pid"
+    assert res["session_retry_useless"] is True
+    assert "21664" in res["title"]
+    assert any("illegal pid 21664" in e for e in res["evidence"])
+    assert "换 session_id 无效" in res["steps"]
+    # 「服务未获授权启动」的拒绝行本日志 0 命中，绝不能被误判成它。
+    assert res["reason"] != "xtquant_server_blocked"
+
+
+def test_illegal_pid_is_case_insensitive_and_accepts_pid_zero(tmp_path):
+    """cp36/Jupyter 上报 `illegal pid 0`；日志大小写也不由我们控制。"""
+    trade_dir, _ = _write_log(tmp_path, [
+        _auth_line(_GUOXIN_FLAGS),
+        b"2026-11-10 17:05:29 quant session 28729, illegal pid 23776\n",
+        b"2026-11-10 17:09:05 quant session 28945, Illegal Pid 0\n",
+        b"2026-11-10 17:12:18 quant session 31415, ILLEGAL PID 0\n",
+    ], name="XtClient_20261110.log")
+
+    res = G._diagnose_one(str(trade_dir))
+    assert res["reason"] == "pid_not_allowed"
+    assert res["pid_deny_wording"] == "illegal pid"
+    assert len(res["evidence"]) >= 2
+    # 扩了正则，「服务未授权启动」仍不得被误归为 PID 拉黑（D2 护栏不退化）。
+    assert G._PID_DENY_RE.search("The XtQuantServer is not allowed to start.") is None
+
+
+def test_old_and_new_pid_wordings_coexist_without_duplicate_evidence(tmp_path):
+    """两套措辞并存（或同一行同时命中两个 marker）时证据不重复、归因不分叉。"""
+    trade_dir, _ = _write_log(tmp_path, [
+        _auth_line(_GUOXIN_FLAGS),
+        b"2026-11-10 08:27:01 quant session 1, pid 4242 not allowed, return\n",
+        b"2026-11-10 20:55:57 quant session 900001, illegal pid 21664 not allowed\n",
+    ], name="XtClient_20261110.log")
+
+    res = G._diagnose_one(str(trade_dir))
+    assert res["reason"] == "pid_not_allowed"
+    assert res["session_retry_useless"] is True
+    # 第二行同时含 "not allowed" 与 "illegal pid"，去重后只能出现一次。
+    assert len(set(res["evidence"])) == len(res["evidence"]), res["evidence"]
+    assert any("4242" in e for e in res["evidence"])
+    assert any("21664" in e for e in res["evidence"])
+    assert "联系券商" in res["steps"]
+
+
+# ------------------------------------------------ §22.R7 早停：增量游标 + PID 拒绝归属
+# 背景：客户端按调用进程 PID 拒绝时，换 session / 换目录都不会改变结果，但旧实现
+# 仍会跑完 6 session × 2 目录（最多 12 次 connect、最长 45s）。要早停就必须先解决
+# 「怎么证明这条拒绝行是**这次**尝试产生的」—— 当日日志 17MB+，历史里躺着上一天的
+# `illegal pid`，直接扫尾窗口必然误杀。故用「尝试前取游标 → 只扫增量 → 按 session 归属」。
+
+_DENY_HIST = b"2026-11-09 09:00:00 quant session 3, illegal pid 1111\n"
+
+
+def test_log_cursor_is_file_size_so_history_is_excluded(tmp_path):
+    """游标 = 尝试前的文件长度；历史拒绝行落在游标之前，不得被算进本次尝试。"""
+    trade_dir, p = _write_log(tmp_path, [_auth_line(_GUOXIN_FLAGS), _DENY_HIST],
+                              name="XtClient_20261110.log")
+    cur = G.log_cursor(str(trade_dir))
+    assert cur["log"].endswith("XtClient_20261110.log")
+    assert cur["offset"] == p.stat().st_size
+
+    # 尝试前：增量里空无一物 ⇒ 不早停
+    assert G.pid_denial_since(cur)["denied"] is False
+
+    # 本次尝试写进一条新拒绝行 ⇒ 只认这一条
+    with open(p, "ab") as f:
+        f.write(b"2026-11-10 22:05:56 quant session 7, illegal pid 24620\n")
+    got = G.pid_denial_since(cur, sessions=[7])
+    assert got["denied"] is True
+    assert got["wording"] == "illegal pid"
+    assert got["sessions"] == [7]
+    assert len(got["lines"]) == 1 and "24620" in got["lines"][0]
+    # 游标必须前进，否则同一段会被反复扫描
+    assert got["next_offset"] > cur["offset"]
+
+
+def test_pid_denial_since_rejects_denial_belonging_to_other_session(tmp_path):
+    """增量里有拒绝行、但属于**别的** session ⇒ 不能据此早停（宁可继续重试）。"""
+    trade_dir, p = _write_log(tmp_path, [_auth_line(_GUOXIN_FLAGS)],
+                              name="XtClient_20261110.log")
+    cur = G.log_cursor(str(trade_dir))
+    with open(p, "ab") as f:
+        f.write(b"2026-11-10 22:06:00 quant session 3, illegal pid 999\n")
+    got = G.pid_denial_since(cur, sessions=[7])
+    assert got["denied"] is False
+    assert got["sessions"] == [3]
+    # 反向锚：不限 session 时同一段就是有效证据（证明不是解析失败，而是归属过滤）
+    assert G.pid_denial_since(cur)["denied"] is True
+
+
+def test_pid_denial_since_accepts_line_without_session_token(tmp_path):
+    """无法归属会话的措辞（无 `quant session`）仍算拒绝：无法归属 ≠ 不是拒绝。"""
+    trade_dir, p = _write_log(tmp_path, [_auth_line(_GUOXIN_FLAGS)],
+                              name="XtClient_20261110.log")
+    cur = G.log_cursor(str(trade_dir))
+    with open(p, "ab") as f:
+        f.write(b"2026-11-10 22:06:01 [TC::COrderService] pid 24620 not allowed\n")
+    got = G.pid_denial_since(cur, sessions=[7])
+    assert got["denied"] is True
+    assert got["sessions"] == []
+    assert got["wording"] == "pid not allowed"
+
+
+def test_pid_denial_since_recovers_when_log_is_truncated(tmp_path):
+    """日志被轮转/截断（size < offset）时从 0 重扫，而不是永久失明。"""
+    trade_dir, p = _write_log(tmp_path, [_auth_line(_GUOXIN_FLAGS), _DENY_HIST],
+                              name="XtClient_20261110.log")
+    cur = G.log_cursor(str(trade_dir))
+    p.write_bytes(b"2026-11-10 22:07:00 quant session 7, illegal pid 24620\n")
+    got = G.pid_denial_since(cur, sessions=[7])
+    assert got["denied"] is True
+
+
+def test_pid_denial_since_is_silent_when_log_missing():
+    """没有日志时不抛异常、不臆断（诊断崩掉比诊断不到更糟）。"""
+    assert G.log_cursor("")["log"] == ""
+    assert G.pid_denial_since({})["denied"] is False
+    assert G.pid_denial_since({"log": "nope.log", "offset": 0})["denied"] is False
+
+
+# ------------------------------------------------ §22.R7 三轴证据：互不顶替
+
+def test_probe_xtdata_distinguishes_refused_from_timeout():
+    """`refused` 才能说「未监听」；`timeout` 只能说「不可用」，不得断言进程未启动。"""
+    def _refused(addr, timeout):
+        raise ConnectionRefusedError(10061, "refused")
+
+    def _timeout(addr, timeout):
+        raise TimeoutError("timed out")
+
+    ref = G.probe_xtdata_service(_connect=_refused)
+    assert ref["listening"] is False and ref["cause"] == "refused"
+    assert "未监听" in ref["detail"]
+
+    tmo = G.probe_xtdata_service(_connect=_timeout)
+    assert tmo["listening"] is False and tmo["cause"] == "timeout"
+    assert "不能" in tmo["detail"] and "断定客户端未启动" in tmo["detail"]
+    assert "未监听" not in tmo["detail"]
+
+    ok = G.probe_xtdata_service(_connect=lambda addr, timeout: None)
+    assert ok["listening"] is True and ok["cause"] == "ok"
+    # 反向锚：可连接 ≠ 行情已证实
+    assert "不等于行情已证实" in ok["detail"]
+
+
+def test_tri_state_axes_never_substitute_for_each_other():
+    """三轴并列：58610 未绑定 ≠ 交易会话失败 ≠ SDK 导入失败，任一轴都不得代表其余。"""
+    bound = {"address": "127.0.0.1:58610", "listening": True, "cause": "ok",
+             "detail": "端口可连接（服务已绑定）"}
+    tri = G.diagnose_tri_state("", trader_rc=-1, sdk_import_ok=None,
+                               xtdata_probe=bound)
+    assert tri["independent_axes"] is True
+    assert tri["xtdata_service_bound"]["state"] == "bound"
+    assert tri["trader_session_ok"]["state"] == "failed"
+    # 未检查就是未检查，不得因为别的轴 ok 就填成 ok
+    assert tri["sdk_import_ok"]["state"] == "unchecked"
+
+    unusable = {"address": "127.0.0.1:58610", "listening": False,
+                "cause": "timeout", "detail": "无应答"}
+    tri2 = G.diagnose_tri_state("", trader_rc=0, sdk_import_ok=True,
+                                xtdata_probe=unusable)
+    assert tri2["xtdata_service_bound"]["state"] == "unusable"
+    assert tri2["trader_session_ok"]["state"] == "ok"
+    assert tri2["sdk_import_ok"]["state"] == "ok"
+
+
+def test_attach_tri_state_states_market_side_fact_only_when_unusable(tmp_path, monkeypatch):
+    """行情侧结论必须由**实测**给出：不可用就如实说不可用，可连接就不下结论。"""
+    trade_dir, _ = _write_log(tmp_path, [
+        _auth_line(_GUOXIN_FLAGS),
+        b"2026-11-10 22:05:56 quant session 7, illegal pid 24620\n",
+    ], name="XtClient_20261110.log")
+    res = G._diagnose_one(str(trade_dir))
+    assert res["reason"] == "pid_not_allowed"
+
+    monkeypatch.setattr(G, "probe_xtdata_service", lambda **k: {
+        "address": "127.0.0.1:58610", "listening": False,
+        "cause": "timeout", "detail": "无应答"})
+    got = G._attach_tri_state(dict(res), str(trade_dir))
+    assert got["tri_state"]["xtdata_service_bound"]["state"] == "unusable"
+    assert "行情侧实测" in got["steps"]
+    assert "不可用" in got["steps"]
+
+    monkeypatch.setattr(G, "probe_xtdata_service", lambda **k: {
+        "address": "127.0.0.1:58610", "listening": True,
+        "cause": "ok", "detail": "端口可连接（服务已绑定）"})
+    got2 = G._attach_tri_state(dict(res), str(trade_dir))
+    assert got2["tri_state"]["xtdata_service_bound"]["state"] == "bound"
+    # 反向锚：可连接时**不得**补写「行情不可用」，也不得改写成「行情可用」
+    assert "行情侧实测" not in got2["steps"]
+
+
+def test_steps_never_claim_xtdata_unaffected_without_evidence(tmp_path):
+    """★ 旧文案无条件断言「行情（xtdata）不受影响」——58610 未监听时那是假话。"""
+    trade_dir, _ = _write_log(tmp_path, [
+        _auth_line(_GUOXIN_FLAGS),
+        b"2026-11-10 22:05:56 quant session 7, illegal pid 24620\n",
+    ], name="XtClient_20261110.log")
+    res = G._diagnose_one(str(trade_dir))
+    assert "行情（xtdata）不受影响" not in res["steps"]
+    assert "行情功能可继续使用" not in res["steps"]
+    # 但仍须说明「本条只裁决交易通道」，不能因为删掉假话就把边界也删了
+    assert "只裁决**交易通道**" in res["steps"]
